@@ -1,0 +1,68 @@
+{
+  "id": "humanagent-default-product-adoption",
+  "version": "1",
+  "meta": {
+    "title": "默认产品采用：显式写入唯一 bootstrap 选择",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "requirementsVersion": 16,
+    "terminalContract": {
+      "success": "adoption receipt：公开 CLI 返回 command、declarationPath 与 canonical selected controlRoot；不返回 credential、session、lease 或 workspace 值",
+      "declaration": "固定文件 ~/.humanagent/default-product.toml 只含 schemaVersion=1 与绝对 controlRoot；不保存 workspace、端口、PID、lease、凭据、session、产品副本或运行状态",
+      "validation": "目标必须是现有、可访问、符合既有路径策略的绝对产品 root；不扫描 owner 或运行实例，不推断 cwd，不初始化产品或创建空产品",
+      "atomicity": "唯一 config owner 原子写入；失败返回 typed default-product-adoption failure，不保留部分声明",
+      "scope": "普通 serve、pair、restart 与带 --control-root 的调用不隐式改写声明；声明只影响没有 --control-root 与 HUMANAGENT_HOME 的后续调用",
+      "unimplemented": "readDefaultProductSelection、declareDefaultProduct、resolveProductPaths 与 CLI product use 尚未实现；D 在 C0 后同树承接 config，C1 待 D/P 后接线"
+    },
+    "implementationGap": "当前 packages/config/src/index.ts 没有默认产品声明读写，packages/app/src/cli.ts 没有 product 子命令。本图是待实现候选，只记录最小对象流，不证明运行时能力。"
+  },
+  "inputs": [{ "id": "adoption_request", "schema": "Object" }],
+  "nodes": [
+    {
+      "id": "parse_product_use_request",
+      "operator": "humanagent-default-product-adoption-request-parse",
+      "operator_version": "1",
+      "inputs": ["adoption_request"],
+      "output": { "id": "parsed_adoption_request", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "validate_adoption_target",
+      "operator": "humanagent-default-product-adoption-target-validate",
+      "operator_version": "1",
+      "inputs": ["parsed_adoption_request"],
+      "output": { "id": "validated_adoption_target", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "write_default_product_declaration",
+      "operator": "humanagent-default-product-adoption-declare",
+      "operator_version": "1",
+      "inputs": ["validated_adoption_target"],
+      "output": { "id": "persisted_default_product", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "render_adoption_receipt",
+      "operator": "humanagent-default-product-adoption-receipt-render",
+      "operator_version": "1",
+      "inputs": ["persisted_default_product"],
+      "output": { "id": "adoption_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "parse_product_use_request", "to": "validate_adoption_target", "arc_id": "parsed_adoption_request" },
+    { "from": "validate_adoption_target", "to": "write_default_product_declaration", "arc_id": "validated_adoption_target" },
+    { "from": "write_default_product_declaration", "to": "render_adoption_receipt", "arc_id": "persisted_default_product" }
+  ],
+  "outputs": ["adoption_result"]
+}

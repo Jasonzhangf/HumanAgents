@@ -1,6 +1,6 @@
 # Pairing and workspace foundation contract
 
-Status: foundation candidate. The ledger and DAG contracts are ready; no runtime source or behavior in this document is implemented.
+Status: foundation candidate. The ledger and DAG contracts are ready; no runtime source or behavior in this document is implemented. Root accepted the default-product selection supplement on 2026-10-19; this record adds no ledger row and does not relax the persistence boundary.
 
 ## Requirements and authority
 
@@ -50,11 +50,73 @@ export async function resolveRuntimePaths(options: {
 export function formatPairingCommand(
   paths: Pick<ProductPaths, 'controlRoot'>,
 ): string;
+
+export interface DefaultProductSelection {
+  readonly schemaVersion: 1;
+  readonly controlRoot: string;
+}
+
+export async function readDefaultProductSelection(): Promise<DefaultProductSelection | undefined>;
+export async function declareDefaultProduct(controlRoot: string): Promise<DefaultProductSelection>;
 ```
 
-Control-root precedence remains explicit `--control-root`, then `HUMANAGENT_HOME`, then `~/.humanagent`. `resolveProductPaths` does not resolve a workspace or read a lease. Workspace precedence is explicit `--workspace`, then product `[project].workspace`, then a typed `workspace-selection-missing` failure. There is no cwd fallback. An explicit invocation selection does not write product config; a declared workspace must already be absolute.
+Control-root precedence is explicit `--control-root`, then `HUMANAGENT_HOME`, then the fixed default-product declaration, then `~/.humanagent`. `resolveProductPaths` does not resolve a workspace or read a lease. Workspace precedence is explicit `--workspace`, then product `[project].workspace`, then a typed `workspace-selection-missing` failure. There is no cwd fallback. An explicit invocation selection does not write product config; a declared workspace must already be absolute.
 
 `formatPairingCommand` is the only command formatter. It returns `humanagent pair` for the canonical root and `humanagent pair --control-root <POSIX-shell-quoted-absolute-root>` for a custom root. Pairing never adds a workspace option.
+
+## Default product selection
+
+Bare `humanagent` and bare `humanagent pair` must adopt one already selected product across terminals without terminal exports or cwd inference. The only mechanism is one fixed bootstrap declaration:
+
+```text
+~/.humanagent/default-product.toml
+```
+
+Its content is exactly:
+
+```toml
+schemaVersion = 1
+controlRoot = "/absolute/path/to/the/selected/product"
+```
+
+This file is the user default product selector. It stores no workspace, port, PID, lease, credential, session, product copy, or run state. Its location always derives from `os.homedir()` and never follows cwd, `HUMANAGENT_HOME`, or the selected product, so selection cannot form a cycle. The file is bootstrap selection, not product persistence; product persistence still lives only under the selected control root.
+
+`packages/config/src/index.ts` is the single owner for reading, validating, writing, and ordering this declaration. The proposal above is not implemented yet. No product registry or run-instance directory is added.
+
+The CLI exposes one explicit adoption entry:
+
+```sh
+humanagent product use --control-root "/known/current/product"
+```
+
+This command calls the config owner only. It validates that the target is an existing, accessible absolute directory that satisfies the existing path policy, then atomically writes the default declaration. It does not load a provider, start a runtime, initialize a product, issue a pairing code, or change the product workspace. A successful receipt contains only the declaration location and the selected root. Bare `serve`, `pair`, `restart`, or any `--control-root` call never rewrites the declaration, so a temporary visit to another product cannot change later terminals.
+
+### Selection precedence and failure semantics
+
+The resolver reads from highest to lowest priority:
+
+```text
+explicit --control-root
+  → HUMANAGENT_HOME
+  → ~/.humanagent/default-product.toml declaration
+  → ~/.humanagent
+```
+
+An explicit `--control-root` or `HUMANAGENT_HOME` selection must short-circuit. When a higher-priority selection exists, the resolver does not read or validate a lower-priority declaration, so an invalid lower selection cannot block that call. The declaration is read only when neither the flag nor the environment variable is present.
+
+- A missing declaration keeps the original `~/.humanagent` default. It does not make a custom root discoverable.
+- A declaration with invalid format, invalid version, or an invalid path returns a typed `default-product-selection-invalid` failure.
+- A declaration whose directory no longer exists returns an explicit failure.
+- The resolver never falls back to another product and never creates an empty product.
+- The resolver never scans owners, processes, or data directories to find a product.
+
+The selected root does not imply a runnable runtime. Workspace still resolves as `--workspace → selected product [project].workspace → typed workspace-selection-missing`. `pair` consumes only the resolved product root; it adds no workspace, lease, or owner lookup. The declaration changes only the root for later calls without a higher-priority selection. It does not change product identity, migrate data, or merge products. Every journal, checkpoint, credential, and session stays under the selected root with its existing owner.
+
+The `formatPairingCommand` signature and behavior stay unchanged. A custom root still produces `humanagent pair --control-root <POSIX-shell-quoted-absolute-root>` in the browser.
+
+### Restart retains the resolved product
+
+The existing typed `SupervisorStartupDeclaration` keeps its owner and `args` field. When a launch is bare, its original args may omit root and workspace, so C1 must write the already resolved canonical control root and workspace as explicit arguments into the retained `args`. No restart config file and no selection state in a business payload is added. This keeps a formal restart on the same product even if the default declaration changes later. Caller cwd stays the process start context and no longer decides product or workspace. This contract records the requirement; CLI composition is C1 and is not implemented here.
 
 ## Pair issuance
 
@@ -120,17 +182,23 @@ For `auth.pair.invalid`, `auth.pair.expired`, and request failure, the login sur
 |---|---|---|---|
 | `workspace-selection` | launch request to one typed selected/missing/invalid result | `cli.ts`, `config/src/index.ts` | candidate; not implemented |
 | `pair-issuance` | pair request to one code receipt or typed failure | `cli.ts`, `config/src/index.ts`, `access-control.ts` | candidate; not implemented |
+| `default-product-adoption` | explicit adoption request to one declaration receipt or typed failure | `cli.ts`, `config/src/index.ts` | candidate; not implemented |
 | `humanagent-auth-session` | browser public entry to one auth terminal view | login/runtime shell and access control; existing topology retained | partial current behavior; recovery contract pending |
 | `daemon-restart` | restart request to one restart result | existing supervisor/code-handoff owners; topology retained | current restart flow; product-auth preservation pending |
 
 After foundation acceptance, these writers may start in parallel with disjoint files:
 
 - C0 config foundation and formatter: `packages/config/src/index.ts`, config tests.
+- D default-product declaration and precedence: `packages/config/src/index.ts`, config tests, after C0 in the same tree.
 - P pair core and session projection: `access-control.ts`, `server.ts`, and existing auth test callers needed for the async issuer migration.
 - U UI recovery: `docs/ui/login.html`, `docs/ui/login.js`, `docs/ui/login.css` only if needed, and the existing login browser proof.
 
 P may implement against the frozen `formatPairingCommand` signature while C0 is in flight. P must import that function and must not copy formatting logic. Server composition and compile are checked after C0 is merged.
 
-C1 CLI composition waits for C0 and P to merge. It owns `cli.ts` launch/pair wiring and affected CLI tests. It must not recreate durable issuance, session projection, or workspace selection inside CLI. No full config/supervisor/typecheck matrix is a foundation gate.
+C1 CLI composition waits for D and P. It owns `cli.ts` adoption/launch/pair wiring and affected CLI tests. It must not recreate durable issuance, session projection, default-product selection, or workspace selection inside CLI. No full config/supervisor/typecheck matrix is a foundation gate.
 
-The source/sink and binding checks are static only. Runtime behavior, real browser recovery, pair-before-serve, restart persistence and independent-session acceptance remain `UNVERIFIED` until their named implementation owners provide focused tests and Root runs the real entry.
+## Installed naked CLI acceptance
+
+The installed global entry must be usable before delivery. Root acceptance uses `/opt/homebrew/bin/humanagent` with no `HUMANAGENT_HOME`, from a fresh terminal and an unrelated cwd, after one explicit `humanagent product use --control-root <known-current-product>` adoption. Bare `humanagent` and bare `humanagent pair` must select the declared product and its declared workspace; the default home product must not gain a second empty service, credential, project manifest, or lease. A second isolated browser session must pair while the first session stays valid. Formal `humanagent restart` from the same environment must retain the resolved product and workspace, and an explicit `--control-root` for an isolated product B must not change the default declaration.
+
+The source/sink and binding checks are static only. Runtime behavior, default-product adoption, installed naked CLI selection, real browser recovery, pair-before-serve, restart persistence, and independent-session acceptance remain `UNVERIFIED` until their named implementation owners provide focused tests and Root runs the real entry.

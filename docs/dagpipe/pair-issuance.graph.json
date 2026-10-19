@@ -1,6 +1,6 @@
 {
   "id": "humanagent-pair-issuance",
-  "version": "1",
+  "version": "2",
   "meta": {
     "title": "配对码签发：产品 root 本地直达持久凭证",
     "designStatus": "candidate",
@@ -13,9 +13,10 @@
       "oneUse": "持久化消费在凭证 mutation lock 内原子移除；同一 code 至多签发一个 session",
       "sessions": "签发和成功配对都不旋转 session generation，不吊销同一 generation 的其他独立配对终端",
       "failure": "typed durable issue failure：不返回 code，不创建 project manifest 或 daemon lease",
-      "controlRoot": "显式 --control-root、HUMANAGENT_HOME 与 home 默认值的既有优先级保持不变"
+      "controlRoot": "control-root 优先级为本次显式 --control-root → HUMANAGENT_HOME → 固定 ~/.humanagent/default-product.toml 声明 → ~/.humanagent；显式 flag 或环境已选时短路，不读取或校验低优先级声明",
+      "productSelection": "pair 只消费同一 config owner 解析出的 ProductPaths；不读取 workspace、lease、daemon owner 或 HTTP 端点，默认声明只在没有更高优先级选择时决定 root"
     },
-    "implementationGap": "当前 CLI pair 先解析 workspace、读取 active lease 并请求 supervisor HTTP challenge；AccessControlService 的 challenge 是进程内 Map。本图是待实现候选，不证明运行时能力。"
+    "implementationGap": "当前 CLI pair 先解析 workspace、读取 active lease 并请求 supervisor HTTP challenge；AccessControlService 的 challenge 是进程内 Map。resolveProductPaths、默认产品声明读取、持久 challenge 与本地签发尚未实现；P 承接凭证 owner，C1 待 D/P 后接线。本图是待实现候选，不证明运行时能力。"
   },
   "inputs": [{ "id": "pair_request", "schema": "Object" }],
   "nodes": [
