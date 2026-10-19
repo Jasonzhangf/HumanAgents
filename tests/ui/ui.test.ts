@@ -929,10 +929,10 @@ test('observation API keeps subtree, node, agent, project, and mode in one read'
     }) => {
       observation: (
         taskId: string,
-        scopeRef: string,
-        selectedNodeId: string,
-        agentQuery: URLSearchParams,
-        taskScope: { kind: 'task'; projectKey: string; mode: 'rcc' },
+        scopeRef?: string,
+        selectedNodeId?: string,
+        agentQuery?: URLSearchParams,
+        taskScope?: { kind?: string; projectKey?: string; mode?: string } | null,
       ) => Promise<unknown>;
     };
   };
@@ -961,6 +961,17 @@ test('observation API keeps subtree, node, agent, project, and mode in one read'
   assert.equal(request.searchParams.get('agentExecutionEpoch'), '2');
   assert.equal(request.searchParams.get('projectKey'), 'project-config-a');
   assert.equal(request.searchParams.get('mode'), 'rcc');
+
+  assert.throws(
+    () => api.observation('same-task', undefined, undefined, undefined, { projectKey: 'project-config-a' } as any),
+    TypeError,
+  );
+
+  await api.observation('same-task', undefined, undefined, undefined, null);
+  const nullRequest = new URL(calls[1]!, 'http://ui.test');
+  assert.equal(nullRequest.pathname, '/api/tasks/same-task/observation');
+  assert.equal(nullRequest.searchParams.has('projectKey'), false);
+  assert.equal(nullRequest.searchParams.has('mode'), false);
 });
 
 test('confirmed task controls keep the exact scope and business body', async () => {
