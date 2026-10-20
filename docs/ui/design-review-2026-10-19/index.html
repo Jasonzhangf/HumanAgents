@@ -1,0 +1,2590 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HumanAgent · 高保真 UX 设计审查预览 (2026-10-19)</title>
+  <style>
+    /* ==========================================================================
+       Design System & Tokens (Neutral Low-Saturation & HumanAgent Calibrated)
+       ========================================================================== */
+    :root {
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      
+      --color-page: #f4f6fa;
+      --color-surface: #ffffff;
+      --color-surface-soft: #f8fafc;
+      --color-surface-hover: #f1f5f9;
+      --color-line: #dce4ef;
+      --color-line-strong: #cbd5e1;
+      
+      --color-ink: #152d45;
+      --color-ink-soft: #475569;
+      --color-ink-faint: #64748b;
+      
+      --color-primary: #174d7d;
+      --color-primary-hover: #123d64;
+      --color-primary-soft: #e8f1fd;
+      --color-primary-border: #bfdbfe;
+      
+      --color-warn: #92400e;
+      --color-warn-bg: #fffbeb;
+      --color-warn-border: #fde68a;
+      
+      --color-success: #166534;
+      --color-success-bg: #f0fdf4;
+      --color-success-border: #bbf7d0;
+      
+      --color-danger: #991b1b;
+      --color-danger-bg: #fef2f2;
+      --color-danger-border: #fecaca;
+      
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --radius-pill: 9999px;
+      
+      --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+      --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.07);
+      --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.12);
+      
+      --transition-fast: 150ms cubic-bezier(0.2, 0, 0, 1);
+      --transition-normal: 220ms cubic-bezier(0.2, 0, 0, 1);
+    }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: #e9eff6;
+      color: var(--color-ink);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Focus accessibility */
+    button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
+
+    /* ==========================================================================
+       Reviewer Toolbar (Design Preview Meta-bar - Separate from Product UI)
+       ========================================================================== */
+    .review-toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      background: #112a48;
+      color: #ffffff;
+      padding: 6px 14px;
+      font-size: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      flex: 0 0 auto;
+    }
+    .review-toolbar-left, .review-toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .review-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #1f3f66;
+      padding: 4px 8px;
+      border-radius: var(--radius-sm);
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 0.2px;
+    }
+    .review-badge::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #38bdf8;
+    }
+    .review-ctrl-group {
+      display: inline-flex;
+      align-items: center;
+      background: #091a2e;
+      border-radius: var(--radius-sm);
+      padding: 2px;
+      border: 1px solid #23456c;
+    }
+    .review-ctrl-btn {
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      padding: 4px 10px;
+      font-size: 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all var(--transition-fast);
+      white-space: nowrap;
+    }
+    .review-ctrl-btn:hover {
+      color: #ffffff;
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .review-ctrl-btn.active {
+      color: #ffffff;
+      background: #1e4976;
+      font-weight: 500;
+    }
+
+    /* ==========================================================================
+       Viewport Frame (Desktop vs Mobile Preview Container)
+       ========================================================================== */
+    .viewport-canvas {
+      padding: 12px 16px;
+      display: flex;
+      justify-content: center;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .product-frame {
+      width: 100%;
+      max-width: 1440px;
+      background: var(--color-page);
+      border: 1px solid var(--color-line);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-md);
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 0;
+      transition: max-width var(--transition-normal);
+    }
+    /* Mobile simulated preview */
+    .product-frame.mode-mobile {
+      max-width: min(400px, 100%);
+      border-radius: 12px;
+      border: 1px solid var(--color-line);
+    }
+    .product-frame.mode-mobile .phone-notch {
+      display: block;
+      width: 120px;
+      height: 20px;
+      background: #1e293b;
+      margin: 0 auto;
+      border-bottom-left-radius: 12px;
+      border-bottom-right-radius: 12px;
+    }
+    .phone-notch { display: none; }
+
+    /* ==========================================================================
+       Four Lightweight Border Configuration Entries (Top / Bottom / Left / Right)
+       "边框是配置入口，上下左右都是，需要不占空间显示入口不打扰主线"
+       ========================================================================== */
+    .border-entry {
+      position: absolute;
+      z-index: 80;
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--color-line);
+      color: var(--color-ink-soft);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2px;
+      width: 22px;
+      height: 22px;
+      border-radius: var(--radius-sm);
+    }
+    .border-entry svg { width: 14px; height: 14px; }
+    .border-entry:hover {
+      background: #ffffff;
+      color: var(--color-ink);
+      border-color: var(--color-primary-border);
+      box-shadow: var(--shadow-sm);
+    }
+    .border-entry-top {
+      top: 0;
+      left: 50%;
+      gap: 4px;
+    }
+    .border-entry-bottom {
+      bottom: 0;
+      left: 50%;
+      gap: 4px;
+    }
+    .border-entry-left {
+      left: 0;
+      top: 48%;
+      transform: translateY(-50%);
+      writing-mode: vertical-rl;
+      letter-spacing: 2px;
+      padding: 2px;
+    }
+    .border-entry-right {
+      right: 0;
+      top: 48%;
+      transform: translateY(-50%);
+      writing-mode: vertical-rl;
+      letter-spacing: 2px;
+      padding: 2px;
+    }
+
+    /* Product App Shell */
+    .app-shell {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      height: 100%;
+      position: relative;
+    }
+
+    /* ==========================================================================
+       Product Header (Top Navigation & Location Breadcrumb)
+       ========================================================================== */
+    .app-header {
+      background: var(--color-surface);
+      border-bottom: 1px solid var(--color-line);
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      gap: 12px;
+      position: relative;
+      z-index: 50;
+    }
+    .app-header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    /* The human '位置' button */
+    .btn-location {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--color-surface-soft);
+      border: 1px solid var(--color-line);
+      padding: 6px 10px;
+      border-radius: var(--radius-sm);
+      color: var(--color-ink);
+      font-weight: 500;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      flex-shrink: 0;
+    }
+    .btn-location:hover {
+      background: var(--color-primary-soft);
+      border-color: var(--color-primary-border);
+      color: var(--color-primary);
+    }
+    .btn-location svg {
+      width: 15px;
+      height: 15px;
+      color: var(--color-primary);
+    }
+    
+    /* Hierarchy Back Link (Deterministic parent, distinct from browser history) */
+    .hierarchy-nav-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--color-ink-soft);
+      text-decoration: none;
+      padding: 4px 8px;
+      border-radius: var(--radius-sm);
+      border: 1px solid transparent;
+      transition: all var(--transition-fast);
+      white-space: nowrap;
+    }
+    .hierarchy-nav-link:hover {
+      background: var(--color-surface-hover);
+      color: var(--color-primary);
+      border-color: var(--color-line);
+    }
+    .breadcrumb-separator {
+      color: var(--color-ink-faint);
+      font-size: 12px;
+    }
+    .current-surface-tag {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--color-ink);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .app-header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .btn-shell-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--color-surface);
+      border: 1px solid var(--color-line);
+      padding: 6px 11px;
+      border-radius: var(--radius-sm);
+      color: var(--color-ink);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+    }
+    .btn-shell-action:hover {
+      background: var(--color-surface-soft);
+      border-color: var(--color-line-strong);
+    }
+    .btn-shell-action.active {
+      background: var(--color-primary-soft);
+      border-color: var(--color-primary-border);
+      color: var(--color-primary);
+      font-weight: 500;
+    }
+    .btn-shell-action svg {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+    }
+
+    /* ==========================================================================
+       Main Workspace Layout (Auxiliary Nav + Center Canvas + Right Detail Pane)
+       ========================================================================== */
+    .workspace-layout {
+      display: flex;
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* --- Collapsible Left Auxiliary Navigation Window --- */
+    .aux-navigation {
+      width: 280px;
+      background: var(--color-surface);
+      border-right: 1px solid var(--color-line);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: transform var(--transition-normal), width var(--transition-normal);
+      z-index: 40;
+    }
+    .aux-navigation.collapsed {
+      width: 0;
+      transform: translateX(-100%);
+      border-right: none;
+      visibility: hidden;
+    }
+    .aux-nav-header {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--color-line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--color-surface-soft);
+    }
+    .aux-nav-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--color-ink-faint);
+    }
+    .aux-nav-close {
+      background: transparent;
+      border: none;
+      color: var(--color-ink-faint);
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 4px;
+      font-size: 16px;
+      line-height: 1;
+    }
+    .aux-nav-close:hover {
+      color: var(--color-ink);
+      background: var(--color-surface-hover);
+    }
+    .aux-nav-tree {
+      padding: 8px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .tree-node {
+      margin-bottom: 2px;
+    }
+    .tree-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: var(--radius-sm);
+      color: var(--color-ink);
+      text-decoration: none;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background var(--transition-fast);
+      user-select: none;
+    }
+    .tree-caret {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: none;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--color-ink-faint);
+      cursor: pointer;
+    }
+    .tree-caret:hover {
+      background: var(--color-surface-hover);
+      color: var(--color-ink);
+    }
+    .tree-caret svg {
+      width: 12px;
+      height: 12px;
+      transition: transform var(--transition-fast);
+    }
+    .tree-row[aria-expanded="false"] .tree-caret svg {
+      transform: rotate(-90deg);
+    }
+    .tree-caret-spacer {
+      width: 18px;
+      flex-shrink: 0;
+    }
+    .tree-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: 1;
+      min-width: 0;
+      color: inherit;
+      text-decoration: none;
+    }
+    .tree-children[hidden] {
+      display: none;
+    }
+    .tree-indent-3 { padding-left: 52px; }
+    .node-bullet {
+      width: 16px;
+      flex-shrink: 0;
+      text-align: center;
+      color: var(--color-ink-faint);
+    }
+    .tree-row:hover {
+      background: var(--color-surface-hover);
+    }
+    .tree-row.active {
+      background: var(--color-primary-soft);
+      color: var(--color-primary);
+      font-weight: 600;
+    }
+    .tree-row.active .node-icon {
+      color: var(--color-primary);
+    }
+    .tree-indent-1 { padding-left: 20px; }
+    .tree-indent-2 { padding-left: 36px; }
+    .node-icon {
+      width: 16px;
+      height: 16px;
+      color: var(--color-ink-faint);
+      flex-shrink: 0;
+    }
+    .node-title {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .node-badge {
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: var(--radius-pill);
+      background: var(--color-surface-soft);
+      border: 1px solid var(--color-line);
+      color: var(--color-ink-soft);
+      font-weight: normal;
+    }
+    .node-badge.badge-warn {
+      background: var(--color-warn-bg);
+      border-color: var(--color-warn-border);
+      color: var(--color-warn);
+    }
+    .node-badge.badge-running {
+      background: var(--color-primary-soft);
+      border-color: var(--color-primary-border);
+      color: var(--color-primary);
+    }
+    .node-badge.badge-done {
+      background: var(--color-success-bg);
+      border-color: var(--color-success-border);
+      color: var(--color-success);
+    }
+
+    /* --- Center Main Workspace (Progress, Interaction, Input) --- */
+    .main-workspace {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      padding: 14px 18px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: var(--color-page);
+      scroll-padding-bottom: 120px;
+    }
+    .workspace-container {
+      max-width: 820px;
+      margin: 0 auto;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .task-reading { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; overflow-y: auto; }
+    #viewProjectList, #viewAllProjects { overflow-y: auto; min-height: 0; }
+
+    /* Task Header Card */
+    .task-hero-card {
+      background: var(--color-surface);
+      border: 1px solid var(--color-line);
+      border-radius: var(--radius-md);
+      padding: 14px 16px;
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .task-hero-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+    }
+    .task-title-area h1 {
+      margin: 0 0 6px 0;
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--color-ink);
+    }
+    .task-goal {
+      margin: 0 0 8px 0;
+      max-width: 56ch;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--color-ink-soft);
+    }
+    .task-meta-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--color-ink-soft);
+      font-size: 13px;
+      flex-wrap: wrap;
+    }
+    .task-meta-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .task-scope-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border: 1px solid var(--color-line);
+      border-radius: var(--radius-pill);
+      background: var(--color-surface-soft);
+      color: var(--color-ink-soft);
+      font-size: 12px;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: var(--radius-pill);
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .status-pill::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      flex-shrink: 0;
+    }
+    .status-pill.status-waiting {
+      background: var(--color-warn-bg);
+      color: var(--color-warn);
+      border: 1px solid var(--color-warn-border);
+    }
+    .status-pill.status-running {
+      background: var(--color-primary-soft);
+      color: var(--color-primary);
+      border: 1px solid var(--color-primary-border);
+    }
+    .status-pill.status-running::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--color-primary);
+      animation: pulse 1.5s infinite;
+    }
+    .status-pill.status-done {
+      background: var(--color-success-bg);
+      color: var(--color-success);
+      border: 1px solid var(--color-success-border);
+    }
+    .status-pill.status-stopped {
+      background: #f1f5f9;
+      color: #64748b;
+      border: 1px solid #cbd5e1;
+    }
+    @keyframes pulse {
+      0% { opacity: 0.3; transform: scale(0.9); }
+      50% { opacity: 1; transform: scale(1.1); }
+      100% { opacity: 0.3; transform: scale(0.9); }
+    }
+
+    /* Attention / Approval Banner (When task is waiting approval) */
+    .approval-banner {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }
+    .approval-banner-text {
+      font-size: 13px;
+      color: #92400e;
+    }
+    .approval-banner-text strong {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 14px;
+    }
+    .btn-review-approval {
+      background: #b45309;
+      color: #ffffff;
+      border: none;
+      padding: 7px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background var(--transition-fast);
+    }
+    .btn-review-approval:hover {
+      background: #92400e;
+    }
+
+    /* Progress Timeline (Calm, Compact, Informative) */
+    .progress-section {
+      background: var(--color-surface);
+      border: 1px solid var(--color-line);
+      border-radius: var(--radius-md);
+      padding: 14px 16px;
+      box-shadow: var(--shadow-sm);
+    }
+    .section-title {
+      margin: 0 0 16px 0;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--color-ink);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .timeline-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .timeline-item {
+      display: flex;
+      gap: 12px;
+      position: relative;
+    }
+    .timeline-item:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      left: 11px;
+      top: 24px;
+      bottom: -12px;
+      width: 2px;
+      background: var(--color-line);
+    }
+    .timeline-marker {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--color-surface-soft);
+      border: 2px solid var(--color-line-strong);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-ink-soft);
+      flex-shrink: 0;
+      z-index: 2;
+    }
+    .timeline-item.completed .timeline-marker {
+      background: var(--color-success);
+      border-color: var(--color-success);
+      color: #ffffff;
+    }
+    .timeline-item.current .timeline-marker {
+      background: var(--color-primary);
+      border-color: var(--color-primary);
+      color: #ffffff;
+      box-shadow: 0 0 0 3px var(--color-primary-soft);
+    }
+    .timeline-content {
+      flex: 1;
+      padding-top: 2px;
+    }
+    .timeline-heading {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--color-ink);
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 3px;
+    }
+    .timeline-time {
+      font-size: 12px;
+      font-weight: normal;
+      color: var(--color-ink-faint);
+    }
+    .timeline-desc {
+      font-size: 13px;
+      color: var(--color-ink-soft);
+      margin: 0;
+    }
+
+    /* Result Deliverable Card (Rendered ONLY when result exists) */
+    .deliverable-card {
+      background: var(--color-surface);
+      border: 1px solid var(--color-success-border);
+      border-radius: var(--radius-md);
+      padding: 14px 16px;
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .deliverable-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .deliverable-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--color-success);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .deliverable-preview-box {
+      background: var(--color-surface-soft);
+      border: 1px solid var(--color-line);
+      border-radius: var(--radius-sm);
+      padding: 14px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.6;
+      color: #1e293b;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .deliverable-note {
+      margin: 0;
+      font-size: 12px;
+      color: var(--color-ink-soft);
+    }
+
+    /* Main Input Area (Clear Main Input) */
+    .main-input-box {
+      position: relative;
+      flex-shrink: 0;
+      bottom: 0;
+      z-index: 30;
+      background: var(--color-surface);
+      border: 1px solid var(--color-line);
+      border-radius: var(--radius-md);
+      padding: 10px 14px;
+      box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.08), var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .main-input-box label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--color-ink);
+    }
+    .input-textarea {
+      width: 100%;
+      min-height: 54px;
+      padding: 10px 12px;
+      border: 1px solid var(--color-line);
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: 13px;
+      color: var(--color-ink);
+      resize: vertical;
+      background: var(--color-surface-soft);
+      transition: border-color var(--transition-fast), background var(--transition-fast);
+    }
+    .input-textarea:focus {
+      background: #ffffff;
+      border-color: var(--color-primary);
+    }
+    .input-actions-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .input-tips {
+      font-size: 12px;
+      color: var(--color-ink-faint);
+    }
+    .btn-primary {
+      background: var(--color-primary);
+      color: #ffffff;
+      border: none;
+      padding: 7px 16px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background var(--transition-fast);
+    }
+    .btn-primary:hover {
+      background: var(--color-primary-hover);
+    }
+    .btn-secondary {
+      background: var(--color-surface-soft);
+      border: 1px solid var(--color-line);
+      color: var(--color-ink);
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+    }
+    .btn-secondary:hover {
+      background: var(--color-surface-hover);
+      border-color: var(--color-line-strong);
+    }
+
+    /* --- Desktop Expandable/Closable Right Detail Pane --- */
+    .detail-pane {
+      width: 340px;
+      background: var(--color-surface);
+      border-left: 1px solid var(--color-line);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: width var(--transition-normal), transform var(--transition-normal);
+      z-index: 40;
+    }
+    .detail-pane.collapsed {
+      width: 0;
+      transform: translateX(100%);
+      border-left: none;
+      visibility: hidden;
+    }
+    .detail-pane-head {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--color-line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--color-surface-soft);
+    }
+    .detail-pane-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--color-ink);
+    }
+    .detail-pane-body {
+      padding: 14px;
+      overflow-y: auto;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .detail-item-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-ink-faint);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    .detail-record-box {
+      background: var(--color-surface-soft);
+      border: 1px solid var(--color-line);
+      border-radius: var(--radius-sm);
+      padding: 10px;
+      font-size: 12px;
+      color: var(--color-ink-soft);
+    }
+    .detail-section {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .detail-prose {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--color-ink-soft);
+    }
+    .tech-details {
+      border-top: 1px solid var(--color-line);
+      padding-top: 12px;
+    }
+    .tech-details summary {
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-ink-faint);
+    }
+    .tech-details .detail-record-box {
+      margin-top: 8px;
+    }
+    .sheet-section-title {
+      font-weight: 600;
+      margin-bottom: 10px;
+      font-size: 13px;
+      color: var(--color-ink-faint);
+    }
+
+    /* ==========================================================================
+       Project Overview & In-Project Task List (Same Category Navigation)
+       "Task list and create belong ONE task category; creation is a task-area action"
+       ========================================================================== */
+    .project-view-container {
+      display: none;
+      flex-direction: column;
+      gap: 16px;
+      max-width: 820px;
+      margin: 0 auto;
+      width: 100%;
+    }
+    .project-card {
+      background: var(--color-surface);
+      border: 1px solid var(--color-line);
+      border-radius: var(--radius-md);
+      padding: 20px;
+      box-shadow: var(--shadow-sm);
+    }
+    .project-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .task-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .task-table th {
+      text-align: left;
+      padding: 8px 10px;
+      color: var(--color-ink-faint);
+      font-size: 12px;
+      border-bottom: 1px solid var(--color-line);
+      font-weight: 500;
+    }
+    .task-table td {
+      padding: 10px;
+      border-bottom: 1px solid var(--color-line);
+    }
+    .task-table tr:hover td {
+      background: var(--color-surface-hover);
+    }
+    .task-row-link {
+      font-weight: 500;
+      color: var(--color-ink);
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .task-row-link:hover {
+      color: var(--color-primary);
+    }
+
+    /* ==========================================================================
+       Modal Overlays (Approval Dialog & Low-Frequency Border Settings Drawer)
+       ========================================================================== */
+    .modal-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.4);
+      backdrop-filter: blur(2px);
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .modal-backdrop.open {
+      display: flex;
+    }
+    .modal-card {
+      background: #ffffff;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--color-line);
+      box-shadow: var(--shadow-lg);
+      width: 100%;
+      max-width: 480px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      animation: modalIn var(--transition-fast);
+    }
+    @keyframes modalIn {
+      from { opacity: 0; transform: scale(0.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .modal-head {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--color-line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .modal-head h3 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--color-ink);
+    }
+    .modal-body {
+      padding: 20px;
+      font-size: 13px;
+      color: var(--color-ink-soft);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 70vh;
+      overflow-y: auto;
+    }
+    .modal-foot {
+      padding: 14px 20px;
+      background: var(--color-surface-soft);
+      border-top: 1px solid var(--color-line);
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    /* Secondary Configuration Drawer (From Border Entries) */
+    .config-drawer {
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: 360px;
+      background: #ffffff;
+      border-left: 1px solid var(--color-line);
+      box-shadow: var(--shadow-lg);
+      z-index: 150;
+      display: none;
+      flex-direction: column;
+    }
+    .config-drawer.open {
+      display: flex;
+    }
+    .config-drawer-head {
+      padding: 16px;
+      border-bottom: 1px solid var(--color-line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--color-surface-soft);
+    }
+    .config-drawer-body {
+      padding: 18px;
+      overflow-y: auto;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .config-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .config-group-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-ink-faint);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    /* ==========================================================================
+       Mobile Single Bottom-Sheet Layer
+       "Mobile navigation AND details use a SINGLE bottom-sheet layer (switch content, not nested overlays)"
+       ========================================================================== */
+    .mobile-sheet-backdrop {
+      position: absolute;
+      inset: 0;
+      z-index: 89;
+      background: rgba(15, 23, 42, 0.18);
+    }
+    .mobile-bottom-sheet {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      max-height: 80%;
+      background: #ffffff;
+      border-top-left-radius: 20px;
+      border-top-right-radius: 20px;
+      border-top: 1px solid var(--color-line);
+      box-shadow: 0 -8px 30px rgba(15, 23, 42, 0.2);
+      z-index: 90;
+      display: none;
+      flex-direction: column;
+      animation: sheetUp var(--transition-normal);
+    }
+    .mobile-bottom-sheet.open {
+      display: flex;
+    }
+    @keyframes sheetUp {
+      from { transform: translateY(100%); }
+      to { transform: translateY(0); }
+    }
+    .sheet-handle-bar {
+      padding: 8px;
+      display: flex;
+      justify-content: center;
+    }
+    .sheet-handle {
+      width: 40px;
+      height: 4px;
+      border-radius: 2px;
+      background: #cbd5e1;
+    }
+    .sheet-header {
+      padding: 8px 16px 12px;
+      border-bottom: 1px solid var(--color-line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .sheet-tabs {
+      display: inline-flex;
+      background: var(--color-surface-soft);
+      padding: 2px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--color-line);
+    }
+    .sheet-tab-btn {
+      border: none;
+      background: transparent;
+      padding: 4px 10px;
+      font-size: 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      color: var(--color-ink-soft);
+    }
+    .sheet-tab-btn.active {
+      background: #ffffff;
+      color: var(--color-primary);
+      font-weight: 600;
+      box-shadow: var(--shadow-sm);
+    }
+    .sheet-body {
+      padding: 16px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    /* Notification Toast */
+    .toast-msg {
+      position: absolute;
+      top: 60px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1e293b;
+      color: #ffffff;
+      padding: 8px 16px;
+      border-radius: var(--radius-pill);
+      font-size: 12px;
+      box-shadow: var(--shadow-md);
+      z-index: 200;
+      display: none;
+      animation: fadeIn var(--transition-fast);
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translate(-50%, -8px); }
+      to { opacity: 1; transform: translate(-50%, 0); }
+    }
+    .mode-mobile .phone-notch { display: none; }
+    .mode-mobile .app-header { padding: 9px 26px; gap: 6px; height: auto; min-height: 54px; }
+    .mode-mobile .app-header-left { flex: 1; min-width: 0; gap: 6px; }
+    .mode-mobile #hierarchyBreadcrumb { min-width: 0; }
+    .mode-mobile #hierarchyParentLink, .mode-mobile .breadcrumb-separator { display: none !important; }
+    .mode-mobile .current-surface-tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mode-mobile .app-header-right { flex-shrink: 0; }
+    .mode-mobile #btnToggleDetail span { display: none; }
+    .mode-mobile .main-workspace { padding: 10px 24px 24px; }
+    .mode-mobile .task-hero-card { padding: 12px; }
+    .mode-mobile .task-hero-top { gap: 8px; flex-wrap: wrap; }
+    .mode-mobile .task-title-area h1 { font-size: 18px; }
+    .mode-mobile .approval-banner { flex-direction: column; align-items: stretch; padding: 10px; gap: 8px; }
+    .mode-mobile .approval-banner-text { width: 100%; line-height: 1.6; }
+    .mode-mobile .main-input-box { padding: 9px; }
+    .mode-mobile .input-actions-bar { gap: 6px; flex-wrap: wrap; }
+    .mode-mobile .config-drawer { width: 100%; max-width: 100%; }
+    @media (max-width: 600px) {
+      .viewport-canvas { padding: 4px; }
+      .review-toolbar { padding: 5px 8px; gap: 6px; }
+      .review-toolbar-left, .review-toolbar-right { gap: 5px; }
+      .review-ctrl-group { flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ========================================================================
+       Reviewer Meta-bar (Design Review Toolbar · 示例数据 · Non-Product Control)
+       ======================================================================== -->
+  <header class="review-toolbar" role="region" aria-label="设计审查工具栏">
+    <div class="review-toolbar-left">
+      <span class="review-badge">设计走查预览 · 示例数据</span>
+      
+      <!-- Device responsive switch (Design tool, not product control) -->
+      <div class="review-ctrl-group" title="切换设计预览视口">
+        <button id="ctrl-desktop" class="review-ctrl-btn active" onclick="setDeviceMode('desktop')">桌面 1280</button>
+        <button id="ctrl-mobile" class="review-ctrl-btn" onclick="setDeviceMode('mobile')">手机 390</button>
+      </div>
+
+      <!-- State progression switcher -->
+      <div class="review-ctrl-group" title="切换模拟任务执行状态">
+        <button id="ctrl-state-waiting" class="review-ctrl-btn active" onclick="setSimulatedState('waiting')">等待审批</button>
+        <button id="ctrl-state-running" class="review-ctrl-btn" onclick="setSimulatedState('running')">执行中</button>
+        <button id="ctrl-state-result" class="review-ctrl-btn" onclick="setSimulatedState('result')">已有成果</button>
+        <button id="ctrl-state-stopped" class="review-ctrl-btn" onclick="setSimulatedState('stopped')">已终止</button>
+      </div>
+    </div>
+
+    <div class="review-toolbar-right">
+      <!-- Quick hierarchy switcher -->
+      <div class="review-ctrl-group" title="层级视图切换">
+        <button id="ctrl-view-all" class="review-ctrl-btn" onclick="navigateTo('#/projects')">全部项目</button>
+        <button id="ctrl-view-proj" class="review-ctrl-btn" onclick="navigateTo('#/projects/doc-sync')">智能文档编排</button>
+        <button id="ctrl-view-task" class="review-ctrl-btn active" onclick="navigateTo('#/tasks/weekly-summary')">核心任务</button>
+      </div>
+      <button class="review-ctrl-btn" style="border:1px solid #33537a" onclick="resetDemo()">重置</button>
+    </div>
+  </header>
+
+  <!-- ========================================================================
+       Product Canvas (Desktop / Mobile Viewport Container)
+       ======================================================================== -->
+  <main class="viewport-canvas">
+    <div id="productFrame" class="product-frame mode-desktop">
+      <div class="phone-notch"></div>
+
+      <!-- ── Lightweight Top/Bottom/Left/Right Border Configuration Entries ──
+           "边框是配置入口，上下左右都是，需要不占空间显示入口不打扰主线" -->
+      <button class="border-entry border-entry-top" onclick="openBorderConfig('top')" title="上边框配置：界面与显示偏好" aria-haspopup="dialog">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M4 17h16M9 4v6m6 4v6"/></svg>
+      </button>
+      <button class="border-entry border-entry-left" onclick="openBorderConfig('left')" title="左边框配置：工作空间与资源偏好" aria-haspopup="dialog">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M4 17h16M9 4v6m6 4v6"/></svg>
+      </button>
+      <button class="border-entry border-entry-right" onclick="openBorderConfig('right')" title="右边框配置：细节面板停靠方式" aria-haspopup="dialog">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M4 17h16M9 4v6m6 4v6"/></svg>
+      </button>
+      <button class="border-entry border-entry-bottom" onclick="openBorderConfig('bottom')" title="下边框配置：底层环境与诊断" aria-haspopup="dialog">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M4 17h16M9 4v6m6 4v6"/></svg>
+      </button>
+
+      <!-- ── Product Shell ── -->
+      <div class="app-shell">
+
+        <!-- Top Header (Location & Hierarchy Parent Return) -->
+        <header class="app-header">
+          <div class="app-header-left">
+            <!-- Auxiliary Navigation Trigger: Human label '位置' -->
+            <button id="btnLocation" class="btn-location" onclick="toggleAuxNav()" title="打开位置与目录导航">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                <polyline points="9 22 9 12 15 12 15 22"></polyline>
+              </svg>
+              <span>位置</span>
+            </button>
+
+            <!-- Deterministic Hierarchy Parent Return Link (Distinct from browser history) -->
+            <div id="hierarchyBreadcrumb" style="display:flex; align-items:center; gap:6px;">
+              <a id="hierarchyParentLink" href="#/projects/doc-sync" class="hierarchy-nav-link" onclick="handleHierarchyClick(event, '#/projects/doc-sync')">
+                <span>‹ 返回项目：智能文档编排</span>
+              </a>
+              <span class="breadcrumb-separator">/</span>
+              <span id="currentSurfaceName" class="current-surface-tag">周报待办事项整理</span>
+            </div>
+          </div>
+
+          <div class="app-header-right">
+            <!-- Detail Pane Toggle Button -->
+            <button id="btnToggleDetail" class="btn-shell-action" onclick="toggleDetailPane()" title="查看任务细节" aria-label="查看任务细节">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="16" rx="2" ry="2"></rect>
+                <line x1="15" y1="4" x2="15" y2="20"></line>
+              </svg>
+              <span>任务细节与依据</span>
+            </button>
+          </div>
+        </header>
+
+        <!-- Workspace Layout: Left Nav + Center Workspace + Right Detail Pane -->
+        <div class="workspace-layout">
+
+          <!-- ── 1. Collapsible Left Auxiliary Navigation Window ── -->
+          <aside id="auxNav" class="aux-navigation" aria-label="项目与路径导航">
+            <div class="aux-nav-header">
+              <span class="aux-nav-title">位置与路径导航</span>
+              <button class="aux-nav-close" onclick="closeAuxNav()" title="关闭导航" aria-label="关闭">✕</button>
+            </div>
+            
+            <nav class="aux-nav-tree" role="tree" aria-label="项目与任务树">
+              <!-- All Projects root branch -->
+              <div class="tree-node">
+                <div class="tree-row" role="treeitem" aria-expanded="true" aria-level="1" data-route="#/projects">
+                  <button class="tree-caret" type="button" aria-label="折叠全部项目" onclick="toggleTreeBranch('tree-all-projects', this)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                  </button>
+                  <a class="tree-label" href="#/projects" onclick="handleNavClick(event, '#/projects')">
+                    <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
+                      <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path>
+                    </svg>
+                    <span class="node-title">全部项目</span>
+                  </a>
+                  <span class="node-badge">3 项</span>
+                </div>
+                <div id="tree-all-projects" class="tree-children">
+                  <!-- Current project branch (expanded initially) -->
+                  <div class="tree-node">
+                    <div class="tree-row tree-indent-1" role="treeitem" aria-expanded="true" aria-level="2" data-route="#/projects/doc-sync">
+                      <button class="tree-caret" type="button" aria-label="折叠智能文档编排" onclick="toggleTreeBranch('tree-project-doc-sync', this)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                      </button>
+                      <a class="tree-label" href="#/projects/doc-sync" onclick="handleNavClick(event, '#/projects/doc-sync')">
+                        <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        <span class="node-title">智能文档编排</span>
+                      </a>
+                      <span class="node-badge">当前</span>
+                    </div>
+                    <div id="tree-project-doc-sync" class="tree-children">
+                      <!-- Current task branch (expanded initially) -->
+                      <div class="tree-node">
+                        <div class="tree-row tree-indent-2 active" role="treeitem" aria-expanded="true" aria-level="3" data-route="#/tasks/weekly-summary">
+                          <button class="tree-caret" type="button" aria-label="折叠周报待办事项整理" onclick="toggleTreeBranch('tree-task-weekly', this)">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                          </button>
+                          <a class="tree-label" href="#/tasks/weekly-summary" onclick="handleNavClick(event, '#/tasks/weekly-summary')">
+                            <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                              <polyline points="9 11 12 14 22 4"></polyline>
+                              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                            </svg>
+                            <span class="node-title">周报待办事项整理</span>
+                          </a>
+                          <span id="navTaskBadge" class="node-badge badge-warn">待审批</span>
+                        </div>
+                        <div id="tree-task-weekly" class="tree-children">
+                          <a class="tree-row tree-indent-3" href="#/tasks/weekly-summary" onclick="handleNavClick(event, '#/tasks/weekly-summary')">
+                            <span class="node-bullet">•</span>
+                            <span class="node-title">工作进展与输入</span>
+                          </a>
+                          <a class="tree-row tree-indent-3" href="#/tasks/weekly-summary/result" onclick="handleNavClick(event, '#/tasks/weekly-summary/result')" data-route="#/tasks/weekly-summary/result" hidden>
+                            <span class="node-bullet">•</span>
+                            <span class="node-title">任务成果</span>
+                          </a>
+                        </div>
+                      </div>
+
+                      <!-- Another task in the same project -->
+                      <div class="tree-node">
+                        <div class="tree-row tree-indent-2" role="treeitem">
+                          <span class="tree-caret-spacer"></span>
+                          <button class="tree-label" style="background:transparent;border:none;padding:0;color:var(--color-ink);text-align:left;cursor:pointer;" onclick="showToast('当前任务处于排队就绪状态')">
+                            <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                              <circle cx="12" cy="12" r="10"></circle>
+                              <polyline points="12 6 12 12 16 14"></polyline>
+                            </svg>
+                            <span class="node-title">API 契约升级核对</span>
+                          </button>
+                          <span class="node-badge">排队中</span>
+                        </div>
+                      </div>
+
+                      <!-- Create task action inside the task category -->
+                      <div class="tree-node">
+                        <div class="tree-row tree-indent-2">
+                          <span class="tree-caret-spacer"></span>
+                          <button class="tree-label" style="background:transparent;border:none;padding:0;color:var(--color-primary);text-align:left;cursor:pointer;" onclick="openCreateTaskModal()">
+                            <span style="font-weight:bold;">+</span>
+                            <span class="node-title">在此项目新建任务...</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Other projects -->
+                  <div class="tree-node">
+                    <div class="tree-row tree-indent-1" role="treeitem">
+                      <span class="tree-caret-spacer"></span>
+                      <a class="tree-label" href="#/projects" onclick="handleNavClick(event, '#/projects')">
+                        <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                        </svg>
+                        <span class="node-title">基础设施运维</span>
+                      </a>
+                      <span class="node-badge">1 任务</span>
+                    </div>
+                  </div>
+                  <div class="tree-node">
+                    <div class="tree-row tree-indent-1" role="treeitem">
+                      <span class="tree-caret-spacer"></span>
+                      <a class="tree-label" href="#/projects" onclick="handleNavClick(event, '#/projects')">
+                        <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                          <polyline points="14 2 14 8 20 8"></polyline>
+                        </svg>
+                        <span class="node-title">知识库同步</span>
+                      </a>
+                      <span class="node-badge">空闲</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </nav>
+          </aside>
+
+          <!-- ── 2. Center Main Workspace (High Frequency Progress & Interaction) ── -->
+          <section class="main-workspace" aria-label="任务主工作区">
+            
+            <!-- View A: Current Task Focus (Default) -->
+            <div id="viewTaskFocus" class="workspace-container">
+              <div class="task-reading">
+              
+              <!-- Task Hero / Status Card -->
+              <div class="task-hero-card">
+                <div class="task-hero-top">
+                  <div class="task-title-area">
+                    <h1>周报待办事项整理</h1>
+                    <p class="task-goal">读取当前项目里的待办标记，整理成一份清晰的本周待办清单，结果保存在这个任务里。</p>
+                    <div class="task-meta-line">
+                      <span class="task-meta-pill">所属项目：<strong>智能文档编排</strong></span>
+                      <span class="task-scope-chip">只读整理 · 不改动项目文件</span>
+                    </div>
+                  </div>
+                  
+                  <div id="taskStatusPill" class="status-pill status-waiting">
+                    <span>等待审批</span>
+                  </div>
+                </div>
+
+                <!-- Waiting Approval Banner (Shown ONLY when waiting approval) -->
+                <div id="approvalBanner" class="approval-banner">
+                  <div class="approval-banner-text">
+                    <strong>需要你确认：开始整理本周待办</strong>
+                    <span>读取当前项目里的待办标记，整理结果只保存在本任务，不改动任何项目文件。</span>
+                  </div>
+                  <button id="btnOpenApprovalModal" class="btn-review-approval" onclick="openApprovalModal()">
+                    查看并处理
+                  </button>
+                </div>
+              </div>
+
+              <!-- Project Progress Timeline (Actual-looking project progress) -->
+              <div id="taskProgressSection" class="progress-section" hidden>
+                <div class="section-title">
+                  <span>项目推进进展</span>
+                  <span id="progressStepSummary" style="font-size:12px; font-weight:normal; color:var(--color-ink-faint);">步骤 2 / 3</span>
+                </div>
+
+                <div class="timeline-list">
+                  <!-- Step 1: Read todo sources -->
+                  <div class="timeline-item completed">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                      <div class="timeline-heading">
+                        <span>1. 读取待办来源</span>
+                        <span class="timeline-time">已完成 · 耗时 1.2s</span>
+                      </div>
+                      <p class="timeline-desc">已读取当前项目里的 4 个待办来源，提取 18 项候选标记。</p>
+                    </div>
+                  </div>
+
+                  <!-- Step 2: Deduplication and classification -->
+                  <div id="timelineStep2" class="timeline-item current">
+                    <div id="timelineStep2Marker" class="timeline-marker">2</div>
+                    <div class="timeline-content">
+                      <div class="timeline-heading">
+                        <span id="timelineStep2Title">2. 核对重复事项并分类</span>
+                        <span id="timelineStep2Time" class="timeline-time">等待你确认</span>
+                      </div>
+                      <p id="timelineStep2Desc" class="timeline-desc">等待你确认后开始整理。</p>
+                    </div>
+                  </div>
+
+                  <!-- Step 3: Compose result inside the task -->
+                  <div id="timelineStep3" class="timeline-item">
+                    <div id="timelineStep3Marker" class="timeline-marker">3</div>
+                    <div class="timeline-content">
+                      <div class="timeline-heading">
+                        <span>3. 整理成清单并保存在本任务</span>
+                        <span id="timelineStep3Time" class="timeline-time">待进行</span>
+                      </div>
+                      <p id="timelineStep3Desc" class="timeline-desc">完成后结果直接显示在本任务，不写入项目文件。</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Deliverable Result Box (Rendered ONLY when state is 'result') -->
+              <div id="deliverableCard" class="deliverable-card" style="display:none;">
+                <div class="deliverable-head">
+                  <div class="deliverable-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                      <polyline points="14 2 14 8 20 8"></polyline>
+                      <line x1="16" y1="13" x2="8" y2="13"></line>
+                      <line x1="16" y1="17" x2="8" y2="17"></line>
+                      <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                    <span>整理结果：本周待办清单</span>
+                  </div>
+                  <button class="btn-secondary" onclick="showToast('已复制成果文本')">复制内容</button>
+                </div>
+                <p class="deliverable-note">结果保存在本任务，未改动任何项目文件。</p>
+                <div class="deliverable-preview-box">
+# 本周研发待办事项清单
+
+## 待处理事项 (按优先级排列)
+- [ ] 导航与审批交互设计走查 (负责人: 设计组, 优先级: 高)
+- [ ] 工作流生命周期检查 (负责人: 架构组, 优先级: 高)
+- [ ] 前端界面精简与无障碍核对 (负责人: 前端组, 优先级: 中)
+
+## 已核验关闭事项
+- [x] 显式输入整理流程落地
+- [x] 供应商直连路径录制回放验证
+- [x] 任务历史存储格式定义
+                </div>
+              </div>
+
+              </div>
+              <!-- Clear Main Input (Directing the task) -->
+              <div class="main-input-box">
+                <label for="taskInputText">向该任务补充要求或指令</label>
+                <textarea id="taskInputText" class="input-textarea" placeholder="在此补充要求或说明... (Enter 发送)" rows="2"></textarea>
+                <div class="input-actions-bar">
+                  <span class="input-tips">Enter 发送 · Shift+Enter 换行</span>
+                  <div style="display:flex; gap:8px;">
+                    <button class="btn-secondary" onclick="toggleDetailPane()">查看细节</button>
+                    <button class="btn-primary" onclick="handleSendInstruction()">发送指令</button>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- View B: Project Level & Task List (Belongs to same category) -->
+            <div id="viewProjectList" class="project-view-container">
+              <div class="project-card">
+                <div class="project-card-header">
+                  <div>
+                    <h2 style="margin:0 0 4px 0; font-size:18px;">项目：智能文档编排</h2>
+                  </div>
+                  <button class="btn-primary" onclick="openCreateTaskModal()">+ 新建任务</button>
+                </div>
+
+                <table class="task-table">
+                  <thead>
+                    <tr>
+                      <th>任务名称</th>
+                      <th>当前状态</th>
+                      <th>执行角色</th>
+                      <th>更新时间</th>
+                      <th style="text-align:right;">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        <a href="#/tasks/weekly-summary" class="task-row-link" onclick="handleNavClick(event, '#/tasks/weekly-summary')">
+                          <strong>周报待办事项整理</strong>
+                        </a>
+                      </td>
+                      <td><span id="projTableTask1Status" class="status-pill status-waiting">待审批</span></td>
+                      <td>文档整理助手</td>
+                      <td>今天</td>
+                      <td style="text-align:right;">
+                        <button class="btn-secondary" onclick="navigateTo('#/tasks/weekly-summary')">进入任务</button>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>
+                        <a href="#/projects/doc-sync" class="task-row-link" onclick="showToast('当前任务处于排队就绪状态')">
+                          <strong>API 契约升级核对</strong>
+                        </a>
+                      </td>
+                      <td><span class="status-pill status-stopped">排队中</span></td>
+                      <td>接口审查助手</td>
+                      <td>2 小时前</td>
+                      <td style="text-align:right;">
+                        <button class="btn-secondary" onclick="showToast('当前任务处于排队就绪状态')">查看</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- View C: All Projects Overview -->
+            <div id="viewAllProjects" class="project-view-container">
+              <div class="project-card">
+                <div class="project-card-header">
+                  <div>
+                    <h2 style="margin:0 0 4px 0; font-size:18px;">全部项目概览</h2>
+                    <span style="color:var(--color-ink-soft); font-size:13px;">当前已声明的项目目录</span>
+                  </div>
+                </div>
+
+                <table class="task-table">
+                  <thead>
+                    <tr>
+                      <th>项目名称</th>
+                      <th>活动任务数</th>
+                      <th>最近状态</th>
+                      <th style="text-align:right;">入口</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        <a href="#/projects/doc-sync" class="task-row-link" onclick="handleNavClick(event, '#/projects/doc-sync')">
+                          <strong>智能文档编排</strong>
+                        </a>
+                      </td>
+                      <td>2 个任务</td>
+                      <td><span class="status-pill status-waiting">需要确认</span></td>
+                      <td style="text-align:right;">
+                        <button class="btn-secondary" onclick="navigateTo('#/projects/doc-sync')">进入项目</button>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><strong>基础设施运维</strong></td>
+                      <td>1 个任务</td>
+                      <td><span class="status-pill status-done">正常运行</span></td>
+                      <td style="text-align:right;">
+                        <button class="btn-secondary" onclick="showToast('示例项目')">进入项目</button>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><strong>知识库同步</strong></td>
+                      <td>0 个任务</td>
+                      <td><span class="status-pill status-stopped">空闲</span></td>
+                      <td style="text-align:right;">
+                        <button class="btn-secondary" onclick="showToast('示例项目')">进入项目</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </section>
+
+          <!-- ── 3. Desktop Expandable/Closable Right Detail Pane ── -->
+          <aside id="detailPane" class="detail-pane collapsed" aria-label="任务细节与依据">
+            <div class="detail-pane-head">
+              <span class="detail-pane-title">任务细节与依据</span>
+              <button class="aux-nav-close" onclick="closeDetailPane()" title="关闭细节面板" aria-label="关闭">✕</button>
+            </div>
+            <div class="detail-pane-body">
+              <div class="detail-section">
+                <div class="detail-item-title">任务目标</div>
+                <p class="detail-prose">读取当前项目里的待办标记，整理成一份清晰的本周待办清单，结果保存在本任务中。</p>
+              </div>
+              <div class="detail-section">
+                <div class="detail-item-title">当前进展</div>
+                <p id="detailProgressText" class="detail-prose">等待批准后读取并整理项目待办。</p>
+              </div>
+              <div class="detail-section">
+                <div class="detail-item-title">本任务范围</div>
+                <p class="detail-prose">只读取当前项目的待办标记，不改动任何项目文件；结果只保存在本任务内。</p>
+              </div>
+              <div class="detail-section">
+                <div class="detail-item-title">相关材料</div>
+                <p class="detail-prose">当前项目中的待办标记，批准后读取。</p>
+              </div>
+              <details class="tech-details">
+                <summary>技术细节</summary>
+                <div class="detail-record-box">
+                  检查点编号 12 · 保存状态：已持久保存<br>
+                  记录时间：2026-10-19 17:00–17:04
+                </div>
+              </details>
+            </div>
+          </aside>
+
+        </div>
+
+      </div>
+
+      <!-- ====================================================================
+           Mobile Single Bottom-Sheet Layer
+           "Mobile navigation AND details use a SINGLE bottom-sheet layer"
+           ==================================================================== -->
+      <div id="mobileSheetBackdrop" class="mobile-sheet-backdrop" hidden aria-hidden="true" onclick="event.preventDefault(); event.stopPropagation(); closeMobileSheet()"></div>
+      <div id="mobileBottomSheet" class="mobile-bottom-sheet" role="dialog" aria-modal="true" aria-label="移动端操作面板">
+        <div class="sheet-handle-bar">
+          <div class="sheet-handle"></div>
+        </div>
+        <div class="sheet-header">
+          <div class="sheet-tabs">
+            <button id="sheetTabNav" class="sheet-tab-btn active" onclick="switchMobileSheetTab('nav')">位置导航</button>
+            <button id="sheetTabDetail" class="sheet-tab-btn" onclick="switchMobileSheetTab('detail')">任务细节</button>
+          </div>
+          <button class="aux-nav-close" onclick="closeMobileSheet()" aria-label="关闭">✕</button>
+        </div>
+        <div id="mobileSheetContent" class="sheet-body">
+          <!-- Dynamically filled with either navigation tree or detail records -->
+        </div>
+      </div>
+
+      <!-- ====================================================================
+           Waiting Approval Modal (Interactive Confirmation Modal)
+           ==================================================================== -->
+      <div id="approvalModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="approvalTitle" onclick="handleBackdropClick(event, 'approvalModal')">
+        <div class="modal-card" onclick="event.stopPropagation()">
+          <div class="modal-head">
+            <h3 id="approvalTitle">需要你确认：开始整理本周待办</h3>
+            <button class="aux-nav-close" onclick="dismissApprovalModal()" title="稍后处理 (关闭)" aria-label="关闭">✕</button>
+          </div>
+          <div class="modal-body">
+            <p style="margin:0; line-height:1.5;">
+              本任务会读取当前项目里的待办标记，去重后整理成一份清单。结果只保存在这个任务里，不会修改任何项目文件。
+            </p>
+            <div class="detail-record-box" style="background:#f8fafc;">
+              <strong>将读取：</strong> 当前项目的待办标记<br>
+              <strong>整理结果：</strong> 保存到本任务<br>
+              <strong>不会发生：</strong> 修改或新建项目文件
+            </div>
+            <p style="margin:0; font-size:12px; color:var(--color-ink-faint);">
+              * 点击“开始整理”后任务继续；点击“不整理”将停止；关闭本弹窗则保留待审批状态。
+            </p>
+          </div>
+          <div class="modal-foot">
+            <button class="btn-secondary" onclick="dismissApprovalModal()">稍后决定</button>
+            <button class="btn-secondary" style="color:var(--color-danger); border-color:var(--color-danger-border);" onclick="rejectApproval()">不整理</button>
+            <button class="btn-primary" onclick="approveAndRun()">开始整理</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ====================================================================
+           New Task Modal (In-Project Action)
+           ==================================================================== -->
+      <div id="createTaskModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="createTaskTitle" onclick="handleBackdropClick(event, 'createTaskModal')">
+        <div class="modal-card" onclick="event.stopPropagation()">
+          <div class="modal-head">
+            <h3 id="createTaskTitle">在项目「智能文档编排」中新建任务</h3>
+            <button class="aux-nav-close" onclick="closeCreateTaskModal()" aria-label="关闭">✕</button>
+          </div>
+          <div class="modal-body">
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <label for="newTaskDescInput" style="font-weight:600; font-size:13px;">你需要完成什么？</label>
+              <textarea id="newTaskDescInput" class="input-textarea" rows="3" placeholder="描述该任务需要达成的具体结果..."></textarea>
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn-secondary" onclick="closeCreateTaskModal()">取消</button>
+            <button class="btn-primary" onclick="handleCreateTaskSubmit()">预览提交</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ====================================================================
+           Secondary Low-Frequency Configuration Drawer (Triggered by Border Entries)
+           ==================================================================== -->
+      <div id="borderConfigDrawer" class="config-drawer" role="dialog" aria-modal="true" aria-labelledby="configDrawerTitle">
+        <div class="config-drawer-head">
+          <span id="configDrawerTitle" style="font-weight:600; font-size:14px;">界面与底层配置 (低频入口)</span>
+          <button class="aux-nav-close" onclick="closeBorderConfig()" aria-label="关闭">✕</button>
+        </div>
+        <div class="config-drawer-body">
+          <div class="config-group">
+            <span class="config-group-title">查看方式</span>
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+              <input type="radio" name="viewDepth" value="compact" checked> 正常项目进度 (标准)
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+              <input type="radio" name="viewDepth" value="raw"> 原始操作与执行日志
+            </label>
+          </div>
+
+          <div class="config-group">
+            <span class="config-group-title">显示偏好</span>
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+              <input type="checkbox" id="cfgDenseMode" onchange="toggleDenseMode(this.checked)"> 紧凑排版密度
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+              <input type="checkbox" id="cfgSoftColor" onchange="toggleSoftColor(this.checked)"> 护眼柔和纸感色调
+            </label>
+          </div>
+
+          <div class="config-group">
+            <span class="config-group-title">输入偏好</span>
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+              <input type="radio" name="inputSendKey" value="enter" checked> Enter 发送，Shift+Enter 换行
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+              <input type="radio" name="inputSendKey" value="ctrl-enter"> Ctrl/Cmd+Enter 发送
+            </label>
+          </div>
+
+          <div class="config-group">
+            <span class="config-group-title">底层环境与诊断</span>
+            <div class="detail-record-box">
+              执行方式：本机运行<br>
+              运行环境：本机沙箱<br>
+              运行记录：标准
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Toast Feedback -->
+      <div id="toastMsg" class="toast-msg"></div>
+
+    </div>
+  </main>
+
+  <!-- ========================================================================
+       Deterministic Client-Side Interaction Controller
+       ======================================================================== -->
+  <script>
+    // Dismissal is presentation-only and scoped to one waiting request.
+    const APPROVAL_DISMISS_KEY = 'humanagent.design-review.weekly-approval.dismissed';
+    const CHEVRON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+
+    // State machine storage
+    const state = {
+      device: 'desktop', // 'desktop' | 'mobile'
+      simulatedState: 'waiting', // 'waiting' | 'running' | 'result' | 'stopped'
+      currentRoute: '#/tasks/weekly-summary', // '#/projects' | '#/projects/doc-sync' | '#/tasks/weekly-summary' | '#/tasks/weekly-summary/result'
+      auxNavOpen: true,
+      detailPaneOpen: false,
+      approvalModalOpen: false,
+      approvalDismissed: false,
+      createTaskModalOpen: false,
+      borderConfigOpen: false,
+      mobileSheetOpen: false,
+      mobileSheetTab: 'nav', // 'nav' | 'detail'
+      returnFocusEl: null
+    };
+    state.approvalDismissed = readApprovalDismissed();
+
+    // DOM Elements Cache
+    const el = {
+      productFrame: document.getElementById('productFrame'),
+      btnLocation: document.getElementById('btnLocation'),
+      hierarchyBreadcrumb: document.getElementById('hierarchyBreadcrumb'),
+      hierarchyParentLink: document.getElementById('hierarchyParentLink'),
+      currentSurfaceName: document.getElementById('currentSurfaceName'),
+      auxNav: document.getElementById('auxNav'),
+      detailPane: document.getElementById('detailPane'),
+      btnToggleDetail: document.getElementById('btnToggleDetail'),
+      viewTaskFocus: document.getElementById('viewTaskFocus'),
+      viewProjectList: document.getElementById('viewProjectList'),
+      viewAllProjects: document.getElementById('viewAllProjects'),
+      taskStatusPill: document.getElementById('taskStatusPill'),
+      approvalBanner: document.getElementById('approvalBanner'),
+      timelineStep2: document.getElementById('timelineStep2'),
+      timelineStep2Marker: document.getElementById('timelineStep2Marker'),
+      timelineStep2Title: document.getElementById('timelineStep2Title'),
+      timelineStep2Time: document.getElementById('timelineStep2Time'),
+      timelineStep2Desc: document.getElementById('timelineStep2Desc'),
+      timelineStep3: document.getElementById('timelineStep3'),
+      timelineStep3Marker: document.getElementById('timelineStep3Marker'),
+      timelineStep3Time: document.getElementById('timelineStep3Time'),
+      timelineStep3Desc: document.getElementById('timelineStep3Desc'),
+      deliverableCard: document.getElementById('deliverableCard'),
+      progressStepSummary: document.getElementById('progressStepSummary'),
+      approvalModal: document.getElementById('approvalModal'),
+      btnOpenApprovalModal: document.getElementById('btnOpenApprovalModal'),
+      createTaskModal: document.getElementById('createTaskModal'),
+      borderConfigDrawer: document.getElementById('borderConfigDrawer'),
+      mobileBottomSheet: document.getElementById('mobileBottomSheet'),
+      mobileSheetContent: document.getElementById('mobileSheetContent'),
+      sheetTabNav: document.getElementById('sheetTabNav'),
+      sheetTabDetail: document.getElementById('sheetTabDetail'),
+      toastMsg: document.getElementById('toastMsg'),
+      navTaskBadge: document.getElementById('navTaskBadge'),
+      projTableTask1Status: document.getElementById('projTableTask1Status')
+    };
+
+    // Initialize on load
+    window.addEventListener('DOMContentLoaded', () => {
+      // Parse initial route from location.hash or default
+      const initialHash = window.location.hash || '#/tasks/weekly-summary';
+      navigateTo(initialHash, false);
+      if (window.matchMedia('(max-width: 600px)').matches) setDeviceMode('mobile');
+      renderState();
+    });
+
+    window.addEventListener('resize', () => {
+      if (window.matchMedia('(max-width: 600px)').matches && state.device !== 'mobile') {
+        setDeviceMode('mobile');
+      }
+    });
+
+    // Native browser back/forward support
+    window.addEventListener('popstate', () => {
+      const hash = window.location.hash || '#/tasks/weekly-summary';
+      navigateTo(hash, false);
+    });
+
+    // Keyboard accessibility: Escape closes open modal/drawer
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        if (state.approvalModalOpen) {
+          dismissApprovalModal();
+        } else if (state.createTaskModalOpen) {
+          closeCreateTaskModal();
+        } else if (state.borderConfigOpen) {
+          closeBorderConfig();
+        } else if (state.mobileSheetOpen) {
+          closeMobileSheet();
+        } else if (state.device === 'mobile' && state.auxNavOpen) {
+          closeAuxNav();
+        }
+      }
+    });
+
+    /* ========================================================================
+       Navigation & Routing (Deterministic Hierarchy Links vs Browser History)
+       ======================================================================== */
+    function navigateTo(hash, pushState = true) {
+      if (hash === '#/tasks/weekly-summary/result' && state.simulatedState !== 'result') {
+        hash = '#/tasks/weekly-summary';
+        window.history.replaceState(null, '', hash);
+      }
+      state.currentRoute = hash;
+      if (pushState && window.location.hash !== hash) {
+        window.history.pushState(null, '', hash);
+      }
+
+      // Update meta bar active buttons
+      document.querySelectorAll('.review-toolbar .review-ctrl-group button').forEach(b => {
+        if (b.id === 'ctrl-view-all') b.classList.toggle('active', hash === '#/projects');
+        if (b.id === 'ctrl-view-proj') b.classList.toggle('active', hash === '#/projects/doc-sync');
+        if (b.id === 'ctrl-view-task') b.classList.toggle('active', hash.startsWith('#/tasks'));
+      });
+
+      // Update tree active rows: exactly one current node
+      document.querySelectorAll('.aux-nav-tree .tree-row[data-route]').forEach(row => {
+        row.classList.toggle('active', row.getAttribute('data-route') === hash);
+      });
+
+      // Switch Main View Canvas
+      if (hash === '#/projects') {
+        el.viewTaskFocus.style.display = 'none';
+        el.viewProjectList.style.display = 'none';
+        el.viewAllProjects.style.display = 'flex';
+        el.hierarchyParentLink.style.display = 'none';
+        el.currentSurfaceName.textContent = '全部项目概览';
+      } else if (hash === '#/projects/doc-sync') {
+        el.viewTaskFocus.style.display = 'none';
+        el.viewProjectList.style.display = 'flex';
+        el.viewAllProjects.style.display = 'none';
+        el.hierarchyParentLink.style.display = 'inline-flex';
+        el.hierarchyParentLink.setAttribute('href', '#/projects');
+        el.hierarchyParentLink.innerHTML = '‹ 返回全部项目';
+        el.currentSurfaceName.textContent = '项目：智能文档编排';
+      } else {
+        // Task focus view
+        el.viewTaskFocus.style.display = 'flex';
+        el.viewProjectList.style.display = 'none';
+        el.viewAllProjects.style.display = 'none';
+        el.hierarchyParentLink.style.display = 'inline-flex';
+        el.hierarchyParentLink.setAttribute('href', '#/projects/doc-sync');
+        el.hierarchyParentLink.innerHTML = '‹ 返回项目：智能文档编排';
+        el.currentSurfaceName.textContent = hash === '#/tasks/weekly-summary/result'
+          ? '周报待办事项整理 · 成果'
+          : '周报待办事项整理';
+        
+        if (hash === '#/tasks/weekly-summary/result') {
+          // Open detail pane or scroll to deliverable
+          if (!state.detailPaneOpen) toggleDetailPane();
+        }
+      }
+
+      revealCurrentTreeBranch(hash);
+      maybeAutoOpenApproval();
+    }
+
+    // Keep the current node reachable after ancestor navigation.
+    function revealCurrentTreeBranch(hash) {
+      let ids = [];
+      if (hash.startsWith('#/tasks/weekly-summary')) {
+        ids = ['tree-all-projects', 'tree-project-doc-sync', 'tree-task-weekly'];
+      } else if (hash === '#/projects/doc-sync') {
+        ids = ['tree-all-projects', 'tree-project-doc-sync'];
+      } else if (hash === '#/projects') {
+        ids = ['tree-all-projects'];
+      }
+      ids.forEach(id => {
+        const children = document.getElementById(id);
+        if (!children) return;
+        children.removeAttribute('hidden');
+        const row = children.previousElementSibling;
+        if (row && row.classList.contains('tree-row')) row.setAttribute('aria-expanded', 'true');
+      });
+    }
+
+    function handleNavClick(e, hash) {
+      e.preventDefault();
+      navigateTo(hash, true);
+      if (state.device === 'mobile') {
+        closeMobileSheet();
+        closeAuxNav();
+      }
+    }
+
+    function handleHierarchyClick(e, hash) {
+      e.preventDefault();
+      navigateTo(hash, true);
+    }
+
+    /* ========================================================================
+       State Progression Simulation (Waiting / Running / Result / Stopped)
+       ======================================================================== */
+    function setSimulatedState(s) {
+      state.simulatedState = s;
+      if (s !== 'result' && state.currentRoute === '#/tasks/weekly-summary/result') {
+        window.history.replaceState(null, '', '#/tasks/weekly-summary');
+        navigateTo('#/tasks/weekly-summary', false);
+      }
+
+      // Update Toolbar buttons
+      ['waiting', 'running', 'result', 'stopped'].forEach(name => {
+        const btn = document.getElementById(`ctrl-state-${name}`);
+        if (btn) btn.classList.toggle('active', s === name);
+      });
+
+      renderState();
+    }
+
+    function renderState() {
+      const s = state.simulatedState;
+      document.querySelectorAll('[data-route="#/tasks/weekly-summary/result"]').forEach(row => { row.hidden = s !== 'result'; });
+      const progressText = {
+        waiting: '等待批准后读取并整理项目待办。',
+        running: '正在核对 18 项候选，并合并重复待办。项目文件保持不变。',
+        result: '已合并重复条目，整理出 15 项有效待办。完整清单保存在本任务中。',
+        stopped: '你已拒绝本次整理，任务已停止，未读取项目文件。'
+      }[s];
+      document.getElementById('taskProgressSection').hidden = s === 'waiting' || s === 'stopped';
+      document.getElementById('detailProgressText').textContent = progressText;
+      const mobileProgress = document.getElementById('mobileProgressText');
+      if (mobileProgress) mobileProgress.textContent = progressText;
+
+      // Leaving the waiting state must not leave the approval dialog open.
+      if (s !== 'waiting' && state.approvalModalOpen) {
+        state.approvalModalOpen = false;
+        el.approvalModal.classList.remove('open');
+      }
+
+      // Badges
+      if (s === 'waiting') {
+        el.taskStatusPill.className = 'status-pill status-waiting';
+        el.taskStatusPill.innerHTML = '<span>等待审批</span>';
+        el.approvalBanner.style.display = 'flex';
+        
+        el.timelineStep2.className = 'timeline-item current';
+        el.timelineStep2Marker.textContent = '2';
+        el.timelineStep2Title.textContent = '2. 核对重复事项并分类';
+        el.timelineStep2Time.textContent = '等待你确认';
+        el.timelineStep2Desc.textContent = '等待你确认后开始整理。';
+
+        el.timelineStep3.className = 'timeline-item';
+        el.timelineStep3Marker.textContent = '3';
+        el.timelineStep3Time.textContent = '待进行';
+        el.timelineStep3Desc.textContent = '完成后结果直接显示在本任务，不写入项目文件。';
+
+        el.deliverableCard.style.display = 'none';
+        el.progressStepSummary.textContent = '步骤 2 / 3 · 等待确认';
+
+        el.navTaskBadge.className = 'node-badge badge-warn';
+        el.navTaskBadge.textContent = '待审批';
+        el.projTableTask1Status.className = 'status-pill status-waiting';
+        el.projTableTask1Status.textContent = '待审批';
+      } else if (s === 'running') {
+        el.taskStatusPill.className = 'status-pill status-running';
+        el.taskStatusPill.innerHTML = '<span>正在整理</span>';
+        el.approvalBanner.style.display = 'none';
+
+        el.timelineStep2.className = 'timeline-item current';
+        el.timelineStep2Marker.textContent = '2';
+        el.timelineStep2Title.textContent = '2. 核对重复事项并分类';
+        el.timelineStep2Time.textContent = '正在整理 · 进度 65%';
+        el.timelineStep2Desc.textContent = '正在合并 4 个来源里的重复事项...';
+
+        el.timelineStep3.className = 'timeline-item';
+        el.timelineStep3Marker.textContent = '3';
+        el.timelineStep3Time.textContent = '待进行';
+        el.timelineStep3Desc.textContent = '整理完成后立即在本任务显示结果。';
+
+        el.deliverableCard.style.display = 'none';
+        el.progressStepSummary.textContent = '步骤 2 / 3 · 整理中';
+
+        el.navTaskBadge.className = 'node-badge badge-running';
+        el.navTaskBadge.textContent = '推进中';
+        el.projTableTask1Status.className = 'status-pill status-running';
+        el.projTableTask1Status.textContent = '推进中';
+      } else if (s === 'result') {
+        el.taskStatusPill.className = 'status-pill status-done';
+        el.taskStatusPill.innerHTML = '<span>已完成</span>';
+        el.approvalBanner.style.display = 'none';
+
+        el.timelineStep2.className = 'timeline-item completed';
+        el.timelineStep2Marker.textContent = '✓';
+        el.timelineStep2Title.textContent = '2. 核对重复事项并分类';
+        el.timelineStep2Time.textContent = '已完成 · 耗时 2.4s';
+        el.timelineStep2Desc.textContent = '已合并 3 处重复条目，确认 15 项有效待办。';
+
+        el.timelineStep3.className = 'timeline-item completed';
+        el.timelineStep3Marker.textContent = '✓';
+        el.timelineStep3Time.textContent = '已完成 · 耗时 0.8s';
+        el.timelineStep3Desc.textContent = '已整理成清单并保存在本任务。';
+
+        el.deliverableCard.style.display = 'flex';
+        el.progressStepSummary.textContent = '步骤 3 / 3 · 全部完成';
+
+        el.navTaskBadge.className = 'node-badge badge-done';
+        el.navTaskBadge.textContent = '已完成';
+        el.projTableTask1Status.className = 'status-pill status-done';
+        el.projTableTask1Status.textContent = '已完成';
+      } else if (s === 'stopped') {
+        el.taskStatusPill.className = 'status-pill status-stopped';
+        el.taskStatusPill.innerHTML = '<span>已终止</span>';
+        el.approvalBanner.style.display = 'none';
+
+        el.timelineStep2.className = 'timeline-item';
+        el.timelineStep2Marker.textContent = '✕';
+        el.timelineStep2Title.textContent = '2. 核对重复事项并分类';
+        el.timelineStep2Time.textContent = '已停止';
+        el.timelineStep2Desc.textContent = '你已拒绝本次整理，任务已停止，项目文件未改动。';
+
+        el.timelineStep3.className = 'timeline-item';
+        el.timelineStep3Marker.textContent = '3';
+        el.timelineStep3Time.textContent = '未执行';
+        el.timelineStep3Desc.textContent = '任务已停止。';
+
+        el.deliverableCard.style.display = 'none';
+        el.progressStepSummary.textContent = '已终止';
+
+        el.navTaskBadge.className = 'node-badge';
+        el.navTaskBadge.textContent = '已终止';
+        el.projTableTask1Status.className = 'status-pill status-stopped';
+        el.projTableTask1Status.textContent = '已终止';
+      }
+    }
+
+    /* ========================================================================
+       Approval Modal Handling (Approve / Reject / Dismiss / Focus Restoration)
+       ======================================================================== */
+    function readApprovalDismissed() {
+      try { return sessionStorage.getItem(APPROVAL_DISMISS_KEY) === '1'; } catch (err) { return false; }
+    }
+
+    function rememberApprovalDismissed(value) {
+      try {
+        if (value) sessionStorage.setItem(APPROVAL_DISMISS_KEY, '1');
+        else sessionStorage.removeItem(APPROVAL_DISMISS_KEY);
+      } catch (err) {
+        // Preview can be opened from file:// where storage may be unavailable.
+      }
+    }
+
+    function maybeAutoOpenApproval() {
+      if (state.simulatedState !== 'waiting') return;
+      if (state.approvalDismissed) return;
+      if (state.currentRoute === '#/projects' || state.currentRoute === '#/projects/doc-sync') return;
+      if (state.currentRoute === '#/tasks/weekly-summary/result') return;
+      openApprovalModal(true);
+    }
+
+    function openApprovalModal(auto = false) {
+      if (state.approvalModalOpen) return;
+      state.returnFocusEl = auto ? el.btnOpenApprovalModal : document.activeElement;
+      state.approvalModalOpen = true;
+      el.approvalModal.classList.add('open');
+      const approveBtn = el.approvalModal.querySelector('.btn-primary');
+      if (approveBtn) approveBtn.focus();
+    }
+
+    function dismissApprovalModal() {
+      state.approvalModalOpen = false;
+      el.approvalModal.classList.remove('open');
+      // Dismissal is presentation-only: the task stays waiting approval.
+      state.approvalDismissed = true;
+      rememberApprovalDismissed(true);
+      restoreFocus();
+    }
+
+    function approveAndRun() {
+      state.approvalModalOpen = false;
+      el.approvalModal.classList.remove('open');
+      state.approvalDismissed = false;
+      rememberApprovalDismissed(false);
+      setSimulatedState('running');
+      showToast('已批准，任务开始整理。');
+      restoreFocus();
+    }
+
+    function rejectApproval() {
+      state.approvalModalOpen = false;
+      el.approvalModal.classList.remove('open');
+      state.approvalDismissed = false;
+      rememberApprovalDismissed(false);
+      setSimulatedState('stopped');
+      showToast('已拒绝，任务停止，项目文件未改动。');
+      restoreFocus();
+    }
+
+    function toggleTreeBranch(id, trigger) {
+      const children = document.getElementById(id);
+      if (!children) return;
+      const willExpand = children.hasAttribute('hidden');
+      if (willExpand) children.removeAttribute('hidden');
+      else children.setAttribute('hidden', '');
+      const row = trigger.closest('.tree-row');
+      if (row) row.setAttribute('aria-expanded', String(willExpand));
+      const node = trigger.closest('.tree-node');
+      if (node) node.classList.toggle('collapsed', !willExpand);
+    }
+
+    function handleBackdropClick(e, modalId) {
+      if (e.target.id === modalId) {
+        if (modalId === 'approvalModal') dismissApprovalModal();
+        if (modalId === 'createTaskModal') closeCreateTaskModal();
+      }
+    }
+
+    function restoreFocus() {
+      if (state.returnFocusEl && typeof state.returnFocusEl.focus === 'function') {
+        state.returnFocusEl.focus();
+      }
+    }
+
+    /* ========================================================================
+       Task Creation inside Task Area
+       ======================================================================== */
+    function openCreateTaskModal() {
+      state.returnFocusEl = document.activeElement;
+      state.createTaskModalOpen = true;
+      el.createTaskModal.classList.add('open');
+      document.getElementById('newTaskDescInput').focus();
+    }
+
+    function closeCreateTaskModal() {
+      state.createTaskModalOpen = false;
+      el.createTaskModal.classList.remove('open');
+      restoreFocus();
+    }
+
+    function handleCreateTaskSubmit() {
+      const requirement = document.getElementById('newTaskDescInput').value.trim();
+      if (!requirement) {
+        document.getElementById('newTaskDescInput').focus();
+        return;
+      }
+      closeCreateTaskModal();
+      showToast('需求已记录到本页演示，未创建真实任务');
+    }
+
+    /* ========================================================================
+       Left Auxiliary Navigation & Right Detail Pane (Collapsible & Responsive)
+       ======================================================================== */
+    function toggleAuxNav() {
+      if (state.device === 'mobile') {
+        openMobileSheet('nav');
+      } else {
+        state.auxNavOpen = !state.auxNavOpen;
+        el.auxNav.classList.toggle('collapsed', !state.auxNavOpen);
+      }
+    }
+
+    function closeAuxNav() {
+      state.auxNavOpen = false;
+      el.auxNav.classList.add('collapsed');
+      restoreFocus();
+    }
+
+    function toggleDetailPane() {
+      if (state.device === 'mobile') {
+        openMobileSheet('detail');
+      } else {
+        state.detailPaneOpen = !state.detailPaneOpen;
+        el.detailPane.classList.toggle('collapsed', !state.detailPaneOpen);
+        el.btnToggleDetail.classList.toggle('active', state.detailPaneOpen);
+      }
+    }
+
+    function closeDetailPane() {
+      state.detailPaneOpen = false;
+      el.detailPane.classList.add('collapsed');
+      el.btnToggleDetail.classList.remove('active');
+      restoreFocus();
+    }
+
+    /* ========================================================================
+       Mobile Single Bottom-Sheet Layer (Switching content, not nested overlays)
+       ======================================================================== */
+    function openMobileSheet(tab = 'nav') {
+      if (!state.mobileSheetOpen) state.returnFocusEl = document.activeElement;
+      state.mobileSheetOpen = true;
+      state.mobileSheetTab = tab;
+      document.getElementById('mobileSheetBackdrop').hidden = false;
+      el.mobileBottomSheet.classList.add('open');
+      switchMobileSheetTab(tab);
+      (tab === 'nav' ? el.sheetTabNav : el.sheetTabDetail).focus();
+    }
+
+    function closeMobileSheet() {
+      if (!state.mobileSheetOpen) return;
+      state.mobileSheetOpen = false;
+      document.getElementById('mobileSheetBackdrop').hidden = true;
+      el.mobileBottomSheet.classList.remove('open');
+      restoreFocus();
+    }
+
+    function switchMobileSheetTab(tab) {
+      state.mobileSheetTab = tab;
+      el.sheetTabNav.classList.toggle('active', tab === 'nav');
+      el.sheetTabDetail.classList.toggle('active', tab === 'detail');
+
+      if (tab === 'nav') {
+        el.mobileSheetContent.innerHTML = `
+          <div class="sheet-section-title">位置与路径</div>
+          <div class="tree-node">
+            <div class="tree-row" role="treeitem" aria-expanded="true">
+              <button class="tree-caret" type="button" aria-label="折叠全部项目" onclick="toggleTreeBranch('m-tree-projects', this)">${CHEVRON_SVG}</button>
+              <a class="tree-label" href="#/projects" onclick="handleNavClick(event, '#/projects')"><span class="node-title">全部项目</span></a>
+              <span class="node-badge">3 项</span>
+            </div>
+            <div id="m-tree-projects" class="tree-children">
+              <div class="tree-node">
+                <div class="tree-row tree-indent-1" role="treeitem" aria-expanded="true">
+                  <button class="tree-caret" type="button" aria-label="折叠智能文档编排" onclick="toggleTreeBranch('m-tree-project-doc-sync', this)">${CHEVRON_SVG}</button>
+                  <a class="tree-label" href="#/projects/doc-sync" onclick="handleNavClick(event, '#/projects/doc-sync')"><span class="node-title">智能文档编排</span></a>
+                  <span class="node-badge">当前</span>
+                </div>
+                <div id="m-tree-project-doc-sync" class="tree-children">
+                  <div class="tree-node">
+                    <div class="tree-row tree-indent-2 active" role="treeitem" aria-expanded="true">
+                      <button class="tree-caret" type="button" aria-label="折叠周报待办事项整理" onclick="toggleTreeBranch('m-tree-task-weekly', this)">${CHEVRON_SVG}</button>
+                      <a class="tree-label" href="#/tasks/weekly-summary" onclick="handleNavClick(event, '#/tasks/weekly-summary')"><span class="node-title">周报待办事项整理</span></a>
+                      <span class="node-badge">${el.navTaskBadge.textContent}</span>
+                    </div>
+                    <div id="m-tree-task-weekly" class="tree-children">
+                      <a class="tree-row tree-indent-3" href="#/tasks/weekly-summary" onclick="handleNavClick(event, '#/tasks/weekly-summary')"><span class="node-bullet">•</span><span class="node-title">工作进展与输入</span></a>
+                      ${state.simulatedState === 'result' ? '<a class="tree-row tree-indent-3" href="#/tasks/weekly-summary/result" onclick="handleNavClick(event, \'#/tasks/weekly-summary/result\')"><span class="node-bullet">•</span><span class="node-title">任务成果</span></a>' : ''}
+                    </div>
+                  </div>
+                  <div class="tree-node">
+                    <div class="tree-row tree-indent-2">
+                      <span class="tree-caret-spacer"></span>
+                      <button class="tree-label" style="background:transparent;border:none;padding:0;color:var(--color-primary);text-align:left;cursor:pointer;" onclick="closeMobileSheet(); openCreateTaskModal();"><span style="font-weight:bold;">+</span><span class="node-title">在此项目新建任务...</span></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+      } else {
+        el.mobileSheetContent.innerHTML = `
+          <div class="sheet-section-title">任务细节与依据</div>
+          <div class="detail-section">
+            <div class="detail-item-title">任务目标</div>
+            <p class="detail-prose">读取当前项目里的待办标记，整理成一份清晰的本周待办清单，结果保存在本任务中。</p>
+          </div>
+          <div class="detail-section">
+            <div class="detail-item-title">当前进展</div>
+            <p id="mobileProgressText" class="detail-prose">${document.getElementById('detailProgressText').textContent}</p>
+          </div>
+          <div class="detail-section">
+            <div class="detail-item-title">本任务范围</div>
+            <p class="detail-prose">只读取当前项目的待办标记，不改动任何项目文件；结果只保存在本任务内。</p>
+          </div>
+          <div class="detail-section">
+            <div class="detail-item-title">相关材料</div>
+            <p class="detail-prose">当前项目中的待办标记，批准后读取。</p>
+          </div>
+          <details class="tech-details">
+            <summary>技术细节</summary>
+            <div class="detail-record-box">检查点编号 12 · 保存状态：已持久保存<br>记录时间：2026-10-19 17:00–17:04</div>
+          </details>
+        `;
+      }
+    }
+
+    /* ========================================================================
+       Secondary Low-Frequency Configuration Drawer (Border Entries)
+       ======================================================================== */
+    function openBorderConfig(position) {
+      state.returnFocusEl = document.activeElement;
+      state.borderConfigOpen = true;
+      const positionNames = { top: '上方', left: '左侧', right: '右侧', bottom: '下方' };
+      document.getElementById('configDrawerTitle').textContent = `${positionNames[position] || ''}配置 · 低频偏好`;
+      el.borderConfigDrawer.classList.add('open');
+    }
+
+    function closeBorderConfig() {
+      state.borderConfigOpen = false;
+      el.borderConfigDrawer.classList.remove('open');
+      restoreFocus();
+    }
+
+    function toggleDenseMode(dense) {
+      document.body.style.fontSize = dense ? '13px' : '14px';
+      showToast(dense ? '已启用紧凑排版' : '已恢复标准排版');
+    }
+
+    function toggleSoftColor(soft) {
+      document.documentElement.style.setProperty('--color-page', soft ? '#f7f4ed' : '#f4f6fa');
+      showToast(soft ? '已启用护眼柔和色调' : '已恢复标准色调');
+    }
+
+    /* ========================================================================
+       Device Preview Mode Toggle (Desktop vs Mobile)
+       ======================================================================== */
+    function setDeviceMode(mode) {
+      state.device = mode;
+      document.getElementById('ctrl-desktop').classList.toggle('active', mode === 'desktop');
+      document.getElementById('ctrl-mobile').classList.toggle('active', mode === 'mobile');
+
+      if (mode === 'mobile') {
+        el.productFrame.className = 'product-frame mode-mobile';
+        // Auto-collapse desktop side panes in mobile mode
+        el.auxNav.classList.add('collapsed');
+        el.detailPane.classList.add('collapsed');
+      } else {
+        el.productFrame.className = 'product-frame mode-desktop';
+        closeMobileSheet();
+        // Restore desktop side panes
+        if (state.auxNavOpen) el.auxNav.classList.remove('collapsed');
+        if (state.detailPaneOpen) el.detailPane.classList.remove('collapsed');
+      }
+    }
+
+    /* ========================================================================
+       Task Input & Instructions Handling
+       ======================================================================== */
+    function handleSendInstruction() {
+      const textarea = document.getElementById('taskInputText');
+      const val = textarea.value.trim();
+      if (!val) {
+        showToast('请输入指令内容');
+        return;
+      }
+      textarea.value = '';
+      showToast('已记录到本页演示');
+    }
+
+    /* Reset Demo */
+    function resetDemo() {
+      state.approvalDismissed = false;
+      rememberApprovalDismissed(false);
+      setSimulatedState('waiting');
+      navigateTo('#/tasks/weekly-summary', true);
+      state.auxNavOpen = true;
+      state.detailPaneOpen = false;
+      el.auxNav.classList.remove('collapsed');
+      el.detailPane.classList.add('collapsed');
+      el.btnToggleDetail.classList.remove('active');
+      ['tree-all-projects', 'tree-project-doc-sync', 'tree-task-weekly'].forEach(id => {
+        const children = document.getElementById(id);
+        if (children) children.removeAttribute('hidden');
+      });
+      document.querySelectorAll('.aux-nav-tree .tree-row[aria-expanded]').forEach(row => {
+        row.setAttribute('aria-expanded', 'true');
+      });
+      showToast('已重置示例预览状态');
+      maybeAutoOpenApproval();
+    }
+
+    /* Toast Notification Helper */
+    let toastTimeout = null;
+    function showToast(text) {
+      clearTimeout(toastTimeout);
+      el.toastMsg.textContent = text;
+      el.toastMsg.style.display = 'block';
+      toastTimeout = setTimeout(() => {
+        el.toastMsg.style.display = 'none';
+      }, 2500);
+    }
+  </script>
+</body>
+</html>
