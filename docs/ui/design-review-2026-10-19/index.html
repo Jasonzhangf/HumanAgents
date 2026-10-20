@@ -1646,13 +1646,14 @@
                     </div>
                   </div>
                 </div>
+                <div id="humanInstructionLog" hidden></div>
               </div>
 
               <div id="mainInputBox" class="main-input-box" hidden>
-                <label for="taskInputText">向该任务补充要求或指令</label>
+                <label for="taskInputText">人类指令</label>
                 <textarea id="taskInputText" class="input-textarea" placeholder="在此补充要求或说明... (Enter 发送)" rows="2"></textarea>
                 <div class="input-actions-bar">
-                  <span class="input-tips">Enter 发送 · Shift+Enter 换行</span>
+                  <span class="input-tips">最高控制权限 · 可随时介入</span>
                   <div style="display:flex; gap:8px;">
                     <button class="btn-secondary" onclick="toggleDetailPane()">查看细节</button>
                     <button class="btn-primary" onclick="handleSendInstruction()">发送指令</button>
@@ -1825,13 +1826,13 @@
           id: 'brain-current', period: 'live', title: '本轮需求整理', meta: '今天 16:50',
           summary: '本周待办事项整理需求已完成整理。',
           facts: ['输入：用户提交的本周待办事项整理需求', '整理结果：需求已交给编排 agent'],
-          session: [{ speaker: '用户', text: '请读取当前项目的待办标记，整理本周待办清单，不修改项目文件。' }, { speaker: 'agent', text: '已整理目标和只读范围，并交给编排 agent 安排执行。' }]
+          session: [{ speaker: '人类', text: '请读取当前项目的待办标记，整理本周待办清单，不修改项目文件。' }, { speaker: 'agent', text: '已整理目标和只读范围，并交给编排 agent 安排执行。' }]
         },
         history: {
           id: 'brain-previous', period: 'history', title: '上一轮需求整理', meta: '昨天 16:20',
           summary: '历史需求整理记录，供回顾。',
           facts: ['记录类型：历史需求整理', '整理结果：上一轮需求已投递'],
-          session: [{ speaker: '用户需求', text: '整理上一轮项目待办。' }, { speaker: 'agent', text: '上一轮需求已整理并投递。' }]
+          session: [{ speaker: '人类需求', text: '整理上一轮项目待办。' }, { speaker: 'agent', text: '上一轮需求已整理并投递。' }]
         }
       },
       implicit: {
@@ -1842,7 +1843,7 @@
           id: 'runtime-current', period: 'live', title: '周报任务编排', meta: '今天 16:55',
           summary: '为周报待办事项整理安排执行步骤。',
           facts: ['所属项目：智能文档编排', '编排结果：形成执行记录', '准入：执行前等待批准'],
-          session: [{ speaker: '编排目标', text: '为智能文档编排项目安排本周待办整理。' }, { speaker: 'agent', text: '已形成执行步骤：读取待办来源、核对重复事项、整理清单。执行交给执行 agent，读取前需获得任务批准。' }]
+          session: [{ speaker: '交互 agent', text: '为智能文档编排项目安排本周待办整理。' }, { speaker: 'agent', text: '已形成执行步骤：读取待办来源、核对重复事项、整理清单。执行交给执行 agent，读取前需获得任务批准。' }]
         },
         history: {
           id: 'runtime-previous', period: 'history', title: '上一轮编排', meta: '昨天 16:30',
@@ -1859,7 +1860,7 @@
           id: 'inspection-next', period: 'live', title: '文档待办巡检安排', meta: '今天 17:10',
           summary: '下一次文档待办巡检已安排。',
           facts: ['巡检对象：文档待办标记', '安排方式：按计划巡检'],
-          session: [{ speaker: '巡检安排', text: '按计划检查文档中的待办标记。' }, { speaker: 'agent', text: '本次巡检对象为文档待办标记，当前保留巡检安排。' }]
+          session: [{ speaker: '编排 agent · 任务安排', text: '按计划检查文档中的待办标记。' }, { speaker: 'agent', text: '本次巡检对象为文档待办标记，当前保留巡检安排。' }]
         },
         history: {
           id: 'inspection-previous', period: 'history', title: '上次巡检记录', meta: '昨天 15:40',
@@ -1880,12 +1881,12 @@
           id: 'task-interface-review', period: 'live', title: '接口变更核对', meta: '今天', status: '核对中',
           summary: '核对接口定义中的变更，保留差异记录。',
           facts: ['所属项目：智能文档编排', '检查内容：接口定义变更'],
-          session: [{ speaker: '执行目标', text: '核对项目接口定义中的变更。' }, { speaker: 'agent', text: '正在核对接口变更，记录需要确认的差异。' }]
+          session: [{ speaker: '编排 agent · 任务安排', text: '核对项目接口定义中的变更。' }, { speaker: 'agent', text: '正在核对接口变更，记录需要确认的差异。' }]
         }, {
           id: 'task-document-index', period: 'live', title: '文档索引整理', meta: '今天', status: '待开始',
           summary: '整理项目文档的索引条目。',
           facts: ['所属项目：智能文档编排', '整理内容：文档索引'],
-          session: [{ speaker: '执行目标', text: '整理项目文档的索引条目。' }, { speaker: 'agent', text: '已保留整理目标，工作尚未开始。' }]
+          session: [{ speaker: '编排 agent · 任务安排', text: '整理项目文档的索引条目。' }, { speaker: 'agent', text: '已保留整理目标，工作尚未开始。' }]
         }],
         history: {
           id: 'task-previous', period: 'history', title: '上次整理记录', meta: '昨天 15:10',
@@ -1902,7 +1903,7 @@
           id: 'memory-current', period: 'live', title: '项目记忆整理', meta: '今天 17:20',
           summary: '整理当前项目中需要保留的上下文。',
           facts: ['内容：项目上下文'],
-          session: [{ speaker: '整理内容', text: '当前项目中需要保留的上下文。' }, { speaker: 'agent', text: '围绕项目上下文整理记忆内容。' }]
+          session: [{ speaker: '编排 agent · 任务安排', text: '当前项目中需要保留的上下文。' }, { speaker: 'agent', text: '围绕项目上下文整理记忆内容。' }]
         },
         history: {
           id: 'memory-previous', period: 'history', title: '历史记忆记录', meta: '昨天 14:50',
@@ -1934,6 +1935,8 @@
         description: '历史编排记录与对应历史任务的关系；不指向当前实例。'
       }
     ];
+
+    const humanInstructions = new Map();
 
     const state = {
       device: 'desktop',
@@ -2221,8 +2224,9 @@
       el.entityWorkspace.hidden = !selected;
       el.genericEntityView.hidden = !selected || isExecutionTask;
       el.taskView.hidden = !isExecutionTask;
-      el.mainInputBox.hidden = !selected || selected.period !== 'live' || !['explicit', 'execution'].includes(selected.boardKey);
-      el.mainInputBox.querySelector('label').textContent = selected && selected.boardKey === 'explicit' ? '补充需求' : '向该任务补充要求或指令';
+      el.mainInputBox.hidden = !selected || selected.period !== 'live';
+      el.mainInputBox.querySelector('label').textContent = selected && selected.boardKey === 'explicit' ? '人类对话 · 你 → 交互 agent' : selected ? `人类指令 · 你 → ${BOARDS[selected.boardKey].name}` : '人类指令';
+      renderHumanInstructions(selected);
       if (!selected || isExecutionTask) return;
 
       el.entityPeriodChip.className = `entity-row-status ${selected.period === 'history' ? 'is-history' : 'is-current'}`;
@@ -2584,15 +2588,42 @@
       showToast('需求已记录到本页演示，未创建真实任务');
     }
 
+    function renderHumanInstructions(selected) {
+      const log = document.getElementById('humanInstructionLog');
+      const messages = selected && selected.period === 'live'
+        ? humanInstructions.get(entityRef(selected.boardKey, selected.period, selected.id)) || []
+        : [];
+      log.hidden = messages.length === 0;
+      log.replaceChildren(...messages.map(text => {
+        const message = document.createElement('section');
+        message.className = 'session-turn';
+        const speaker = document.createElement('span');
+        speaker.className = 'session-speaker';
+        speaker.textContent = `人类 → ${BOARDS[selected.boardKey].name} · 最高控制权限`;
+        const body = document.createElement('p');
+        body.textContent = text;
+        message.append(speaker, body);
+        return message;
+      }));
+    }
+
     function handleSendInstruction() {
+      const selected = getSelectedEntity();
+      if (!selected || selected.period !== 'live') return;
       const textarea = document.getElementById('taskInputText');
       const val = textarea.value.trim();
       if (!val) {
         showToast('请输入指令内容');
         return;
       }
+      const ref = entityRef(selected.boardKey, selected.period, selected.id);
+      const messages = humanInstructions.get(ref) || [];
+      messages.push(val);
+      humanInstructions.set(ref, messages);
       textarea.value = '';
-      showToast('已记录到本页演示');
+      renderHumanInstructions(selected);
+      document.getElementById('humanInstructionLog').lastElementChild.scrollIntoView({ block: 'nearest' });
+      textarea.focus();
     }
 
     /* ========================================================================
