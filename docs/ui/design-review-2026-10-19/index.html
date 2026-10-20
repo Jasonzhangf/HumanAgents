@@ -440,15 +440,17 @@
       flex: 1;
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 8px;
     }
     .board-nav-item {
       display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 9px 10px;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 6px;
+      padding: 10px;
       border-radius: var(--radius-sm);
-      border: 1px solid transparent;
+      border: 1px solid var(--color-line);
+      background: var(--color-surface);
       color: var(--color-ink);
       text-decoration: none;
       font-size: 13px;
@@ -464,16 +466,10 @@
       color: var(--color-primary);
       font-weight: 600;
     }
-    .board-nav-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--color-line-strong);
-      flex-shrink: 0;
-    }
-    .board-nav-item.active .board-nav-dot {
-      background: var(--color-primary);
-    }
+    .board-nav-title { font-weight: 600; }
+    .board-nav-live { display: flex; align-items: flex-start; gap: 8px; color: var(--color-ink-soft); font-size: 12px; font-weight: 400; line-height: 1.5; }
+    .board-nav-task { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .board-nav-status { flex-shrink: 0; font-size: 11px; }
     .board-nav-note {
       margin: 0;
       padding: 10px 14px 14px;
@@ -641,6 +637,10 @@
       background: var(--color-surface);
     }
     .entity-focus h2 { margin: 0; font-size: 16px; font-weight: 600; }
+    .session-turn { padding: 12px 0; border-top: 1px solid var(--color-line); }
+    .session-speaker { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--color-ink-soft); }
+    .session-turn p { margin: 0; white-space: pre-line; }
+    .relation-chain-label { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 2px 0; font-size: 12px; color: var(--color-ink-soft); }
     .entity-focus-meta { display: flex; flex-wrap: wrap; gap: 6px; }
     .entity-focus p {
       margin: 0;
@@ -1499,11 +1499,6 @@
             </div>
             
             <nav id="boardNav" class="board-nav-list" aria-label="五个工作板块">
-              <a class="board-nav-item" data-board="explicit" href="#/boards/explicit" onclick="handleNavClick(event, '#/boards/explicit')"><span class="board-nav-dot"></span><span>交互 agent</span></a>
-              <a class="board-nav-item" data-board="implicit" href="#/boards/implicit" onclick="handleNavClick(event, '#/boards/implicit')"><span class="board-nav-dot"></span><span>编排 agent</span></a>
-              <a class="board-nav-item" data-board="inspection" href="#/boards/inspection" onclick="handleNavClick(event, '#/boards/inspection')"><span class="board-nav-dot"></span><span>巡检 agent</span></a>
-              <a class="board-nav-item" data-board="execution" href="#/boards/execution" onclick="handleNavClick(event, '#/boards/execution')"><span class="board-nav-dot"></span><span>执行 agent</span></a>
-              <a class="board-nav-item" data-board="memory" href="#/boards/memory" onclick="handleNavClick(event, '#/boards/memory')"><span class="board-nav-dot"></span><span>记忆 agent</span></a>
             </nav>
           </aside>
 
@@ -1521,6 +1516,7 @@
                   </div>
                 </header>
 
+                <div id="boardDashboard" style="display:flex;flex-direction:column;gap:12px;">
                 <section class="board-section" aria-labelledby="liveRowsTitle">
                   <div class="board-section-head">
                     <h2 id="liveRowsTitle">实时</h2>
@@ -1535,6 +1531,7 @@
                   <div id="boardHistoryRows" class="entity-list"></div>
                 </section>
 
+                </div>
                 <div id="entityWorkspace" hidden>
                   <div id="genericEntityView" class="entity-focus" hidden>
                     <div class="entity-focus-meta">
@@ -1542,8 +1539,7 @@
                       <span id="entityRefChip" class="entity-row-status"></span>
                     </div>
                     <h2 id="entityFocusTitle"></h2>
-                    <p id="entityFocusSummary"></p>
-                    <ul id="entityFocusFacts" class="entity-facts"></ul>
+                    <div id="entitySession"></div>
                   </div>
 
                   <div id="taskView" class="task-reading" hidden>
@@ -1825,12 +1821,14 @@
         live: {
           id: 'brain-current', period: 'live', title: '本轮需求整理', meta: '今天 16:50',
           summary: '本周待办事项整理需求已完成整理。',
-          facts: ['输入：用户提交的本周待办事项整理需求', '整理结果：需求已交给编排 agent']
+          facts: ['输入：用户提交的本周待办事项整理需求', '整理结果：需求已交给编排 agent'],
+          session: [{ speaker: '用户', text: '请读取当前项目的待办标记，整理本周待办清单，不修改项目文件。' }, { speaker: 'agent', text: '已整理目标和只读范围，并交给编排 agent 安排执行。' }]
         },
         history: {
           id: 'brain-previous', period: 'history', title: '上一轮需求整理', meta: '昨天 16:20',
           summary: '历史需求整理记录，供回顾。',
-          facts: ['记录类型：历史需求整理', '整理结果：上一轮需求已投递']
+          facts: ['记录类型：历史需求整理', '整理结果：上一轮需求已投递'],
+          session: [{ speaker: '用户需求', text: '整理上一轮项目待办。' }, { speaker: 'agent', text: '上一轮需求已整理并投递。' }]
         }
       },
       implicit: {
@@ -1840,12 +1838,14 @@
         live: {
           id: 'runtime-current', period: 'live', title: '周报任务编排', meta: '今天 16:55',
           summary: '为周报待办事项整理安排执行步骤。',
-          facts: ['所属项目：智能文档编排', '编排结果：形成执行记录', '准入：执行前等待批准']
+          facts: ['所属项目：智能文档编排', '编排结果：形成执行记录', '准入：执行前等待批准'],
+          session: [{ speaker: '编排目标', text: '为智能文档编排项目安排本周待办整理。' }, { speaker: 'agent', text: '已形成执行步骤：读取待办来源、核对重复事项、整理清单。执行交给执行 agent，读取前需获得任务批准。' }]
         },
         history: {
           id: 'runtime-previous', period: 'history', title: '上一轮编排', meta: '昨天 16:30',
           summary: '上一次周报任务编排记录。',
-          facts: ['记录类型：历史编排', '对应任务：上次整理记录']
+          facts: ['记录类型：历史编排', '对应任务：上次整理记录'],
+          session: [{ speaker: '当时目标', text: '安排上一轮周报待办整理。' }, { speaker: 'agent', text: '上一轮编排已形成对应执行安排。可沿右侧关联查看当时的执行记录。' }]
         }
       },
       inspection: {
@@ -1855,12 +1855,14 @@
         live: {
           id: 'inspection-next', period: 'live', title: '文档待办巡检安排', meta: '今天 17:10',
           summary: '下一次文档待办巡检已安排。',
-          facts: ['巡检对象：文档待办标记', '安排方式：按计划巡检']
+          facts: ['巡检对象：文档待办标记', '安排方式：按计划巡检'],
+          session: [{ speaker: '巡检安排', text: '按计划检查文档中的待办标记。' }, { speaker: 'agent', text: '本次巡检对象为文档待办标记，当前保留巡检安排。' }]
         },
         history: {
           id: 'inspection-previous', period: 'history', title: '上次巡检记录', meta: '昨天 15:40',
           summary: '上一次文档待办巡检记录。',
-          facts: ['记录类型：历史巡检', '巡检范围：文档待办标记']
+          facts: ['记录类型：历史巡检', '巡检范围：文档待办标记'],
+          session: [{ speaker: '当时范围', text: '文档中的待办标记。' }, { speaker: 'agent', text: '上一次巡检范围为文档待办标记。' }]
         }
       },
       execution: {
@@ -1875,7 +1877,8 @@
         history: {
           id: 'task-previous', period: 'history', title: '上次整理记录', meta: '昨天 15:10',
           summary: '上一次周报待办整理记录。',
-          facts: ['记录类型：历史执行记录', '结果：当时生成过一份待办清单']
+          facts: ['记录类型：历史执行记录', '结果：当时生成过一份待办清单'],
+          session: [{ speaker: '执行目标', text: '整理上一轮周报待办。' }, { speaker: 'agent', text: '当时已生成一份待办清单。' }]
         }
       },
       memory: {
@@ -1885,12 +1888,14 @@
         live: {
           id: 'memory-current', period: 'live', title: '项目记忆整理', meta: '今天 17:20',
           summary: '整理当前项目中需要保留的上下文。',
-          facts: ['内容：项目上下文']
+          facts: ['内容：项目上下文'],
+          session: [{ speaker: '整理内容', text: '当前项目中需要保留的上下文。' }, { speaker: 'agent', text: '围绕项目上下文整理记忆内容。' }]
         },
         history: {
           id: 'memory-previous', period: 'history', title: '历史记忆记录', meta: '昨天 14:50',
           summary: '上一轮保留的项目上下文。',
-          facts: ['记录类型：历史记忆记录', '内容：项目上下文']
+          facts: ['记录类型：历史记忆记录', '内容：项目上下文'],
+          session: [{ speaker: '保留内容', text: '上一轮项目上下文。' }, { speaker: 'agent', text: '上一轮记忆内容为项目上下文。' }]
         }
       }
     };
@@ -1958,8 +1963,7 @@
       entityPeriodChip: document.getElementById('entityPeriodChip'),
       entityRefChip: document.getElementById('entityRefChip'),
       entityFocusTitle: document.getElementById('entityFocusTitle'),
-      entityFocusSummary: document.getElementById('entityFocusSummary'),
-      entityFocusFacts: document.getElementById('entityFocusFacts'),
+      entitySession: document.getElementById('entitySession'),
       taskView: document.getElementById('taskView'),
       mainInputBox: document.getElementById('mainInputBox'),
       taskStatusPill: document.getElementById('taskStatusPill'),
@@ -2090,9 +2094,10 @@
       }
 
       if (parsed.entityId && state.device === 'desktop') {
-        state.detailPaneOpen = true;
-        el.detailPane.classList.remove('collapsed');
-        el.btnToggleDetail.classList.add('active');
+        const ref = entityRef(parsed.boardKey, parsed.period, parsed.entityId);
+        state.detailPaneOpen = RELATIONS.some(edge => edge.source === ref || edge.target === ref);
+        el.detailPane.classList.toggle('collapsed', !state.detailPaneOpen);
+        el.btnToggleDetail.classList.toggle('active', state.detailPaneOpen);
       } else if (!parsed.entityId) {
         state.detailPaneOpen = false;
         el.detailPane.classList.add('collapsed');
@@ -2176,15 +2181,19 @@
 
     function renderBoard() {
       const board = BOARDS[state.boardKey];
+      const selected = getSelectedEntity();
       el.boardTitle.textContent = board.name;
       el.boardIntro.textContent = board.intro;
-      el.boardCreateTaskBtn.hidden = state.boardKey !== 'execution';
+      el.boardIntro.hidden = !!selected;
+      document.getElementById('boardDashboard').hidden = !!selected;
+      el.boardCreateTaskBtn.hidden = state.boardKey !== 'execution' || !!selected;
       el.boardLiveRows.innerHTML = rowHtml({ ...board.live, boardKey: state.boardKey });
       el.boardHistoryRows.innerHTML = rowHtml({ ...board.history, boardKey: state.boardKey });
 
-      document.querySelectorAll('.board-nav-item').forEach(item => {
-        item.classList.toggle('active', item.getAttribute('data-board') === state.boardKey);
-      });
+      document.getElementById('boardNav').innerHTML = boardNavCardsHtml();
+      if (state.mobileSheetOpen && state.mobileSheetTab === 'nav') {
+        el.mobileSheetContent.innerHTML = mobileNavHtml();
+      }
     }
 
     function renderEntityWorkspace() {
@@ -2193,15 +2202,25 @@
       el.entityWorkspace.hidden = !selected;
       el.genericEntityView.hidden = !selected || isExecutionTask;
       el.taskView.hidden = !isExecutionTask;
-      el.mainInputBox.hidden = !isExecutionTask;
+      el.mainInputBox.hidden = !selected || selected.period !== 'live' || !['explicit', 'execution'].includes(selected.boardKey);
+      el.mainInputBox.querySelector('label').textContent = selected && selected.boardKey === 'explicit' ? '补充需求' : '向该任务补充要求或指令';
       if (!selected || isExecutionTask) return;
 
       el.entityPeriodChip.className = `entity-row-status ${selected.period === 'history' ? 'is-history' : 'is-current'}`;
       el.entityPeriodChip.textContent = PERIOD_LABELS[selected.period];
       el.entityRefChip.textContent = BOARDS[selected.boardKey].name;
       el.entityFocusTitle.textContent = selected.title;
-      el.entityFocusSummary.textContent = selected.summary;
-      el.entityFocusFacts.innerHTML = selected.facts.map(fact => `<li>${fact}</li>`).join('');
+      el.entitySession.replaceChildren(...selected.session.map(turn => {
+        const message = document.createElement('section');
+        message.className = 'session-turn';
+        const speaker = document.createElement('span');
+        speaker.className = 'session-speaker';
+        speaker.textContent = turn.speaker === 'agent' ? BOARDS[selected.boardKey].name : turn.speaker;
+        const body = document.createElement('p');
+        body.textContent = turn.text;
+        message.append(speaker, body);
+        return message;
+      }));
     }
 
     function renderTaskState() {
@@ -2290,62 +2309,33 @@
         <a class="relation-node${isCurrent ? ' current' : ''}" href="${href}" onclick="handleEntityClick(event, '${href}')">
           <span class="relation-node-name">${entity.title}</span>
           <span class="relation-node-board">${BOARDS[entity.boardKey].name} · ${PERIOD_LABELS[entity.period]}</span>
-          ${isCurrent ? '<span class="relation-current-tag">当前</span>' : ''}
+          ${isCurrent ? '<span class="relation-current-tag">当前焦点</span>' : ''}
         </a>
       `;
     }
 
     function relationHtml(ref) {
-      const edges = RELATIONS.filter(edge => edge.source === ref || edge.target === ref);
+      const period = getEntityByRef(ref).period;
+      const connected = [ref];
+      for (const member of connected) {
+        RELATIONS.filter(edge => edge.source === member || edge.target === member).forEach(edge => {
+          [edge.source, edge.target].forEach(node => {
+            if (getEntityByRef(node).period === period && !connected.includes(node)) connected.push(node);
+          });
+        });
+      }
+      const edges = RELATIONS.filter(edge => connected.includes(edge.source) && connected.includes(edge.target));
       if (!edges.length) return '';
-      const rows = edges.map(edge => {
-        const source = getEntityByRef(edge.source);
-        const target = getEntityByRef(edge.target);
-        if (!source || !target) return '';
-        return `
-          <div class="relation-edge-row">
-            ${relationNodeHtml(source, edge.source === ref)}
-            <span class="relation-edge-label" title="${edge.description}">
-              <span class="relation-arrow">→</span>
-              <span>${edge.label}</span>
-            </span>
-            ${relationNodeHtml(target, edge.target === ref)}
-          </div>
-        `;
+      const nodes = [...new Set(edges.flatMap(edge => [edge.source, edge.target]))];
+      const rows = nodes.map((node, index) => {
+        const incoming = index === 0 ? undefined : edges.find(edge => edge.source === nodes[index - 1] && edge.target === node);
+        const arrow = incoming ? `<div class="relation-chain-label" title="${incoming.description}"><span>↓</span><span>${incoming.label}</span></div>` : '';
+        return arrow + relationNodeHtml(getEntityByRef(node), node === ref);
       }).join('');
       return `
         <div class="relation-section">
           <div class="relation-section-title">关联</div>
           <div class="relation-map">${rows}</div>
-          <p class="relation-note">${edges.map(edge => `${edge.label}：${edge.description}`).join(' ')}</p>
-        </div>
-      `;
-    }
-
-    function executionDetailHtml() {
-      const s = state.simulatedState;
-      const labels = { waiting: '等待审批', running: '执行中', result: '已有成果', stopped: '已终止' };
-      const progress = {
-        waiting: '等待你确认后开始整理。',
-        running: '正在核对 18 项候选，并合并重复待办。',
-        result: '已整理出 15 项有效待办，清单保存在本任务。',
-        stopped: '你已拒绝本次整理，任务已停止，未读取项目文件。'
-      }[s];
-      const checkpoint = (s === 'running' || s === 'result')
-        ? '<br>阶段进展已保存'
-        : '';
-      return `
-        <div class="detail-section">
-          <div class="detail-item-title">实时 · 当前任务</div>
-          <h2 style="margin:0 0 4px; font-size:16px;">周报待办事项整理</h2>
-          <p class="detail-prose">读取当前项目里的待办标记，整理成一份清晰的本周待办清单，结果保存在本任务中。</p>
-        </div>
-        <div class="detail-section">
-          <div class="detail-item-title">当前进展</div>
-          <div class="detail-record-box">
-            状态：${labels[s]}<br>
-            进展：${progress}${checkpoint}
-          </div>
         </div>
       `;
     }
@@ -2356,28 +2346,29 @@
         return '<div class="detail-section"><p class="detail-prose">从实时或历史列表选择一条记录。</p></div>';
       }
       const ref = entityRef(selected.boardKey, selected.period, selected.id);
-      if (selected.boardKey === 'execution' && selected.period === 'live' && selected.id === 'task-weekly') {
-        return executionDetailHtml() + relationHtml(ref);
-      }
       return relationHtml(ref);
     }
 
     function renderDetailPane() {
       const selected = getSelectedEntity();
-      el.detailPaneTitle.textContent = selected ? `${BOARDS[selected.boardKey].name} · 细节与关联` : '细节与关联';
+      el.detailPaneTitle.textContent = selected ? `${BOARDS[selected.boardKey].name} · 关联` : '关联';
       el.detailPaneBody.innerHTML = selectedDetailHtml();
       if (state.mobileSheetOpen && state.mobileSheetTab === 'detail') {
         el.mobileSheetContent.innerHTML = selectedDetailHtml();
       }
     }
 
-    function mobileNavHtml() {
-      const items = BOARD_ORDER.map(key => {
+    function boardNavCardsHtml() {
+      return BOARD_ORDER.map(key => {
         const board = BOARDS[key];
+        const live = { ...board.live, boardKey: key };
         const href = boardRoute(key);
-        return `<a class="board-nav-item${state.boardKey === key ? ' active' : ''}" href="${href}" onclick="handleNavClick(event, '${href}')"><span class="board-nav-dot"></span><span>${board.name}</span></a>`;
+        return `<a class="board-nav-item${state.boardKey === key ? ' active' : ''}" data-board="${key}"${state.boardKey === key ? ' aria-current="page"' : ''} href="${href}" onclick="handleNavClick(event, '${href}')"><span class="board-nav-title">${board.name}</span><span class="board-nav-live"><span class="board-nav-task">${live.title}</span><span class="board-nav-status">${rowStatus(live)}</span></span></a>`;
       }).join('');
-      return `<div class="sheet-section-title">五个工作板块</div><div style="display:flex;flex-direction:column;gap:4px;">${items}</div>`;
+    }
+
+    function mobileNavHtml() {
+      return `<div class="sheet-section-title">五个工作板块</div><div style="display:flex;flex-direction:column;gap:8px;">${boardNavCardsHtml()}</div>`;
     }
 
     function switchMobileSheetTab(tab) {
