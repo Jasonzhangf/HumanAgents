@@ -7,7 +7,8 @@
 ## 已实现静态行为
 
 - 左侧只保留五个同级板块：交互 agent、编排 agent、巡检 agent、执行 agent、记忆 agent。当前板块高亮，旧桌面和手机项目树已物理移除。
-- 五个入口改为紧凑卡片，展示各自当前任务名与现有状态。桌面和手机复用同一渲染与状态来源，整卡进入板块，不嵌套任务链接；历史不进入卡片。执行 agent 卡片随现有工具条状态同步，已有成果不显示为执行中。
+- 五个入口改为紧凑卡片，展示各自当前任务名与现有状态。桌面和手机复用同一渲染与状态来源；板块标题进入 dashboard，任务行进入对应 session，各链接同级、不嵌套。历史不进入卡片。执行 agent 原周报任务随现有工具条状态同步，已有成果不显示为执行中。
+- 卡片支持多条 Live 任务，执行 agent 下放置三条独立任务，左侧与中心列表共用同一集合。板块标题和各任务为同级链接，分别进入 dashboard 与对应 session；当前板块和当前任务分别高亮。新增任务不接入无依据的关联链，状态不受原周报任务的工具条控制。
 - 各板块 dashboard 显示实时与历史列表。进入 session 后不再堆放完整列表；项目、任务和实例信息位于所属板块及 session 中。
 - 板块 dashboard 与选中 session 按路由分层。选中后，中间显示对应 agent 的需求、回复、编排或执行记录；巡检与记忆没有强加人工输入框。右侧显示当前 focus 所在的完整关联链，节点只出现一次并标明当前焦点，点击节点同步切换中间 session。当前链与历史链不混合，也不为巡检和记忆编造关联。
 - 沿用 hash、pushState 和 popstate。路由同时携带板块、实时或历史、实体标识；刷新与深链恢复同一选择。
@@ -23,6 +24,8 @@
 前次五板块基线记录为 `navigation-semantics-20261019/root-static-board-acceptance.md`，截图为 `five-agent-desktop.png` 与 `five-agent-mobile.png`。本轮卡片、session 与整链的实际浏览器证据为同目录 `root-focus-chain-acceptance.md`，最终桌面截图为 `focus-chain-desktop.png`。
 
 本轮已核对卡片状态同步、session 不堆 dashboard、实时整链去重与跨 focus 跳转、历史链独立、巡检无输入，以及真实 390 宽度下的手机卡片、单抽屉和历史 focus 切换，无横向溢出。执行 focus 右侧只保留链路、巡检不自动打开空面板，两项也经刷新确认。仅顶部设计工具条标明示例，不在产品主区重复说明。
+
+多 Live 修订已另经浏览器确认：桌面三项各自进入 session，板块 dashboard 与卡片展示同一集合，原周报状态切换不改变新增任务状态；手机从导航抽屉点任务后先关闭抽屉，再显示 session，焦点返回入口，390 宽度无横向溢出。从关联抽屉点击链路则保留关联并切换 focus。记录为同目录 `root-multi-live-acceptance.md`，截图为 `multi-live-desktop.png` 与 `multi-live-mobile.png`。
 
 ## 未验证
 

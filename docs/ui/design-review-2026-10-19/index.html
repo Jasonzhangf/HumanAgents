@@ -466,10 +466,13 @@
       color: var(--color-primary);
       font-weight: 600;
     }
-    .board-nav-title { font-weight: 600; }
+    .board-nav-title { display: block; color: inherit; text-decoration: none; font-weight: 600; }
     .board-nav-live { display: flex; align-items: flex-start; gap: 8px; color: var(--color-ink-soft); font-size: 12px; font-weight: 400; line-height: 1.5; }
     .board-nav-task { flex: 1; min-width: 0; overflow-wrap: anywhere; }
     .board-nav-status { flex-shrink: 0; font-size: 11px; }
+    .board-nav-task-link { text-decoration: none; padding: 4px 5px; border: 1px solid transparent; border-radius: 4px; }
+    .board-nav-task-link:hover { background: var(--color-surface-hover); }
+    .board-nav-task-link.focused { color: var(--color-primary); border-color: var(--color-primary-border); background: var(--color-surface); font-weight: 600; }
     .board-nav-note {
       margin: 0;
       padding: 10px 14px 14px;
@@ -1869,11 +1872,21 @@
         key: 'execution',
         name: '执行 agent',
         intro: '管理执行记录与需求输入，查看当前和历史整理记录。',
-        live: {
+        live: [{
           id: 'task-weekly', period: 'live', title: '周报待办事项整理', meta: '今天',
           summary: '读取项目待办，整理本周待办清单。',
           facts: []
-        },
+        }, {
+          id: 'task-interface-review', period: 'live', title: '接口变更核对', meta: '今天', status: '核对中',
+          summary: '核对接口定义中的变更，保留差异记录。',
+          facts: ['所属项目：智能文档编排', '检查内容：接口定义变更'],
+          session: [{ speaker: '执行目标', text: '核对项目接口定义中的变更。' }, { speaker: 'agent', text: '正在核对接口变更，记录需要确认的差异。' }]
+        }, {
+          id: 'task-document-index', period: 'live', title: '文档索引整理', meta: '今天', status: '待开始',
+          summary: '整理项目文档的索引条目。',
+          facts: ['所属项目：智能文档编排', '整理内容：文档索引'],
+          session: [{ speaker: '执行目标', text: '整理项目文档的索引条目。' }, { speaker: 'agent', text: '已保留整理目标，工作尚未开始。' }]
+        }],
         history: {
           id: 'task-previous', period: 'history', title: '上次整理记录', meta: '昨天 15:10',
           summary: '上一次周报待办整理记录。',
@@ -2032,10 +2045,14 @@
       return `${boardKey}/${period}/${entityId}`;
     }
 
+    function liveEntities(board) {
+      return Array.isArray(board.live) ? board.live : [board.live];
+    }
+
     function getEntity(boardKey, period, entityId) {
       const board = BOARDS[boardKey];
       if (!board || !entityId) return null;
-      const entity = board[period];
+      const entity = period === 'live' ? liveEntities(board).find(item => item.id === entityId) : board.history;
       return entity && entity.id === entityId ? { ...entity, boardKey, period } : null;
     }
 
@@ -2117,9 +2134,11 @@
 
     function handleEntityClick(e, hash) {
       e.preventDefault();
-      state.returnFocusEl = e.currentTarget || document.activeElement;
+      const fromNavigationSheet = state.mobileSheetOpen && state.mobileSheetTab === 'nav';
+      if (!state.mobileSheetOpen) state.returnFocusEl = e.currentTarget || document.activeElement;
+      if (fromNavigationSheet) closeMobileSheet();
       navigateTo(hash, true);
-      if (state.mobileSheetOpen) switchMobileSheetTab('detail');
+      if (!fromNavigationSheet && state.mobileSheetOpen) switchMobileSheetTab('detail');
     }
 
     function handleHierarchyClick(e, hash) {
@@ -2160,7 +2179,7 @@
     function rowStatus(entity) {
       if (entity.period === 'history') return '历史记录';
       if (entity.boardKey === 'execution' && entity.period === 'live' && entity.id === 'task-weekly') return stateLabel();
-      return '当前';
+      return entity.status || '当前';
     }
 
     function rowHtml(entity) {
@@ -2187,7 +2206,7 @@
       el.boardIntro.hidden = !!selected;
       document.getElementById('boardDashboard').hidden = !!selected;
       el.boardCreateTaskBtn.hidden = state.boardKey !== 'execution' || !!selected;
-      el.boardLiveRows.innerHTML = rowHtml({ ...board.live, boardKey: state.boardKey });
+      el.boardLiveRows.innerHTML = liveEntities(board).map(entity => rowHtml({ ...entity, boardKey: state.boardKey })).join('');
       el.boardHistoryRows.innerHTML = rowHtml({ ...board.history, boardKey: state.boardKey });
 
       document.getElementById('boardNav').innerHTML = boardNavCardsHtml();
@@ -2361,9 +2380,14 @@
     function boardNavCardsHtml() {
       return BOARD_ORDER.map(key => {
         const board = BOARDS[key];
-        const live = { ...board.live, boardKey: key };
         const href = boardRoute(key);
-        return `<a class="board-nav-item${state.boardKey === key ? ' active' : ''}" data-board="${key}"${state.boardKey === key ? ' aria-current="page"' : ''} href="${href}" onclick="handleNavClick(event, '${href}')"><span class="board-nav-title">${board.name}</span><span class="board-nav-live"><span class="board-nav-task">${live.title}</span><span class="board-nav-status">${rowStatus(live)}</span></span></a>`;
+        const tasks = liveEntities(board).map(entity => {
+          const live = { ...entity, boardKey: key };
+          const focused = state.boardKey === key && state.period === 'live' && state.entityId === live.id;
+          const taskHref = entityRoute(key, 'live', live.id);
+          return `<a class="board-nav-live board-nav-task-link${focused ? ' focused' : ''}"${focused ? ' aria-current="page"' : ''} href="${taskHref}" onclick="handleEntityClick(event, '${taskHref}')"><span class="board-nav-task">${live.title}</span><span class="board-nav-status">${rowStatus(live)}</span></a>`;
+        }).join('');
+        return `<article class="board-nav-item${state.boardKey === key ? ' active' : ''}" data-board="${key}"><a class="board-nav-title" href="${href}" onclick="handleNavClick(event, '${href}')">${board.name}</a>${tasks}</article>`;
       }).join('');
     }
 
