@@ -11,7 +11,8 @@
  *      `/api/tasks`, `/api/tasks/:id/observation`) and serves the built UI over
  *      real HTTP. It proves:
  *        - read-only brain feedback is never written into an editable control;
- *        - one submit authorizes the task and lands directly on observation;
+ *        - one submit authorizes the task and stays on the entry index with the
+ *          committed task row (`#entry-live a.task-row-link[data-task-id]`);
  *        - the second confirmation panel and `#entry-confirm-button` are gone;
  *        - the clarification loop survives;
  *        - a failed submit keeps the input and shows a readable error;
@@ -158,6 +159,10 @@ function draftFor(interaction) {
     matchedTasks: [],
     decisionRefs: [],
   };
+}
+
+function semanticTitleFor(rawInput) {
+  return String(rawInput).replace(/^CLARIFY\s*/, '').trim();
 }
 
 function snapshotFor(interaction) {
@@ -318,6 +323,7 @@ async function handleScriptedApi(url, method, body) {
     scripted.tasks.push({
       taskId: { scope: 'task', value: taskId },
       title: interaction.draft.normalizedInput,
+      semanticTitle: semanticTitleFor(interaction.rawInput),
       currentState: '排队中',
       stateLabel: '排队中',
       state: 'waiting',
@@ -397,6 +403,29 @@ async function readEditableValues(page) {
   });
 }
 
+// Wait for the exact committed task row that the entry page renders in place
+// after confirmation, then read its real identity, href and progress. The
+// entry page stays on index.html; it never navigates to observation on submit.
+async function waitForSubmittedTaskRow(page, expectedTaskId, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const row = await page.evaluate((taskId) => {
+      const link = document.querySelector(`#entry-live a.task-row-link[data-task-id="${taskId}"]`);
+      if (!link) return null;
+      return {
+        taskId: link.dataset.taskId,
+        href: link.getAttribute('href'),
+        heading: (link.querySelector('h3')?.textContent || '').trim(),
+        progress: (link.querySelector('p')?.textContent || '').trim(),
+        stateChip: (link.querySelector('.state-chip')?.textContent || '').trim(),
+      };
+    }, expectedTaskId).catch(() => null);
+    if (row) return row;
+    await sleep(100);
+  }
+  throw new Error(`submitted task row ${expectedTaskId} did not render in #entry-live within ${timeoutMs} ms`);
+}
+
 // Launch one fresh browser+context for a deterministic case. A constrained
 // sandbox restarts Chromium after a context close under `--single-process`, so
 // each case owns and closes its own browser.
@@ -458,7 +487,7 @@ async function sectionA(artifactDir) {
     await page.screenshot({ path: join(artifactDir, 'defect-a-feedback-desktop.png') });
   }, { viewport: runs[0].viewport });
 
-  // Defect B: one submit authorizes the task and lands on observation.
+  // Defect B: one submit authorizes the task and renders its committed row in place.
   for (const run of runs) {
     await withScriptedPage(async (page) => {
       const pageErrors = [];
@@ -467,38 +496,55 @@ async function sectionA(artifactDir) {
       await page.waitForSelector('#entry-form textarea[name="rawInput"]');
       const confirmButtonCount = await page.locator('#entry-confirm-button').count();
       record(`${run.label} no second confirmation button exists`, confirmButtonCount === 0, confirmButtonCount);
-      await page.fill('#entry-form textarea[name="rawInput"]', '读取 README 并汇报');
+      const rawInput = '读取 README 并汇报';
+      const receiveBefore = scripted.receiveCount;
+      const confirmBefore = scripted.confirmationCount;
+      const expectedTaskId = `ui-task-${scripted.taskSeq + 1}`;
+      await page.fill('#entry-form textarea[name="rawInput"]', rawInput);
       await page.click('#entry-form button[type="submit"]');
-      await page.waitForURL(/observation\.html\?task=/, { timeout: 20_000 });
-      const taskId = new URL(page.url()).searchParams.get('task');
-      await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 10_000 });
-      const pipelineChip = (await page.textContent('.flow-node[data-node-id="pipeline.execute"] .state-chip'))?.trim();
-      const nodeCount = await page.locator('.flow-node').count();
-      record(`${run.label} one submit lands directly on the task observation`, Boolean(taskId), page.url());
-      record(`${run.label} observation renders real pipeline nodes`, nodeCount > 0 && pipelineChip === '已完成', { nodeCount, pipelineChip });
+      const row = await waitForSubmittedTaskRow(page, expectedTaskId);
+      const href = new URL(row.href, page.url());
+      record(`${run.label} one submit stays on the entry index`, new URL(page.url()).pathname === '/index.html', page.url());
+      record(`${run.label} one submit renders the exact committed task id`, row.taskId === expectedTaskId, { taskId: row.taskId, expectedTaskId });
+      record(`${run.label} one submit task row links to the task dashboard`, href.pathname.endsWith('/task-dashboard.html') && href.searchParams.get('task') === expectedTaskId, row.href);
+      record(`${run.label} one submit task row shows in-place waiting progress`, row.progress === '排队中' && row.stateChip === '排队中', { progress: row.progress, stateChip: row.stateChip });
+      record(`${run.label} one submit task row uses the controlled semanticTitle`, row.heading === semanticTitleFor(rawInput), row.heading);
+      record(`${run.label} one submit issues exactly one receive`, scripted.receiveCount - receiveBefore === 1, scripted.receiveCount - receiveBefore);
+      record(`${run.label} one submit issues exactly one confirmation`, scripted.confirmationCount - confirmBefore === 1, scripted.confirmationCount - confirmBefore);
       record(`${run.label} entry page has no page errors`, pageErrors.length === 0, pageErrors);
-      await page.screenshot({ path: join(artifactDir, `defect-b-observation-${run.label}.png`) });
+      await page.screenshot({ path: join(artifactDir, `defect-b-task-row-${run.label}.png`) });
     }, { viewport: run.viewport, reducedMotion: run.reducedMotion });
   }
 
   // Clarification loop survives.
   await withScriptedPage(async (page) => {
+    const rawInput = 'CLARIFY 处理这份需求';
+    const expectedTaskId = `ui-task-${scripted.taskSeq + 1}`;
     await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
-    await page.fill('#entry-form textarea[name="rawInput"]', 'CLARIFY 处理这份需求');
+    await page.fill('#entry-form textarea[name="rawInput"]', rawInput);
     await page.click('#entry-form button[type="submit"]');
     await page.waitForSelector('#entry-draft input[name="answer"]', { timeout: 10_000 });
     const question = (await page.textContent('#entry-draft')) ?? '';
     await page.fill('#entry-draft input[name="answer"]', '验收范围就是 README 的前 10 行');
     await page.click('#entry-draft button[type="submit"]');
-    await page.waitForURL(/observation\.html\?task=/, { timeout: 20_000 });
+    const row = await waitForSubmittedTaskRow(page, expectedTaskId);
+    const href = new URL(row.href, page.url());
     record('clarification question is rendered before authorization', question.includes('请补充验收范围'), question.slice(0, 200));
-    record('clarification answer continues the same submission', /observation\.html\?task=/.test(page.url()), page.url());
+    record(
+      'clarification answer renders the committed task row on the entry index',
+      row.taskId === expectedTaskId
+      && new URL(page.url()).pathname === '/index.html'
+      && href.pathname.endsWith('/task-dashboard.html')
+      && href.searchParams.get('task') === expectedTaskId
+      && row.heading === semanticTitleFor(rawInput),
+      { row, url: page.url() },
+    );
   }, { viewport: runs[0].viewport });
 
   // A failed submission keeps the goal text, reports the real reason in the
   // shell status region and leaves a usable retry. The retry must reuse the
   // same interaction: one more confirmation only, no second receive and no
-  // resent clarification answer, then the same observation landing.
+  // resent clarification answer, then the same committed task row on index.
   //
   // The reason is read from the technical-detail trigger, because that is the
   // control that publishes the runtime's own `message`; the visible summary is
@@ -570,8 +616,10 @@ async function sectionA(artifactDir) {
           clarify: scripted.clarificationCount,
         };
         scripted.confirmFails = false;
+        const expectedTaskId = `ui-task-${scripted.taskSeq + 1}`;
         await page.click('#entry-form button[type="submit"]');
-        await page.waitForURL(/observation\.html\?task=/, { timeout: 20_000 });
+        const row = await waitForSubmittedTaskRow(page, expectedTaskId);
+        const href = new URL(row.href, page.url());
         record(
           `${variant.label} retry reuses the same interaction and does not resend the input`,
           scripted.receiveCount - beforeRetry.receive === 0,
@@ -588,9 +636,13 @@ async function sectionA(artifactDir) {
           scripted.confirmationCount - beforeRetry.confirm,
         );
         record(
-          `${variant.label} retry lands on the task observation`,
-          /observation\.html\?task=/.test(page.url()),
-          page.url(),
+          `${variant.label} retry renders the committed task row on the entry index`,
+          row.taskId === expectedTaskId
+          && new URL(page.url()).pathname === '/index.html'
+          && href.pathname.endsWith('/task-dashboard.html')
+          && href.searchParams.get('task') === expectedTaskId
+          && row.heading === semanticTitleFor(variant.rawInput),
+          { row, url: page.url() },
         );
         await page.screenshot({ path: join(artifactDir, `failure-retains-input-${variant.label}.png`) });
       } finally {
@@ -604,6 +656,7 @@ async function sectionA(artifactDir) {
     const receiveBefore = scripted.receiveCount;
     const confirmBefore = scripted.confirmationCount;
     const tasksBefore = scripted.tasks.length;
+    const expectedTaskId = `ui-task-${scripted.taskSeq + 1}`;
     await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
     await page.fill('#entry-form textarea[name="rawInput"]', '只允许创建一次的任务');
     await page.evaluate(() => {
@@ -611,7 +664,8 @@ async function sectionA(artifactDir) {
       button.click();
       button.click();
     });
-    await page.waitForURL(/observation\.html\?task=/, { timeout: 20_000 });
+    const row = await waitForSubmittedTaskRow(page, expectedTaskId);
+    const href = new URL(row.href, page.url());
     await sleep(1500);
     const receiveDelta = scripted.receiveCount - receiveBefore;
     const confirmDelta = scripted.confirmationCount - confirmBefore;
@@ -619,6 +673,15 @@ async function sectionA(artifactDir) {
     record('rapid double click issues exactly one explicit input', receiveDelta === 1, receiveDelta);
     record('rapid double click issues exactly one confirmation', confirmDelta === 1, confirmDelta);
     record('rapid double click creates exactly one task', taskDelta === 1, taskDelta);
+    record(
+      'rapid double click renders the single committed task row on the entry index',
+      row.taskId === expectedTaskId
+      && new URL(page.url()).pathname === '/index.html'
+      && href.pathname.endsWith('/task-dashboard.html')
+      && href.searchParams.get('task') === expectedTaskId
+      && row.heading === semanticTitleFor('只允许创建一次的任务'),
+      { row, url: page.url() },
+    );
   }, { viewport: runs[0].viewport });
 }
 
