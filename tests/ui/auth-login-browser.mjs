@@ -209,8 +209,8 @@ async function submitCode(page, code) {
   await page.click('[data-pair-submit]')
 }
 
-async function openTechnicalDetail(page) {
-  const trigger = page.locator('[data-auth-detail-host] [data-technical-detail-trigger="true"]')
+async function openTechnicalDetail(page, triggerSelector = '[data-auth-detail-host] [data-technical-detail-trigger="true"]') {
+  const trigger = page.locator(triggerSelector)
   await trigger.waitFor({ state: 'visible', timeout: 30_000 })
   await trigger.focus()
   await page.keyboard.press('Enter')
@@ -221,7 +221,15 @@ async function openTechnicalDetail(page) {
   )
   return page.evaluate((selector) => {
     const dialog = document.querySelector(selector)
-    const attr = (name) => dialog?.querySelector(`[data-auth-error-${name}]`)?.getAttribute(`data-auth-error-${name}`) ?? null
+    // The detail layer carries the runtime's exact typed fields. Login-owned
+    // entries keep their `data-auth-error-*` hooks; shell-owned entries use the
+    // shared `data-detail-*` hooks. Read whichever the surface actually ships.
+    const attr = (name) => {
+      const node = dialog?.querySelector(`[data-auth-error-${name}], [data-detail-${name}]`)
+      return node?.getAttribute(`data-auth-error-${name}`)
+        ?? node?.getAttribute(`data-detail-${name}`)
+        ?? null
+    }
     return {
       eyebrow: dialog?.querySelector('.eyebrow')?.textContent ?? '',
       title: dialog?.querySelector('#technical-detail-title')?.textContent ?? '',
@@ -237,13 +245,13 @@ async function openTechnicalDetail(page) {
   }, TECHNICAL_DETAIL_SELECTOR)
 }
 
-async function closeTechnicalDetail(page) {
+async function closeTechnicalDetail(page, focusHost = '[data-auth-detail-host]') {
   await page.keyboard.press('Escape')
   await page.waitForFunction(
-    (selector) => !document.querySelector(selector)
+    ([selector, host]) => !document.querySelector(selector)
       && document.activeElement?.getAttribute?.('data-technical-detail-trigger') === 'true'
-      && document.activeElement?.closest?.('[data-auth-detail-host]'),
-    TECHNICAL_DETAIL_SELECTOR,
+      && document.activeElement?.closest?.(host),
+    [TECHNICAL_DETAIL_SELECTOR, focusHost],
     { timeout: 30_000 },
   )
 }
@@ -439,7 +447,12 @@ try {
   const linked = await readBanner(page)
   observe('shell pairing link', linked)
   const linkUrl = new URL(linked.pairLinkHref, `${binding.serveBaseUrl}/dashboard.html`)
-  record('the auth-gated shell links to a real login page and preserves the runtime nextAction',
+  // The banner's primary layer is human copy. The runtime's exact
+  // code/owner/message/nextAction are preserved in the shared technical detail,
+  // so read them there, close, then follow the real pairing link.
+  const shellDetail = await openTechnicalDetail(page, '.status-banner [data-technical-detail-trigger="true"]')
+  await closeTechnicalDetail(page, '.status-banner')
+  record('the auth-gated shell links to a real login page and keeps the exact runtime rejection in shared detail',
     linked.pairLinkPresent
       && linkUrl.pathname === '/login.html'
       && linkUrl.searchParams.get('next') === '/dashboard.html'
@@ -447,8 +460,12 @@ try {
       && linkUrl.searchParams.get('authOwner') === ACCESS_CONTROL_OWNER
       && linkUrl.searchParams.get('authMessage') === 'browser session is required'
       && linkUrl.searchParams.get('authNext') === SESSION_MISSING_NEXT
-      && linked.bannerText.includes(SESSION_MISSING_NEXT),
-    { linked, resolved: linkUrl.href })
+      && shellDetail.code === 'auth.session.missing'
+      && shellDetail.owner === ACCESS_CONTROL_OWNER
+      && shellDetail.message === 'browser session is required'
+      && shellDetail.next === SESSION_MISSING_NEXT
+      && shellDetail.openLayerCount === 1,
+    { linked, resolved: linkUrl.href, detail: shellDetail })
   await capture(page, 'shell-auth-missing')
 
   // --- 3. every hostile path variant stays on the same-origin fallback -----
@@ -464,94 +481,34 @@ try {
     evaluatedHostile.every((entry) => entry.resolved === '/dashboard.html'),
     evaluatedHostile)
 
-  // --- 4. an expired runtime session still links from tasks.html -----------
+  // --- 4. an expired system read still links from tasks.html --------------
   const expiredTasksContext = await browser.newContext()
   const expiredTasksPage = await expiredTasksContext.newPage()
-  await expiredTasksPage.route('**/api/tasks', async (route) => route.fulfill({
-    status: 401,
-    contentType: 'application/json',
-    body: JSON.stringify({ code: 'auth.session.expired', ownerId: ACCESS_CONTROL_OWNER, message: 'browser session has expired', nextAction: 'open the login page and pair this browser' }),
-  }))
+  // tasks.html runs the formal scoped system read (api.systemDashboard ->
+  // GET /api/dashboard?scope=system), not the retired unscoped task-list shape.
+  await expiredTasksPage.route(
+    (url) => url.pathname === '/api/dashboard' && url.searchParams.get('scope') === 'system',
+    async (route) => route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ code: 'auth.session.expired', ownerId: ACCESS_CONTROL_OWNER, message: 'browser session has expired', nextAction: 'open the login page and pair this browser again' }),
+    }),
+  )
   await expiredTasksPage.goto(`${binding.serveBaseUrl}/tasks.html`, { waitUntil: 'domcontentloaded' })
-  await expiredTasksPage.waitForSelector('[data-auth-pair-link]', { timeout: 30_000 })
+  await expiredTasksPage.waitForSelector('a[data-auth-pair-link="true"][href*="authCode=auth.session.expired"]', { timeout: 30_000 })
   const expiredTasksLink = await expiredTasksPage.evaluate(() => document.querySelector('[data-auth-pair-link]')?.getAttribute('href') ?? '')
   observe('tasks expired session pairing link', { expiredTasksLink })
-  record('tasks.html renders a real pairing link for an auth.session.expired mutation',
+  record('tasks.html renders a real pairing link for an auth.session.expired system read',
     new URL(expiredTasksLink, `${binding.serveBaseUrl}/tasks.html`).searchParams.get('authCode') === 'auth.session.expired'
       && new URL(expiredTasksLink, `${binding.serveBaseUrl}/tasks.html`).pathname === '/login.html',
     { expiredTasksLink })
   await expiredTasksContext.close()
 
-  // --- 4b. an expired session on dashboard task deletion offers pairing -----
-  // The dashboard delete path is reachable now, so its rejection is a real
-  // surface: a session that expires after the page loaded must still offer the
-  // login page instead of a dead-end message.
-  const deleteContext = await browser.newContext()
-  const deletePage = await deleteContext.newPage()
-  const deleteRequests = []
-  deletePage.on('dialog', (dialog) => { void dialog.accept() })
-  await deletePage.route('**/api/**', async (route) => {
-    const request = route.request()
-    const path = new URL(request.url()).pathname
-    const body = (payload, status = 200) => route.fulfill({
-      status,
-      contentType: 'application/json',
-      body: JSON.stringify(payload),
-    })
-    if (path === '/api/auth/session') return body({ paired: true, sessionId: 'session-delete-proof' })
-    if (path === '/api/runtime/status') return body({ state: 'ready', mode: 'fake', providerState: 'ready', connected: true })
-    if (path === '/api/dashboard') {
-      return body({ hasRunning: true, taskCount: 1, waitingDecisionCount: 0, recentFailures: [] })
-    }
-    if (path === '/api/tasks') {
-      return body({
-        draft: [],
-        waiting: [],
-        running: [{
-          taskId: { value: 'task-delete-auth-proof' },
-          title: '删除授权证明任务',
-          state: 'running',
-          stateLabel: '运行中',
-          currentState: 'running',
-          nextStep: '',
-          updatedAt: new Date().toISOString(),
-        }],
-        completed: [],
-        stopped: [],
-      })
-    }
-    if (path === '/api/runtime/scheduler') return body({ plans: [], issue: null })
-    if (path === '/api/tasks/task-delete-auth-proof' && request.method() === 'DELETE') {
-      deleteRequests.push(request.method())
-      return body({
-        code: 'auth.session.expired',
-        ownerId: ACCESS_CONTROL_OWNER,
-        message: 'browser session has expired',
-        nextAction: 'open the login page and pair this browser',
-      }, 401)
-    }
-    return body({ code: 'not-found', message: `unexpected ${request.method()} ${path}`, ownerId: 'test', nextAction: 'none' }, 404)
-  })
-  await deletePage.goto(`${binding.serveBaseUrl}/dashboard.html`, { waitUntil: 'domcontentloaded' })
-  await deletePage.waitForSelector('.task-item-actions button.button--danger', { timeout: 30_000 })
-  await deletePage.click('.task-item-actions button.button--danger')
-  await deletePage.waitForSelector('.status-banner [data-auth-pair-link]', { timeout: 30_000 })
-  const deleteRejection = await deletePage.evaluate(() => ({
-    link: document.querySelector('.status-banner [data-auth-pair-link]')?.getAttribute('href') ?? '',
-    banner: document.querySelector('.status-banner')?.textContent ?? '',
-  }))
-  observe('dashboard delete auth rejection', { deleteRequests, ...deleteRejection })
-  record('a dashboard delete really reached the runtime before the rejection',
-    deleteRequests.length === 1,
-    deleteRequests)
-  record('an expired session on dashboard task deletion links to the real login page',
-    new URL(deleteRejection.link, `${binding.serveBaseUrl}/dashboard.html`).pathname === '/login.html'
-      && new URL(deleteRejection.link, `${binding.serveBaseUrl}/dashboard.html`).searchParams.get('authCode') === 'auth.session.expired'
-      && deleteRejection.banner.includes('browser session has expired'),
-    deleteRejection)
-  await deleteContext.close()
+  // The former dashboard-delete mutation scenario is removed: current main
+  // dashboard.js is a read-only system projection with no live delete control,
+  // so this scenario tested a candidate UI that must not be resurrected.
 
-  // --- 4c. the legacy interaction form reaches the same pairing surface ----
+  // --- 4b. the legacy interaction form reaches the same pairing surface ----
   // The task form on interaction.html performs create/update/delete, and all
   // three catches now route through the shared pairing entry. All three are
   // driven here, because a proof that clicks only create would leave the other
