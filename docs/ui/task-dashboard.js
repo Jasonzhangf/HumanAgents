@@ -2887,8 +2887,9 @@ function handlePopState() {
 }
 
 let pageDisposed = false
-function disposePage() {
+function disposePage(event) {
   if (pageDisposed) return
+  if (event?.persisted) return
   pageDisposed = true
   window.removeEventListener('popstate', handlePopState)
   window.removeEventListener('pagehide', disposePage)
