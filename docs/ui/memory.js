@@ -32,7 +32,6 @@ reasonSection.append(
   element('p', '接受、拒绝或延期前，请写明理由。理由会随这次决定提交。', 'muted'),
   reasonField,
 )
-support.append(reasonSection)
 
 function memoryTechnicalDetail(label, buildDetail) {
   const button = element('button', label, 'button button--quiet')
@@ -60,6 +59,10 @@ function showReviewError(error) {
 
 function render(view) {
   for (const section of primary.querySelectorAll('[data-memory-section]')) section.remove()
+  reasonSection.remove()
+  if (view.skillCandidates.some((candidate) => candidate.state === 'candidate')) {
+    support.append(reasonSection)
+  }
 
   const analysis = element('section', undefined, 'section')
   analysis.dataset.memorySection = 'analysis'
