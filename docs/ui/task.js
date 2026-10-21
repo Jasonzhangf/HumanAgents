@@ -5,7 +5,7 @@ import {
   element,
   formatTime,
   loadRuntimeStatus,
-  makePageShell,
+  mountPageTemplate,
   observationHref,
   queryParam,
   renderPageError,
@@ -29,13 +29,19 @@ const requestedInteraction = queryParam('interaction')
 const taskReadScope = taskReadScopeFromQuery()
 const explicitScope = taskReadScope.kind === 'task' ? taskReadScope : null
 const isNew = (requestedTask === 'new' || !requestedTask) && !requestedInteraction
-const { main, status, interactionCardHosts } = makePageShell(
-  'Task List',
-  'Task',
-  requestedInteraction ? '确认任务' : '任务详情',
-  requestedInteraction ? '显式大脑会先整理，再由你确认是否提交后台。' : '查看任务状态和处理结果。',
-)
-const interactionCardHost = interactionCardHosts[0]
+const pageRoot = document.querySelector('#page-root')
+const interactionCardHost = document.querySelector('[data-interaction-work-card-host][data-entry="task"]')
+if (!(pageRoot instanceof HTMLElement)) throw new Error('task page requires #page-root')
+if (!(interactionCardHost instanceof HTMLElement)) throw new Error('task page requires an interaction work card host')
+const template = mountPageTemplate(pageRoot, {
+  layout: 'work',
+  active: 'Task List',
+  eyebrow: 'Task',
+  title: requestedInteraction ? '确认任务' : '任务详情',
+  lede: requestedInteraction ? '显式大脑会先整理，再由你确认是否提交后台。' : '查看任务状态和处理结果。',
+})
+const { composer, primary, status } = template.hosts
+let pageLeaving = false
 // The shared work card mounts on the first real projection: a returned
 // interaction event or snapshot, or an existing Task's own dashboard/history
 // read. Until one of those facts exists the host stays genuinely empty, so an
@@ -48,7 +54,7 @@ function mountTaskCard() {
   interactionCard = mountInteractionWorkCard(interactionCardHost, {
     onAction: async (action) => {
       if (action.id === 'confirm-requirement') {
-        const confirmationButton = document.querySelector('#task-confirm-button')
+        const confirmationButton = composer.querySelector('#task-confirm-button')
         if (confirmationButton) void confirmationButton.click()
       }
     },
@@ -62,7 +68,7 @@ function mountTaskCard() {
 // the preserved host after the page rebuilds that `renderInteraction` /
 // `renderTask` perform.
 function presentInteractionCard(projection) {
-  if (!interactionCardHost || !projection) return
+  if (pageLeaving || !interactionCardHost || !projection) return
   attachInteractionCardHost()
   if (!interactionCard) mountTaskCard()
   interactionCard.update(projection)
@@ -108,13 +114,15 @@ function stopDashboardPoll() {
 
 function scheduleDashboardPoll(delayMs = DASHBOARD_POLL_MS) {
   stopDashboardPoll()
+  if (pageLeaving) return
   dashboardPollTimer = setTimeout(() => {
     dashboardPollTimer = 0
-    void refreshTaskDashboard().catch(() => {})
+    if (!pageLeaving) void refreshTaskDashboard().catch(() => {})
   }, delayMs)
 }
 
 function setTransportState(next) {
+  if (pageLeaving) return
   if (transportState === next) return
   transportState = next
   // A transport change is itself a fact the card must show, and no dashboard
@@ -124,27 +132,30 @@ function setTransportState(next) {
 }
 
 function closeTaskStream() {
-  if (!taskStream) return
-  closingStream = true
-  taskStream.close()
+  const stream = taskStream
   taskStream = undefined
-  closingStream = false
   subscribedOperationId = undefined
+  if (!stream) return
+  closingStream = true
+  stream.close()
+  closingStream = false
 }
 
 function subscribeTaskStream(operationId) {
-  if (subscribedOperationId === operationId) return
+  if (pageLeaving || subscribedOperationId === operationId) return
   closeTaskStream()
   subscribedOperationId = operationId
   terminalClosed = false
   taskStream = new EventSource(api.eventsUrl(operationId))
   taskStream.onopen = () => {
+    if (pageLeaving) return
     // A reconnected stream is a real transport fact; re-observe at once so the
     // card reports the recovery without waiting a poll tick.
     setTransportState('connected')
     void refreshTaskDashboard().catch(() => {})
   }
   taskStream.onerror = () => {
+    if (pageLeaving) return
     if (closingStream) return
     if (terminalClosed) return
     setTransportState('lost')
@@ -161,6 +172,7 @@ function subscribeTaskStream(operationId) {
     'execution.terminal',
   ]) {
     taskStream.addEventListener(kind, (message) => {
+      if (pageLeaving) return
       if (terminalClosed) return
       let payload
       try {
@@ -186,6 +198,16 @@ function subscribeTaskStream(operationId) {
   }
 }
 
+function disposeTaskPage() {
+  if (pageLeaving) return
+  pageLeaving = true
+  stopDashboardPoll()
+  closeTaskStream()
+  interactionCard?.dispose()
+  template.dispose()
+}
+window.addEventListener('pagehide', disposeTaskPage, { once: true })
+
 function projectTaskLiveness(dashboard) {
   // The card is built from the interaction entries; the execution facts come
   // from the runtime dashboard read the page performed. Both are reported
@@ -209,6 +231,7 @@ function projectTaskLiveness(dashboard) {
 }
 
 function updateTaskExecution(dashboard) {
+  if (pageLeaving) return
   // Rebuild the card from the interaction entries plus the runtime's own
   // execution facts, keep the page-local transport fact on it, then re-apply
   // the loaded history page so the trace is not dropped by the observation.
@@ -246,6 +269,7 @@ function effectiveTransport(dashboard) {
 }
 
 async function refreshTaskDashboard() {
+  if (pageLeaving) return
   // Eligibility is the real host plus a real existing Task identity, not
   // whether the card already mounted: a valid Task with zero interaction
   // events must still issue this read and render the dashboard it returns.
@@ -254,6 +278,7 @@ async function refreshTaskDashboard() {
   try {
     dashboard = await api.taskDashboard(taskId)
   } catch {
+    if (pageLeaving) return
     // A failed read is the only transport fact left once the event stream has
     // stopped reporting. An established stream survives a silent network drop,
     // so its `onerror` may never fire; the read failing is what proves this page
@@ -263,6 +288,7 @@ async function refreshTaskDashboard() {
     scheduleDashboardPoll()
     return
   }
+  if (pageLeaving) return
   if (!dashboard) return
   if (TERMINAL_TASK_STATES.includes(dashboard.state)) {
     // Terminal is the last thing worth observing. Hold the card here; do not
@@ -302,6 +328,7 @@ async function refreshTaskDashboard() {
 // times are the values the provider binding reported; when the task has no
 // event yet the card keeps the explicit empty state.
 async function loadTaskHistory(query) {
+  if (pageLeaving) return
   // Same boundary as the dashboard read: the host and a real Task identity.
   if (!interactionCardHost || !taskId || taskId === 'new') return
   const effectiveQuery = query ?? { limit: 20, replay: true }
@@ -324,6 +351,7 @@ async function loadTaskHistory(query) {
       },
     }
   }
+  if (pageLeaving) return
   cardState.history = { query: effectiveQuery, result }
   // History can return before the base projection exists. The read is a real
   // runtime fact, so it is cached and applied onto the base when the actual
@@ -381,10 +409,10 @@ function updateCardFromSnapshot(snapshot) {
   updateCard(projectInteractionCardFromSnapshot(snapshot))
 }
 
-// `renderInteraction` / `renderTask` rebuild `main`, so the card host must be
+// `renderInteraction` / `renderTask` rebuild `primary`, so the card host must be
 // re-attached after every rebuild instead of being dropped.
 function attachInteractionCardHost() {
-  if (interactionCardHost) main.append(interactionCardHost)
+  if (!pageLeaving && interactionCardHost) primary.append(interactionCardHost)
 }
 
 function readable(value, placeholder = '暂无信息') {
@@ -399,7 +427,9 @@ function readable(value, placeholder = '暂无信息') {
 }
 
 async function renderInteraction(interactionId, currentTaskId) {
-  clearNode(main)
+  if (pageLeaving) return
+  clearNode(primary)
+  clearNode(composer)
   const panel = element('section', undefined, 'panel')
   panel.append(element('p', '显式大脑', 'eyebrow'), element('h2', '先确认这次要处理的事'))
   const feedback = element('p', '正在整理你的输入…', 'muted')
@@ -418,7 +448,7 @@ async function renderInteraction(interactionId, currentTaskId) {
   }))
   detailTrigger.hidden = true
   panel.append(feedback, detailTrigger, body, actions)
-  main.append(panel)
+  primary.append(panel)
   attachInteractionCardHost()
 
   // The runtime keeps the original failure in a bounded cause chain instead of
@@ -449,6 +479,7 @@ async function renderInteraction(interactionId, currentTaskId) {
 
   try {
     const snapshot = await advanceExplicitInteraction(api, { interactionId })
+    if (pageLeaving) return
     activeInteractionId = interactionId
     updateCardFromSnapshot(snapshot)
     body.append(
@@ -464,6 +495,7 @@ async function renderInteraction(interactionId, currentTaskId) {
       const submitAnswer = element('button', '回答并继续', 'button button--primary')
       submitAnswer.type = 'button'
       submitAnswer.addEventListener('click', async () => {
+        if (pageLeaving) return
         submitAnswer.disabled = true
         feedback.textContent = '正在继续整理…'
         try {
@@ -471,8 +503,10 @@ async function renderInteraction(interactionId, currentTaskId) {
             interactionId,
             clarificationAnswer: answer.value.trim(),
           })
+          if (pageLeaving) return
           window.location.reload()
         } catch (error) {
+          if (pageLeaving) return
           submitAnswer.disabled = false
           showError('这次补充未能处理完成。', error)
         }
@@ -493,12 +527,14 @@ async function renderInteraction(interactionId, currentTaskId) {
             confirmedAt: new Date().toISOString(),
             payloadRef: `asset://requirements/${interactionId}`,
           })
+          if (pageLeaving) return
           feedback.textContent = `已确认，需求 requirement:${snapshot.draft.draftId}:${snapshot.draft.inputRevision} 已进入 FIFO。可在任务列表查看 queued/admitted/executing 等状态。`
           const taskList = element('a', '打开任务列表', 'button button--primary')
           taskList.href = './tasks.html'
           actions.replaceChildren(taskList)
           appendCardEvent('decision', '任务已确认，等待队列消费', 'decision', { eventKey: 'explicit.confirmation-submitted', interactionId })
         } catch (error) {
+          if (pageLeaving) return
           if (button) button.disabled = false
           showError('本次确认提交未获成功回执。', error)
         }
@@ -512,21 +548,25 @@ async function renderInteraction(interactionId, currentTaskId) {
     } else {
       feedback.textContent = `当前状态：${snapshot.state}。${snapshot.nextAction}`
     }
+    if (actions.childElementCount > 0) composer.append(actions)
   } catch (error) {
+    if (pageLeaving) return
     showError('这次交互未能打开或整理完成。', error)
   }
 }
 
 function renderTask() {
-  clearNode(main)
-  const heading = element('section', undefined, 'page-heading')
+  if (pageLeaving) return
+  clearNode(primary)
+  clearNode(composer)
+  const heading = element('section', undefined, 'section')
   const copy = element('div')
-  copy.append(element('p', 'Task Detail', 'eyebrow'), element('h1', readable(detail.title)))
+  copy.append(element('p', 'Task Detail', 'eyebrow'), element('h2', readable(detail.title)))
   const chip = element('span', readable(detail.currentState), 'state-chip')
   chip.dataset.tone = stateTone(detail.state)
   copy.append(chip)
   heading.append(copy)
-  main.append(heading)
+  primary.append(heading)
 
   const facts = element('dl', undefined, 'detail-grid')
   for (const [label, value] of [
@@ -544,7 +584,7 @@ function renderTask() {
     cell.append(element('dt', label), element('dd', readable(value)))
     facts.append(cell)
   }
-  main.append(facts)
+  primary.append(facts)
 
   const actions = element('section', undefined, 'actions')
   const dashboardLink = element('a', '打开 Task Dashboard', 'button button--primary')
@@ -554,7 +594,7 @@ function renderTask() {
   const observationLink = element('a', '打开只读 Observation', 'button')
   observationLink.href = observationHref(taskId)
   actions.append(dashboardLink, observationLink)
-  main.append(actions)
+  primary.append(actions)
   attachInteractionCardHost()
   void loadTaskHistory()
   void refreshTaskDashboard()
@@ -572,28 +612,33 @@ async function load() {
     return
   }
   const { status: runtimeStatus, error } = await loadRuntimeStatus()
+  if (pageLeaving) return
   renderRuntimeStatus(status, runtimeStatus, error)
   if (requestedInteraction) {
     if (taskId && taskId !== 'new') detail = await api.taskDetail(taskId)
+    if (pageLeaving) return
     await renderInteraction(requestedInteraction, taskId)
     return
   }
   if (taskId && window.location.hash === '#task-interaction') {
     detail = await api.taskDetail(taskId)
+    if (pageLeaving) return
     const received = await api.receiveExplicitInput({
       sourceRef: `ui:task:${taskId}`,
       rawInput: detail.priorInput || detail.title,
       inputRevision: 1,
     })
+    if (pageLeaving) return
     activeInteractionId = received.interactionId
     window.history.replaceState(null, '', `./task.html?task=${encodeURIComponent(taskId)}&interaction=${encodeURIComponent(received.interactionId)}#task-interaction`)
     await renderInteraction(received.interactionId, taskId)
     return
   }
   detail = await api.taskDetail(taskId)
+  if (pageLeaving) return
   renderTask()
 }
 
 void load().catch((error) => {
-  renderPageError(status, error)
+  if (!pageLeaving) renderPageError(status, error)
 })
