@@ -231,14 +231,28 @@ const harnessHtml = `<!doctype html>
   <link rel="stylesheet" href="/observation.css">
 </head>
 <body>
-  <main class="page">
-    <div id="host"></div>
-  </main>
+  <div id="root"></div>
   <script type="module">
-    import { mountSemanticObservation } from '/semantic-observation.js'
+    import { mountPageTemplate } from '/runtime-shell.js'
+    import { mountSemanticObservation, renderSemanticEvidenceContent } from '/semantic-observation.js'
+
+    const template = mountPageTemplate(document.querySelector('#root'), {
+      layout: 'standalone',
+      eyebrow: '只读观测',
+      title: '语义观测组件',
+      lede: '组件消费者使用共享详情载体。',
+    })
+    const host = document.createElement('div')
+    template.hosts.primary.append(host)
+
     window.__events = []
     window.__mutations = []
-    window.__component = mountSemanticObservation(document.querySelector('#host'), {
+    window.__openEvidence = (evidence, trigger) => template.detail.open({
+      eyebrow: '只读证据',
+      title: evidence.title,
+      content: renderSemanticEvidenceContent(evidence),
+    }, trigger)
+    window.__component = mountSemanticObservation(host, {
       onModeChange(mode, trigger) {
         window.__events.push({ type: 'mode', mode, text: trigger.textContent })
       },
@@ -247,7 +261,7 @@ const harnessHtml = `<!doctype html>
       },
       onEvidenceRequest(evidence, trigger) {
         window.__events.push({ type: 'evidence', evidenceId: evidence.evidenceId, text: trigger.textContent })
-        window.__component.openEvidence(evidence, trigger)
+        window.__openEvidence(evidence, trigger)
       },
     })
     window.__fixtures = ${JSON.stringify(fixtures)}
@@ -807,34 +821,123 @@ try {
   observe('raw', raw)
   record('raw mode renders the explicit raw ledger separately', raw.mode === 'raw' && raw.text.includes('原始记录') && raw.text.includes('不驱动语义分类') && raw.mutationCallbacks === 0, raw)
 
-  // Drawer open, raw evidence remains behind the explicit action, close returns
-  // focus to the initiating evidence button.
+  // The semantic component emits the evidence request. The explicit-root page
+  // template owns the single product detail and its focus lifecycle.
   await page.click('.so-mode[data-semantic-mode="current"]')
   await page.evaluate(() => window.__component.update(window.__fixtures.valid))
   const evidenceTrigger = page.locator('.so-evidence').first()
   await evidenceTrigger.focus()
   await page.keyboard.press('Enter')
-  const drawerOpen = await page.evaluate(() => {
-    const dialog = document.querySelector('.so-drawer')
+  await page.waitForFunction(
+    () => Boolean(document.querySelector('dialog.shell-layer[data-technical-detail="true"][open]')),
+    undefined,
+    { timeout: 15_000 },
+  )
+  const evidence = base.sections[0].items[0].evidence
+  const detailOpen = await page.evaluate(() => {
+    const dialog = document.querySelector('dialog.shell-layer[data-technical-detail="true"][open]')
+    const sectionValues = (raw) => [...(dialog?.querySelectorAll('.so-drawer-section') ?? [])]
+      .filter((section) => (section.dataset.raw === 'true') === raw)
+      .map((section) => [
+        section.querySelector('h3')?.textContent ?? '',
+        [...section.querySelectorAll('li')].map((entry) => entry.textContent ?? ''),
+      ])
     return {
       open: Boolean(dialog?.open),
+      detailCount: document.querySelectorAll('dialog.shell-layer[open]').length,
+      retiredDialogCount: document.querySelectorAll('.so-drawer').length,
+      title: dialog?.querySelector('#technical-detail-title')?.textContent ?? '',
+      eyebrow: dialog?.querySelector('.eyebrow')?.textContent ?? '',
       text: dialog?.innerText ?? '',
+      summary: dialog?.querySelector('.so-drawer-summary')?.textContent ?? '',
+      facts: Object.fromEntries([...(dialog?.querySelectorAll('.so-fact-list > div') ?? [])].map((row) => [
+        row.querySelector('dt')?.textContent ?? '',
+        row.querySelector('dd')?.textContent ?? '',
+      ])),
+      sections: Object.fromEntries(sectionValues(false)),
+      rawLabel: dialog?.querySelector('[data-raw="true"] h3')?.textContent ?? '',
+      rawContent: dialog?.querySelector('[data-raw="true"] pre')?.textContent ?? '',
+      contentText: document.querySelector('.so-content')?.innerText ?? '',
+      active: document.activeElement?.className ?? '',
+      closeControlCount: dialog?.querySelectorAll('.shell-layer-close').length ?? 0,
+      mutationControls: dialog?.querySelectorAll('form, button:not(.shell-layer-close), [data-action="retry"], [data-action="stop"], [data-action="steer"]').length ?? 0,
+    }
+  })
+  observe('shared-detail-open', detailOpen)
+  record('semantic evidence opens in the one shared read-only detail',
+    detailOpen.open
+      && detailOpen.detailCount === 1
+      && detailOpen.retiredDialogCount === 0
+      && detailOpen.eyebrow === '只读证据'
+      && detailOpen.title === evidence.title
+      && detailOpen.closeControlCount === 1
+      && detailOpen.mutationControls === 0
+      && detailOpen.active.includes('shell-layer-close'),
+    detailOpen)
+  record('shared detail preserves the exact semantic evidence fields',
+    detailOpen.summary === evidence.summary
+      && detailOpen.facts['证据 ID'] === evidence.evidenceId
+      && detailOpen.facts['范围'] === evidence.scopeLabel
+      && detailOpen.facts['来源'] === evidence.sourceLabel
+      && JSON.stringify(detailOpen.sections['输入']) === JSON.stringify(evidence.inputs)
+      && JSON.stringify(detailOpen.sections['输出']) === JSON.stringify(evidence.outputs)
+      && JSON.stringify(detailOpen.sections['引用']) === JSON.stringify(evidence.refs)
+      && detailOpen.rawLabel === evidence.raw.label
+      && detailOpen.rawContent === evidence.raw.content,
+    detailOpen)
+  record('raw evidence stays behind the explicit action and outside the semantic body',
+    detailOpen.text.includes(evidence.raw.label)
+      && detailOpen.text.includes(evidence.raw.content)
+      && !detailOpen.contentText.includes(evidence.raw.label)
+      && !detailOpen.contentText.includes(evidence.raw.content),
+    detailOpen)
+  await page.screenshot({ path: join(evidenceRoot, 'artifacts', 'evidence-detail.png'), fullPage: true })
+
+  const replacement = await page.evaluate(() => {
+    const trigger = document.querySelector('.so-evidence')
+    window.__openEvidence({
+      evidenceId: 'evidence-second',
+      title: '第二份证据',
+      summary: '第二份详情替换第一份。',
+      scopeLabel: 'task://task-observation',
+      sourceLabel: 'runtime projection',
+      inputs: ['second-input'],
+      outputs: ['second-output'],
+      refs: ['artifact://second'],
+    }, trigger)
+    const dialogs = [...document.querySelectorAll('dialog.shell-layer[open]')]
+    return {
+      detailCount: dialogs.length,
+      text: dialogs[0]?.innerText ?? '',
       active: document.activeElement?.className ?? '',
     }
   })
-  observe('drawer-open', drawerOpen)
-  record('evidence drawer opens as a read-only dialog', drawerOpen.open && drawerOpen.text.includes('只读证据') && drawerOpen.text.includes('file.search 结果证据'), drawerOpen)
-  record('raw evidence content is only inside the active drawer', drawerOpen.text.includes('原始工具记录') && drawerOpen.active.includes('so-drawer-close'), drawerOpen)
-  await page.screenshot({ path: join(evidenceRoot, 'artifacts', 'evidence-drawer.png'), fullPage: true })
+  observe('shared-detail-replacement', replacement)
+  record('opening another detail replaces the semantic evidence without stacking dialogs',
+    replacement.detailCount === 1
+      && replacement.text.includes('第二份证据')
+      && !replacement.text.includes(evidence.title)
+      && replacement.active.includes('shell-layer-close'),
+    replacement)
+
   await page.keyboard.press('Escape')
-  const drawerClosed = await page.evaluate(() => ({
-    open: Boolean(document.querySelector('.so-drawer')?.open),
+  await page.waitForFunction(
+    () => document.activeElement?.classList?.contains('so-evidence'),
+    undefined,
+    { timeout: 15_000 },
+  )
+  const detailClosed = await page.evaluate(() => ({
+    open: Boolean(document.querySelector('dialog.shell-layer[data-technical-detail="true"]')?.open),
     activeText: document.activeElement?.textContent ?? '',
     activeClass: document.activeElement?.className ?? '',
     activeTag: document.activeElement?.tagName ?? '',
   }))
-  observe('drawer-closed', drawerClosed)
-  record('Escape closes the drawer and returns focus to the evidence trigger', drawerClosed.open === false && drawerClosed.activeText.includes('查看只读证据') && drawerClosed.activeClass.includes('so-evidence'), drawerClosed)
+  observe('shared-detail-closed', detailClosed)
+  record('Escape closes the shared detail and returns focus to the evidence trigger',
+    detailClosed.open === false
+      && detailClosed.activeText.includes('查看只读证据')
+      && detailClosed.activeClass.includes('so-evidence'),
+    detailClosed)
 
   // Keyboard mode selection with visible focus.
   const focusAfterCloseFrames = await page.evaluate(() => new Promise((resolve) => {
@@ -1098,13 +1201,32 @@ try {
   const wiredRawText = await readContentText()
   await wiredPage.click('.so-mode[data-semantic-mode="current"]')
 
-  // Evidence drawer is read-only.
+  // Evidence uses the page-level shared detail and stays read-only.
   await wiredPage.locator('.so-evidence').first().click()
-  const wiredDrawer = await wiredPage.evaluate(() => {
-    const dialog = document.querySelector('.so-drawer')
-    return { open: Boolean(dialog?.open), text: dialog?.innerText ?? '', active: document.activeElement?.className ?? '' }
+  await wiredPage.waitForFunction(
+    () => Boolean(document.querySelector('dialog.shell-layer[data-technical-detail="true"][open]')),
+    undefined,
+    { timeout: 15_000 },
+  )
+  const wiredDetail = await wiredPage.evaluate(() => {
+    const dialog = document.querySelector('dialog.shell-layer[data-technical-detail="true"][open]')
+    return {
+      open: Boolean(dialog?.open),
+      detailCount: document.querySelectorAll('dialog.shell-layer[open]').length,
+      retiredDialogCount: document.querySelectorAll('.so-drawer').length,
+      text: dialog?.innerText ?? '',
+      active: document.activeElement?.className ?? '',
+      mutationControls: dialog?.querySelectorAll('form, button:not(.shell-layer-close), [data-action="retry"], [data-action="stop"], [data-action="steer"]').length ?? 0,
+    }
   })
-  record('wired evidence drawer opens read-only and focuses its close control', wiredDrawer.open && wiredDrawer.text.includes('只读证据') && wiredDrawer.active.includes('so-drawer-close'), wiredDrawer)
+  record('wired evidence opens in the one shared read-only detail',
+    wiredDetail.open
+      && wiredDetail.detailCount === 1
+      && wiredDetail.retiredDialogCount === 0
+      && wiredDetail.text.includes('只读证据')
+      && wiredDetail.active.includes('shell-layer-close')
+      && wiredDetail.mutationControls === 0,
+    wiredDetail)
   record('wired default modes are human-readable and raw evidence stays traceable',
     [wiredCurrentText, wiredSemanticText, wiredActionsText].every((body) =>
       !wiredTechnicalTokens.some((token) => body.includes(token)))
@@ -1115,10 +1237,10 @@ try {
       && wiredCurrentText.includes('可用')
       && wiredCurrentText.includes('覆盖不完整')
       && wiredTechnicalTokens.every((token) => wiredRawText.includes(token))
-      && wiredDrawer.text.includes(wiredEvidenceRefs.eventId)
-      && wiredDrawer.text.includes(wiredEvidenceRefs.payloadRef)
-      && wiredDrawer.text.includes(wiredEvidenceRefs.evidenceLocator),
-    { currentText: wiredCurrentText, semanticText: wiredSemanticText, actionsText: wiredActionsText, rawText: wiredRawText, drawerText: wiredDrawer.text })
+      && wiredDetail.text.includes(wiredEvidenceRefs.eventId)
+      && wiredDetail.text.includes(wiredEvidenceRefs.payloadRef)
+      && wiredDetail.text.includes(wiredEvidenceRefs.evidenceLocator),
+    { currentText: wiredCurrentText, semanticText: wiredSemanticText, actionsText: wiredActionsText, rawText: wiredRawText, detailText: wiredDetail.text })
   await wiredPage.keyboard.press('Escape')
 
   record('wired panel exposes no executable control and issues no mutation request', wiredInitial.controls === 0 && requests.mutations === 0, { controls: wiredInitial.controls, requests })
