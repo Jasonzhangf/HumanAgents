@@ -312,7 +312,8 @@ function clearNode(node) {
   while (node.firstChild) node.removeChild(node.firstChild)
 }
 
-function disposePage() {
+function disposePage(event) {
+  if (event?.persisted) return
   if (pageDisposed) return
   pageDisposed = true
   if (pollHandle !== null) {
@@ -326,4 +327,4 @@ function disposePage() {
 renderTaskEntry()
 void refreshLists()
 pollHandle = setInterval(() => void refreshLists(), REFRESH_MS)
-window.addEventListener('pagehide', disposePage, { once: true })
+window.addEventListener('pagehide', disposePage)

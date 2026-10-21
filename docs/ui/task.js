@@ -198,7 +198,8 @@ function subscribeTaskStream(operationId) {
   }
 }
 
-function disposeTaskPage() {
+function disposeTaskPage(event) {
+  if (event?.persisted) return
   if (pageLeaving) return
   pageLeaving = true
   stopDashboardPoll()
@@ -206,7 +207,7 @@ function disposeTaskPage() {
   interactionCard?.dispose()
   template.dispose()
 }
-window.addEventListener('pagehide', disposeTaskPage, { once: true })
+window.addEventListener('pagehide', disposeTaskPage)
 
 function projectTaskLiveness(dashboard) {
   // The card is built from the interaction entries; the execution facts come
