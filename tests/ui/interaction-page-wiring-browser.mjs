@@ -1744,6 +1744,14 @@ try {
         task: taskId.value, projectKey, mode, display: 'current',
       })}`, { waitUntil: 'domcontentloaded' })
       await preferenceRead
+      // The current plan lives inside the collapsed native 任务计划 fold, so
+      // open that exact details before waiting on the visible current section.
+      const planSummary = fixturePage.locator('details.display-detail-fold > summary')
+        .filter({ hasText: /^任务计划$/ }).first()
+      const planFold = planSummary.locator('..')
+      if (!(await planFold.evaluate((node) => node.open === true))) {
+        await planSummary.click()
+      }
       const currentSection = fixturePage.locator('[data-plan-history="current"]')
       await currentSection.waitFor({ timeout: 20000 })
       await settle()
