@@ -1,12 +1,16 @@
 # HumanAgent 项目状态汇总（2026-10-19）
 
-## 2026-10-20：共享模板与八页配置，待最终集成
+## 2026-10-20：共享模板与八页配置已安装，完成交付
 
 本轮按用户新增指令实现共享 UI 组件组合和排版模板。采用静态 ESM、collection/work/standalone 三类布局和显式 slots。八个实际页面均已接入；template 只拥有排版、共享详情和返回焦点，页面保留正式读取、动作、权限范围及生命周期。已删除旧 makePageShell、宿主扫描、语义自有证据弹窗及其无用样式。架构与页面配置表见 docs/ui/shared-layout-and-features-2026-10-20.md。
 
 受影响行为已按现有消费者验收。入口55项、登录配对30项、授权46项、桌面/手机范围与历史36项、记忆审核18项、计划历史9项、真实观测投影11项均通过。UI源提取用例30项通过。浏览器后退空白的实际根因是 persisted pagehide 被当作真实退出销毁DOM；八页均保留 BFCache 内容与真实退出清理。原始失败、恢复及草稿保留截图已记录。语义详情构造正文却未返回的 producer 缺陷已修正。无候选时不挂载审核理由；同一现有记忆消费者18项再次通过，Chrome无数据页支持区为空。
 
-当前产品代码仍在唯一集成分支，尚未合入main或安装。最后语义消费者正在对齐真实证据点击对象，再进行一次整体Review和标准main/build/install/restart/push交付。旧通用观测脚本的十项失败在main和候选完全一致，未冒充全量通过。所有原始回执及有效独立计划保留于 /Volumes/Intel/playground/humanagent/.worker-runs/ui-layout-modules-20261020/。本轮不声称五板块索引、统一session或跨板块关系等后端缺口完成。
+完整 milestone 独立Review发现两项P1：checkpoint pending呈现使当前读取自身失效，以及桌面高优先级双列规则覆盖手机单列。已修复并保留同入口RED。额外的真实关闭场景捕获晚到响应重开详情；共享owner现同步完成显式关闭/cancel，再释放页面读取。最终checkpoint消费者26/26、共享语义详情71/71、手机Memory24/24、桌面Memory18/18，受影响构建通过。独立finding复核输出空findings，宿主按同源schema裁决PASS，复用其余整体结论；首选AGY的配额错误保留，审查使用独立OAuth GPT-6.1 explicit medium。
+
+产品代码已正常合入main。canonical main完成build、package及全局安装；正式humanagent restart将generation54/PID74975更新到generation55/PID45737，旧实例clean，原control root、workspace、53007和配对保留。Chrome实际读到work模板的primary/composer，项目列表保留范围，已有完成任务显示原ux-handoff.md结果；详情只有一个共享carrier，关闭返回原触发按钮，浏览器前进/返回均可读。未新建、授权、重跑或停止用户业务任务。安装回执、最终截图和所有原始结果位于 /Volumes/Intel/playground/humanagent/.worker-runs/ui-layout-modules-20261020/。随后按标准推送main并回收唯一集成树；最终远端和清理回执见该run的delivery.md与cleanup.md。
+
+旧通用观测脚本的十项失败在main和候选完全一致，未冒充全量通过。本轮完成共享基础和八页接线；五板块入口/live历史、统一session、跨板块关系、人类来源与完整批准恢复等仍按设计差距报告推进，部分旧内部文案也未在本轮重写。不能把本增量称为整套新UX完成。
 
 ## 2026-10-20：设计稿到实际产品的 UX 差距盘点
 
