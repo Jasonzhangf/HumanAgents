@@ -353,6 +353,7 @@ export function renderSemanticEvidenceContent(evidence) {
     raw.append(element('pre', 'so-raw', text(evidence.raw.content)))
     body.append(raw)
   }
+  return body
 }
 
 /**
