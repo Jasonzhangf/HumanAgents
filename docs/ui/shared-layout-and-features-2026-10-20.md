@@ -1,6 +1,6 @@
 # 共享排版模板与页面功能配置
 
-状态：机制与八页矩阵已确定，产品迁移进行中。本文说明本轮装配方式，不代表新 UX、八页迁移或真实运行验收已经完成。
+状态：共享模板与八页源码配置已完成。本文记录本轮装配方式；公开行为验收、运行安装和 main 交付以本轮记录为准，不能据此宣称整个新 UX 已完成。
 
 ## 三层职责
 
@@ -24,7 +24,7 @@
 
 共享功能区为 `heading/status`、`primary`、按需使用的 `support` 和 `composer`。没有内容的辅助区或输入区不占位。`detail.open/close/dispose` 提供唯一详情入口；新详情替换旧详情，不叠加第二个产品弹窗。手机沿同一载体呈现底部抽屉。
 
-页面继续持有自己的 task/project/mode/instance 与 URL 选择。semantic GET/SSE 继续归 `mountSemanticObservationPanel`，不能为了插件化再订阅一份。退出顺序为：停止 controller 资源，释放功能组件，最后释放模板。
+页面继续持有自己的 task/project/mode/instance 与 URL 选择。semantic GET/SSE 继续归 `mountSemanticObservationPanel`，不能为了插件化再订阅一份。真实离页的退出顺序为：停止 controller 资源，释放功能组件，最后释放模板。`pagehide.persisted` 表示浏览器缓存页面，此时保留组件与草稿，由浏览器暂停和恢复；不能清空模板，也不能用重新加载代替恢复。
 
 ## 已找到的共享插件
 
@@ -45,7 +45,7 @@
 | 页面 | 模板 | 主要功能配置 | 页面保留的职责 |
 |---|---|---|---|
 | `index.html / entry.js` | work | primary 交互卡，composer 原新任务输入 | 一次提交确认、澄清、策略与精确任务身份匹配；有效卡片挂载点必须保留。 |
-| `dashboard.html / dashboard.js` | collection | primary 系统／任务列表，support 计划与管理 | system 读取、scheduler、正式计划控制及任务管理；清理原刷新 timer。 |
+| `dashboard.html / dashboard.js` | collection | primary 系统／任务列表，support 调度计划 | system 读取、scheduler 和原正式计划控制；真实离页清理刷新 timer。 |
 | `tasks.html / tasks.js` | collection | primary project/system 任务列表 | 精确 project scope、刷新、面包屑、任务链接及配对恢复。 |
 | `task.html / task.js` | work | primary 交互卡与任务正文，composer 适用澄清或确认 | task/interaction 身份、原 reads/writes、EventSource、polling、项目范围转发和退出收口。 |
 | `task-dashboard.html / task-dashboard.js` | work | primary 任务与语义视图，support 执行实例／计划／checkpoint，共享 detail | 精确 task/project/mode、实例与历史选择、正式控制、回执、浏览器位置和原流生命周期。 |
@@ -57,7 +57,7 @@
 
 ## 实施与交付边界
 
-共享模板、样式、详情及其契约由一个执行者负责。页面分为集合、输入／任务、总览、执行／观测、配对五组，按文件归属并行。先组合真实 tasks 与 memory 页面，再完成全部八页。全部页面的受影响行为验收后，在正式集成边界审查一次整体增量。
+共享模板、样式、详情及其契约由共同 owner 维护。页面已按文件归属并行迁移，直接组合已有功能模块。旧 `makePageShell` 兼容入口、全页宿主扫描和语义组件自有证据弹窗已删除。全部页面的受影响行为验收后，在正式集成边界审查一次整体增量。
 
 本轮迁移不自动解决五板块真实索引、跨板块关系事实、人类来源、完整批准恢复和统一提交结果等底层缺口。详细差距见 `design-review-2026-10-19/implementation-gap-2026-10-20.md`。不能用空槽位、前端样例、标题匹配或静态关系填补缺失事实。
 
