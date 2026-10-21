@@ -27,7 +27,7 @@ import {
   groupTaskFlowRows,
   unclassifiedTaskFlowReason,
 } from './task-flow-groups.js'
-import { mountSemanticObservation } from './semantic-observation.js'
+import { mountSemanticObservation, renderSemanticEvidenceContent } from './semantic-observation.js'
 import { buildSemanticObservationProjection } from './semantic-observation-projection.js'
 
 export const api = createRuntimeApi()
@@ -1410,7 +1410,7 @@ const shellLayerLeaves = new WeakMap()
 // shared agent-activity detail) in this same shell layer. Either way the layer stays
 // the one desktop side panel / mobile bottom drawer: the header, close button, single
 // open layer and focus return are not re-implemented by the page.
-export function openTechnicalDetail({ title = '技术详情', eyebrow = '技术详情', entries = [], footer, content, onClose } = {}) {
+export function openTechnicalDetail({ title = '技术详情', eyebrow = '技术详情', entries = [], footer, content, onClose, trigger } = {}) {
   if (!technicalDetailLayer) {
     const frame = createShellLayerFrame({
       ariaLabel: '技术详情',
@@ -1428,7 +1428,7 @@ export function openTechnicalDetail({ title = '技术详情', eyebrow = '技术�
   }
   const { layer, eyebrow: eyebrowNode, title: titleNode, body, close } = technicalDetailLayer
   if (!technicalDetailLayer.active) {
-    technicalDetailLayer.returnFocus = document.activeElement
+    technicalDetailLayer.returnFocus = trigger instanceof HTMLElement ? trigger : document.activeElement
     technicalDetailLayer.active = true
   }
   technicalDetailLayer.onClose = onClose
@@ -1482,6 +1482,14 @@ function closeTechnicalDetailLayer() {
   // An explicit page callback owns the final focus destination. Generic
   // restoration finishes first so it cannot overwrite that destination.
   if (typeof onClose === 'function') onClose()
+}
+
+function removeTechnicalDetailLayer() {
+  if (!technicalDetailLayer) return
+  const { layer } = technicalDetailLayer
+  closeTechnicalDetailLayer()
+  if (layer.isConnected) layer.remove()
+  technicalDetailLayer = null
 }
 
 // A contextual trigger for the technical-detail layer. It is not a global configuration
@@ -1637,7 +1645,8 @@ function renderMissingDisplayMount() {
   return box
 }
 
-export function mountShellLayer(context = {}) {
+export function mountShellLayer(context = {}, mountRoot = document.body) {
+  if (!(mountRoot instanceof HTMLElement)) throw new TypeError('mountShellLayer requires an HTMLElement mount root')
   const controls = element('div', undefined, 'shell-controls')
   controls.setAttribute('role', 'group')
   controls.setAttribute('aria-label', '主动配置')
@@ -1665,7 +1674,7 @@ export function mountShellLayer(context = {}) {
     body.append(section)
   }
 
-  document.body.append(controls, layer)
+  mountRoot.append(controls, layer)
 
   let returnFocus = null
   let currentContext = { ...context }
@@ -1675,6 +1684,7 @@ export function mountShellLayer(context = {}) {
   let displayUnsubscribe = null
   let draftDefault = null
   let displayNotice = ''
+  let disposed = false
 
   if (currentContext.displaySurface) {
     displayController = createDisplayPreferenceController({
@@ -1948,10 +1958,11 @@ export function mountShellLayer(context = {}) {
     if (layer.open || technicalDetailLayer?.leaveDrawer === leaveDrawer) return
     leaveDrawer()
   })
-  window.addEventListener('pagehide', () => {
+  const onPageHide = () => {
     closeTechnicalDetailLayer()
     leaveDrawer()
-  })
+  }
+  window.addEventListener('pagehide', onPageHide)
   for (const [id, button] of triggers) button.addEventListener('click', () => open(id))
 
   function setScope(scope) {
@@ -1962,59 +1973,165 @@ export function mountShellLayer(context = {}) {
     currentContext = { ...currentContext, capabilities }
   }
 
-  return { open, setScope, setCapabilities, applyDisplayMode, initializeDisplayPreference, disposeDisplayPreference }
+  function dispose() {
+    if (disposed) return
+    disposed = true
+    window.removeEventListener('pagehide', onPageHide)
+    closeTechnicalDetailLayer()
+    leaveDrawer()
+    disposeDisplayPreference()
+    controls.remove()
+    layer.remove()
+  }
+
+  return {
+    open,
+    openShellSection: open,
+    setScope,
+    setShellScope: setScope,
+    setCapabilities,
+    setShellCapabilities: setCapabilities,
+    applyDisplayMode,
+    initializeDisplayPreference,
+    disposeDisplayPreference,
+    dispose,
+  }
 }
 
-export function makePageShell(active, eyebrow, title, lede, options = {}) {
-  const interactionCardHosts = [...document.querySelectorAll('[data-interaction-work-card-host]')]
-  document.body.replaceChildren()
-  const header = makeTopbar(active)
-  const main = element('main', undefined, 'page')
+const PAGE_LAYOUTS = Object.freeze({
+  collection: 'collection',
+  work: 'work',
+  standalone: 'standalone',
+})
+
+// The explicit-root template is the single page composition owner. It builds
+// the heading/status/primary/support/composer slots for every business layout
+// and the shared detail/focus carrier. Page controllers keep business reads,
+// writes, selection and URL state; optional slots stay visually absent until
+// the controller publishes real content.
+export function mountPageTemplate(root, config = {}) {
+  if (!(root instanceof HTMLElement)) throw new TypeError('mountPageTemplate requires an HTMLElement root')
+  const layout = PAGE_LAYOUTS[config.layout] || PAGE_LAYOUTS.collection
+  const active = typeof config.active === 'string' ? config.active : ''
+  const eyebrow = typeof config.eyebrow === 'string' ? config.eyebrow : ''
+  const title = typeof config.title === 'string' ? config.title : ''
+  const lede = typeof config.lede === 'string' ? config.lede : ''
+  const context = {
+    scope: config.scope,
+    capabilities: config.capabilities,
+    ...(config.displaySurface ? { displaySurface: config.displaySurface } : {}),
+  }
+
+  root.replaceChildren()
+
+  const page = element('main', undefined, 'page')
+  page.dataset.pageLayout = layout
   const heading = element('section', undefined, 'page-heading')
-  const copy = element('div')
+  heading.dataset.pageSlot = 'heading'
+  const copy = element('div', undefined, 'page-heading-copy')
   if (eyebrow) copy.append(element('p', eyebrow, 'eyebrow'))
   copy.append(element('h1', title))
   if (lede) copy.append(element('p', lede, 'lede'))
   const breadcrumbs = element('nav', undefined, 'breadcrumbs')
   breadcrumbs.setAttribute('aria-label', '范围面包屑')
-  // Pages can publish a human scope name after their initial scoped read.
   function setBreadcrumbs(items) {
     breadcrumbs.replaceChildren()
     for (const crumb of items || []) {
-      if (crumb.href) {
+      if (crumb && crumb.href) {
         const link = element('a', crumb.label)
         link.href = crumb.href
         breadcrumbs.append(link)
-      } else {
+      } else if (crumb) {
         breadcrumbs.append(element('span', crumb.label))
       }
     }
     if (breadcrumbs.children.length > 0 && !breadcrumbs.isConnected) copy.append(breadcrumbs)
   }
-  setBreadcrumbs(options.breadcrumbs)
+  setBreadcrumbs(config.breadcrumbs)
   const status = element('div', undefined, 'status-banner')
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
   status.textContent = '正在读取当前状态…'
   heading.append(copy, status)
-  main.append(heading)
-  document.body.append(header, main)
-  const shellLayer = mountShellLayer({
+  page.append(heading)
+
+  const primary = element('section', undefined, 'page-primary')
+  primary.dataset.pageSlot = 'primary'
+  const support = element('aside', undefined, 'page-support')
+  support.dataset.pageSlot = 'support'
+  const composer = element('section', undefined, 'page-composer')
+  composer.dataset.pageSlot = 'composer'
+  page.append(primary, support, composer)
+
+  const header = layout === PAGE_LAYOUTS.standalone ? null : makeTopbar(active)
+  if (header) root.append(header)
+  root.append(page)
+
+  let shell = null
+  if (layout !== PAGE_LAYOUTS.standalone) {
+    shell = mountShellLayer(context, root)
+  }
+
+  const detail = {
+    open(detailConfig, trigger) {
+      openTechnicalDetail({ ...detailConfig, trigger })
+      return detail
+    },
+    close() {
+      closeTechnicalDetailLayer()
+      return detail
+    },
+    dispose() {
+      removeTechnicalDetailLayer()
+    },
+  }
+
+  function dispose() {
+    detail.dispose()
+    shell?.dispose()
+    root.replaceChildren()
+  }
+
+  return {
+    root,
+    layout,
+    hosts: { page, heading, status, primary, support, composer },
+    shell,
+    detail,
+    setBreadcrumbs,
+    dispose,
+  }
+}
+
+export function makePageShell(active, eyebrow, title, lede, options = {}) {
+  const interactionCardHosts = [...document.querySelectorAll('[data-interaction-work-card-host]')]
+  const template = mountPageTemplate(document.body, {
+    layout: PAGE_LAYOUTS.collection,
+    active,
+    eyebrow,
+    title,
+    lede,
+    breadcrumbs: options.breadcrumbs,
     scope: options.scope,
     capabilities: options.capabilities,
-    ...(options.displaySurface ? { displaySurface: options.displaySurface } : {}),
+    displaySurface: options.displaySurface,
   })
+  const { shell } = template
   return {
-    main,
-    status,
-    setBreadcrumbs,
+    main: template.hosts.page,
+    status: template.hosts.status,
+    setBreadcrumbs: template.setBreadcrumbs,
     interactionCardHosts,
-    openShellSection: shellLayer.open,
-    setShellScope: shellLayer.setScope,
-    setShellCapabilities: shellLayer.setCapabilities,
-    applyDisplayMode: shellLayer.applyDisplayMode,
-    initializeDisplayPreference: shellLayer.initializeDisplayPreference,
-    disposeDisplayPreference: shellLayer.disposeDisplayPreference,
+    openShellSection: shell.openShellSection,
+    setShellScope: shell.setShellScope,
+    setShellCapabilities: shell.setShellCapabilities,
+    applyDisplayMode: shell.applyDisplayMode,
+    initializeDisplayPreference: shell.initializeDisplayPreference,
+    disposeDisplayPreference: shell.disposeDisplayPreference,
+    hosts: template.hosts,
+    shell,
+    detail: template.detail,
+    dispose: template.dispose,
   }
 }
 
@@ -2069,10 +2186,16 @@ export function taskIdFromQuery(required = true) {
  * writes a task, consumes a queue, retries an operation or changes execution.
  *
  * @param {HTMLElement} host
- * @param {{ taskId: string, scope?: Object, apiClient?: Object, onModeChange?: (mode: string) => void }} options
+ * @param {{ taskId: string, scope?: Object, apiClient?: Object, onModeChange?: (mode: string) => void, onEvidenceRequest?: (evidence: Object, trigger: HTMLButtonElement) => void }} options
  * @returns {{ reload: () => Promise<void>, setMode: (mode: string) => void, setScopeRef: (scopeRef: string) => void, dispose: () => void }}
  */
-export function mountSemanticObservationPanel(host, { taskId, scope, apiClient = api, onModeChange } = {}) {
+export function mountSemanticObservationPanel(host, {
+  taskId,
+  scope,
+  apiClient = api,
+  onModeChange,
+  onEvidenceRequest,
+} = {}) {
   if (!(host instanceof HTMLElement)) throw new TypeError('mountSemanticObservationPanel requires an HTMLElement host')
   if (typeof taskId !== 'string' || !taskId) throw new TypeError('mountSemanticObservationPanel requires a taskId')
 
@@ -2096,7 +2219,16 @@ export function mountSemanticObservationPanel(host, { taskId, scope, apiClient =
       render()
     },
     onEvidenceRequest(evidence, trigger) {
-      view.openEvidence(evidence, trigger)
+      if (typeof onEvidenceRequest === 'function') {
+        onEvidenceRequest(evidence, trigger)
+        return
+      }
+      openTechnicalDetail({
+        eyebrow: '只读证据',
+        title: evidence?.title || '证据详情',
+        content: renderSemanticEvidenceContent(evidence),
+        trigger,
+      })
     },
   })
 
