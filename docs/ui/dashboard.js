@@ -3,17 +3,10 @@ import {
   appendPairingEntry,
   createScopedReadPublication,
   element,
-  formatTime,
-  makePageShell,
+  mountPageTemplate,
   renderSystemRead,
   renderPageError,
   renderRuntimeStatus,
-  renderTaskExecutions,
-  taskRowStateText,
-  taskRowTitle,
-  taskFlowText,
-  taskExecutionHref,
-  taskDashboardHref,
 } from './runtime-shell.js'
 import {
   planActionsForState,
@@ -26,29 +19,36 @@ import {
 } from './plan-control.js'
 
 const REFRESH_MS = 4000
-const { main, status } = makePageShell(
-  'Dashboard',
-  'Runtime',
-  '工作总览',
-  '在这里新建、跟踪和管理任务。',
-  {
-    scope: { kind: 'system' },
-    breadcrumbs: [
-      { label: '系统', href: null },
-      { label: '全部项目', href: null },
-    ],
-  },
-)
+
+const template = mountPageTemplate(document.body, {
+  layout: 'collection',
+  active: 'Dashboard',
+  eyebrow: 'Runtime',
+  title: '工作总览',
+  lede: '在这里新建、跟踪和管理任务。',
+  scope: { kind: 'system' },
+  breadcrumbs: [
+    { label: '系统', href: null },
+    { label: '全部项目', href: null },
+  ],
+})
+const { status } = template.hosts
+
+// The controller stops polling at page exit and refuses to publish into the
+// removed template after that point. In-flight reads are allowed to settle;
+// they just never reach a disposed page.
+let pageDisposed = false
+let pollHandle = null
 
 // ── DOM regions: canonical task entry + refreshed overview panels ──
 const inputRegion = element('section', undefined, 'quick-create')
 const statsRegion = element('section', undefined, 'stats')
 const plansRegion = element('section', undefined, 'plan-list')
 const listRegion = element('div', undefined, 'task-lists')
-main.append(inputRegion)
+template.hosts.primary.append(inputRegion, statsRegion, listRegion)
 const plansDetails = element('details', undefined, 'plan-list-fold')
 plansDetails.append(element('summary', '执行计划管理'), plansRegion)
-main.append(statsRegion, listRegion, plansDetails)
+template.hosts.support.append(plansDetails)
 
 function renderTaskEntry() {
   clearNode(inputRegion)
@@ -61,6 +61,7 @@ function renderTaskEntry() {
 const systemRead = createScopedReadPublication(() => api.systemDashboard())
 
 async function refreshLists() {
+  if (pageDisposed) return
   try {
     const [read, scheduler] = await Promise.all([
       systemRead.refresh({ kind: 'system' }),
@@ -69,7 +70,7 @@ async function refreshLists() {
       // it is reported as its own typed notice instead of failing the page.
       api.scheduler().catch((schedulerError) => ({ __error: schedulerError })),
     ])
-    if (!read.published) return
+    if (pageDisposed || !read.published) return
     const state = read.state
     if (state.content) {
       renderRuntimeStatus(status, state.content.runtime, null)
@@ -89,7 +90,7 @@ async function refreshLists() {
     }
     renderPlanList(scheduler)
   } catch (error) {
-    renderPageError(status, error)
+    if (!pageDisposed) renderPageError(status, error)
   }
 }
 
@@ -100,6 +101,7 @@ async function refreshLists() {
 let planControlNotice = { subscriptionId: '', text: '', error: undefined }
 
 async function runPlanControl(subscriptionId, action) {
+  if (pageDisposed) return
   planControlNotice = { subscriptionId, text: planControlPendingCopy(action), error: undefined }
   renderPlanList(lastSchedulerRead)
   try {
@@ -115,6 +117,7 @@ async function runPlanControl(subscriptionId, action) {
     // that decides whether pairing is the right recovery.
     planControlNotice = { subscriptionId, text: planControlErrorMessage(error), error }
   }
+  if (pageDisposed) return
   await refreshLists()
 }
 
@@ -201,169 +204,23 @@ function renderSystemStats(projection) {
   }
 }
 
-function taskRow(row) {
-  const item = element('div', undefined, 'task-item')
-  const link = element('a', undefined, 'task-item-main')
-  const currentChild = taskRowCurrentExecution(row)
-  link.href = currentChild
-    ? taskExecutionHref(currentChild, false, row.scope)
-    : taskDashboardHref(row.taskId.value)
-  link.append(
-    element('h3', taskRowTitle(row)),
-    element('p', taskRowStateText(row)),
-  )
-  const meta = element('div', undefined, 'task-item-meta')
-  meta.append(
-    element('span', row.stateLabel || row.state || '', 'task-state-pill'),
-    element('time', formatTime(row.updatedAt)),
-  )
-  const taskType = taskFlowText(row.taskFlow)
-  if (taskType) meta.append(element('span', taskType))
-  link.append(meta)
-  const actions = element('div', undefined, 'task-item-actions')
-  actions.append(
-    actionButton('编辑', () => openEditDialog(row)),
-    actionButton('删除', true, (btn) => runDelete(row, btn)),
-  )
-  item.append(link, actions)
-  const executions = renderTaskExecutions(row, row.scope)
-  if (executions) item.append(executions)
-  return item
-}
-
-function taskRowCurrentExecution(row) {
-  const currentId = taskIdValue(row.currentExecutionTaskId)
-  if (currentId === undefined || currentId === null) return undefined
-  const executions = Array.isArray(row.executions) ? row.executions : []
-  return executions.find((child) => taskIdValue(child.taskId) === currentId)
-}
-
-function taskIdValue(taskId) {
-  return taskId && typeof taskId === 'object' ? taskId.value : taskId
-}
-
-function actionButton(label, danger, onClick) {
-  if (typeof danger === 'function') { onClick = danger; danger = false }
-  const btn = element('button', label, `button button--sm${danger ? ' button--danger' : ''}`)
-  btn.type = 'button'
-  btn.addEventListener('click', (e) => {
-    e.preventDefault()
-    e.stopPropagation()
-    void onClick(btn)
-  })
-  return btn
-}
-
-async function runDelete(row, btn) {
-  if (!window.confirm(`删除任务"${row.title}"？`)) return
-  btn.disabled = true
-  try {
-    await api.deleteTask(row.taskId.value)
-    await refreshLists()
-  } catch (error) {
-    btn.disabled = false
-    // The page banner is the one dashboard surface that carries the shared
-    // pairing entry, so an expired or revoked session on delete offers the real
-    // login page. An alert would be a dead end: it cannot hold a link, and it
-    // would drop the runtime's own code/owner/nextAction.
-    renderPageError(status, error, 'inspect the task deletion')
-  }
-}
-
-function openEditDialog(row) {
-  const existing = document.querySelector('dialog.edit-dialog')
-  if (existing) existing.remove()
-  const dialog = element('dialog', undefined, 'edit-dialog')
-  const form = element('form', undefined, 'edit-form')
-  const input = element('input')
-  input.type = 'text'
-  input.value = row.title || ''
-  input.required = true
-  const cancel = element('button', '取消', 'button button--quiet')
-  cancel.type = 'button'
-  const save = element('button', '保存', 'button button--primary')
-  save.type = 'submit'
-  const err = element('p', undefined, 'edit-status')
-  const editActions = element('div', undefined, 'edit-actions')
-  editActions.append(cancel, save)
-  form.append(
-    element('label', '任务标题', 'field-label'),
-    input,
-    err,
-    editActions,
-  )
-  dialog.append(form)
-  document.body.append(dialog)
-  dialog.showModal()
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault()
-    save.disabled = true
-    err.textContent = '保存中…'
-    try {
-      await api.updateTask(row.taskId.value, { title: input.value.trim() })
-      dialog.close()
-      await refreshLists()
-    } catch (error) {
-      save.disabled = false
-      clearNode(err)
-      err.append(element('span', `${error.message || error} · owner=${error.ownerId || 'unknown'}`))
-      appendPairingEntry(err, error)
-    }
-  })
-  cancel.addEventListener('click', () => dialog.close())
-  dialog.addEventListener('close', () => dialog.remove(), { once: true })
-}
-
-function section(title, rows, emptyText) {
-  const sec = element('section', undefined, 'section')
-  const head = element('header', undefined, 'section-head')
-  head.append(element('h2', title), element('span', `${rows.length} 项`, 'section-meta'))
-  const panel = element('div', undefined, 'panel')
-  if (rows.length === 0) panel.append(element('p', emptyText, 'empty'))
-  else for (const row of rows) panel.append(taskRow(row))
-  sec.append(head, panel)
-  return sec
-}
-
-function renderTaskLists(dashboard, tasks) {
-  clearNode(listRegion)
-  listRegion.append(
-    section('运行中', tasks.running, '当前没有运行中的任务。'),
-    section('等待决策', tasks.waiting, '当前没有等待决策的任务。'),
-  )
-  const layout = element('div', undefined, 'layout')
-  const left = element('div')
-  const right = element('div')
-  left.append(
-    section('已完成', tasks.completed, '还没有已完成的任务。'),
-    section('已停止', tasks.stopped, '当前没有已停止的任务。'),
-  )
-  right.append(
-    section('最近失败', (dashboard.recentFailures || []).map((f) => ({
-      taskId: f.taskId,
-      title: f.taskTitle || '失败任务',
-      state: 'failed',
-      stateLabel: '失败',
-      currentState: '执行失败',
-      error: {
-        code: f.code,
-        ownerId: f.ownerId,
-        message: f.message,
-        retryable: false,
-        nextAction: f.nextAction,
-      },
-      updatedAt: f.occurredAt,
-    })), '暂无失败记录。'),
-  )
-  layout.append(left, right)
-  listRegion.append(layout)
-}
-
 function clearNode(node) {
   while (node.firstChild) node.removeChild(node.firstChild)
+}
+
+function disposePage(event) {
+  if (event?.persisted) return
+  if (pageDisposed) return
+  pageDisposed = true
+  if (pollHandle !== null) {
+    clearInterval(pollHandle)
+    pollHandle = null
+  }
+  template.dispose()
 }
 
 // ── Init ──
 renderTaskEntry()
 void refreshLists()
-const pollHandle = setInterval(() => void refreshLists(), REFRESH_MS)
+pollHandle = setInterval(() => void refreshLists(), REFRESH_MS)
+window.addEventListener('pagehide', disposePage)

@@ -254,7 +254,7 @@ try {
 
   // --- Real captured payload: the drawer refs tab must show the selected refs.
   await page.click(`.flow-node[data-node-id="${selectedNodeId}"]`)
-  const drawerOpened = await waitForCondition(page, () => document.querySelector('dialog[open]') !== null)
+  const drawerOpened = await waitForCondition(page, () => document.querySelector('dialog[data-technical-detail="true"][open]') !== null)
   record('drawer-opens-on-node-selection', drawerOpened)
   await page.click('button[data-tab-id="refs"]')
   const refs = await readDrawerRefs(page)
@@ -279,10 +279,10 @@ try {
   )
 
   // --- Negative case: an empty ref array stays the explicit empty projection.
-  await page.click('button[data-action="close-drawer"]')
-  await waitForCondition(page, () => document.querySelector('dialog[open]') === null)
+  await page.click('dialog[data-technical-detail="true"][open] .shell-layer-close')
+  await waitForCondition(page, () => document.querySelector('dialog[data-technical-detail="true"][open]') === null)
   await page.click(`.flow-node[data-node-id="${emptyRefsNodeId}"]`)
-  await waitForCondition(page, () => document.querySelector('dialog[open]') !== null)
+  await waitForCondition(page, () => document.querySelector('dialog[data-technical-detail="true"][open]') !== null)
   await page.click('button[data-tab-id="refs"]')
   const emptyRefs = await readDrawerRefs(page)
   observe('emptySelectedNodeRefs', emptyRefs)

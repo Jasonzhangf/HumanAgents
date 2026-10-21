@@ -421,46 +421,6 @@ button.so-crumb:hover {
   margin: 0;
 }
 
-.so-drawer {
-  position: fixed;
-  inset-block: 14px;
-  inset-inline: auto 14px;
-  width: min(680px, calc(100% - 28px));
-  max-width: calc(100% - 28px);
-  max-height: min(760px, calc(100vh - 28px));
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--ink);
-}
-
-.so-drawer-body {
-  display: grid;
-  gap: 14px;
-  min-width: 0;
-  padding: 20px;
-}
-
-.so-drawer-head {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 18px;
-  position: sticky;
-  inset-block-start: 0;
-  z-index: 1;
-  background: var(--surface);
-}
-
-.so-drawer-head h2 {
-  margin: 3px 0 0;
-  font-size: 20px;
-}
-
 .so-drawer-summary {
   max-width: 68ch;
   margin: 7px 0 0;
@@ -518,10 +478,6 @@ button.so-crumb:hover {
   overflow-wrap: anywhere;
 }
 
-.so-drawer-close {
-  flex: 0 0 auto;
-}
-
 @media (max-width: 680px) {
   .so-modebar {
     width: 100%;
@@ -540,17 +496,8 @@ button.so-crumb:hover {
   }
 
   .so-section-head,
-  .so-item-head,
-  .so-drawer-head {
+  .so-item-head {
     flex-wrap: wrap;
-  }
-
-  .so-drawer {
-    inset: auto 0 0;
-    width: 100%;
-    max-width: 100%;
-    max-height: 86vh;
-    border-radius: 10px 10px 0 0;
   }
 }
 

@@ -9,78 +9,7 @@
     <link rel="stylesheet" href="./tasks.css" />
   </head>
   <body>
-    <div class="tasks-wireframe" hidden>
-      <header class="tasks-header" data-region="global-navigation">
-        <div class="brand-line">
-          <a href="./dashboard.html">HumanAgent</a>
-          <span>任务列表</span>
-        </div>
-        <nav aria-label="任务列表导航">
-          <a href="./dashboard.html">总览</a>
-          <a href="./task.html?task=new">新建任务</a>
-        </nav>
-      </header>
-
-      <main id="main-content" class="tasks-main">
-        <section class="tasks-intro" aria-labelledby="tasks-title">
-          <div>
-            <h1 id="tasks-title">任务</h1>
-            <p>正在运行、需要你决定和历史记录。</p>
-          </div>
-          <a class="button button--primary" href="./task.html?task=new">新建任务</a>
-        </section>
-
-        <section class="filterbar" aria-label="筛选任务">
-          <div class="segments" role="group" aria-label="任务范围">
-            <button type="button" class="segment" aria-pressed="true">全部</button>
-            <button type="button" class="segment" aria-pressed="false">运行中</button>
-            <button type="button" class="segment" aria-pressed="false">等待决策</button>
-            <button type="button" class="segment" aria-pressed="false">已完成</button>
-            <button type="button" class="segment" aria-pressed="false">已停止</button>
-            <button type="button" class="segment" aria-pressed="false">未启动</button>
-            <button type="button" class="segment" aria-pressed="false">失败</button>
-          </div>
-        </section>
-
-        <div class="task-groups" data-task-groups>
-          <section data-group="current" aria-labelledby="current-tasks-title">
-            <header class="section-head">
-              <div><h2 id="current-tasks-title">当前运行</h2></div>
-              <span class="section-meta" data-group-count="current">0 项</span>
-            </header>
-            <div class="panel" role="table" aria-label="当前运行任务" data-task-table="running">
-              <div class="task-row task-row--head" role="row" aria-hidden="true">
-                <span class="task-cell-label">任务</span>
-                <span class="task-cell-label">状态</span>
-                <span class="task-cell-label">负责 agent</span>
-                <span class="task-cell-label">当前节点</span>
-                <span class="task-cell-label">正在处理</span>
-                <span class="task-cell-label">第几轮</span>
-                <span class="task-cell-label">进度</span>
-                <span class="task-cell-label">最近更新</span>
-                <span class="task-cell-label">操作</span>
-              </div>
-              <p class="empty" data-runtime-rows>任务行由 Runtime projection 渲染。</p>
-            </div>
-          </section>
-
-          <section data-group="decision" aria-labelledby="decision-tasks-title">
-          <header class="section-head"><div><h2 id="decision-tasks-title">需要你决策</h2></div><span class="section-meta" data-group-count="decision">0 项</span></header>
-            <div class="panel" aria-label="需要用户决策的任务" data-task-table="waiting">
-              <p class="empty" data-runtime-rows>需要决策的任务行由 Runtime projection 渲染。</p>
-            </div>
-          </section>
-
-          <section data-group="history" aria-labelledby="history-tasks-title">
-          <header class="section-head"><div><h2 id="history-tasks-title">历史任务</h2></div><span class="section-meta" data-group-count="history">0 项</span></header>
-            <div class="panel" aria-label="历史任务" data-task-table="history">
-              <p class="empty" data-runtime-rows>历史任务行由 Runtime projection 渲染。</p>
-            </div>
-          </section>
-        </div>
-
-      </main>
-    </div>
+    <div id="page-root"></div>
     <script type="module" src="./tasks.js"></script>
   </body>
 </html>

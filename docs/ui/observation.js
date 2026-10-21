@@ -3,7 +3,7 @@ import {
   clearNode,
   element,
   loadRuntimeStatus,
-  makePageShell,
+  mountPageTemplate,
   mountSemanticObservationPanel,
   openTechnicalDetail,
   renderPageError,
@@ -12,6 +12,7 @@ import {
   taskIdFromQuery,
   taskReadScopeFromQuery,
 } from './runtime-shell.js'
+import { renderSemanticEvidenceContent } from './semantic-observation.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
 import {
   renderTaskActualExecutionGraphSection,
@@ -77,21 +78,22 @@ const OBSERVATION_DISPLAY_SURFACE = {
   applyMode: applyObservationDisplayMode,
 }
 
-const {
-  main,
-  status,
-  applyDisplayMode,
-  initializeDisplayPreference,
-  disposeDisplayPreference,
-} = makePageShell(
-  'Task List',
-  'Pipeline Observation',
-  '任务观测',
-  '从输入到任务输出的只读节点流转；节点详情只呈现工具调用、工具返回和 agent 写入的结论。',
-  { displaySurface: OBSERVATION_DISPLAY_SURFACE },
-)
+const pageRoot = document.getElementById('page-root')
+const template = mountPageTemplate(pageRoot, {
+  layout: 'work',
+  active: 'Task List',
+  eyebrow: '任务观测 · 只读',
+  title: '任务观测',
+  lede: '从输入到任务输出的只读节点流转；节点详情只呈现工具调用、工具返回和 agent 写入的结论。',
+  scope: explicitScope,
+  displaySurface: OBSERVATION_DISPLAY_SURFACE,
+})
+const { heading, status, primary, support } = template.hosts
+const { applyDisplayMode, initializeDisplayPreference } = template.shell
+const headingCopy = heading.querySelector('.page-heading-copy')
+const headingMeta = element('div', undefined, 'observation-meta')
+headingCopy.append(headingMeta)
 
-let drawer
 let drawerCard
 let triggerNodeId
 let returnFocusPending = false
@@ -280,71 +282,33 @@ function buildFlow(nodes, lanes) {
   return canvas
 }
 
-function buildDrawer() {
-  drawer = element('dialog', undefined, 'node-drawer')
-  drawer.setAttribute('aria-labelledby', 'drawer-title')
-  const body = element('div', undefined, 'drawer-body')
-  drawer.append(body)
-  drawer.addEventListener('close', () => {
-    drawerCard?.dispose()
-    drawerCard = undefined
-    returnFocusPending = true
-    queueMicrotask(focusCurrentTrigger)
-  })
-  drawer.addEventListener('keydown', trapFocus)
-  document.body.append(drawer)
-}
-
-// renderObservation replaces every flow node (clearNode(main)), so the node that
-// opened the drawer is detached by the time the dialog fires `close`. Hold the
-// trigger id instead of the element and resolve it in the CURRENT DOM.
+// renderObservation replaces every flow node (clearNode(primary)), so the node that
+// opened the detail is detached by the time a scope navigation re-renders. Hold
+// the trigger id instead of the element and resolve it in the CURRENT DOM.
 // Breadcrumb-back and enter-scope re-render into a scope where the original id
 // can be absent; those paths fall back to that scope's first node.
 function currentTriggerNode() {
   const card = triggerNodeId
-    ? main.querySelector(`.flow-node[data-node-id="${CSS.escape(String(triggerNodeId))}"]`)
+    ? primary.querySelector(`.flow-node[data-node-id="${CSS.escape(String(triggerNodeId))}"]`)
     : null
-  return card ?? main.querySelector('.flow-node')
+  return card ?? primary.querySelector('.flow-node')
 }
 
 // Best effort right after `close`, while the pre-navigation DOM is still
 // present. Must not clear the pending flag: a scope navigation re-renders after
 // this and still needs the post-render pass below.
 function focusCurrentTrigger() {
-  if (!returnFocusPending || drawer?.open) return
+  if (!returnFocusPending || document.querySelector('dialog.shell-layer[open]')) return
   currentTriggerNode()?.focus()
 }
 
 // Authoritative pass, scheduled by renderObservation after it rebuilds the flow
 // nodes. This is what re-establishes focus once the render replaced the trigger.
 function restoreFocusAfterRender() {
-  if (!returnFocusPending || drawer?.open) return
+  if (!returnFocusPending || document.querySelector('dialog.shell-layer[open]')) return
   const target = currentTriggerNode()
   if (target) target.focus()
   returnFocusPending = false
-}
-
-function focusables() {
-  return [...drawer.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
-    .filter((node) => !node.disabled)
-}
-
-function trapFocus(event) {
-  if (event.key !== 'Tab') return
-  const items = focusables()
-  if (items.length === 0) {
-    event.preventDefault()
-    return
-  }
-  const first = items[0]
-  const last = items[items.length - 1]
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault()
-    last.focus()
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault()
-    first.focus()
-  }
 }
 
 function renderHandoffPane(node, handoffs) {
@@ -408,30 +372,17 @@ function renderDrawerSection(definition, node, handoffs, detail) {
   return section
 }
 
-function renderNodeDrawer(node, handoffs, detail, purpose) {
+function renderNodeDrawer(node, handoffs, detail, purpose, trigger) {
   triggerNodeId = node.nodeId
-  const body = drawer.querySelector('.drawer-body')
+  const body = element('div', undefined, 'drawer-body')
   drawerCard?.dispose()
   drawerCard = undefined
-  clearNode(body)
   const eventView = purpose === 'execution-events'
-  const head = element('header', undefined, 'drawer-head')
-  const titleWrap = element('div')
-  titleWrap.append(
-    element('p', '节点详情 · 只读', 'eyebrow'),
-    element('h2', detail?.title || node.title || node.nodeId),
-  )
   // The work-card note describes summary conclusions and CoT; an execution event
   // is a recorded fact, not a work item, so it carries no such note.
   if (!eventView) {
-    titleWrap.append(element('p', '工具调用、工具返回和 agent 自己写入的 summary 结论；不呈现模型私有思维链。', 'drawer-note'))
+    body.append(element('p', '工具调用、工具返回和 agent 自己写入的 summary 结论；不呈现模型私有思维链。', 'drawer-note'))
   }
-  const close = element('button', '关闭', 'button drawer-close')
-  close.type = 'button'
-  close.dataset.action = 'close-drawer'
-  close.addEventListener('click', () => drawer.close())
-  head.append(titleWrap, close)
-  body.append(head)
 
   if (eventView) {
     // A recorded execution event is not a work item: show its typed facts once
@@ -485,14 +436,23 @@ function renderNodeDrawer(node, handoffs, detail, purpose) {
     const enter = element('button', '进入下一层观测', 'button drawer-enter')
     enter.type = 'button'
     enter.addEventListener('click', () => {
-      drawer.close()
+      template.detail.close()
       void load(detail.childScopeRef)
     })
     body.append(enter)
   }
 
-  drawer.showModal()
-  close.focus()
+  template.detail.open({
+    eyebrow: '节点详情 · 只读',
+    title: detail?.title || node.title || node.nodeId,
+    content: body,
+    onClose: () => {
+      drawerCard?.dispose()
+      drawerCard = undefined
+      returnFocusPending = true
+      queueMicrotask(focusCurrentTrigger)
+    },
+  }, trigger)
 }
 
 // Compact facts for one recorded execution event. State always shows once; the
@@ -932,41 +892,45 @@ function renderCatalogueDisclosure(projection, collection) {
   return disclosure
 }
 
+function renderHeading(projection) {
+  const title = headingCopy.querySelector('h1')
+  if (title) title.textContent = projection.scope?.title || '任务处理流水'
+  let nextStep = headingCopy.querySelector('.lede')
+  if (!nextStep) {
+    nextStep = element('p', undefined, 'lede')
+    headingCopy.insertBefore(nextStep, headingMeta)
+  }
+  nextStep.textContent = observationNextStep(projection)
+  nextStep.dataset.observationNextStep = 'true'
+
+  clearNode(headingMeta)
+  if (runtimeMode === 'fake') {
+    const fake = element('span', '演示模式：非真实 Provider 结果', 'state-chip')
+    fake.dataset.tone = 'warning'
+    headingMeta.append(fake)
+  }
+  headingMeta.append(element('span', projection.data?.label || '未投影状态', 'state-chip'))
+  const technical = element('button', '技术详情', 'button button--quiet')
+  technical.type = 'button'
+  technical.dataset.observationTechnicalTrigger = 'true'
+  technical.addEventListener('click', () => observationTechnicalDetail(projection))
+  headingMeta.append(technical)
+}
+
 function renderObservation(projection) {
   if (agentViewDispose) {
     agentViewDispose()
     agentViewDispose = null
   }
   lastProjection = projection
-  clearNode(main)
 
   currentScopeStates = scopeStatesOf(projection)
   currentFrames = laneDefinitions(Array.isArray(projection.agentFrames) ? projection.agentFrames : [])
   currentHandoffs = Array.isArray(projection.handoffs) ? projection.handoffs : []
 
-  const heading = element('section', undefined, 'page-heading')
-  const copy = element('div')
-  const nextStep = element('p', observationNextStep(projection), 'lede')
-  nextStep.dataset.observationNextStep = 'true'
-  copy.append(
-    element('p', '任务观测 · 只读', 'eyebrow'),
-    element('h1', projection.scope?.title || '任务处理流水'),
-    nextStep,
-  )
-  const meta = element('div', undefined, 'observation-meta')
-  if (runtimeMode === 'fake') {
-    const fake = element('span', '演示模式：非真实 Provider 结果', 'state-chip')
-    fake.dataset.tone = 'warning'
-    meta.append(fake)
-  }
-  meta.append(element('span', projection.data?.label || '未投影状态', 'state-chip'))
-  const technical = element('button', '技术详情', 'button button--quiet')
-  technical.type = 'button'
-  technical.dataset.observationTechnicalTrigger = 'true'
-  technical.addEventListener('click', () => observationTechnicalDetail(projection))
-  meta.append(technical)
-  heading.append(copy, meta)
-  main.append(heading)
+  clearNode(primary)
+  clearNode(support)
+  renderHeading(projection)
 
   const breadcrumbs = element('nav', undefined, 'breadcrumbs')
   breadcrumbs.setAttribute('aria-label', '当前观测路径')
@@ -980,36 +944,38 @@ function renderObservation(projection) {
     })
     breadcrumbs.append(button)
   })
-  main.append(breadcrumbs)
+  primary.append(breadcrumbs)
 
   const collection = observationCollection(projection)
   const catalogue = projection.scope?.purpose === 'pipeline-registry'
-  if (!catalogue) main.append(renderAgentChain(projection.nodes, currentFrames))
+  if (!catalogue) primary.append(renderAgentChain(projection.nodes, currentFrames))
 
   const agentSection = renderAgentActivitySection(projection)
-  if (agentSection) main.append(agentSection)
+  if (agentSection) support.append(agentSection)
 
   const actualGraphSection = renderActualExecutionGraphSection(projection?.agentActivity)
-  if (actualGraphSection) main.append(actualGraphSection)
+  if (actualGraphSection) support.append(actualGraphSection)
 
-  main.append(renderSemanticObservationSection())
+  primary.append(renderSemanticObservationSection())
 
-  main.append(catalogue
+  primary.append(catalogue
     ? renderCatalogueDisclosure(projection, collection)
     : renderNodeCollection(projection, collection))
   if (projection.nodes.length === 0) return
   requestAnimationFrame(restoreFocusAfterRender)
 
-  // The typed detail of the selected node opens the read-only drawer; `selectedNodeId` is cleared so
-  // the drawer opens once per selection and breadcrumb navigation starts from a clean state.
+  // The typed detail of the selected node opens the shared detail carrier; `selectedNodeId` is cleared so
+  // the detail opens once per selection and breadcrumb navigation starts from a clean state.
   const selected = projection.selectedNode
   if (selected && selectedNodeId === selected.nodeId) {
     selectedNodeId = undefined
+    const trigger = primary.querySelector(`.flow-node[data-node-id="${CSS.escape(String(selected.nodeId))}"]`)
     renderNodeDrawer(
       projection.nodes.find((node) => node.nodeId === selected.nodeId) || { nodeId: selected.nodeId, title: selected.title },
       currentHandoffs,
       selected,
       projection.scope?.purpose,
+      trigger,
     )
   }
 }
@@ -1028,6 +994,13 @@ function renderSemanticObservationSection() {
         onModeChange: (mode) => {
           if (mode === observationDisplayMode) return
           void applyDisplayMode(mode)
+        },
+        onEvidenceRequest: (evidence, trigger) => {
+          template.detail.open({
+            eyebrow: '只读证据',
+            title: evidence.title,
+            content: renderSemanticEvidenceContent(evidence),
+          }, trigger)
         },
       })
     } else {
@@ -1092,7 +1065,6 @@ async function applyObservationDisplayMode({ mode }) {
   }
 }
 
-buildDrawer()
 void (async () => {
   const { status: runtimeStatus, error } = await loadRuntimeStatus()
   runtimeMode = runtimeStatus?.mode || ''
@@ -1103,9 +1075,15 @@ void (async () => {
   await initializeDisplayPreference()
 })()
 
-window.addEventListener('pagehide', () => {
+window.addEventListener('pagehide', (event) => {
+  if (event?.persisted) return
+  agentViewDispose?.()
+  agentViewDispose = null
+  closeAgentDetail()
+  drawerCard?.dispose()
+  drawerCard = undefined
   semanticObservationPanel?.dispose()
   semanticObservationPanel = null
   semanticObservationHost = null
-  disposeDisplayPreference()
+  template.dispose()
 })

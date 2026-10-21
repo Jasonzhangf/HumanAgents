@@ -4,10 +4,9 @@ import {
   createScopedReadPublication,
   element,
   loadRuntimeStatus,
-  makePageShell,
+  mountPageTemplate,
   mountSemanticObservationPanel,
   observationHref,
-  openTechnicalDetail,
   queryParam,
   readHistoryFilters,
   readScopeLabel,
@@ -91,7 +90,8 @@ let agentSelectionFailure = initialAgentSelection.ok ? undefined : initialAgentS
 let agentQuery = initialAgentSelection.ok ? requestAgentQuery(initialAgentSelection.value) : undefined
 let agentViewDispose = null
 let agentDetailDispose = null
-let agentDetailLayer = null
+let agentDetailOpen = false
+let agentDetailSerial = 0
 let agentReadFailure
 let agentReadPending = false
 
@@ -198,24 +198,46 @@ function updatePlanViewUrl({ display, selection } = {}) {
   window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
 }
 
+function detailEntriesContent(entries) {
+  const list = element('dl', undefined, 'draft-receipt')
+  for (const [label, value] of entries) {
+    const row = element('div')
+    row.append(element('dt', label), element('dd', value === undefined || value === null ? '未提供' : String(value)))
+    list.append(row)
+  }
+  return list
+}
+
+// Every page-owned drill-down enters the one template detail carrier. The
+// wrapper only composes the existing back control and content; it does not
+// create another dialog or own focus.
+function openPageDetail({ onBack, entries = [], content, ...config }, trigger) {
+  if (typeof onBack !== 'function') {
+    return detail.open({ ...config, entries, ...(content ? { content } : {}) }, trigger)
+  }
+  const body = element('div', undefined, 'page-detail-content')
+  const back = element('button', '返回计划详情', 'button button--quiet')
+  back.type = 'button'
+  back.addEventListener('click', onBack)
+  body.append(back)
+  if (content) body.append(content)
+  if (entries.length > 0) body.append(detailEntriesContent(entries))
+  return detail.open({ ...config, content: body }, trigger)
+}
+
 // The existing contextual 技术详情 drawer is the evidence reader this surface
 // supports. It shows the exact typed reference and never fabricates a
 // checkpoint association or a resolvable link the runtime did not supply.
-function openPlanDetail({ onBack, ...detail }, trigger) {
-  const layer = openTechnicalDetail({
-    ...detail,
+function openPlanDetail(detailContent, trigger) {
+  const layer = openPageDetail({
+    ...detailContent,
     onClose: () => {
       if (trigger?.dataset.planDetailTrigger === 'current' && !trigger.isConnected && displayMode === 'current') {
-        main.querySelector('[data-plan-detail-trigger="current"]')?.focus()
+        primary.querySelector('[data-plan-detail-trigger="current"]')?.focus()
       }
     },
-  })
-  if (typeof onBack === 'function') {
-    const back = element('button', '返回计划详情', 'button button--quiet')
-    back.type = 'button'
-    back.addEventListener('click', onBack)
-    layer.querySelector('.shell-layer-body').append(back)
-  }
+  }, trigger)
+  return layer
 }
 
 function evidenceTrigger(ref, { onOpenDetail = openPlanDetail } = {}) {
@@ -237,42 +259,54 @@ function evidenceTrigger(ref, { onOpenDetail = openPlanDetail } = {}) {
   return button
 }
 
-const {
-  main,
-  status,
-  applyDisplayMode,
-  initializeDisplayPreference,
-  disposeDisplayPreference,
-} = makePageShell(
-  'Task List',
-  'Task Dashboard',
-  '任务看板',
-  '这里显示这个任务当前的状态、执行进展、关键节点和可执行操作。',
-  {
-    scope: explicitScope,
-    breadcrumbs: explicitScope
-      ? [
-          { label: '系统', href: './dashboard.html' },
-          { label: '项目', href: `./tasks.html?projectKey=${encodeURIComponent(explicitScope.projectKey)}` },
-          { label: '任务', href: null },
-        ]
-      : [
-          { label: '系统', href: './dashboard.html' },
-          { label: '任务', href: null },
-        ],
-    capabilities: explicitScope
-      ? {
-          onLeaveRecords: leaveRecords,
-          history: true,
-          onReadHistory: loadHistory,
-          onLeaveHistory: leaveHistory,
-        }
-      : undefined,
-    // Pass the surface by reference: its mode/reason getters must stay live so
-    // `semantic` appears only after the authoritative history has been read.
-    displaySurface: TASK_DISPLAY_SURFACE,
-  },
-)
+const template = mountPageTemplate(document.getElementById('page-root'), {
+  layout: 'work',
+  active: 'Task List',
+  eyebrow: 'Task Dashboard',
+  title: '任务看板',
+  lede: '这里显示这个任务当前的状态、执行进展、关键节点和可执行操作。',
+  scope: explicitScope,
+  breadcrumbs: explicitScope
+    ? [
+        { label: '系统', href: './dashboard.html' },
+        { label: '项目', href: `./tasks.html?projectKey=${encodeURIComponent(explicitScope.projectKey)}` },
+        { label: '任务', href: null },
+      ]
+    : [
+        { label: '系统', href: './dashboard.html' },
+        { label: '任务', href: null },
+      ],
+  capabilities: explicitScope
+    ? {
+        onLeaveRecords: leaveRecords,
+        history: true,
+        onReadHistory: loadHistory,
+        onLeaveHistory: leaveHistory,
+      }
+    : undefined,
+  // Pass the surface by reference: its mode/reason getters must stay live so
+  // `semantic` appears only after the authoritative history has been read.
+  displaySurface: TASK_DISPLAY_SURFACE,
+})
+const { hosts, shell, detail } = template
+const { primary, support, status, heading } = hosts
+
+function applyDisplayMode(mode) {
+  return shell.applyDisplayMode(mode)
+}
+
+const refreshButton = element('button', '刷新当前范围', 'button button--quiet')
+refreshButton.type = 'button'
+refreshButton.dataset.pageRefresh = 'true'
+refreshButton.addEventListener('click', refreshPage)
+heading.append(refreshButton)
+
+function refreshPage() {
+  if (pageDisposed) return
+  // A manual refresh is the one path that re-reads the shared semantic panel.
+  // Plain re-renders re-attach its retained host without a new request.
+  void refresh().then(() => semanticObservationPanel?.reload()).catch(setRefreshError)
+}
 
 let dashboard
 let taskGrantControl = null
@@ -622,7 +656,7 @@ async function returnToActionsSource() {
 }
 
 /**
- * The selected reading mode owns what `main` shows. A background refresh
+ * The selected reading mode owns what the primary/support hosts show. A background refresh
  * re-reads the task projection, so it has to re-apply the active reading mode
  * instead of forcing the dashboard back over a confirmed Actions/Raw view.
  */
@@ -644,21 +678,17 @@ function renderPanelPerspectiveView(mode) {
     agentViewDispose()
     agentViewDispose = null
   }
-  clearNode(main)
-  const heading = element('section', undefined, 'page-heading')
-  const copy = element('div', undefined, 'page-heading-copy')
-  copy.append(element('p', '只读阅读', 'eyebrow'), element('h1', displayModeLabel(mode)))
-  heading.append(copy, status, refreshButton)
-  main.append(heading)
-  main.append(renderSemanticObservationSection())
-  main.append(mode === 'semantic' ? renderPlanHistoryDetailSection() : renderRecordsDetailSection(mode))
+  clearNode(primary)
+  clearNode(support)
+  primary.append(renderSemanticObservationSection())
+  support.append(mode === 'semantic' ? renderPlanHistoryDetailSection() : renderRecordsDetailSection(mode))
   const trace = element('details', undefined, 'display-detail-fold')
   trace.dataset.executionTraceDetail = 'true'
   trace.open = executionTraceDetailOpen
   trace.append(element('summary', '任务事件明细'))
   trace.addEventListener('toggle', () => { executionTraceDetailOpen = trace.open })
   trace.append(renderExecutionTraceSection())
-  main.append(trace)
+  support.append(trace)
 }
 
 function recordsContentHasRef(content, selectedRef) {
@@ -753,13 +783,14 @@ let comparisonLeft = ''
 
 // The checkpoint selection lives in the URL only: the old local
 // `viewedCheckpointId` is gone. The frozen C5 helper encodes and decodes the four
-// keys, so reload and popstate restore the exact target. The main layer and the
+// keys, so reload and popstate restore the exact target. The page slots and the
 // shared shell detail layer each own a disposer so replacing a renderer cannot
 // leave a stale listener behind.
 let checkpointViewDispose = null
 let checkpointRenderRead = null
 let checkpointDetailDispose = null
-let checkpointDetailLayer = null
+let checkpointDetailOpen = false
+let checkpointDetailSerial = 0
 
 function leaveHistory() {
   historyView = ''
@@ -973,30 +1004,40 @@ function disposeCheckpointView() {
   }
 }
 
-function closeCheckpointDetail() {
+function releaseCheckpointDetail() {
   invalidateCheckpointAssetBody()
+  disposeCheckpointDetailRenderer()
+}
+
+function disposeCheckpointDetailRenderer() {
+  checkpointDetailOpen = false
   if (checkpointDetailDispose) {
     checkpointDetailDispose()
     checkpointDetailDispose = null
   }
-  if (checkpointDetailLayer?.open) checkpointDetailLayer.close()
-  checkpointDetailLayer = null
+}
+
+function closeCheckpointDetail() {
+  const wasOpen = checkpointDetailOpen
+  releaseCheckpointDetail()
+  if (wasOpen) detail.close()
 }
 
 // Every drill-down reuses the one shell layer, so the exact checkpoint detail and
 // a chosen reference share the same desktop side panel / mobile bottom drawer.
 // There is no second overlay and no page-owned store.
-function showCheckpointDetail(title, content, dispose) {
-  if (checkpointDetailDispose) {
-    checkpointDetailDispose()
-    checkpointDetailDispose = null
-  }
+function showCheckpointDetail(title, content, dispose, trigger) {
+  const serial = ++checkpointDetailSerial
+  disposeCheckpointDetailRenderer()
   checkpointDetailDispose = dispose ?? null
-  checkpointDetailLayer = openTechnicalDetail({
+  checkpointDetailOpen = true
+  openPageDetail({
     title,
     content,
-    onClose: closeCheckpointDetail,
-  })
+    onClose: () => {
+      if (serial === checkpointDetailSerial) releaseCheckpointDetail()
+    },
+  }, trigger)
 }
 
 function checkpointReferenceRows(reference) {
@@ -1078,7 +1119,7 @@ function checkpointControlRefreshFailure(error, stage) {
 }
 
 async function refreshCheckpointAfterControl() {
-  const reopenDetail = checkpointDetailLayer?.open === true
+  const reopenDetail = checkpointDetailOpen
   try {
     if (!historyHost) throw checkpointControlUnavailable()
     await renderCheckpointHistoryView(historyHost, true)
@@ -1198,7 +1239,7 @@ function checkpointHistoryActions(host, read) {
 }
 
 // C5 already renders unavailable capability reasons in the shared detail.
-// Unknown or malformed states stay out of the main layer and remain diagnosable here.
+// Unknown or malformed states stay out of the page slots and remain diagnosable here.
 function appendCheckpointCapabilityDiagnostics(root, read) {
   if (!read?.ok) return
   const entries = Object.entries(read.value.capabilities ?? {})
@@ -1222,6 +1263,7 @@ function appendCheckpointCapabilityDiagnostics(root, read) {
 }
 
 async function loadHistory(view, host) {
+  if (pageDisposed) return
   if (!explicitScope) {
     host.append(element('p', '当前页面没有已确认的 task scope，无法读取历史。', 'empty'))
     return
@@ -1258,6 +1300,7 @@ async function loadHistory(view, host) {
 }
 
 async function renderContextHistoryView(host, keep = false) {
+  if (pageDisposed) return
   if (!keep) {
     clearNode(host)
     host.append(element('p', '正在读取 Context 历史…', 'muted'))
@@ -1301,6 +1344,7 @@ async function renderContextHistoryView(host, keep = false) {
 // the same task. It is URL view state only: the call never writes current, a
 // preference, or another scope's read.
 function pushCheckpointSelection(viewed) {
+  if (pageDisposed) return
   const encoded = checkpointQuery(new URLSearchParams(location.search), { viewed })
   if (!encoded.ok) {
     void checkpointHistoryRead.refresh({ kind: 'closed' })
@@ -1329,10 +1373,11 @@ function mountCheckpointView(host, read) {
   host.append(actions)
   // An open detail layer belongs to the previous read. Refresh it so it can never
   // show content for a selection the page no longer displays.
-  if (checkpointDetailLayer?.open) openCheckpointDetail()
+  if (checkpointDetailOpen) openCheckpointDetail()
 }
 
 async function renderCheckpointHistoryView(host, keep = false) {
+  if (pageDisposed) return
   closeCheckpointDetail()
   checkpointRenderRead = null
   disposeCheckpointView()
@@ -1378,6 +1423,7 @@ async function renderCheckpointHistoryView(host, keep = false) {
 }
 
 async function renderBusinessCyclesView(host, keep = false) {
+  if (pageDisposed) return
   if (!keep) {
     clearNode(host)
     host.append(element('p', '正在读取业务周期…', 'muted'))
@@ -1417,6 +1463,7 @@ async function renderBusinessCyclesView(host, keep = false) {
 }
 
 async function renderMilestoneReviewsView(host, keep = false) {
+  if (pageDisposed) return
   if (!keep) {
     clearNode(host)
     host.append(element('p', '正在读取里程碑评审…', 'muted'))
@@ -1462,6 +1509,7 @@ async function renderMilestoneReviewsView(host, keep = false) {
 }
 
 async function renderInspectionOccurrencesView(host, keep = false) {
+  if (pageDisposed) return
   if (!keep) {
     clearNode(host)
     host.append(element('p', '正在读取巡检记录…', 'muted'))
@@ -1510,6 +1558,7 @@ async function renderInspectionOccurrencesView(host, keep = false) {
 }
 
 async function renderInspectionComparisonView(host, left, right) {
+  if (pageDisposed) return
   clearNode(host)
   host.append(element('p', '正在对比巡检记录…', 'muted'))
   let read
@@ -1733,6 +1782,7 @@ async function runPlanControl(subscriptionId, action) {
     planControlNotice = planControlResultCopy(action, result)
     await refresh()
   } catch (error) {
+    if (pageDisposed) return
     // A typed rejection is a real outcome, not a hidden failure: the re-read
     // keeps the page truthful about the plan the runtime still reports, and the
     // rejection itself stays available so a session error still offers pairing.
@@ -1823,7 +1873,7 @@ function renderActualExecutionGraphSection() {
   const read = dashboard?.agentActivity
   if (!read || read.ok !== true || !read.value?.actualExecutionGraph) return null
   return renderTaskActualExecutionGraphSection(read.value.actualExecutionGraph, {
-    onOpenDetail: openTechnicalDetail,
+    onOpenDetail: openPageDetail,
   })
 }
 
@@ -1847,11 +1897,12 @@ async function selectAgentInstance(selection) {
   try {
     await refresh()
   } catch (error) {
+    if (pageDisposed) return
     agentReadFailure = error
     setRefreshError(error)
   } finally {
     agentReadPending = false
-    if (dashboard) renderActiveReadingMode()
+    if (dashboard && !pageDisposed) renderActiveReadingMode()
   }
 }
 
@@ -1898,40 +1949,54 @@ function agentReferenceDetail(payload) {
   return wrap
 }
 
-function closeAgentDetail() {
+function releaseAgentDetail() {
+  agentDetailOpen = false
   if (agentDetailDispose) {
     agentDetailDispose()
     agentDetailDispose = null
   }
-  if (agentDetailLayer?.open) agentDetailLayer.close()
-  agentDetailLayer = null
+}
+
+function closeAgentDetail() {
+  const wasOpen = agentDetailOpen
+  releaseAgentDetail()
+  if (wasOpen) detail.close()
 }
 
 // One shared shell layer hosts every drill-down: this page never opens a second
 // overlay. The A3 module only builds content; focus and close stay with the shell.
 function openAgentDetail(payload) {
   if (!payload || !payload.selection) return
-  closeAgentDetail()
+  const serial = ++agentDetailSerial
+  releaseAgentDetail()
+  agentDetailOpen = true
   if (payload.kind === 'activity') {
     const read = dashboard?.agentActivity
-    if (!read) return
+    if (!read) {
+      releaseAgentDetail()
+      return
+    }
     const detail = renderAgentActivityDetail(read, {
       element,
       onSelect: (selection) => void selectAgentInstance(selection),
       onOpenDetail: openAgentDetail,
     })
     agentDetailDispose = detail.dispose
-    agentDetailLayer = openTechnicalDetail({
+    openPageDetail({
       title: '运行实例详情',
       content: detail.element,
-      onClose: closeAgentDetail,
+      onClose: () => {
+        if (serial === agentDetailSerial) releaseAgentDetail()
+      },
     })
     return
   }
-  agentDetailLayer = openTechnicalDetail({
+  openPageDetail({
     title: '关联引用',
     content: agentReferenceDetail(payload),
-    onClose: closeAgentDetail,
+    onClose: () => {
+      if (serial === agentDetailSerial) releaseAgentDetail()
+    },
   })
 }
 
@@ -2047,7 +2112,7 @@ function renderTaskGrantControlInto(host) {
   const technical = element('button', '查看控制技术详情', 'button button--quiet')
   technical.type = 'button'
   technical.dataset.taskGrantTechnical = 'true'
-  technical.addEventListener('click', () => openTechnicalDetail({
+  technical.addEventListener('click', () => openPageDetail({
     title: '任务控制技术详情',
     entries: taskGrantTechnicalEntries(),
     onClose: () => {
@@ -2070,7 +2135,8 @@ function openTaskGrantControl() {
   }
   renderTaskGrantControlInto(taskGrantControlHost)
   taskGrantDrawerOpen = true
-  const detail = openTechnicalDetail({
+  taskGrantControlHost.dataset.taskGrantControlDrawer = 'true'
+  openPageDetail({
     title: '任务控制 / 执行授权',
     content: taskGrantControlHost,
     onClose: () => {
@@ -2078,11 +2144,11 @@ function openTaskGrantControl() {
       taskGrantDrawerDismissed = true
       if (taskGrantEntry?.isConnected) taskGrantEntry.focus()
     },
-  })
-  detail.dataset.taskGrantControlDrawer = 'true'
+  }, taskGrantEntry)
 }
 
 async function refreshTaskGrantControl() {
+  if (pageDisposed) return
   if (!taskGrantIntent) return
   if (!explicitScope) {
     taskGrantRead = null
@@ -2104,15 +2170,17 @@ async function refreshTaskGrantControl() {
       projectKey: explicitScope.projectKey,
       mode: explicitScope.mode,
     })
+    if (pageDisposed) return
     taskGrantReadState = taskGrantTargetMatches() ? 'ready' : 'unconfirmed'
   } catch (error) {
+    if (pageDisposed) return
     taskGrantRead = error?.status === 409 || error?.status === 400 ? null : previousRead
     taskGrantReadState = error?.status === 409 ? 'target-unverified'
       : error?.status === 400 ? 'unavailable'
         : taskGrantReceipt ? 'unconfirmed' : 'unavailable'
     taskGrantReadError = error
   }
-  renderTaskGrantControlInto(taskGrantControlHost)
+  if (!pageDisposed) renderTaskGrantControlInto(taskGrantControlHost)
 }
 
 async function runTaskGrantCommand(action) {
@@ -2132,6 +2200,7 @@ async function runTaskGrantCommand(action) {
     const receipt = action === 'grant'
       ? await api.grantTaskControl(taskId, input, scope)
       : await api.revokeTaskGrant(taskId, input, scope)
+    if (pageDisposed) return
     taskGrantReceipt = receipt
     taskGrantBusy = false
     try {
@@ -2140,8 +2209,9 @@ async function runTaskGrantCommand(action) {
       taskGrantReadError = error
       taskGrantReadState = 'unconfirmed'
     }
-    renderTaskGrantControlInto(taskGrantControlHost)
+    if (!pageDisposed) renderTaskGrantControlInto(taskGrantControlHost)
   } catch (error) {
+    if (pageDisposed) return
     taskGrantBusy = false
     if (error?.status) {
       taskGrantReceipt = {
@@ -2184,12 +2254,11 @@ function renderDashboard() {
     agentViewDispose()
     agentViewDispose = null
   }
-  clearNode(main)
+  clearNode(primary)
+  clearNode(support)
 
-  const heading = element('section', undefined, 'page-heading')
-  const copy = element('div', undefined, 'page-heading-copy')
   const titleBlock = element('div', undefined, 'task-title-block')
-  titleBlock.append(element('h1', taskRowTitle(dashboard), 'task-title task-title-current'))
+  titleBlock.append(element('h2', taskRowTitle(dashboard), 'task-title task-title-current'))
   const fullBrief = element('button', '查看完整任务说明', 'button button--quiet')
   fullBrief.type = 'button'
   fullBrief.addEventListener('click', () => {
@@ -2198,13 +2267,13 @@ function renderDashboard() {
       content.append(element('h3', '原始任务名称'), element('p', dashboard.taskTitle, 'business-output-text'))
     }
     content.append(renderTaskDescriptionContent({ input: dashboard.input }))
-    openTechnicalDetail({ title: '任务说明', eyebrow: '任务说明', content })
+    openPageDetail({ title: '任务说明', eyebrow: '任务说明', content })
   })
   titleBlock.append(fullBrief)
-  copy.append(element('p', '当前任务', 'eyebrow'), titleBlock)
   const stateChip = element('span', businessStateLabel(), 'state-chip')
   stateChip.dataset.tone = stateTone(dashboard.state)
-  copy.append(stateChip)
+  const currentCopy = element('div', undefined, 'page-heading-copy')
+  currentCopy.append(element('p', '当前任务', 'eyebrow'), titleBlock, stateChip)
   if (explicitScope) {
     const breadcrumbs = element('nav', undefined, 'breadcrumbs')
     breadcrumbs.setAttribute('aria-label', '范围面包屑')
@@ -2213,7 +2282,7 @@ function renderDashboard() {
     const project = element('a', '所属项目')
     project.href = `./tasks.html?projectKey=${encodeURIComponent(explicitScope.projectKey)}`
     breadcrumbs.append(system, project, element('span', '当前任务'))
-    copy.append(breadcrumbs)
+    currentCopy.append(breadcrumbs)
   }
   if (explicitScope) {
     const control = element('button', '任务控制 / 执行授权', 'button button--quiet')
@@ -2226,11 +2295,12 @@ function renderDashboard() {
       }
       openTaskGrantControl()
     })
-    copy.append(control)
+    currentCopy.append(control)
     taskGrantEntry = control
   }
-  heading.append(copy, status, refreshButton)
-  main.append(heading)
+  const currentSection = element('section', undefined, 'section task-dashboard-summary')
+  currentSection.append(currentCopy)
+  primary.append(currentSection)
 
   const waitingStatus = dashboard.statusSections.waiting
   const waitingStatusAbsent = !waitingStatus || waitingStatus === ABSENT_WAITING_STATUS
@@ -2254,7 +2324,7 @@ function renderDashboard() {
     failureDetailButton.type = 'button'
     failureDetailButton.addEventListener('click', () => technicalDetail.click())
     errorNotice.append(failureDetailButton)
-    main.append(errorNotice)
+    primary.append(errorNotice)
   }
 
   if (!['succeeded', 'failed', 'cancelled', 'stopped'].includes(dashboard.state)
@@ -2273,7 +2343,7 @@ function renderDashboard() {
       currentFacts.append(nextCell)
     }
     currentSection.append(currentFacts)
-    main.append(currentSection)
+    primary.append(currentSection)
   }
 
   const outputPresent = (dashboard.output !== undefined && dashboard.output !== null && dashboard.output !== '')
@@ -2285,7 +2355,7 @@ function renderDashboard() {
       output: dashboard.output,
       publication: dashboard.publicOutput,
     }))
-    main.append(outputSection)
+    primary.append(outputSection)
   }
 
   const statuses = element('dl', undefined, 'detail-grid status-layers')
@@ -2303,7 +2373,7 @@ function renderDashboard() {
 
   const technicalDetail = element('button', '技术详情', 'button button--quiet')
   technicalDetail.type = 'button'
-  technicalDetail.addEventListener('click', () => openTechnicalDetail({
+  technicalDetail.addEventListener('click', () => openPageDetail({
     title: '任务技术详情',
     entries: [
       ['当前执行节点', dashboard.currentNode],
@@ -2337,7 +2407,7 @@ function renderDashboard() {
   }))
   const supportDetails = element('div')
   supportDetails.append(statuses, technicalDetail)
-  main.append(renderDashboardDetailFold('运行与连接详情', supportDetails))
+  support.append(renderDashboardDetailFold('运行与连接详情', supportDetails))
 
   if (!explicitScope) {
     const execution = element('section', undefined, 'section')
@@ -2381,7 +2451,7 @@ function renderDashboard() {
     actionStatus.setAttribute('aria-live', 'polite')
     panel.append(actions, actionStatus)
     execution.append(panel)
-    main.append(execution)
+    support.append(execution)
   }
 
   // The accepted reasoning plan for this task: exactly the current revision the
@@ -2407,7 +2477,7 @@ function renderDashboard() {
   // persisted plan; a task without one must not show a schedule surface.
   if (dashboard.plan) planDetails.append(renderTaskPlanSection(dashboard.plan))
   if (planDetails.children.length > 0) {
-    main.append(renderDashboardDetailFold('任务计划', planDetails, planFailureVisible))
+    support.append(renderDashboardDetailFold('任务计划', planDetails, planFailureVisible))
   }
 
   const actualGraphSection = renderActualExecutionGraphSection()
@@ -2416,7 +2486,7 @@ function renderDashboard() {
     const runtimeDetails = element('div')
     if (actualGraphSection) runtimeDetails.append(actualGraphSection)
     if (agentSection) runtimeDetails.append(agentSection)
-    main.append(renderDashboardDetailFold(
+    support.append(renderDashboardDetailFold(
       '执行实例与分配',
       runtimeDetails,
       agentSection?.dataset.agentActivity === 'failed'
@@ -2424,9 +2494,13 @@ function renderDashboard() {
     ))
   }
 
-  const diagnosticsDetails = element('div')
   const semanticSection = renderSemanticObservationSection()
-  diagnosticsDetails.append(semanticSection)
+  primary.append(renderDashboardDetailFold(
+    '语义观测',
+    semanticSection,
+    semanticSection.dataset.semanticObservation === 'unavailable',
+  ))
+  const diagnosticsDetails = element('div')
   const traceSection = element('section', undefined, 'section')
   traceSection.append(element('h2', '执行轨迹'))
   const traceTrigger = element('button', '查看执行轨迹', 'button button--quiet')
@@ -2434,17 +2508,16 @@ function renderDashboard() {
   traceTrigger.addEventListener('click', () => {
     const traceHost = element('div', undefined, 'execution-trace-drawer')
     renderExecutionTraceInto(traceHost)
-    openTechnicalDetail({ title: '执行轨迹', content: traceHost })
+    openPageDetail({ title: '执行轨迹', content: traceHost })
   })
   traceSection.append(traceTrigger)
   diagnosticsDetails.append(traceSection)
   const observationLink = element('a', '打开只读 Observation', 'button')
   observationLink.href = observationHref(taskId, explicitScope)
   diagnosticsDetails.append(observationLink)
-  main.append(renderDashboardDetailFold(
-    '语义观测与执行轨迹',
+  support.append(renderDashboardDetailFold(
+    '执行轨迹与只读观测',
     diagnosticsDetails,
-    semanticSection.dataset.semanticObservation === 'unavailable',
   ))
 }
 
@@ -2595,6 +2668,7 @@ function applyPlanHistoryRead(projection) {
 
 async function refresh() {
   try {
+    if (pageDisposed) return
     if (scopeFailure || !taskId) {
       setRefreshError(scopeFailure || { code: 'read.scope.invalid', message: 'URL 缺少 task 参数', ownerId: 'humanagent.ui', nextAction: '从项目任务行打开任务' })
       return
@@ -2604,6 +2678,7 @@ async function refresh() {
       subscribedOperationId = undefined
       stopObserving()
       const read = await scopedTaskRead.refresh({ ...explicitScope, ...(agentQuery ? { agentQuery } : {}) })
+      if (pageDisposed) return
       if (!read.published) return
       if (!read.state.content) {
         agentReadPending = false
@@ -2629,13 +2704,16 @@ async function refresh() {
       markSync()
       renderActiveReadingMode()
       await refreshTaskGrantControl()
+      if (pageDisposed) return
       if (!taskGrantDrawerOpen && !taskGrantDrawerDismissed && taskGrantEntry?.isConnected) {
         openTaskGrantControl()
       }
       renderTaskGrantControlInto(taskGrantControlHost)
       return
     }
-    dashboard = await api.taskDashboard(taskId, agentQuery)
+    const nextDashboard = await api.taskDashboard(taskId, agentQuery)
+    if (pageDisposed) return
+    dashboard = nextDashboard
     agentReadPending = false
     agentReadFailure = undefined
     dashboardStale = false
@@ -2647,17 +2725,20 @@ async function refresh() {
         taskControlError = error
         return null
       })
+      if (pageDisposed) return
     }
     status.dataset.tone = 'success'
     status.textContent = '任务投影已同步'
     markSync()
     renderActiveReadingMode()
   } catch (error) {
+    if (pageDisposed) return
     agentReadPending = false
     if (agentQuery) agentReadFailure = error
     setRefreshError(error)
     throw error
   }
+  if (pageDisposed) return
   if (!dashboard) return
   if (dashboard.operationId && ['running', 'settling'].includes(dashboard.state)) {
     stopObserving()
@@ -2679,11 +2760,13 @@ async function stopExecution() {
     actionStatus.textContent = 'stopping · 正在请求 stop，等待 stopped checkpoint'
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     const result = await api.stop(taskId)
+    if (pageDisposed) return
     await refresh()
     actionStatus.textContent = result.state === 'stopped'
       ? `stopped · operation=${result.operationId}`
       : `stop=${result.state} · operation=${result.operationId}`
   } catch (error) {
+    if (pageDisposed) return
     renderPageError(actionStatus, error)
     await refresh().catch(setRefreshError)
   }
@@ -2693,11 +2776,13 @@ async function retryStopExecution() {
   try {
     actionStatus.textContent = 'retrying stop · 正在重试 stop 收拢'
     const result = await api.retryStop(taskId)
+    if (pageDisposed) return
     await refresh()
     actionStatus.textContent = result.state === 'stopped'
       ? `stopped · operation=${result.operationId}`
       : `stop=${result.state} · operation=${result.operationId}`
   } catch (error) {
+    if (pageDisposed) return
     renderPageError(actionStatus, error)
     await refresh().catch(setRefreshError)
   }
@@ -2711,8 +2796,10 @@ async function revokeTaskGrantControl() {
       requestId: `control:revoke:task-dashboard:${Date.now()}`,
       expectedRevision: grant.revision,
     })
+    if (pageDisposed) return
     await refresh()
   } catch (error) {
+    if (pageDisposed) return
     taskControlError = error
     renderActiveReadingMode()
   }
@@ -2781,9 +2868,11 @@ function closeStream() {
 async function load() {
   try {
     const [{ status: runtimeStatus, error }] = await Promise.all([loadRuntimeStatus()])
+    if (pageDisposed) return
     renderRuntimeStatus(status, runtimeStatus, error)
     await refresh()
   } catch (error) {
+    if (pageDisposed) return
     renderPageError(status, error)
   }
 }
@@ -2792,33 +2881,39 @@ async function load() {
 // settled. A controller that applies `current` before the dashboard read
 // resolves cannot report a truthful render receipt, so it must wait for the
 // read this page actually owns.
-void load().then(() => initializeDisplayPreference())
-
-const refreshButton = element('button', '刷新当前范围', 'button button--quiet')
-refreshButton.type = 'button'
-refreshButton.addEventListener('click', () => {
-  // A manual refresh is the one path that re-reads the shared semantic panel.
-  // Plain re-renders re-attach its retained host without a new request.
-  void refresh().then(() => semanticObservationPanel?.reload()).catch(setRefreshError)
-})
-status.after(refreshButton)
-
 // Back and forward re-read the exact target the URL now names. Only the open
 // checkpoint level reacts; leaving the level or closing the drawer clears it, so
 // a late popstate cannot publish into a departed host.
-window.addEventListener('popstate', () => {
+function handlePopState() {
   if (historyView === 'checkpoints' && historyHost?.isConnected) {
     void renderCheckpointHistoryView(historyHost, true)
   }
-})
+}
 
-window.addEventListener('pagehide', () => {
+let pageDisposed = false
+function disposePage(event) {
+  if (pageDisposed) return
+  if (event?.persisted) return
+  pageDisposed = true
+  window.removeEventListener('popstate', handlePopState)
+  window.removeEventListener('pagehide', disposePage)
+  refreshButton.removeEventListener('click', refreshPage)
+  stopObserving()
+  closeStream()
+  closeAgentDetail()
+  closeCheckpointDetail()
   semanticObservationPanel?.dispose()
   semanticObservationPanel = null
   semanticObservationHost = null
-  disposeDisplayPreference()
-  closeStream()
-  stopObserving()
+  if (agentViewDispose) {
+    agentViewDispose()
+    agentViewDispose = null
+  }
   leaveRecords()
   leaveHistory()
-})
+  template.dispose()
+}
+
+window.addEventListener('popstate', handlePopState)
+window.addEventListener('pagehide', disposePage)
+void load().then(() => shell.initializeDisplayPreference())

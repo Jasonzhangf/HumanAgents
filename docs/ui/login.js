@@ -15,7 +15,7 @@ import {
   queryParam,
   sameOriginPath,
 } from './runtime-api.js'
-import { technicalDetailTrigger } from './runtime-shell.js'
+import { mountPageTemplate } from './runtime-shell.js'
 
 const api = createRuntimeApi()
 
@@ -24,8 +24,11 @@ const api = createRuntimeApi()
 // redirect.
 const entryTarget = sameOriginPath(queryParam('next'))
 
+// The shared template replaces the children of its root at mount. Keep every
+// live login node first, then transfer the valid form/error/session nodes into
+// the standalone hosts so the static DOM is never cleared without retaining
+// the exact form refs and their hooks.
 const sessionState = document.querySelector('[data-auth-session-state]')
-const statusBanner = document.querySelector('[data-auth-status]')
 const pairCard = document.querySelector('[data-pair-card]')
 const form = document.querySelector('[data-pair-form]')
 const codeInput = document.querySelector('[data-pair-code]')
@@ -39,8 +42,23 @@ const errorRetry = document.querySelector('[data-auth-error-retry]')
 const errorReturn = document.querySelector('[data-auth-error-return]')
 const errorExit = document.querySelector('[data-auth-error-exit]')
 
+const template = mountPageTemplate(document.body, {
+  layout: 'standalone',
+  eyebrow: '浏览器会话',
+  title: '配对这台浏览器',
+  lede: '用一次性配对码连接这台浏览器。配对成功后，你会回到刚才请求的页面。',
+})
+
+const statusBanner = template.hosts.status
+statusBanner.dataset.authStatus = ''
+template.hosts.page.id = 'main-content'
+template.hosts.page.dataset.loginPage = 'true'
+template.hosts.heading.append(sessionState)
+template.hosts.primary.append(detailHost, pairCard, errorCard)
+
 const protocolFooter = '配对码属于控制面：它只经 POST /api/auth/pair 交给运行时，不会写进任何业务请求。'
 let pairingCommand = ''
+let pageDisposed = false
 
 errorExit.href = entryTarget
 
@@ -75,10 +93,18 @@ function typedEntries(error) {
   ]
 }
 
-function renderDetail({ entries, footer = protocolFooter }) {
+function renderDetail(error) {
   clearNode(detailHost)
-  const detail = { title: '技术详情', entries, footer }
-  detailHost.append(technicalDetailTrigger(() => detail))
+  const detail = {
+    title: '技术详情',
+    entries: typedEntries(error),
+    footer: protocolFooter,
+  }
+  const trigger = element('button', '技术详情', 'button button--quiet')
+  trigger.type = 'button'
+  trigger.dataset.technicalDetailTrigger = 'true'
+  trigger.addEventListener('click', () => template.detail.open(detail, trigger))
+  detailHost.append(trigger)
 }
 
 function clearTypedError() {
@@ -117,7 +143,7 @@ function showPairFailure(error) {
   errorCard.dataset.errorKind = 'pair'
   errorCard.dataset.tone = 'danger'
   errorCard.hidden = false
-  renderDetail({ entries: typedEntries(error) })
+  renderDetail(error)
 }
 
 async function submitPairing(code) {
@@ -125,18 +151,20 @@ async function submitPairing(code) {
   setBanner('warning', '正在提交配对码…')
   try {
     await api.authPair(code)
+    if (pageDisposed) return false
     clearTypedError()
     sessionState.textContent = '已配对'
     setBanner('success', '配对成功，正在回到刚才请求的那个页面…')
     location.assign(entryTarget)
     return true
   } catch (error) {
+    if (pageDisposed) return false
     setBanner('danger', '配对未完成')
     showPairFailure(error)
     codeInput.focus()
     return false
   } finally {
-    submitButton.disabled = false
+    if (!pageDisposed) submitButton.disabled = false
   }
 }
 
@@ -168,6 +196,7 @@ async function boot() {
   setBanner('warning', '正在检查浏览器会话…')
   try {
     const session = await api.authSession()
+    if (pageDisposed) return
     setPairingCommand(session?.pairingCommand)
     if (session?.authenticated === true) {
       sessionState.textContent = `已配对 · 到期 ${formatTime(session.expiresAt)}`
@@ -183,16 +212,23 @@ async function boot() {
     // without ever seeing a code field it does not need.
     pairCard.hidden = false
     codeInput.focus()
-    if (carried) renderDetail({ entries: typedEntries(carried) })
+    if (carried) renderDetail(carried)
   } catch (error) {
+    if (pageDisposed) return
     sessionState.textContent = '会话检查失败'
     setBanner('danger', '无法读取浏览器会话，暂时无法确认这台浏览器是否已配对。')
     pairCommand.textContent = '配对命令暂不可用'
-    renderDetail({ entries: typedEntries(error) })
+    renderDetail(error)
     // The session could not be read, so pairing is the only remedy left; offer
     // it instead of leaving the page with no action.
     pairCard.hidden = false
   }
 }
+
+window.addEventListener('pagehide', (event) => {
+  if (event?.persisted) return
+  pageDisposed = true
+  template.dispose()
+})
 
 void boot()

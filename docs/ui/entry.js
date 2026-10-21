@@ -5,7 +5,7 @@ import {
   element,
   formatTime,
   loadRuntimeStatus,
-  makePageShell,
+  mountPageTemplate,
   renderPageError,
   renderRuntimeStatus,
   renderTaskExecutions,
@@ -23,19 +23,34 @@ import {
   projectInteractionCardFromSnapshot,
 } from './interaction-card-page.js'
 
-const { main, status, interactionCardHosts } = makePageShell(
-  'Index',
-  'Explicit Input',
-  '任务输入',
-  '接受用户任务、展示只读整理反馈，并在提交后显示任务进展与执行入口。',
-)
-const interactionCardHost = interactionCardHosts[0]
+const pageRoot = document.querySelector('#page-root')
+const interactionCardHost = document.querySelector('[data-interaction-work-card-host][data-entry="entry"]')
+if (!(pageRoot instanceof HTMLElement)) throw new Error('index page requires #page-root')
+if (!(interactionCardHost instanceof HTMLElement)) throw new Error('index page requires an interaction work card host')
+const template = mountPageTemplate(pageRoot, {
+  layout: 'work',
+  active: '新建 Task',
+  eyebrow: 'Explicit Input',
+  title: '任务输入',
+  lede: '接受用户任务、展示只读整理反馈，并在提交后显示任务进展与执行入口。',
+})
+const { status } = template.hosts
 let interactionCard = null
+let pageLeaving = false
+
+function disposeEntryPage(event) {
+  if (event?.persisted) return
+  if (pageLeaving) return
+  pageLeaving = true
+  interactionCard?.dispose()
+  template.dispose()
+}
+window.addEventListener('pagehide', disposeEntryPage)
 
 // The shared work card mounts on the first real event or snapshot update. Until
 // then the host stays genuinely empty, so first entry claims no work.
 function presentInteractionCard(projection) {
-  if (!interactionCardHost || !projection) return
+  if (pageLeaving || !interactionCardHost || !projection) return
   if (!interactionCard) interactionCard = mountInteractionWorkCard(interactionCardHost)
   interactionCard.update(projection)
 }
@@ -95,17 +110,17 @@ function renderField(section, label, value) {
 // The draft region exists only once a real interaction snapshot supplies
 // content. It takes the place the old always-rendered container occupied.
 function ensureDraftSection() {
-  const existing = document.querySelector('#entry-draft')
+  const existing = template.hosts.primary.querySelector('#entry-draft')
   if (existing) return existing
   const section = element('section', undefined, 'section')
   section.id = 'entry-draft'
-  const live = document.querySelector('#entry-live')
+  const live = template.hosts.primary.querySelector('#entry-live')
   if (live && live.parentNode) live.parentNode.insertBefore(section, live)
   return section
 }
 
 function setEntryError(error) {
-  const panel = document.querySelector('#entry-error')
+  const panel = template.hosts.composer.querySelector('#entry-error')
   if (!panel) return
   if (!error) {
     panel.hidden = true
@@ -221,7 +236,7 @@ function clearEntryError() {
 }
 
 function renderStatus(summary, rows) {
-  const section = document.querySelector('#entry-live')
+  const section = template.hosts.primary.querySelector('#entry-live')
   if (!section) return
   clearNode(section)
   const head = element('header', undefined, 'section-head')
@@ -298,11 +313,14 @@ function taskRows(tasks) {
 }
 
 async function refreshQueue() {
+  if (pageLeaving) return
   try {
     const [runtimeStatus, tasks] = await Promise.all([api.status(), api.listTasks()])
+    if (pageLeaving) return
     renderStatus(runtimeStatus, taskRows(tasks))
   } catch (error) {
-    const panel = document.querySelector('#entry-live')
+    if (pageLeaving) return
+    const panel = template.hosts.primary.querySelector('#entry-live')
     if (panel) {
       clearNode(panel)
       panel.append(element('p', `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`, 'empty'))
@@ -315,7 +333,7 @@ async function refreshQueue() {
 // runtime's own executions and controlTarget links; Observation stays a
 // deliberate deeper read-only navigation.
 function focusSubmittedTask(taskIdValue) {
-  const link = [...document.querySelectorAll('#entry-live .task-row-link')]
+  const link = [...template.hosts.primary.querySelectorAll('#entry-live .task-row-link')]
     .find((candidate) => candidate.dataset.taskId === taskIdValue)
   if (link) link.scrollIntoView({ block: 'center' })
 }
@@ -330,6 +348,7 @@ async function landOnSubmittedTask(identity) {
     // row identity was not returned in time; refresh it and keep the failure.
     lookupError = error
   }
+  if (pageLeaving) return
   await refreshQueue()
   if (taskIdValue) focusSubmittedTask(taskIdValue)
   if (lookupError) throw lookupError
@@ -574,7 +593,9 @@ async function waitForTask(identity) {
   }
   const deadline = Date.now() + 20_000
   while (Date.now() < deadline) {
+    if (pageLeaving) return undefined
     const tasks = await api.listTasks()
+    if (pageLeaving) return undefined
     const rows = taskRows(tasks)
     const candidate = rows.find((row) => row.taskId?.value && rowMatchesIdentitySource(row.identitySource, identity))
     if (candidate?.taskId?.value) return candidate.taskId.value
@@ -901,17 +922,13 @@ function renderForm() {
 
 async function load() {
   const { status: runtimeStatus, error } = await loadRuntimeStatus()
+  if (pageLeaving) return
   renderRuntimeStatus(status, runtimeStatus, error)
-  const layout = element('div', undefined, 'layout')
-  const left = element('div')
-  left.append(renderForm())
-  if (interactionCardHost) left.append(interactionCardHost)
-  left.append(liveArea())
-  layout.append(left)
-  main.append(layout)
+  template.hosts.primary.append(interactionCardHost, liveArea())
+  template.hosts.composer.append(renderForm())
   await refreshQueue()
 }
 
 void load().catch((error) => {
-  renderPageError(status, error)
+  if (!pageLeaving) renderPageError(status, error)
 })

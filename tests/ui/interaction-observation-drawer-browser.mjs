@@ -394,7 +394,7 @@ function technicalTokens(text) {
 
 async function readDrawer(page) {
   return page.evaluate(() => {
-    const drawer = document.querySelector('.node-drawer')
+    const drawer = document.querySelector('dialog[data-technical-detail="true"][open]')
     const card = drawer?.querySelector('.iwc-card')
     const status = card?.querySelector('.iwc-status')
     const conversation = card?.querySelector('.iwc-panel--conversation')
@@ -660,7 +660,7 @@ try {
     )
 
     const beforeRefs = await page.evaluate(() => ({
-      open: Boolean(document.querySelector('.node-drawer')?.open),
+      open: Boolean(document.querySelector('dialog[data-technical-detail="true"][open]')),
       focusNode: document.activeElement?.getAttribute('data-node-id') ?? '',
     }))
     record(
@@ -670,7 +670,7 @@ try {
     )
     await page.locator('.flow-node[data-node-id="pipeline.execute"]').click()
     try {
-      await page.waitForSelector('.node-drawer[open] .iwc-card', { timeout: 5000 })
+      await page.waitForSelector('dialog[data-technical-detail="true"][open] .iwc-card', { timeout: 5000 })
     } catch {
       // The red base has no shared card. The DOM read below records the gap.
     }
@@ -770,7 +770,7 @@ try {
     await page.keyboard.press('Escape')
     await page.waitForTimeout(100)
     const closed = await page.evaluate(() => ({
-      open: Boolean(document.querySelector('.node-drawer')?.open),
+      open: Boolean(document.querySelector('dialog[data-technical-detail="true"][open]')),
       focusNode: document.activeElement?.getAttribute('data-node-id') ?? '',
     }))
     record(`${run.label} Escape closes and returns focus to trigger`, closed.open === false && closed.focusNode === 'pipeline.execute', closed)
@@ -811,7 +811,7 @@ try {
     )
     await page.locator('.flow-node[data-node-id="pipeline.execute"]').click()
     try {
-      await page.waitForSelector('.node-drawer[open] .iwc-card', { timeout: 5000 })
+      await page.waitForSelector('dialog[data-technical-detail="true"][open] .iwc-card', { timeout: 5000 })
     } catch {}
     const emptyRefs = await readNodeRefs(page)
     observe('missing and empty selected node refs', emptyRefs)

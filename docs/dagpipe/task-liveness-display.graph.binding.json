@@ -13,7 +13,8 @@
       "productionWiringStatus": "wired",
       "productionOwnerPath": "docs/ui/task.html",
       "productionOwnerRel": "docs/ui/task.html",
-      "productionOwnerSymbol": "data-interaction-work-card-host"
+      "productionOwnerSymbol": "data-interaction-work-card-host",
+      "sharedTemplateContract": "The page controller keeps this surface mounted through the shared template: mountPageTemplate hosts the card marker in its explicit primary slot. The template owns only placement and the single detail/focus carrier; it does not read liveness facts, own the EventSource, or change task state."
     },
     "read_task_dashboard": {
       "ownerPath": "docs/ui/runtime-api.js",
@@ -63,7 +64,8 @@
       "ownerSymbol": "mountInteractionWorkCard",
       "implementationStatus": "implemented",
       "productionWiringStatus": "wired",
-      "productionEvidence": "既有 renderStatus 已渲染 liveness/stream 并以 runtime stateLabel 代替原始 lifecycle。P0 合同要求它显示真实结果或结果入口、区分授权等待/决策/系统阻塞、只渲染有入口的 actions，并停止把 succeeded 与“可停止”下一步无条件下发。既有 browser 用例不是本 P0 的验收证据。"
+      "productionEvidence": "既有 renderStatus 已渲染 liveness/stream 并以 runtime stateLabel 代替原始 lifecycle。P0 合同要求它显示真实结果或结果入口、区分授权等待/决策/系统阻塞、只渲染有入口的 actions，并停止把 succeeded 与“可停止”下一步无条件下发。既有 browser 用例不是本 P0 的验收证据。",
+      "pageLifecycleContract": "The page controller owns transport/stream and card projection state; on page exit it stops its poll/EventSource, disposes the work card, then disposes the shared template. No template-level second composer or second detail dialog is created; the interaction card host stays valid through the shared template."
     }
   }
 }

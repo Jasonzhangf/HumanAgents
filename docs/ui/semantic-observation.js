@@ -64,9 +64,6 @@
 
 export const SEMANTIC_OBSERVATION_CONTRACT_VERSION = 'semantic-observation-view@1'
 
-const INSTANCE_IDS = new WeakMap()
-let nextInstanceId = 1
-
 // The projection owns capability names; the component only renders the typed
 // three-state availability in plain Chinese.
 const CAPABILITY_STATE_LABELS = Object.freeze({
@@ -233,7 +230,7 @@ function renderCapabilities(capabilities) {
 }
 
 function renderEvidenceButton(evidence, onEvidenceRequest) {
-  if (!evidence || typeof evidence !== 'object') return null
+  if (!evidence || typeof evidence !== 'object' || typeof onEvidenceRequest !== 'function') return null
   const button = element('button', 'so-evidence', '查看只读证据')
   button.type = 'button'
   button.dataset.evidenceId = text(evidence.id || evidence.evidenceId)
@@ -309,21 +306,14 @@ function renderSection(section, onEvidenceRequest) {
   return node
 }
 
-function renderEvidenceDrawer(dialog, evidence) {
-  const body = dialog.querySelector('.so-drawer-body')
-  clear(body)
-  const head = element('header', 'so-drawer-head')
-  const copy = element('div')
-  copy.append(
-    element('p', 'so-kicker', '只读证据'),
-    element('h2', undefined, text(evidence?.title, '证据详情')),
-  )
-  if (evidence?.summary) copy.append(element('p', 'so-drawer-summary', text(evidence.summary)))
-  const close = element('button', 'button so-drawer-close', '关闭')
-  close.type = 'button'
-  close.addEventListener('click', () => dialog.close())
-  head.append(copy, close)
-  body.append(head)
+/**
+ * Render the reusable evidence body without an overlay. The page shell owns
+ * the single product dialog, its close control and focus return.
+ */
+export function renderSemanticEvidenceContent(evidence) {
+  const body = element('div', 'so-evidence-detail')
+  body.dataset.evidenceDetail = 'true'
+  if (evidence?.summary) body.append(element('p', 'so-drawer-summary', text(evidence.summary)))
 
   const facts = element('dl', 'so-fact-list')
   const rows = [
@@ -363,6 +353,7 @@ function renderEvidenceDrawer(dialog, evidence) {
     raw.append(element('pre', 'so-raw', text(evidence.raw.content)))
     body.append(raw)
   }
+  return body
 }
 
 /**
@@ -376,8 +367,6 @@ function renderEvidenceDrawer(dialog, evidence) {
  * }} [options]
  * @returns {{
  *   update: (projection: SemanticObservationProjection) => void,
- *   openEvidence: (evidence: Object, trigger?: HTMLElement) => void,
- *   closeEvidence: () => void,
  *   dispose: () => void
  * }}
  */
@@ -386,22 +375,13 @@ export function mountSemanticObservation(host, options = {}) {
     throw new TypeError('mountSemanticObservation requires an HTMLElement host')
   }
 
-  const instanceId = INSTANCE_IDS.get(host) || nextInstanceId++
-  INSTANCE_IDS.set(host, instanceId)
-  const titleId = `so-title-${instanceId}`
-  const dialogTitleId = `so-evidence-title-${instanceId}`
   const root = element('section', 'semantic-observation')
   root.dataset.contractVersion = SEMANTIC_OBSERVATION_CONTRACT_VERSION
   const content = element('div', 'so-content')
-  const dialog = element('dialog', 'so-drawer')
-  dialog.setAttribute('aria-labelledby', dialogTitleId)
-  const dialogBody = element('div', 'so-drawer-body')
-  dialog.append(dialogBody)
-  root.append(content, dialog)
+  root.append(content)
   host.replaceChildren(root)
 
   let latest = null
-  let returnFocus = null
 
   // The consumer re-renders synchronously after a scope request. Move focus to
   // the newly current crumb instead of leaving it on the removed button.
@@ -410,12 +390,6 @@ export function mountSemanticObservation(host, options = {}) {
     const current = content.querySelector('.so-crumb[aria-current="page"]')
     if (current instanceof HTMLElement) current.focus()
   }
-
-  dialog.addEventListener('close', () => {
-    const target = returnFocus
-    returnFocus = null
-    if (target?.isConnected) queueMicrotask(() => target.focus())
-  })
 
   function render() {
     clear(content)
@@ -473,19 +447,8 @@ export function mountSemanticObservation(host, options = {}) {
       latest = projection
       render()
     },
-    openEvidence(evidence, trigger) {
-      returnFocus = trigger instanceof HTMLElement ? trigger : null
-      renderEvidenceDrawer(dialog, evidence)
-      if (!dialog.open) dialog.showModal()
-      dialog.querySelector('.so-drawer-close')?.focus()
-    },
-    closeEvidence() {
-      if (dialog.open) dialog.close()
-    },
     dispose() {
-      if (dialog.open) dialog.close()
       host.replaceChildren()
-      INSTANCE_IDS.delete(host)
     },
   }
 }

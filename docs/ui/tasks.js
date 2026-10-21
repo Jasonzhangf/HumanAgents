@@ -3,7 +3,7 @@ import {
   createScopedReadPublication,
   element,
   loadRuntimeStatus,
-  makePageShell,
+  mountPageTemplate,
   projectReadScopeFromQuery,
   renderPageError,
   renderProjectRead,
@@ -23,29 +23,32 @@ function projectBreadcrumbs(label) {
   ]
 }
 
-const { main, status, setBreadcrumbs } = makePageShell(
-  'Task List',
-  '',
-  projectView ? '项目任务' : '全部项目',
-  projectView
+const template = mountPageTemplate(document.getElementById('page-root'), {
+  layout: 'collection',
+  active: 'Task List',
+  eyebrow: '',
+  title: projectView ? '项目任务' : '全部项目',
+  lede: projectView
     ? '这里列出这个项目本次读取返回的任务，并标明读取是否完整。'
     : '这里列出系统本次读取返回的项目，并标明读取范围是否已确认。',
-  {
-    scope: readScope,
-    breadcrumbs: projectView
-      ? projectBreadcrumbs('当前项目')
-      : [
-          { label: '系统', href: './dashboard.html' },
-          { label: '全部项目', href: null },
-        ],
-  },
-)
+  scope: readScope,
+  breadcrumbs: projectView
+    ? projectBreadcrumbs('当前项目')
+    : [
+        { label: '系统', href: './dashboard.html' },
+        { label: '全部项目', href: null },
+      ],
+})
+
+const { primary, status } = template.hosts
+const { setBreadcrumbs } = template
 
 const listRegion = element('div', undefined, 'task-lists')
 const refreshButton = element('button', '刷新当前范围', 'button button--quiet')
 refreshButton.type = 'button'
+refreshButton.dataset.taskListRefresh = ''
 refreshButton.addEventListener('click', () => void load())
-main.append(refreshButton, listRegion)
+primary.append(refreshButton, listRegion)
 
 const readPublication = createScopedReadPublication((scope) => (
   scope.kind === 'project'
@@ -101,5 +104,10 @@ async function load() {
     renderPageError(status, error)
   }
 }
+
+window.addEventListener('pagehide', (event) => {
+  if (event?.persisted) return
+  template.dispose()
+})
 
 void load()

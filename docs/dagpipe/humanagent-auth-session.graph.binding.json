@@ -7,7 +7,9 @@
   "nodes": {
     "public_entry": {
       "ownerPath": "docs/ui/runtime-shell.js",
-      "ownerRel": "docs/ui/runtime-shell.js"
+      "ownerRel": "docs/ui/runtime-shell.js",
+      "ownerSymbol": "mountPageTemplate standalone layout",
+      "sharedTemplateContract": "The login page may use mountPageTemplate with layout=standalone. Standalone owns only the explicit root, heading/status/primary/support/composer slots, and the shared detail/focus carrier; it renders no business top navigation, no four-corner shell, no display-preference subscription, and no authenticated business read. session_check remains the login controller's public GET /api/auth/session boundary."
     },
     "session_check": {
       "ownerPath": "docs/ui/login.js",
@@ -15,7 +17,8 @@
     },
     "login_surface": {
       "ownerPath": "docs/ui/login.html",
-      "ownerRel": "docs/ui/login.html"
+      "ownerRel": "docs/ui/login.html",
+      "layoutConsumer": "The page controller keeps the valid pairing form, status/error, safe same-origin next, retry, exit, input retention, and focus behavior. It must not attach business navigation or authenticated data to the standalone template."
     },
     "pair_submission": {
       "ownerPath": "docs/ui/login.js",
@@ -27,7 +30,8 @@
     },
     "render_auth_terminal": {
       "ownerPath": "docs/ui/runtime-shell.js",
-      "ownerRel": "docs/ui/runtime-shell.js"
+      "ownerRel": "docs/ui/runtime-shell.js",
+      "terminalContract": "Success returns to the requested same-origin entry; typed rejection or request failure stays on the standalone login surface with input retained and the existing return/retry/exit actions. The shared template only supplies layout and detail focus; it does not submit pairing, read auth state, or trigger automatic login loops."
     }
   }
 }
