@@ -49,6 +49,7 @@ const EXPIRY_WAIT_MS = PAIRING_TTL_MS + 3_000
 
 const ACCESS_CONTROL_OWNER = 'humanagent.app.access-control'
 const SESSION_MISSING_NEXT = 'open the login page and pair this browser'
+const TECHNICAL_DETAIL_SELECTOR = 'dialog.shell-layer[data-technical-detail="true"][open]'
 
 const checks = []
 const observations = []
@@ -165,7 +166,6 @@ async function readStatus(binding, cookie) {
 function readLoginSurface(page) {
   return page.evaluate(() => {
     const errorCard = document.querySelector('[data-auth-error]')
-    const attr = (name) => document.querySelector(`[data-auth-error-${name}]`)?.getAttribute(`data-auth-error-${name}`) ?? null
     return {
       loginPage: Boolean(document.querySelector('[data-login-page]')),
       sessionState: document.querySelector('[data-auth-session-state]')?.textContent ?? '',
@@ -177,12 +177,9 @@ function readLoginSurface(page) {
       codeInputFocused: document.activeElement === document.querySelector('[data-pair-code]'),
       pairCommand: document.querySelector('[data-pair-command]')?.textContent ?? '',
       submitDisabled: Boolean(document.querySelector('[data-pair-submit]')?.disabled),
+      technicalTriggerVisible: Boolean(document.querySelector('[data-auth-detail-host] [data-technical-detail-trigger]')),
       errorVisible: Boolean(errorCard && !errorCard.hidden),
       errorKind: errorCard?.dataset.errorKind ?? '',
-      errorCode: attr('code'),
-      errorOwner: attr('owner'),
-      errorMessage: attr('message'),
-      errorNext: attr('next'),
       errorText: errorCard?.innerText ?? '',
       retryVisible: Boolean(document.querySelector('[data-auth-error-retry]') && !document.querySelector('[data-auth-error-retry]').hidden),
       retryText: document.querySelector('[data-auth-error-retry]')?.textContent ?? '',
@@ -212,13 +209,60 @@ async function submitCode(page, code) {
   await page.click('[data-pair-submit]')
 }
 
-async function waitForErrorCode(page, expected, timeoutMs = 30_000) {
+async function openTechnicalDetail(page) {
+  const trigger = page.locator('[data-auth-detail-host] [data-technical-detail-trigger="true"]')
+  await trigger.waitFor({ state: 'visible', timeout: 30_000 })
+  await trigger.focus()
+  await page.keyboard.press('Enter')
   await page.waitForFunction(
-    (wanted) => document.querySelector('[data-auth-error-code]')?.getAttribute('data-auth-error-code') === wanted,
-    expected,
+    (selector) => Boolean(document.querySelector(selector)),
+    TECHNICAL_DETAIL_SELECTOR,
+    { timeout: 30_000 },
+  )
+  return page.evaluate((selector) => {
+    const dialog = document.querySelector(selector)
+    const attr = (name) => dialog?.querySelector(`[data-auth-error-${name}]`)?.getAttribute(`data-auth-error-${name}`) ?? null
+    return {
+      eyebrow: dialog?.querySelector('.eyebrow')?.textContent ?? '',
+      title: dialog?.querySelector('#technical-detail-title')?.textContent ?? '',
+      code: attr('code'),
+      owner: attr('owner'),
+      message: attr('message'),
+      next: attr('next'),
+      text: dialog?.innerText ?? '',
+      activeClass: document.activeElement?.className ?? '',
+      openLayerCount: document.querySelectorAll('dialog.shell-layer[open]').length,
+      retiredEvidenceDialogCount: document.querySelectorAll('.so-drawer').length,
+    }
+  }, TECHNICAL_DETAIL_SELECTOR)
+}
+
+async function closeTechnicalDetail(page) {
+  await page.keyboard.press('Escape')
+  await page.waitForFunction(
+    (selector) => !document.querySelector(selector)
+      && document.activeElement?.getAttribute?.('data-technical-detail-trigger') === 'true'
+      && document.activeElement?.closest?.('[data-auth-detail-host]'),
+    TECHNICAL_DETAIL_SELECTOR,
+    { timeout: 30_000 },
+  )
+}
+
+async function waitForPairFailure(page, timeoutMs = 30_000) {
+  await page.waitForFunction(
+    () => {
+      const errorCard = document.querySelector('[data-auth-error]')
+      return errorCard
+        && !errorCard.hidden
+        && errorCard.dataset.errorKind === 'pair'
+        && document.querySelector('[data-auth-detail-host] [data-technical-detail-trigger]')
+    },
+    undefined,
     { timeout: timeoutMs },
   ).catch(() => {})
-  return readLoginSurface(page)
+  const surface = await readLoginSurface(page)
+  const detail = await openTechnicalDetail(page)
+  return { ...surface, detail }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +373,21 @@ try {
       && !requestFailure.submitDisabled,
     requestFailure)
   await capture(recoveryPage, 'login-request-failure')
+
+  const requestFailureDetail = await openTechnicalDetail(recoveryPage)
+  observe('pair request failure detail', requestFailureDetail)
+  record('a failed pair request exposes the original code, owner, message and next action in the shared detail',
+    requestFailureDetail.code === 'auth.pair.failed'
+      && requestFailureDetail.owner === 'unknown'
+      && typeof requestFailureDetail.message === 'string'
+      && requestFailureDetail.message.length > 0
+      && requestFailureDetail.next === 'inspect the runtime error'
+      && requestFailureDetail.text.includes('技术详情')
+      && requestFailureDetail.openLayerCount === 1
+      && requestFailureDetail.retiredEvidenceDialogCount === 0,
+    requestFailureDetail)
+
+  await closeTechnicalDetail(recoveryPage)
 
   await recoveryPage.click('[data-auth-error-return]')
   await recoveryPage.waitForFunction(
@@ -632,34 +691,35 @@ try {
   // --- 4. the page renders the carried typed rejection --------------------
   await page.goto(linkUrl.href, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('[data-login-page]', { timeout: 30_000 })
-  await page.waitForFunction(
-    () => document.querySelector('[data-auth-error-code]')?.getAttribute('data-auth-error-code') === 'auth.session.missing',
-    undefined,
-    { timeout: 30_000 },
-  )
+  await page.waitForSelector('[data-auth-detail-host] [data-technical-detail-trigger]', { timeout: 30_000 })
   const carried = await readLoginSurface(page)
-  observe('login page carried rejection', carried)
-  record('the login page renders the carried typed rejection with code, owner, message and next action',
-    carried.errorVisible
-      && carried.errorCode === 'auth.session.missing'
-      && carried.errorOwner === ACCESS_CONTROL_OWNER
-      && carried.errorMessage === 'browser session is required'
-      && carried.errorNext === SESSION_MISSING_NEXT
+  const carriedDetail = await openTechnicalDetail(page)
+  observe('login page carried session context', { surface: carried, detail: carriedDetail })
+  record('the login page keeps carried session context in the shared detail without a rejected pairing card',
+    carried.errorVisible === false
+      && carried.errorKind === ''
+      && carried.retryVisible === false
+      && carried.technicalTriggerVisible
       && carried.formPresent
       && carried.codeInputPresent
-      && carried.retryVisible,
-    carried)
+      && carriedDetail.code === 'auth.session.missing'
+      && carriedDetail.owner === ACCESS_CONTROL_OWNER
+      && carriedDetail.message === 'browser session is required'
+      && carriedDetail.next === SESSION_MISSING_NEXT
+      && carriedDetail.openLayerCount === 1,
+    { surface: carried, detail: carriedDetail })
+  await closeTechnicalDetail(page)
   await capture(page, 'login-carried-rejection')
 
   // --- 5. a real wrong code is a real typed failure -----------------------
   await submitCode(page, 'not-a-real-pairing-code')
-  const wrong = await waitForErrorCode(page, 'auth.pair.invalid')
+  const wrong = await waitForPairFailure(page)
   observe('real wrong-code failure', wrong)
   record('a real wrong pairing code renders the typed pair failure and keeps the form',
-    wrong.errorCode === 'auth.pair.invalid'
-      && wrong.errorOwner === ACCESS_CONTROL_OWNER
-      && wrong.errorMessage === 'pairing code is invalid or already used'
-      && wrong.errorNext === 'run humanagent pair again'
+    wrong.detail.code === 'auth.pair.invalid'
+      && wrong.detail.owner === ACCESS_CONTROL_OWNER
+      && wrong.detail.message === 'pairing code is invalid or already used'
+      && wrong.detail.next === 'run humanagent pair again'
       && wrong.formPresent
       && wrong.codeInputValue === 'not-a-real-pairing-code'
       && wrong.codeInputFocused
@@ -668,6 +728,7 @@ try {
       && wrong.exitHref === '/dashboard.html'
       && new URL(wrong.url).pathname === '/login.html',
     wrong)
+  await closeTechnicalDetail(page)
   await capture(page, 'login-wrong-code')
 
   await page.click('[data-auth-error-return]')
@@ -763,14 +824,16 @@ try {
   await replayPage.goto(`${binding.serveBaseUrl}/login.html`, { waitUntil: 'domcontentloaded' })
   await replayPage.waitForSelector('[data-pair-code]', { timeout: 30_000 })
   await submitCode(replayPage, first.code)
-  const replay = await waitForErrorCode(replayPage, 'auth.pair.invalid')
+  const replay = await waitForPairFailure(replayPage)
   observe('replayed pairing code', replay)
   record('a consumed pairing code cannot pair a second browser',
-    replay.errorCode === 'auth.pair.invalid'
-      && replay.errorOwner === ACCESS_CONTROL_OWNER
-      && replay.errorMessage === 'pairing code is invalid or already used'
-      && replay.errorNext === 'run humanagent pair again',
+    replay.detail.code === 'auth.pair.invalid'
+      && replay.detail.owner === ACCESS_CONTROL_OWNER
+      && replay.detail.message === 'pairing code is invalid or already used'
+      && replay.detail.next === 'run humanagent pair again'
+      && replay.detail.openLayerCount === 1,
     replay)
+  await closeTechnicalDetail(replayPage)
   await replayContext.close()
 
   // --- 8. a real expired code is a real typed failure ---------------------
@@ -782,15 +845,17 @@ try {
   observe('expiry wait', { waitMs: EXPIRY_WAIT_MS, challengeExpiresAt: expiring.expiresAt })
   await sleep(EXPIRY_WAIT_MS)
   await submitCode(expiredPage, expiring.code)
-  const expired = await waitForErrorCode(expiredPage, 'auth.pair.expired')
+  const expired = await waitForPairFailure(expiredPage)
   observe('real expired-code failure', expired)
   record('a real expired pairing code renders the typed expired failure',
-    expired.errorCode === 'auth.pair.expired'
-      && expired.errorOwner === ACCESS_CONTROL_OWNER
-      && expired.errorMessage === 'pairing code has expired'
-      && expired.errorNext === 'run humanagent pair again'
+    expired.detail.code === 'auth.pair.expired'
+      && expired.detail.owner === ACCESS_CONTROL_OWNER
+      && expired.detail.message === 'pairing code has expired'
+      && expired.detail.next === 'run humanagent pair again'
+      && expired.detail.openLayerCount === 1
       && expired.retryVisible,
     expired)
+  await closeTechnicalDetail(expiredPage)
   await capture(expiredPage, 'login-expired-code')
   await expiredContext.close()
 
