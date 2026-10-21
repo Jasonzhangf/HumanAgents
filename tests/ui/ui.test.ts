@@ -1661,6 +1661,14 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     createElement: (tag: string) => element(tag),
   };
   const main = new Node();
+  // renderInteraction is extracted from task.js after the template migration,
+  // so its primary/composer slot bindings and page-leave guard come from the
+  // harness fixture instead of the migrated template scope.
+  const primary = new Node();
+  const composer = new Node();
+  const pageLeaving = false;
+  let activeInteractionId;
+  main.append(primary, composer);
   let confirmed = 0;
   const api = {
     async inspectExplicitInteraction() {
@@ -1701,6 +1709,10 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
   await new Function(
     'element',
     'main',
+    'primary',
+    'composer',
+    'pageLeaving',
+    'activeInteractionId',
     'api',
     'advanceExplicitInteraction',
     'window',
@@ -1713,7 +1725,7 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     'interactionCard',
     'technicalDetailTrigger',
     `${interactionSource}; return renderInteraction('interaction-confirm', undefined)`,
-  )(element, main, api, advance, window, document, clearNode, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard, technicalDetailTrigger);
+  )(element, main, primary, composer, pageLeaving, activeInteractionId, api, advance, window, document, clearNode, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard, technicalDetailTrigger);
   const feedback = nodes.find((node) => node.attrs.role === 'status');
   const confirm = nodes.find((node) => node.textContent === '按此方案继续');
   if (!feedback || !confirm) throw new Error('expected confirmation controls');
@@ -2110,6 +2122,10 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
     'async function waitForTask() { return "task-1"; }',
     'function observationHref(taskId) { return "./task.html?task=" + taskId; }',
     'async function refreshQueue() {}',
+    // executeSubmission lands on the submitted task through this helper, which
+    // is defined outside the sliced confirmation block, so the harness supplies
+    // a minimal mirror of the real call chain.
+    'async function landOnSubmittedTask(identity) { await waitForTask(identity); await refreshQueue(); }',
     // The identity helpers sit before the sliced confirmation block, so the harness stubs them for
     // the waitForTask call. waitForTask is stubbed here too, so these only keep the call chain real.
     'function identityFromReceipt(requirement) { return requirement ?? null; }',
