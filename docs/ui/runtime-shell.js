@@ -1427,10 +1427,9 @@ export function openTechnicalDetail({ title = '技术详情', eyebrow = '技术�
     technicalDetailLayer = frame
   }
   const { layer, eyebrow: eyebrowNode, title: titleNode, body, close } = technicalDetailLayer
-  if (!technicalDetailLayer.active) {
-    technicalDetailLayer.returnFocus = trigger instanceof HTMLElement ? trigger : document.activeElement
-    technicalDetailLayer.active = true
-  }
+  if (trigger instanceof HTMLElement) technicalDetailLayer.returnFocus = trigger
+  else if (!technicalDetailLayer.active) technicalDetailLayer.returnFocus = document.activeElement
+  technicalDetailLayer.active = true
   technicalDetailLayer.onClose = onClose
   for (const openLayer of document.querySelectorAll('dialog.shell-layer[open]')) {
     if (openLayer !== layer) {
@@ -2069,7 +2068,16 @@ export function mountPageTemplate(root, config = {}) {
 
   let shell = null
   if (layout !== PAGE_LAYOUTS.standalone) {
-    shell = mountShellLayer(context, root)
+    const shellLayer = mountShellLayer(context, root)
+    shell = {
+      openShellSection: shellLayer.open,
+      setShellScope: shellLayer.setScope,
+      setShellCapabilities: shellLayer.setCapabilities,
+      applyDisplayMode: shellLayer.applyDisplayMode,
+      initializeDisplayPreference: shellLayer.initializeDisplayPreference,
+      disposeDisplayPreference: shellLayer.disposeDisplayPreference,
+      dispose: shellLayer.dispose,
+    }
   }
 
   const detail = {
