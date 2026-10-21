@@ -1006,6 +1006,10 @@ function disposeCheckpointView() {
 
 function releaseCheckpointDetail() {
   invalidateCheckpointAssetBody()
+  disposeCheckpointDetailRenderer()
+}
+
+function disposeCheckpointDetailRenderer() {
   checkpointDetailOpen = false
   if (checkpointDetailDispose) {
     checkpointDetailDispose()
@@ -1024,7 +1028,7 @@ function closeCheckpointDetail() {
 // There is no second overlay and no page-owned store.
 function showCheckpointDetail(title, content, dispose, trigger) {
   const serial = ++checkpointDetailSerial
-  releaseCheckpointDetail()
+  disposeCheckpointDetailRenderer()
   checkpointDetailDispose = dispose ?? null
   checkpointDetailOpen = true
   openPageDetail({
