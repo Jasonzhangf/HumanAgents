@@ -17,6 +17,7 @@
  *   MEMORY_UI_ROOT       UI root to serve (default <repo>/docs/ui)
  *   MEMORY_EVIDENCE      evidence directory; when set, checks.json is written
  *   MEMORY_PLAYWRIGHT    Playwright entry point override
+ *   MEMORY_VIEWPORT      set to mobile for the 390x844 layout proof
  *   MEMORY_BROWSER_ARGS  Chromium launch args (default --single-process,--no-zygote)
  *   MEMORY_RED_PROOF=1   run the controlled detached-refresh counterexample
  */
@@ -30,6 +31,8 @@ const uiRoot = resolve(process.env.MEMORY_UI_ROOT ?? join(repoRoot, 'docs', 'ui'
 const evidenceRoot = process.env.MEMORY_EVIDENCE?.trim()
 const redProofMode = process.env.MEMORY_RED_PROOF === '1'
 const proofOrigin = 'http://humanagent.memory.test'
+const mobileViewport = process.env.MEMORY_VIEWPORT?.trim() === 'mobile'
+const viewport = mobileViewport ? { width: 390, height: 844 } : { width: 1440, height: 1000 }
 
 const launchArgs = (process.env.MEMORY_BROWSER_ARGS ?? '--single-process,--no-zygote')
   .split(',')
@@ -230,7 +233,7 @@ async function installRoutes(context, requests, options) {
 
 async function withMemoryPage(run, options = {}) {
   const browser = await playwright.chromium.launch({ headless: true, args: launchArgs })
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
+  const context = await browser.newContext({ viewport })
   const requests = { status: [], summary: [], review: [] }
   const pageErrors = []
 
@@ -298,6 +301,32 @@ function probeFailure() {
     candidateVisible: Boolean(candidate),
     reasonValue: reason?.value ?? null,
     actionDisabled: actions.map((button) => Boolean(button.disabled)),
+  }
+}
+
+function probeMobileLayout() {
+  const page = document.querySelector('.page[data-page-layout]')
+  const primary = document.querySelector('.page-primary')
+  const support = document.querySelector('.page-support')
+  const reason = document.querySelector('[data-memory-review-reason]')
+  const actions = [...document.querySelectorAll('[data-memory-section="candidates"] article .actions button')]
+  const rect = (node) => node ? {
+    left: node.getBoundingClientRect().left,
+    right: node.getBoundingClientRect().right,
+    width: node.getBoundingClientRect().width,
+  } : null
+  const columns = page ? getComputedStyle(page).gridTemplateColumns.split(/\s+/).filter(Boolean) : []
+  return {
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    gridTemplateColumns: page ? getComputedStyle(page).gridTemplateColumns : null,
+    columnCount: columns.length,
+    page: rect(page),
+    primary: rect(primary),
+    support: rect(support),
+    documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+    horizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > window.innerWidth + 1,
+    reasonInSupport: Boolean(support?.contains(reason)),
+    actionCount: actions.length,
   }
 }
 
@@ -421,6 +450,50 @@ async function failureScenario() {
   }, { reviewFailure: true })
 }
 
+async function mobileLayoutScenario() {
+  await withMemoryPage(async ({ page, requests, pageErrors }) => {
+    const initial = await page.evaluate(probeMobileLayout)
+    observe('mobile memory layout', initial)
+    const substantial = (panel) => Boolean(panel)
+      && panel.width >= initial.page.width * 0.9
+      && panel.left >= initial.page.left - 1
+      && panel.right <= initial.page.right + 1
+    check('mobile memory page computes one grid column',
+      initial.viewport.width === 390 && initial.viewport.height === 844 && initial.columnCount === 1,
+      initial)
+    check('mobile primary and support panels stay substantial within the page',
+      initial.reasonInSupport && substantial(initial.primary) && substantial(initial.support),
+      initial)
+    check('mobile memory page has no document horizontal overflow',
+      !initial.horizontalOverflow,
+      { documentWidth: initial.documentWidth, viewportWidth: initial.viewport.width })
+
+    await page.locator('[data-memory-review-reason]').click()
+    const reasonFocused = await page.evaluate(() => (
+      document.activeElement === document.querySelector('[data-memory-review-reason]')
+    ))
+    check('mobile reason input is reachable by normal click', reasonFocused, { reasonFocused })
+
+    await page.fill('[data-memory-review-reason]', fixture.decisionReason)
+    const responsePromise = page.waitForResponse((response) => (
+      response.request().method() === 'POST'
+      && new URL(response.url()).pathname === fixture.reviewPath
+    ))
+    await page.locator('[data-memory-section="candidates"] article .actions button').nth(1).click()
+    const response = await responsePromise
+    check('mobile original action click reaches the exact review POST',
+      response.status() === 200
+      && requests.review.length === 1
+      && JSON.stringify(requests.review[0]?.body) === JSON.stringify({
+        candidateId: fixture.candidateId,
+        decision: fixture.decision,
+        decisionReason: fixture.decisionReason,
+      }),
+      { status: response.status(), review: requests.review, initial })
+    check('mobile scenario has no page exception', pageErrors.length === 0, pageErrors)
+  })
+}
+
 async function detachedRefreshRedProof() {
   let result
   await withMemoryPage(async ({ page, requests }) => {
@@ -452,6 +525,7 @@ try {
   } else {
     await successScenario()
     await failureScenario()
+    if (mobileViewport) await mobileLayoutScenario()
   }
 } catch (error) {
   crashed = error.stack ?? String(error)
@@ -460,6 +534,7 @@ try {
 const result = {
   uiRoot,
   redProofMode,
+  viewportMode: mobileViewport ? 'mobile' : 'desktop',
   checks,
   observations,
   failures,
