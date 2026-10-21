@@ -599,10 +599,11 @@ try {
     const requests = [];
     const errors = [];
     fixturePage.on('pageerror', (error) => errors.push(error.message));
+    let captureErrorOnce = false;
     let held = false;
     let releaseBody;
     let heldRequest;
-    const heldStarted = new Promise((resolveHeld) => { heldRequest = resolveHeld; });
+    let heldStarted = new Promise((resolveHeld) => { heldRequest = resolveHeld; });
     await fixturePage.route('**/api/**', async (route) => {
       const request = route.request();
       const url = new URL(request.url());
@@ -615,12 +616,20 @@ try {
         if (url.pathname === '/api/runtime/status') body = { state: 'ready', mode: 'fake', connected: true };
         if (url.pathname === '/api/ui/display-preference') body = { preference: { mode: 'current' }, defaultMode: 'current' };
         if (url.pathname === `${prefix}/dashboard` && scoped) body = {
-          taskId: scope.taskId, taskTitle: 'checkpoint asset body fixture', state: 'waiting', stateLabel: '等待中',
+          taskId: scope.taskId, taskTitle: 'checkpoint asset body fixture', semanticTitle: 'checkpoint asset body fixture', state: 'waiting', stateLabel: '等待中',
           statusSections: { business: '等待中', waiting: '无待收拢操作' }, allowedActions: [], recentEvents: [],
         };
         if (url.pathname === `${prefix}/checkpoints` && scoped
           && (exact || (!query.checkpointId && query.limit === '20'))) body = history;
-        if (url.pathname === `${prefix}/checkpoints/assets/capture` && scoped && exact) body = capture;
+        if (url.pathname === `${prefix}/checkpoints/assets/capture` && scoped && exact) {
+          if (captureErrorOnce) {
+            captureErrorOnce = false;
+            await route.fulfill({ status: 404, contentType: 'application/json',
+              body: JSON.stringify({ error: { code: 'fixture.capture-read-failed', ownerId: 'fixture', message: 'capture read failed once', nextAction: 'retry' } }) });
+            return;
+          }
+          body = capture;
+        }
         for (const child of children) {
           const selector = child.selector;
           if (url.pathname === `${prefix}/checkpoints/assets/adopted-child/${encodeURIComponent(selector.invocationId)}/${encodeURIComponent(selector.childTurnId)}/${selector.deliverySeq}`
@@ -654,12 +663,13 @@ try {
       await exactHistory;
       await fixturePage.locator('[data-shell-records-host] .history-actions').getByRole('button', { name: '技术详情', exact: true }).click();
       const trigger = (kind) => dialog.locator(`button[data-checkpoint-role="asset-body-trigger"][data-asset-body-selector="${kind}"]`);
-      const readBody = async (projection, index) => {
+      const readBody = async (projection, index, retry = false) => {
         const kind = projection.selector.kind;
         stage = `${kind} body`;
         const responsePromise = fixturePage.waitForResponse((response) => response.request().method() === 'GET'
           && new URL(response.url()).pathname.includes('/checkpoints/assets/'));
-        await trigger(kind).nth(index).click();
+        if (retry) await dialog.getByRole('button', { name: '重试这次读取', exact: true }).click();
+        else await trigger(kind).nth(index).click();
         const response = await responsePromise;
         const actual = await response.json();
         const query = Object.fromEntries(new URL(response.url()).searchParams);
@@ -727,6 +737,21 @@ try {
           && children[0].text !== children[1].text
           && JSON.stringify(children[0].selector) !== JSON.stringify(children[1].selector));
         for (let index = 0; index < children.length; index += 1) await readBody(children[index], index);
+        stage = 'capture failure and retry';
+        captureErrorOnce = true;
+        const failureResponsePromise = fixturePage.waitForResponse((response) => response.request().method() === 'GET'
+          && new URL(response.url()).pathname === `${prefix}/checkpoints/assets/capture`);
+        await trigger('capture').click();
+        const failureResponse = await failureResponsePromise;
+        const failureBody = await failureResponse.json();
+        record('capture read returns exact typed failure', failureResponse.status() === 404
+          && JSON.stringify(failureBody) === JSON.stringify({ error: { code: 'fixture.capture-read-failed', ownerId: 'fixture', message: 'capture read failed once', nextAction: 'retry' } }),
+        { status: failureResponse.status(), body: failureBody });
+        const failure = dialog.locator('[data-checkpoint-role="asset-body-failure"]');
+        await failure.waitFor();
+        record('capture read failure is visible', (await failure.innerText()).includes('capture read failed once'),
+          { text: await failure.innerText() });
+        await readBody(capture, 0, true);
         stage = 'held body return';
         held = true;
         const responsePromise = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === `${prefix}/checkpoints/assets/capture`);
@@ -745,6 +770,21 @@ try {
           && await dialog.locator('[data-checkpoint-role="asset-body-text"]').count() === 0,
           { before, after: await dialog.innerText() });
         await fixturePage.screenshot({ path: join(artifactDir, 'late-response-return.png'), fullPage: true });
+        stage = 'held body close';
+        heldStarted = new Promise((resolveHeld) => { heldRequest = resolveHeld; });
+        held = true;
+        const closedResponsePromise = fixturePage.waitForResponse((response) => new URL(response.url()).pathname === `${prefix}/checkpoints/assets/capture`);
+        await trigger('capture').click();
+        await heldStarted;
+        await dialog.locator('[data-checkpoint-role="asset-body-loading"]').waitFor();
+        await dialog.locator('.shell-layer-close').click();
+        await dialog.waitFor({ state: 'hidden' });
+        releaseBody();
+        await (await closedResponsePromise).finished();
+        await fixturePage.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+        record('late body response preserves closed checkpoint detail',
+          await dialog.count() === 0 && await fixturePage.locator(bodySelector).count() === 0,
+          { openDetails: await dialog.count(), visibleAssetBodies: await fixturePage.locator(bodySelector).count() });
       }
       record('checkpoint fixture raises no page error', errors.length === 0, errors);
     } catch (error) {
