@@ -82,9 +82,7 @@ async function refreshLists() {
       clearNode(statsRegion)
       clearNode(listRegion)
       renderSystemStats(state.content)
-      const systemReadNode = renderSystemRead(state.content)
-      attachTaskActions(systemReadNode, state.content)
-      listRegion.append(systemReadNode)
+      listRegion.append(renderSystemRead(state.content))
     } else {
       renderPageError(status, state.failure || { message: 'system read failed', ownerId: 'humanagent.ui', nextAction: 'retry the system read' })
       clearNode(statsRegion)
@@ -203,108 +201,6 @@ function renderSystemStats(projection) {
     const card = element('article', undefined, 'stat')
     card.append(element('span', label), element('strong', value))
     statsRegion.append(card)
-  }
-}
-
-function taskIdValue(taskId) {
-  return taskId && typeof taskId === 'object' ? taskId.value : taskId
-}
-
-function actionButton(label, danger, onClick) {
-  if (typeof danger === 'function') { onClick = danger; danger = false }
-  const btn = element('button', label, `button button--sm${danger ? ' button--danger' : ''}`)
-  btn.type = 'button'
-  btn.addEventListener('click', (e) => {
-    e.preventDefault()
-    e.stopPropagation()
-    void onClick(btn)
-  })
-  return btn
-}
-
-async function runDelete(row, btn) {
-  if (!window.confirm(`删除任务"${row.title}"？`)) return
-  btn.disabled = true
-  try {
-    await api.deleteTask(taskIdValue(row.taskId))
-    if (!pageDisposed) await refreshLists()
-  } catch (error) {
-    if (pageDisposed) return
-    btn.disabled = false
-    // The page banner is the one dashboard surface that carries the shared
-    // pairing entry, so an expired or revoked session on delete offers the real
-    // login page. An alert would be a dead end: it cannot hold a link, and it
-    // would drop the runtime's own code/owner/nextAction.
-    renderPageError(status, error, 'inspect the task deletion')
-  }
-}
-
-function openTaskEditor(row, trigger) {
-  const form = element('form', undefined, 'edit-form')
-  const input = element('input')
-  input.type = 'text'
-  input.value = row.title || ''
-  input.required = true
-  const cancel = element('button', '取消', 'button button--quiet')
-  cancel.type = 'button'
-  const save = element('button', '保存', 'button button--primary')
-  save.type = 'submit'
-  const err = element('p', undefined, 'edit-status')
-  const editActions = element('div', undefined, 'edit-actions')
-  editActions.append(cancel, save)
-  form.append(
-    element('label', '任务标题', 'field-label'),
-    input,
-    err,
-    editActions,
-  )
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault()
-    save.disabled = true
-    err.textContent = '保存中…'
-    try {
-      await api.updateTask(taskIdValue(row.taskId), { title: input.value.trim() })
-      template.detail.close()
-      if (!pageDisposed) await refreshLists()
-    } catch (error) {
-      if (pageDisposed) return
-      save.disabled = false
-      clearNode(err)
-      err.append(element('span', `${error.message || error} · owner=${error.ownerId || 'unknown'}`))
-      appendPairingEntry(err, error)
-    }
-  })
-  cancel.addEventListener('click', () => template.detail.close())
-  template.detail.open({
-    eyebrow: '编辑任务',
-    title: row.title || '任务标题',
-    content: form,
-  }, trigger)
-}
-
-/**
- * The system read renders read-only task rows. The page controller adds the
- * mutation entry points after that render, so the template and the shared row
- * renderer never own a write. Rows are matched in render order to the exact
- * `RuntimeProjectTaskReadRow` objects they came from.
- */
-function attachTaskActions(readNode, projection) {
-  const projectSections = readNode.querySelectorAll('.section.scope-project')
-  for (const [projectIndex, project] of (projection.projects || []).entries()) {
-    const projectSection = projectSections[projectIndex]
-    if (!projectSection) continue
-    const items = projectSection.querySelectorAll('.panel > .task-item')
-    for (const [rowIndex, row] of (project.tasks || []).entries()) {
-      const item = items[rowIndex]
-      if (!item || item.querySelector('.task-item-actions')) continue
-      const task = { ...row.task, scope: row.scope }
-      const actions = element('div', undefined, 'task-item-actions')
-      actions.append(
-        actionButton('编辑', (btn) => openTaskEditor(task, btn)),
-        actionButton('删除', true, (btn) => runDelete(task, btn)),
-      )
-      item.append(actions)
-    }
   }
 }
 
