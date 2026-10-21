@@ -1,5 +1,11 @@
 # HumanAgent 项目状态汇总（2026-10-19）
 
+## 2026-10-21：剩余UX修复计划与执行交接
+
+本轮按用户要求仅制定计划与提示词，不启动产品实施。计划为 docs/goals/ux-product-repair-plan-2026-10-21.md，执行提示词唯一正文为 docs/goals/ux-product-repair-execution-prompt-2026-10-21.md。独立Planner已核对当前共享模板交付与适用需求、DAG、来源/审批/结果的剩余语义差距；AGY Gemini4本次实际配额失败后，新建OAuth GPT-6.1 medium只读Planner完成正文，回执在 /Volumes/Intel/playground/humanagent/.worker-runs/ux-repair-plan-20261021/。
+
+既有三模板和八页接线计为已完成，不重做。后续按真实工作入口与阅读、关联链与主动介入、审批实际继续三个可用增量推进，完整目标不缩减。首批O1/O2/G并发，接口可用后释放契约、App组合、renderer与共享壳工作；负责人将原单一页面writer拆为W0共享文件与W1–W6页面独占任务，消除可避免的接线串行。计划明确真实来源、无依据不补边、批准后的实际进展、统一提交结果及手机单抽屉的验收。新能力尚未实施或验收；本轮没有产品代码、业务操作、测试、安装或重启。
+
 ## 2026-10-20：共享模板与八页配置已安装，完成交付
 
 本轮按用户新增指令实现共享 UI 组件组合和排版模板。采用静态 ESM、collection/work/standalone 三类布局和显式 slots。八个实际页面均已接入；template 只拥有排版、共享详情和返回焦点，页面保留正式读取、动作、权限范围及生命周期。已删除旧 makePageShell、宿主扫描、语义自有证据弹窗及其无用样式。架构与页面配置表见 docs/ui/shared-layout-and-features-2026-10-20.md。
