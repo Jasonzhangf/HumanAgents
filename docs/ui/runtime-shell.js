@@ -1419,6 +1419,11 @@ export function openTechnicalDetail({ title = '技术详情', eyebrow = '技术�
       titleId: 'technical-detail-title',
     })
     frame.layer.dataset.technicalDetail = 'true'
+    frame.close.addEventListener('click', closeTechnicalDetailLayer)
+    frame.layer.addEventListener('cancel', (event) => {
+      event.preventDefault()
+      closeTechnicalDetailLayer()
+    })
     frame.layer.addEventListener('close', () => {
       // A queued close from an earlier opening cannot close a reopened frame.
       if (!frame.layer.open) closeTechnicalDetailLayer()
