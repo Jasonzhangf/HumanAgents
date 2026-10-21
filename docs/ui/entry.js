@@ -38,13 +38,14 @@ const { status } = template.hosts
 let interactionCard = null
 let pageLeaving = false
 
-function disposeEntryPage() {
+function disposeEntryPage(event) {
+  if (event?.persisted) return
   if (pageLeaving) return
   pageLeaving = true
   interactionCard?.dispose()
   template.dispose()
 }
-window.addEventListener('pagehide', disposeEntryPage, { once: true })
+window.addEventListener('pagehide', disposeEntryPage)
 
 // The shared work card mounts on the first real event or snapshot update. Until
 // then the host stays genuinely empty, so first entry claims no work.

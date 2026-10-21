@@ -225,9 +225,10 @@ async function boot() {
   }
 }
 
-window.addEventListener('pagehide', () => {
+window.addEventListener('pagehide', (event) => {
+  if (event?.persisted) return
   pageDisposed = true
   template.dispose()
-}, { once: true })
+})
 
 void boot()

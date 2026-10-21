@@ -105,6 +105,9 @@ async function load() {
   }
 }
 
-window.addEventListener('pagehide', () => template.dispose(), { once: true })
+window.addEventListener('pagehide', (event) => {
+  if (event?.persisted) return
+  template.dispose()
+})
 
 void load()
