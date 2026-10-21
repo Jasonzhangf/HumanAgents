@@ -1075,7 +1075,8 @@ void (async () => {
   await initializeDisplayPreference()
 })()
 
-window.addEventListener('pagehide', () => {
+window.addEventListener('pagehide', (event) => {
+  if (event?.persisted) return
   agentViewDispose?.()
   agentViewDispose = null
   closeAgentDetail()
