@@ -1985,11 +1985,8 @@ export function mountShellLayer(context = {}, mountRoot = document.body) {
 
   return {
     open,
-    openShellSection: open,
     setScope,
-    setShellScope: setScope,
     setCapabilities,
-    setShellCapabilities: setCapabilities,
     applyDisplayMode,
     initializeDisplayPreference,
     disposeDisplayPreference,
@@ -2108,38 +2105,6 @@ export function mountPageTemplate(root, config = {}) {
     detail,
     setBreadcrumbs,
     dispose,
-  }
-}
-
-export function makePageShell(active, eyebrow, title, lede, options = {}) {
-  const interactionCardHosts = [...document.querySelectorAll('[data-interaction-work-card-host]')]
-  const template = mountPageTemplate(document.body, {
-    layout: PAGE_LAYOUTS.collection,
-    active,
-    eyebrow,
-    title,
-    lede,
-    breadcrumbs: options.breadcrumbs,
-    scope: options.scope,
-    capabilities: options.capabilities,
-    displaySurface: options.displaySurface,
-  })
-  const { shell } = template
-  return {
-    main: template.hosts.page,
-    status: template.hosts.status,
-    setBreadcrumbs: template.setBreadcrumbs,
-    interactionCardHosts,
-    openShellSection: shell.openShellSection,
-    setShellScope: shell.setShellScope,
-    setShellCapabilities: shell.setShellCapabilities,
-    applyDisplayMode: shell.applyDisplayMode,
-    initializeDisplayPreference: shell.initializeDisplayPreference,
-    disposeDisplayPreference: shell.disposeDisplayPreference,
-    hosts: template.hosts,
-    shell,
-    detail: template.detail,
-    dispose: template.dispose,
   }
 }
 

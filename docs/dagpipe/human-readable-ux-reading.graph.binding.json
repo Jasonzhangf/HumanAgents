@@ -34,7 +34,7 @@
     "present": {
       "ownerPath": "docs/ui/runtime-shell.js",
       "ownerRel": "docs/ui/runtime-shell.js",
-      "ownerSymbol": "mountPageTemplate + makePageShell facade + page controller slot composition",
+      "ownerSymbol": "mountPageTemplate + page controller slot composition",
       "implementationStatus": "shared-template-owned-page-composition-pending",
       "designNote": "共享 template 拥有显式 root 与 heading/status/primary/support/composer 具名 slot，三种布局共享同一 slot 实现；页面 controller 把 feature host 送入 slot，并保留任务/项目/模式、选择、URL 与正式读写 owner。详情入口经单一 shell detail carrier 进入完整 child/error/receipt/Observation 证据，不把内部实现细节堆回列表；可选空 slot 不生成可见空块。"
     }
