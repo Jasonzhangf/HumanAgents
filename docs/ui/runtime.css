@@ -122,9 +122,11 @@ a {
   align-items: start;
 }
 
-.page[data-page-layout="collection"]:has(.page-support:not(:empty)),
-.page[data-page-layout="work"]:has(.page-support:not(:empty)) {
-  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.85fr);
+@media (min-width: 781px) {
+  .page[data-page-layout="collection"]:has(.page-support:not(:empty)),
+  .page[data-page-layout="work"]:has(.page-support:not(:empty)) {
+    grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.85fr);
+  }
 }
 
 .page-primary {
