@@ -1133,6 +1133,7 @@ try {
         basis: 'durable-history',
         task: {
           taskId,
+          semanticTitle: 'Scoped I2 history proof',
           title: 'Scoped I2 history proof',
           state: 'waiting',
           stateLabel: '等待中',
@@ -1157,6 +1158,7 @@ try {
         basis: 'durable-history',
         task: {
           taskId,
+          semanticTitle: 'Scoped I2 history proof',
           title: 'Scoped I2 history proof',
           state: 'waiting',
           stateLabel: '等待中',
@@ -1175,6 +1177,7 @@ try {
       surface: 'runtime-task-dashboard',
       mode,
       taskId,
+      semanticTitle: 'Scoped I2 history proof',
       taskTitle: 'Scoped I2 history proof',
       state: 'waiting',
       stateLabel: '等待中',
