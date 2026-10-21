@@ -1201,7 +1201,15 @@ try {
   const wiredRawText = await readContentText()
   await wiredPage.click('.so-mode[data-semantic-mode="current"]')
 
-  // Evidence uses the page-level shared detail and stays read-only.
+  // Evidence uses the page-level shared detail and stays read-only. The
+  // coverage gap is the first evidence in the projection and starts inside a
+  // legitimately collapsed native disclosure, so expand that disclosure before
+  // clicking the same evidence button.
+  const wiredCoverageDisclosure = wiredPage.locator('.so-section[data-section-id="coverage"] .so-section-disclosure')
+  await wiredCoverageDisclosure.locator('summary').click()
+  await wiredCoverageDisclosure.evaluate((details) => {
+    if (details.open !== true) throw new Error('coverage disclosure did not open')
+  })
   await wiredPage.locator('.so-evidence').first().click()
   await wiredPage.waitForFunction(
     () => Boolean(document.querySelector('dialog.shell-layer[data-technical-detail="true"][open]')),
@@ -1227,6 +1235,31 @@ try {
       && wiredDetail.active.includes('shell-layer-close')
       && wiredDetail.mutationControls === 0,
     wiredDetail)
+  // Close the coverage-gap detail before opening the event evidence, so the
+  // exact event refs below come from the event detail rather than the gap.
+  await wiredPage.keyboard.press('Escape')
+  await wiredPage.waitForFunction(
+    () => !document.querySelector('dialog.shell-layer[data-technical-detail="true"]')?.open,
+    undefined,
+    { timeout: 15_000 },
+  )
+  await wiredPage.locator(`.so-item[data-item-id="${wiredEvidenceRefs.eventId}"] .so-evidence`).click()
+  await wiredPage.waitForFunction(
+    () => Boolean(document.querySelector('dialog.shell-layer[data-technical-detail="true"][open]')),
+    undefined,
+    { timeout: 15_000 },
+  )
+  const wiredEventDetail = await wiredPage.evaluate(() => {
+    const dialog = document.querySelector('dialog.shell-layer[data-technical-detail="true"][open]')
+    return {
+      open: Boolean(dialog?.open),
+      detailCount: document.querySelectorAll('dialog.shell-layer[open]').length,
+      retiredDialogCount: document.querySelectorAll('.so-drawer').length,
+      text: dialog?.innerText ?? '',
+      active: document.activeElement?.className ?? '',
+      mutationControls: dialog?.querySelectorAll('form, button:not(.shell-layer-close), [data-action="retry"], [data-action="stop"], [data-action="steer"]').length ?? 0,
+    }
+  })
   record('wired default modes are human-readable and raw evidence stays traceable',
     [wiredCurrentText, wiredSemanticText, wiredActionsText].every((body) =>
       !wiredTechnicalTokens.some((token) => body.includes(token)))
@@ -1237,10 +1270,10 @@ try {
       && wiredCurrentText.includes('可用')
       && wiredCurrentText.includes('覆盖不完整')
       && wiredTechnicalTokens.every((token) => wiredRawText.includes(token))
-      && wiredDetail.text.includes(wiredEvidenceRefs.eventId)
-      && wiredDetail.text.includes(wiredEvidenceRefs.payloadRef)
-      && wiredDetail.text.includes(wiredEvidenceRefs.evidenceLocator),
-    { currentText: wiredCurrentText, semanticText: wiredSemanticText, actionsText: wiredActionsText, rawText: wiredRawText, detailText: wiredDetail.text })
+      && wiredEventDetail.text.includes(wiredEvidenceRefs.eventId)
+      && wiredEventDetail.text.includes(wiredEvidenceRefs.payloadRef)
+      && wiredEventDetail.text.includes(wiredEvidenceRefs.evidenceLocator),
+    { currentText: wiredCurrentText, semanticText: wiredSemanticText, actionsText: wiredActionsText, rawText: wiredRawText, detailText: wiredEventDetail.text })
   await wiredPage.keyboard.press('Escape')
 
   record('wired panel exposes no executable control and issues no mutation request', wiredInitial.controls === 0 && requests.mutations === 0, { controls: wiredInitial.controls, requests })
