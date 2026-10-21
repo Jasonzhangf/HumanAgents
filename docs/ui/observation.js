@@ -95,6 +95,8 @@ const headingMeta = element('div', undefined, 'observation-meta')
 headingCopy.append(headingMeta)
 
 let drawerCard
+let triggerNodeId
+let returnFocusPending = false
 let selectedNodeId
 // The scope the page is currently showing, so a node click reloads the same scope with the node
 // selected instead of re-deriving scope refs on the page.
@@ -280,6 +282,35 @@ function buildFlow(nodes, lanes) {
   return canvas
 }
 
+// renderObservation replaces every flow node (clearNode(primary)), so the node that
+// opened the detail is detached by the time a scope navigation re-renders. Hold
+// the trigger id instead of the element and resolve it in the CURRENT DOM.
+// Breadcrumb-back and enter-scope re-render into a scope where the original id
+// can be absent; those paths fall back to that scope's first node.
+function currentTriggerNode() {
+  const card = triggerNodeId
+    ? primary.querySelector(`.flow-node[data-node-id="${CSS.escape(String(triggerNodeId))}"]`)
+    : null
+  return card ?? primary.querySelector('.flow-node')
+}
+
+// Best effort right after `close`, while the pre-navigation DOM is still
+// present. Must not clear the pending flag: a scope navigation re-renders after
+// this and still needs the post-render pass below.
+function focusCurrentTrigger() {
+  if (!returnFocusPending || document.querySelector('dialog.shell-layer[open]')) return
+  currentTriggerNode()?.focus()
+}
+
+// Authoritative pass, scheduled by renderObservation after it rebuilds the flow
+// nodes. This is what re-establishes focus once the render replaced the trigger.
+function restoreFocusAfterRender() {
+  if (!returnFocusPending || document.querySelector('dialog.shell-layer[open]')) return
+  const target = currentTriggerNode()
+  if (target) target.focus()
+  returnFocusPending = false
+}
+
 function renderHandoffPane(node, handoffs) {
   const panel = element('section', undefined, 'drawer-pane')
   panel.append(element('h3', '跨 agent 交接'))
@@ -342,6 +373,7 @@ function renderDrawerSection(definition, node, handoffs, detail) {
 }
 
 function renderNodeDrawer(node, handoffs, detail, purpose, trigger) {
+  triggerNodeId = node.nodeId
   const body = element('div', undefined, 'drawer-body')
   drawerCard?.dispose()
   drawerCard = undefined
@@ -417,6 +449,8 @@ function renderNodeDrawer(node, handoffs, detail, purpose, trigger) {
     onClose: () => {
       drawerCard?.dispose()
       drawerCard = undefined
+      returnFocusPending = true
+      queueMicrotask(focusCurrentTrigger)
     },
   }, trigger)
 }
@@ -928,6 +962,7 @@ function renderObservation(projection) {
     ? renderCatalogueDisclosure(projection, collection)
     : renderNodeCollection(projection, collection))
   if (projection.nodes.length === 0) return
+  requestAnimationFrame(restoreFocusAfterRender)
 
   // The typed detail of the selected node opens the shared detail carrier; `selectedNodeId` is cleared so
   // the detail opens once per selection and breadcrumb navigation starts from a clean state.
