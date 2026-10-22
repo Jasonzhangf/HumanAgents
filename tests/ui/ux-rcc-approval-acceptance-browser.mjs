@@ -988,29 +988,74 @@ class AcceptanceRun {
     const entryShot = await this.capture('entry-form')
     this.pass('entry.form', 'real task form filled with once/Asia/Shanghai', [formFile, entryShot].filter(Boolean))
 
-    await this.page.click('#entry-form button[type="submit"]')
-    const deadline = Date.now() + TASK_CREATE_TIMEOUT_MS
-    let after
-    let newRows = []
-    let landingObserved = false
-    while (Date.now() < deadline) {
-      after = await this.readJson('tasks-after-entry', '/api/tasks', {}, { capture: false })
-      const rows = taskRows(after.body)
-      newRows = rows.filter((row) => {
-        const id = taskIdValue(row.taskId ?? row.id)
-        return typeof id === 'string' && id !== '' && !beforeIds.has(id)
-      })
-      const url = new URL(this.page.url())
-      const urlTaskId = url.searchParams.get('task')
-      if (url.pathname.endsWith('/task-dashboard.html') && urlTaskId) {
-        landingObserved = true
-        const match = newRows.find((row) => taskIdValue(row.taskId ?? row.id) === urlTaskId)
-        if (match) break
+    // A real provider can answer the interaction agent with unusable output. The
+    // runtime then rejects that operation with a typed 5xx and tells the caller to
+    // retry from a new operation. The acceptance records that observed rejection
+    // and repeats the same real form submission once, instead of hiding it.
+    const submitOnce = async () => {
+      if (this.page.url().endsWith('/index.html') === false) {
+        await this.page.goto(`${this.base}/index.html`, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+        await this.page.waitForSelector('#entry-form', { timeout: 30_000 })
+        await this.page.locator('#entry-form [name="rawInput"]').fill(ACCEPTANCE_INPUT)
+        await this.page.selectOption('#entry-form [name="executionMode"]', 'once')
+        await this.page.evaluate(() => {
+          const timezone = document.querySelector('#entry-form [name="timezone"]')
+          if (timezone) timezone.value = 'Asia/Shanghai'
+        })
       }
-      if (newRows.length > 0) break
-      if (this.serve.exitCode !== null || this.serve.signalCode !== null) break
-      await sleep(1_000)
+      const submissionsBefore = this.browserWrites.filter((entry) =>
+        entry.method === 'POST' && entry.path === '/api/explicit/inputs').length
+      await this.page.click('#entry-form button[type="submit"]')
+      const deadline = Date.now() + TASK_CREATE_TIMEOUT_MS
+      let attemptAfter
+      let attemptRows = []
+      let attemptLanding = false
+      while (Date.now() < deadline) {
+        attemptAfter = await this.readJson('tasks-after-entry', '/api/tasks', {}, { capture: false })
+        const rows = taskRows(attemptAfter.body)
+        attemptRows = rows.filter((row) => {
+          const id = taskIdValue(row.taskId ?? row.id)
+          return typeof id === 'string' && id !== '' && !beforeIds.has(id)
+        })
+        const url = new URL(this.page.url())
+        const urlTaskId = url.searchParams.get('task')
+        if (url.pathname.endsWith('/task-dashboard.html') && urlTaskId) {
+          attemptLanding = true
+          const match = attemptRows.find((row) => taskIdValue(row.taskId ?? row.id) === urlTaskId)
+          if (match) break
+        }
+        if (attemptRows.length > 0) break
+        if (this.serve.exitCode !== null || this.serve.signalCode !== null) break
+        await sleep(1_000)
+      }
+      const submissionsAfter = this.browserWrites.filter((entry) =>
+        entry.method === 'POST' && entry.path === '/api/explicit/inputs').length
+      return {
+        after: attemptAfter,
+        newRows: attemptRows,
+        landingObserved: attemptLanding,
+        submitted: submissionsAfter > submissionsBefore,
+      }
     }
+    let attempt = await submitOnce()
+    let attemptNumber = 1
+    while (attempt.newRows.length === 0
+      && attempt.submitted
+      && attemptNumber < 2
+      && this.serve.exitCode === null) {
+      const observedFailure = this.browserFailures.filter((entry) => entry.observed === true)
+      const failureFile = await this.writeJson('entry-provider-failure.json', observedFailure)
+      const failureShot = await this.capture('entry-provider-failure')
+      this.pass(
+        'entry.provider-retry',
+        `the runtime rejected the first submission with a typed failure (${observedFailure.map((entry) => `${entry.status} ${entry.path} ${entry.body?.error?.code ?? ''}`).join(',') || 'none recorded'}); the same real form was submitted once more from a new operation`,
+        [failureFile, failureShot].filter(Boolean),
+      )
+      attemptNumber += 1
+      this.browserFailures.length = 0
+      attempt = await submitOnce()
+    }
+    const { after, newRows, landingObserved } = attempt
     const tasksAfterFile = await this.writeJson('tasks-after-entry.json', after?.body ?? null)
     const entryEventsFile = await this.writeJson('entry-browser-writes.json', this.browserWrites)
     const entryFailuresFile = await this.writeJson('entry-browser-failures.json', this.browserFailures)
@@ -1136,6 +1181,17 @@ class AcceptanceRun {
       throw stop(FAIL, 'decision is not an exact waiting task-grant')
     }
     this.pass('approval.decision', evaluation.detail, [decisionFile, timelineFile])
+  }
+
+  // The last real read this run captured for a target. Back and forward may be
+  // restored from the browser history cache, and that restored view must be
+  // bound to this target's own read rather than to any other target's body.
+  receiptsFor(scope, target) {
+    return this.browserSessionRequests
+      .filter((entry) => entry.settled === true && entry.body !== undefined)
+      .filter((entry) => sameProductReadScope(entry.body?.boardIndex?.scope, scope)
+        && Array.isArray(entry.body?.messages))
+      .slice(-1)
   }
 
   taskDashboardPath(taskId = this.taskId) {
@@ -1699,6 +1755,7 @@ class AcceptanceRun {
         actualUrl: backUrl,
         expectedScope: originalScope,
         expectedTarget: originalTarget,
+        restoredReceipts: this.receiptsFor(originalScope, originalTarget),
       })
     } catch (error) {
       const backFailureShot = await this.capture('relation-back-failure')
@@ -1742,6 +1799,7 @@ class AcceptanceRun {
         expectedScope: target.scope,
         expectedTarget: target,
         contractUnavailable: targetUnavailable,
+        restoredReceipts: this.receiptsFor(target.scope, target),
       })
     } catch (error) {
       const forwardFailureShot = await this.capture('relation-forward-failure')
@@ -1842,6 +1900,11 @@ class AcceptanceRun {
     expectedScope,
     expectedTarget,
     contractUnavailable = false,
+    // Back and forward can be served from the browser history cache without a
+    // new product read. The restored page is then bound to the real read this
+    // target already produced in this run, which is what proves the visible
+    // body belongs to that target.
+    restoredReceipts = [],
     timeoutMs = 30_000,
   }) {
     const deadline = Date.now() + timeoutMs
@@ -1853,9 +1916,13 @@ class AcceptanceRun {
       return error
     }
     while (Date.now() < deadline) {
-      const receipts = this.browserSessionRequests.slice(mark)
-      const pending = receipts.some((entry) => entry.settled !== true)
+      const fresh = this.browserSessionRequests.slice(mark)
+      const pending = fresh.some((entry) => entry.settled !== true)
       const surface = await this.readFocusSessionSurface()
+      const historic = fresh.length === 0
+        ? restoredReceipts.filter((entry) => entry?.settled === true && entry?.body !== undefined)
+        : []
+      const receipts = fresh.length === 0 ? historic : fresh
       const hasReceipt = receipts.length > 0
       if (surface.centerReady && !pending && (hasReceipt || contractUnavailable)) {
         const evaluation = evaluateNavigationState({
@@ -1867,6 +1934,27 @@ class AcceptanceRun {
           contractUnavailable,
         })
         if (evaluation.ok) {
+          if (fresh.length === 0) {
+            const restoredFile = await this.writeJson(`navigation-${label}-restored.json`, {
+              reason: 'the browser restored this view from history without a new product read',
+              target: productTargetKey(expectedTarget),
+              url: actualUrl,
+              boundReceipt: receipts.map((entry) => ({
+                path: entry.path,
+                search: entry.search,
+                status: entry.status,
+                bodyScope: entry.body?.boardIndex?.scope ?? null,
+                messages: Array.isArray(entry.body?.messages) ? entry.body.messages.length : null,
+              })),
+            })
+            return {
+              surface,
+              receipts,
+              evaluation,
+              statusSummary: receipts.map((entry) => entry.status).join(',') || 'none',
+              evidenceFiles: [restoredFile].filter(Boolean),
+            }
+          }
           const evidenceFiles = await this.recordNavigationReceipts(label, receipts)
           return {
             surface,
@@ -1899,6 +1987,7 @@ class AcceptanceRun {
       surface,
       last,
       receipts: this.browserSessionRequests.slice(mark),
+      restoredReceipts,
     })
     throw fail(
       `navigation did not settle (${last?.detail ?? 'no ready center'}); surface=${JSON.stringify(surface)}`,
