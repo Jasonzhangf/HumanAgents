@@ -676,16 +676,41 @@ async function main() {
         settled: false,
       }
       sessionReceipts.push(entry)
+      // The rendered body is the primary proof, but a page-side response body can
+      // stay unreadable in a browser session (for example when the page abandons
+      // the stream). An unreadable page body must never stall the check, so after a
+      // short grace period the same request is re-read authoritatively with the
+      // session cookie; a genuinely failed read still fails the assertion.
+      const settleAuthoritatively = () => {
+        const path = `${url.pathname}?${url.searchParams.toString()}`
+        return authed(path).then(async (res) => {
+          if (!res.ok) {
+            entry.bodyError = `authoritative re-read HTTP ${res.status}`
+          } else {
+            try {
+              entry.body = await res.json()
+              entry.authoritative = true
+            } catch (error) {
+              entry.bodyError = error?.message ?? String(error)
+            }
+          }
+        }, (error) => {
+          entry.bodyError = error?.message ?? String(error)
+        }).finally(() => { entry.settled = true })
+      }
+      const grace = setTimeout(() => { if (!entry.settled) settleAuthoritatively() }, 2_000)
       response.text().then((text) => {
         try {
           entry.body = parseJson(text)
+          entry.authoritative = false
         } catch (error) {
           entry.bodyError = error?.message ?? String(error)
         }
         entry.settled = true
-      }, (error) => {
-        entry.bodyError = error?.message ?? String(error)
-        entry.settled = true
+        clearTimeout(grace)
+      }, () => {
+        if (!entry.settled) settleAuthoritatively()
+        clearTimeout(grace)
       })
     })
     const consoleErrors = []
@@ -694,7 +719,7 @@ async function main() {
     const goto = async (path) => {
       // The runtime pages hold a live SSE/poll channel, so "networkidle" never
       // settles; navigation is verified through rendered product markers instead.
-      await page.goto(`${base}${path}`, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+      await page.goto(`${base}${path}`, { waitUntil: 'load', timeout: 45_000 })
     }
     const capture = async (name) => {
       await page.screenshot({ path: join(shotsDir, `${name}.png`), fullPage: true })
@@ -705,7 +730,7 @@ async function main() {
       return {
         centerReady,
         focusScope: centerReady
-          ? await center.getAttribute('data-product-focus-scope').catch(() => null)
+          ? await center.getAttribute('data-product-focus-scope', { timeout: 500 }).catch(() => null)
           : null,
         sessionHostCount: await page.locator('.product-focus-session').count(),
         messageCount: await page.locator('.product-focus-session .product-session-message').count(),
@@ -719,7 +744,8 @@ async function main() {
         unavailableCount: await page
           .locator('.product-focus-session .product-focus-failure[data-product-role="focus-failure"]').count(),
         unavailableCode: await page
-          .locator('.product-focus-session .product-focus-failure-message').first().innerText().catch(() => ''),
+          .locator('.product-focus-session .product-focus-failure-message').first()
+          .innerText({ timeout: 500 }).catch(() => ''),
       }
     }
     const recordBrowserSessionReceipts = async (label, receipts) => {
@@ -743,7 +769,7 @@ async function main() {
     // state=ready. Settle one new session receipt (or a contract-unavailable
     // node) and bind its status, scope and messages to the visible body.
     const waitForFocusReady = async (label, sinceReceipt, options = {}) => {
-      const deadline = Date.now() + 20_000
+      const deadline = Date.now() + (options.timeoutMs ?? 20_000)
       let last
       while (Date.now() < deadline) {
         const surface = await readFocusSessionSurface()
@@ -777,7 +803,10 @@ async function main() {
         }
         await page.waitForTimeout(100)
       }
-      throw new Error(`${label}: focus session did not settle (${last?.detail ?? 'no ready center'})`)
+      const surface = await readFocusSessionSurface().catch(() => undefined)
+      await writeFile(join(evidenceRoot, `timeout-${label.replace(/[^a-zA-Z0-9.-]+/g, '_')}.json`),
+        JSON.stringify({ url: page.url(), surface, last, receipts: sessionReceipts.slice(sinceReceipt), consoleErrors }, null, 2)).catch(() => {})
+      throw new Error(`${label}: focus session did not settle (${last?.detail ?? 'no ready center'}) surface=${JSON.stringify(surface)}`)
     }
     const sessionRequestsSince = (index) => requests.slice(index).filter((entry) =>
       entry.method === 'GET' && entry.path === '/api/product/session')
