@@ -206,6 +206,61 @@ function receiptSearchMatchesFocus(search, expectedScope, expectedFocus) {
 }
 
 /**
+ * Read one rendered focus-failure node from its real DOM shape.
+ *
+ * `docs/ui/task-dashboard.js` `renderProductFocusFailure` (L695-728) keeps the
+ * human-readable message in the main layer and the raw failure code in the
+ * closed technical detail:
+ *
+ *   div.product-focus-failure[data-product-role="focus-failure"]
+ *     p.product-focus-failure-message          <- human-readable message
+ *     details.product-focus-failure-detail
+ *       dl.record-ref
+ *         div > dt "code" + dd <raw code>
+ *
+ * The function is self-contained so Playwright can serialize it for
+ * `locator.evaluate()`.
+ */
+export function readFocusFailureNode(node) {
+  const normalize = (value) => String(value ?? '').replace(/\s+/g, ' ').trim()
+  const readText = (element) => normalize(element?.textContent)
+  const readVisibleText = (element) => normalize(element?.innerText ?? element?.textContent)
+  const childrenOf = (element) => (element === undefined || element === null
+    ? []
+    : Array.from(element.children ?? []))
+  const tagOf = (element) => String(element?.tagName ?? '').toUpperCase()
+  const hasClass = (element, name) =>
+    String(element?.className ?? '').split(/\s+/).includes(name)
+  const find = (root, predicate) => {
+    for (const child of childrenOf(root)) {
+      if (predicate(child)) return child
+      const nested = find(child, predicate)
+      if (nested !== undefined) return nested
+    }
+    return undefined
+  }
+  const messageNode = find(node, (element) =>
+    hasClass(element, 'product-focus-failure-message'))
+  const message = readVisibleText(messageNode)
+  const detail = find(node, (element) =>
+    tagOf(element) === 'DETAILS' && hasClass(element, 'product-focus-failure-detail'))
+  const records = detail === undefined
+    ? undefined
+    : find(detail, (element) => tagOf(element) === 'DL' && hasClass(element, 'record-ref'))
+  let code = ''
+  let codeRows = 0
+  for (const row of childrenOf(records)) {
+    const label = readText(find(row, (element) => tagOf(element) === 'DT'))
+    if (label !== 'code') continue
+    codeRows += 1
+    code = readText(find(row, (element) => tagOf(element) === 'DD'))
+  }
+  return { code, codeRows, message }
+}
+
+const unavailableTargetCode = 'product-session.read.unavailable-target'
+
+/**
  * A ready focus center alone is not proof of a successful body read: the page
  * also renders a ready center for a rejected sessionResult. Bind the HTTP
  * receipt's status, scope and message targets to the visible session body. A
@@ -259,11 +314,33 @@ export function evaluateSessionReadEvidence({
         detail: 'contract-unavailable focus must render one explicit unavailable node',
       }
     }
-    if (!String(surface.unavailableCode ?? '').includes('product-session.read.unavailable-target')) {
+    if (surface.unavailableCodeRows !== 1) {
       return {
         ok: false,
         state: 'failed',
-        detail: `contract-unavailable focus rendered ${surface.unavailableCode || '(no code)'}`,
+        detail: `contract-unavailable focus rendered ${surface.unavailableCodeRows ?? 0} structured code rows (want 1)`,
+      }
+    }
+    if (surface.unavailableCode !== unavailableTargetCode) {
+      return {
+        ok: false,
+        state: 'failed',
+        detail: `contract-unavailable focus rendered structured code ${surface.unavailableCode || '(none)'} (want ${unavailableTargetCode})`,
+      }
+    }
+    const mainMessage = String(surface.unavailableMessage ?? '').trim()
+    if (mainMessage === '') {
+      return {
+        ok: false,
+        state: 'blank',
+        detail: 'contract-unavailable focus has no visible human-readable reason',
+      }
+    }
+    if (mainMessage.includes(surface.unavailableCode)) {
+      return {
+        ok: false,
+        state: 'failed',
+        detail: `contract-unavailable main layer leaks the technical code: ${mainMessage}`,
       }
     }
     if (surface.messageCount !== 0 || surface.emptyCount !== 0) {
@@ -727,6 +804,14 @@ async function main() {
     const readFocusSessionSurface = async () => {
       const center = page.locator('.product-focus-center[data-product-focus-state="ready"]')
       const centerReady = await center.count() === 1
+      const focusFailure = page
+        .locator('.product-focus-session .product-focus-failure[data-product-role="focus-failure"]')
+      const unavailableCount = await focusFailure.count()
+      const unavailable = unavailableCount > 0
+        ? await focusFailure.first()
+          .evaluate(readFocusFailureNode, undefined, { timeout: 500 })
+          .catch(() => undefined)
+        : undefined
       return {
         centerReady,
         focusScope: centerReady
@@ -741,11 +826,10 @@ async function main() {
           .allInnerTexts()
           .catch(() => []),
         emptyCount: await page.locator('.product-focus-session .product-session-empty').count(),
-        unavailableCount: await page
-          .locator('.product-focus-session .product-focus-failure[data-product-role="focus-failure"]').count(),
-        unavailableCode: await page
-          .locator('.product-focus-session .product-focus-failure-message').first()
-          .innerText({ timeout: 500 }).catch(() => ''),
+        unavailableCount,
+        unavailableCode: unavailable?.code ?? '',
+        unavailableCodeRows: unavailable?.codeRows ?? 0,
+        unavailableMessage: unavailable?.message ?? '',
       }
     }
     const recordBrowserSessionReceipts = async (label, receipts) => {
