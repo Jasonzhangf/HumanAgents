@@ -299,10 +299,13 @@ import { readTaskAgentActivity, type DecodedTaskAgentActivitySelectionQuery,
   type AssembleTaskAgentActivityRemainingSourcesOptions } from './agent-activity-read.js';
 import {
   composeProductBoardIndex,
+  composeProductSessionRead,
   composeProductSessionMessages,
+  inspectionDisplayFactFromProjection,
   productSelectionScope,
   type ProductBoardScope,
   type ProductInteractionFact,
+  type ProductInspectionDisplayFact,
   type ProductMessageFact,
   type ProductMemoryReadFacts,
   type ProductReadSelection,
@@ -310,6 +313,11 @@ import {
   type ProductTaskEventFact,
 } from './product-session-read.js';
 import { productResultText, selectProductOutput, type ProductOutputView } from './product-output-read.js';
+import {
+  composeProductRelations,
+  type ProductRelationsRead,
+  type ProductTaskRelationFact,
+} from './product-relations.js';
 import type {
   ConfiguredProjectCatalog,
   ConfiguredProjectReadSource,
@@ -1568,6 +1576,38 @@ function interactionClosurePersistenceError(error: unknown): UiRuntimeApiError {
  */
 function subscriptionIdForRequirement(requirementId: string): string {
   return `subscription:${requirementId}`;
+}
+
+/**
+ * Owner evidence for one task's committed identity and execution-lineage
+ * facts. The locators name the committed control Journal records, not the
+ * live task list. The relation projection accepts these exact refs only when
+ * the fact itself is present; absence of a fact never becomes an edge.
+ */
+function relationEvidenceForTask(organId: OrganId, snapshot: RuntimeTaskSnapshotInput): readonly EvidenceRef[] {
+  const scope: ScopeRef = { organId, taskId: snapshot.taskId };
+  const identity = snapshot.identitySource;
+  const lineage = snapshot.executionLineage;
+  const evidence: EvidenceRef[] = [];
+  if (identity !== undefined) {
+    evidence.push({
+      evidenceId: id('evidence', `identity-${snapshot.taskId.value}`),
+      kind: 'operation',
+      source: 'humanagent.app.task-identity',
+      locator: `journal://task-control/${snapshot.taskId.value}/identity/${identity.confirmationRef}`,
+      scope,
+    });
+  }
+  if (lineage !== undefined) {
+    evidence.push({
+      evidenceId: id('evidence', `lineage-${snapshot.taskId.value}`),
+      kind: 'operation',
+      source: 'humanagent.runtime.subscriptions',
+      locator: `journal://subscriptions/${lineage.subscriptionId}/occurrences/${lineage.occurrenceId}`,
+      scope,
+    });
+  }
+  return evidence;
 }
 
 /**
@@ -3606,20 +3646,73 @@ export class UiRuntimeService {
     }
   }
 
+  private async productInspectionFacts(
+    selected: readonly RuntimeTaskSnapshotInput[],
+  ): Promise<RuntimeReadResult<readonly ProductInspectionDisplayFact[]>> {
+    const i2 = this.i2Reader;
+    if (i2 === undefined) {
+      return {
+        ok: false,
+        failure: {
+          code: 'inspection.i2-history-unavailable',
+          ownerId: APP_OWNER,
+          message: 'the serve-bound runtime has no I2 history reader bound',
+          nextAction: 'bind the canonical I2 history reader before enumerating inspection history',
+        },
+      };
+    }
+    try {
+      const histories = await Promise.all(selected.map((snapshot) => i2.listInspectionOccurrences({
+        taskScope: { organId: this.options.organId, taskId: snapshot.taskId },
+        limit: 10000,
+      })));
+      return {
+        ok: true,
+        value: histories.flatMap((history) => history.entries.map((occurrence) =>
+          inspectionDisplayFactFromProjection(occurrence, history.taskScope.taskId))),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        failure: {
+          code: 'inspection.i2-history-read-failed',
+          ownerId: APP_OWNER,
+          message: `inspection occurrence read failed: ${error instanceof Error ? error.message : String(error)}`,
+          nextAction: 'restore the canonical I2 history read before enumerating inspection history',
+        },
+      };
+    }
+  }
+
   private async productBoardReadFacts(
     selection: ProductReadSelection,
+    relationRead?: {
+      readonly snapshots: readonly RuntimeTaskSnapshotInput[];
+      readonly preserveExecutionRows: true;
+    },
   ): Promise<{
     readonly input: Parameters<typeof composeProductBoardIndex>[0];
     readonly snapshots: readonly RuntimeTaskSnapshotInput[];
   }> {
     const observedAt = this.now().toISOString();
-    const snapshots = await this.snapshotsWithIdentitySource();
-    const taskList: RuntimeReadResult<RuntimeTaskListProjection> = {
-      ok: true,
-      value: projectRuntimeTaskList({ mode: this.mode, tasks: snapshots }),
-    };
+    const snapshots = relationRead?.snapshots ?? await this.snapshotsWithIdentitySource();
     const source = this.boundProjectSource();
     const selectedTaskId = selection.taskId;
+    // The list projection folds a child execution into its parent's display
+    // row. Relation endpoints still need one exact interaction ref per Task,
+    // so the relation read keeps every committed row while the UI keeps its
+    // grouped presentation.
+    const taskListTasks = relationRead === undefined
+      ? snapshots
+      : snapshots.map((snapshot) => {
+        const flat = { ...snapshot };
+        delete flat.executionLineage;
+        return flat;
+      });
+    const taskList: RuntimeReadResult<RuntimeTaskListProjection> = {
+      ok: true,
+      value: projectRuntimeTaskList({ mode: this.mode, tasks: taskListTasks }),
+    };
     const selected = selectedTaskId === undefined
       ? snapshots
       : snapshots.filter((snapshot) => snapshot.taskId.value === selectedTaskId.value);
@@ -3633,6 +3726,7 @@ export class UiRuntimeService {
         taskList,
         agentActivity,
         interactions: { ok: true, value: this.explicitInteractionFacts(selection) },
+        inspections: await this.productInspectionFacts(selected),
         memory: await this.productMemoryRead(),
       },
     };
@@ -3640,10 +3734,10 @@ export class UiRuntimeService {
 
   /**
    * Public product board read. It only composes the A1 board module from the
-   * existing task-list, per-task agent activity, explicit interaction, and
-   * memory readers. Inspection occurrences still need an owner reader that
-   * returns `InspectionOccurrenceRecord`; until then that board reports an
-   * explicit source-unavailable failure instead of pretending it is empty.
+   * existing task-list, per-task agent activity, explicit interaction,
+   * inspection-occurrence history and memory readers. An absent reader stays
+   * an explicit source-unavailable failure instead of pretending the board is
+   * empty.
    */
   async productBoardIndex(scope: ProductBoardScope): Promise<ProductBoardIndex> {
     return composeProductBoardIndex((await this.productBoardReadFacts(this.productSelectionFor(scope))).input);
@@ -3674,6 +3768,40 @@ export class UiRuntimeService {
         taskEvents,
       }),
     };
+  }
+
+  /**
+   * Public product relation read for one exact project/task scope. It derives
+   * exact requirement/occurrence targets from the board, combines the typed
+   * identity source and committed execution lineage of each task, and projects
+   * only evidence-backed edges through the R module.
+   */
+  async productRelations(scope: ProductBoardScope): Promise<ProductRelationsRead> {
+    const selection = this.productSelectionFor(scope);
+    const focused = selection.taskId;
+    const snapshots = await this.snapshotsWithIdentitySource();
+    const facts = await this.productBoardReadFacts({
+      projectKey: selection.projectKey,
+      mode: selection.mode,
+    }, {
+      snapshots,
+      preserveExecutionRows: true,
+    });
+    const read = composeProductSessionRead({ ...facts.input, organId: this.options.organId });
+    const targeted = focused === undefined
+      ? snapshots
+      : snapshots.filter((snapshot) => snapshot.taskId.value === focused.value);
+    const tasks: ProductTaskRelationFact[] = targeted.map((snapshot) => ({
+      taskId: snapshot.taskId,
+      ...(snapshot.identitySource === undefined ? {} : { identitySource: snapshot.identitySource }),
+      ...(snapshot.executionLineage === undefined ? {} : { executionLineage: snapshot.executionLineage }),
+      evidenceRefs: relationEvidenceForTask(this.options.organId, snapshot),
+    }));
+    return composeProductRelations({
+      read,
+      tasks,
+      ...(focused === undefined ? {} : { focusTaskId: focused }),
+    });
   }
 
   /**
