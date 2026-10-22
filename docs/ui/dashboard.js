@@ -1,13 +1,18 @@
 import {
   api,
-  appendPairingEntry,
+  clearNode,
   createScopedReadPublication,
   element,
   mountPageTemplate,
-  renderSystemRead,
+  mountProductShell,
   renderPageError,
-  renderRuntimeStatus,
 } from './runtime-shell.js'
+import {
+  PRODUCT_BOARD_LABELS,
+  PRODUCT_BOARD_ORDER,
+  renderProductBoardIndex,
+} from './product-board-view.js'
+import { encodeProductLocation, locationFromHash } from './product-location.js'
 import {
   planActionsForState,
   planControlErrorMessage,
@@ -19,208 +24,473 @@ import {
 } from './plan-control.js'
 
 const REFRESH_MS = 4000
+const PRODUCT_BOARD_ENDPOINT = '/api/product/board'
+const BOARD_LANES = Object.freeze(['live', 'history', 'unknown'])
 
-const template = mountPageTemplate(document.body, {
-  layout: 'collection',
-  active: 'Dashboard',
-  eyebrow: 'Runtime',
-  title: '工作总览',
-  lede: '在这里新建、跟踪和管理任务。',
-  scope: { kind: 'system' },
-  breadcrumbs: [
-    { label: '系统', href: null },
-    { label: '全部项目', href: null },
-  ],
-})
-const { status } = template.hosts
-
-// The controller stops polling at page exit and refuses to publish into the
-// removed template after that point. In-flight reads are allowed to settle;
-// they just never reach a disposed page.
-let pageDisposed = false
-let pollHandle = null
-
-// ── DOM regions: canonical task entry + refreshed overview panels ──
-const inputRegion = element('section', undefined, 'quick-create')
-const statsRegion = element('section', undefined, 'stats')
-const plansRegion = element('section', undefined, 'plan-list')
-const listRegion = element('div', undefined, 'task-lists')
-template.hosts.primary.append(inputRegion, statsRegion, listRegion)
-const plansDetails = element('details', undefined, 'plan-list-fold')
-plansDetails.append(element('summary', '执行计划管理'), plansRegion)
-template.hosts.support.append(plansDetails)
-
-function renderTaskEntry() {
-  clearNode(inputRegion)
-  const link = element('a', '新建任务', 'button button--primary')
-  link.href = './index.html'
-  inputRegion.append(link)
+function searchParams(search) {
+  if (search instanceof URLSearchParams) return search
+  if (typeof search === 'string') {
+    return new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
+  }
+  return new URLSearchParams()
 }
 
-// ── List panel (refreshed by polling) ──
-const systemRead = createScopedReadPublication(() => api.systemDashboard())
+/**
+ * The board home has no task identity of its own. Its read scope comes from the
+ * explicit `projectKey` selection in the URL, or the caller's default project.
+ * Without either it stays the system scope; it never invents a project.
+ */
+export function boardScopeFromSearch(search, defaultProjectKey) {
+  const projectKey = searchParams(search).get('projectKey') || defaultProjectKey
+  return projectKey ? { kind: 'project', projectKey } : { kind: 'system' }
+}
 
-async function refreshLists() {
-  if (pageDisposed) return
-  try {
-    const [read, scheduler] = await Promise.all([
-      systemRead.refresh({ kind: 'system' }),
-      // The scheduler read is the only surface that lists a plan which has no
-      // coordinator task yet. A failure here must not blank the task lists, so
-      // it is reported as its own typed notice instead of failing the page.
-      api.scheduler().catch((schedulerError) => ({ __error: schedulerError })),
-    ])
-    if (pageDisposed || !read.published) return
-    const state = read.state
-    if (state.content) {
-      renderRuntimeStatus(status, state.content.runtime, null)
-      if (state.stale) {
-        renderPageError(status, state.failure)
-        status.dataset.tone = 'warning'
-        status.append(element('span', ' · 上次读取失败，当前显示上次确认内容（stale）'))
-      }
-      clearNode(statsRegion)
-      clearNode(listRegion)
-      renderSystemStats(state.content)
-      listRegion.append(renderSystemRead(state.content))
-    } else {
-      renderPageError(status, state.failure || { message: 'system read failed', ownerId: 'humanagent.ui', nextAction: 'retry the system read' })
-      clearNode(statsRegion)
-      clearNode(listRegion)
+/**
+ * Restore the read position from the URL hash. A valid product location keeps
+ * its exact scope and focus. A present but invalid product hash stays explicit:
+ * the scope falls back to the URL/default project, but no focus is guessed.
+ */
+export function initialBoardState({ hash, search, defaultProjectKey } = {}) {
+  const scope = boardScopeFromSearch(search, defaultProjectKey)
+  if (typeof hash === 'string' && hash.trim() !== '' && hash.includes('#/boards/')) {
+    const decoded = locationFromHash(hash)
+    if (decoded.kind === 'valid') {
+      return { kind: 'valid', location: decoded.location, scope: decoded.location.scope }
     }
-    renderPlanList(scheduler)
-  } catch (error) {
-    if (!pageDisposed) renderPageError(status, error)
+    return { kind: 'unknown', failure: decoded.failure, scope }
   }
+  return { kind: 'board', scope }
+}
+
+export function productBoardPath(scope) {
+  const params = new URLSearchParams()
+  if (scope?.kind === 'project') {
+    params.set('projectKey', scope.projectKey)
+  } else if (scope?.kind === 'task') {
+    params.set('projectKey', scope.projectKey)
+    params.set('mode', scope.mode)
+    params.set('taskId', scope.taskId?.value ?? '')
+  }
+  const query = params.toString()
+  return `${PRODUCT_BOARD_ENDPOINT}${query ? `?${query}` : ''}`
+}
+
+function typedFailure(cause, fallback) {
+  const failure = new Error(cause?.message || fallback.message)
+  failure.code = cause?.code || fallback.code
+  failure.ownerId = cause?.ownerId || fallback.ownerId
+  failure.nextAction = cause?.nextAction || fallback.nextAction
+  if (cause?.status !== undefined) failure.status = cause.status
+  return failure
 }
 
 /**
- * The control notice belongs to the one plan it was issued against, so a
- * result for plan A is never rendered under plan B.
+ * Read one ProductBoardIndex. This is the local transport wrapper the shared
+ * wiring contract allows while runtime-api.js has no readProductBoard export.
+ * Once the shared API names it, the page can inject that reader unchanged.
  */
-let planControlNotice = { subscriptionId: '', text: '', error: undefined }
-
-async function runPlanControl(subscriptionId, action) {
-  if (pageDisposed) return
-  planControlNotice = { subscriptionId, text: planControlPendingCopy(action), error: undefined }
-  renderPlanList(lastSchedulerRead)
-  try {
-    const result = await api.planControl(subscriptionId, {
-      action,
-      idempotencyKey: planControlKey(subscriptionId, action),
-      requestedAt: new Date().toISOString(),
+export async function readProductBoard(scope, { fetchImpl = globalThis.fetch } = {}) {
+  if (typeof fetchImpl !== 'function') {
+    throw typedFailure(undefined, {
+      code: 'product-board.transport-unavailable',
+      ownerId: 'humanagent.ui.dashboard',
+      message: 'fetch is unavailable',
+      nextAction: 'open the dashboard in a browser',
     })
-    planControlNotice = { subscriptionId, text: planControlResultCopy(action, result), error: undefined }
-  } catch (error) {
-    // Keep the rejection itself as the notice's payload so the shared renderer
-    // can add the pairing entry. Overwriting the message first loses the code
-    // that decides whether pairing is the right recovery.
-    planControlNotice = { subscriptionId, text: planControlErrorMessage(error), error }
   }
-  if (pageDisposed) return
-  await refreshLists()
+  const response = await fetchImpl(productBoardPath(scope), {
+    method: 'GET',
+    headers: { accept: 'application/json' },
+  })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw typedFailure(body?.error ?? body, {
+      code: 'product-board.read.failed',
+      ownerId: 'humanagent.app',
+      message: 'product board read failed',
+      nextAction: 'retry the board read',
+    })
+  }
+  if (!isBoardIndex(body)) {
+    throw typedFailure(undefined, {
+      code: 'product-board.invalid',
+      ownerId: 'humanagent.app',
+      message: 'product board read did not return a ProductBoardIndex',
+      nextAction: 'inspect the board read owner',
+    })
+  }
+  return body
 }
 
-let lastSchedulerRead
-
-/**
- * Present every persisted execution plan the patrol reports. This includes a
- * plan whose first occurrence has not been claimed yet, which no task page can
- * show. Each plan renders its own durable state and only the controls that read
- * makes available.
- */
-function renderPlanList(scheduler) {
-  lastSchedulerRead = scheduler
-  clearNode(plansRegion)
-  const head = element('header', undefined, 'section-head')
-  const plans = scheduler?.plans ?? []
-  head.append(element('h2', '执行计划'), element('span', `${plans.length} 项`, 'section-meta'))
-  plansRegion.append(head)
-  const panel = element('div', undefined, 'panel')
-  if (scheduler?.__error) {
-    panel.append(element(
-      'p',
-      `读取执行计划失败 · ${scheduler.__error.message} · owner=${scheduler.__error.ownerId || 'unknown'} · next=${scheduler.__error.nextAction || 'inspect the runtime error'}`,
-      'empty',
-    ))
-    appendPairingEntry(panel, scheduler.__error)
-  } else if (scheduler?.issue) {
-    panel.append(element('p', `计划巡逻上报：${scheduler.issue.code} · ${scheduler.issue.message} · next=${scheduler.issue.nextAction}`, 'empty'))
-  } else if (plans.length === 0) {
-    panel.append(element('p', '当前没有已持久化的执行计划。', 'empty'))
-  }
-  for (const plan of plans) {
-    panel.append(renderPlanSection(projectSchedulerPlan(plan), {
-      ...(planControlNotice.subscriptionId === plan.subscriptionId
-        ? {
-            notice: planControlNotice.text,
-            ...(planControlNotice.error === undefined ? {} : { error: planControlNotice.error }),
-          }
-        : {}),
-      onControl: (action) => runPlanControl(plan.subscriptionId, action),
-    }))
-  }
-  plansRegion.append(panel)
+function isBoardIndex(value) {
+  return value !== null && typeof value === 'object' && Array.isArray(value.boards)
 }
 
 /**
- * Adapt one scheduler plan projection to the shared plan section. The list read
- * carries no `can*` booleans, so the availability is restated from the durable
- * `state` by the same rule the task dashboard projection publishes.
+ * Page render seam. It delegates to the shared board renderer so the consumer
+ * exercises the exact renderer the browser uses.
  */
-function projectSchedulerPlan(plan) {
+export function renderBoardIndex(host, index, options = {}) {
+  return renderProductBoardIndex(host, index, options)
+}
+
+/**
+ * The task focus page for a card. A card with an exact task keeps the task and
+ * its project/mode in the query and the whole product location in the hash.
+ * A card without a task has no task page; returning null keeps the caller from
+ * inventing a task or a new-task entry.
+ */
+export function focusPageHref(location) {
+  const focus = location?.focus
+  if (!focus) return null
+  const hash = encodeProductLocation(location)
+  const taskRef = focus.taskRef
+  if (!taskRef || focus.scope?.kind !== 'task') return null
+  const params = new URLSearchParams({ task: String(taskRef.value) })
+  params.set('projectKey', focus.scope.projectKey)
+  params.set('mode', focus.scope.mode)
+  return `./task-dashboard.html?${params.toString()}${hash}`
+}
+
+/**
+ * One card selection. Live/history keep their exact board, lane, focus ref and
+ * the ref's own scope. Unknown has no read location and is refused.
+ */
+export function cardSelection(item, { board } = {}) {
+  if (!item || typeof item !== 'object' || !item.ref) {
+    throw new TypeError('cardSelection requires a board item with an exact ref')
+  }
+  if (item.lane === 'unknown') {
+    throw new TypeError('unknown board items do not have a Live/history location')
+  }
+  if (!board) throw new TypeError('cardSelection requires the source board')
+  const location = {
+    board,
+    lane: item.lane,
+    focus: item.ref,
+    scope: item.ref.scope,
+  }
   return {
-    subscriptionId: plan.subscriptionId,
-    state: plan.state,
-    nextDueAt: planNextDueAt(plan),
-    goalId: plan.goalId,
-    scheduleRevision: plan.scheduleRevision,
-    currentOccurrenceOrdinal: plan.currentOccurrenceOrdinal,
-    availableActions: planActionsForState(plan.state),
+    location,
+    hash: encodeProductLocation(location),
+    href: focusPageHref(location),
   }
 }
 
-// The system read reports a mechanical coverage code. Show its human meaning
-// and keep an unknown scope truthful instead of printing the raw token.
-const SYSTEM_COVERAGE_LABELS = Object.freeze({
-  'configured-projects-in-current-control-root': '当前系统已声明的项目',
-})
-
-function systemCoverageLabel(coverage) {
-  if (!coverage) return '未知'
-  return SYSTEM_COVERAGE_LABELS[coverage] || '未知'
-}
-
-function renderSystemStats(projection) {
-  for (const [label, value] of [
-    ['项目数', String(projection.projects?.length || 0)],
-    ['任务数', String(projection.taskCount || 0)],
-    ['读取范围', systemCoverageLabel(projection.coverage)],
-    ['完整性', projection.complete ? '完整' : '不完整'],
-  ]) {
-    const card = element('article', undefined, 'stat')
-    card.append(element('span', label), element('strong', value))
-    statsRegion.append(card)
+function noContentFailure() {
+  return {
+    code: 'product-board.no-content',
+    ownerId: 'humanagent.ui.dashboard',
+    message: '板块读取没有返回 ProductBoardIndex。',
+    nextAction: 'retry the board read',
   }
 }
 
-function clearNode(node) {
-  while (node.firstChild) node.removeChild(node.firstChild)
-}
-
-function disposePage(event) {
-  if (event?.persisted) return
-  if (pageDisposed) return
-  pageDisposed = true
-  if (pollHandle !== null) {
-    clearInterval(pollHandle)
-    pollHandle = null
+/**
+ * Board page controller. The shared scoped-publication owner keeps the last
+ * confirmed index for the current scope, marks a same-scope refresh failure
+ * stale and discards late responses. This controller only decides what to
+ * render: a confirmed index, or an explicit failure when no index exists.
+ * Refresh never writes; selection only changes the read location.
+ */
+export function createBoardController({
+  publication,
+  render = () => {},
+  renderFailure = () => {},
+  navigate = () => {},
+  initialScope = { kind: 'system' },
+} = {}) {
+  if (!publication || typeof publication.refresh !== 'function') {
+    throw new TypeError('createBoardController requires a scoped read publication')
   }
-  template.dispose()
+
+  let scope = initialScope
+
+  async function refresh(nextScope) {
+    if (nextScope !== undefined) scope = nextScope
+    const result = await publication.refresh(scope)
+    if (result?.reason === 'discarded-late') {
+      return { ok: false, superseded: true, reason: result.reason }
+    }
+    const state = result?.state ?? {}
+    if (!isBoardIndex(state.content)) {
+      const failure = state.failure ?? noContentFailure()
+      renderFailure(failure, { stale: false, reason: result?.reason })
+      return { ok: false, failure, reason: result?.reason }
+    }
+    render(state.content, { stale: state.stale === true, failure: state.failure })
+    return {
+      ok: true,
+      index: state.content,
+      stale: state.stale === true,
+      failure: state.failure,
+    }
+  }
+
+  function select(item, context = {}) {
+    if (!item || item.lane === 'unknown') return { ok: false, reason: 'unknown-lane' }
+    const selection = cardSelection(item, context)
+    navigate(selection)
+    return { ok: true, selection }
+  }
+
+  function setScope(nextScope) {
+    scope = nextScope
+  }
+
+  function getScope() {
+    return scope
+  }
+
+  return { refresh, select, setScope, getScope }
 }
 
-// ── Init ──
-renderTaskEntry()
-void refreshLists()
-pollHandle = setInterval(() => void refreshLists(), REFRESH_MS)
-window.addEventListener('pagehide', disposePage)
+// ── Browser page ──────────────────────────────────────────────────────────
+
+function mountBoardPage() {
+  const config = {
+    layout: 'collection',
+    active: 'Dashboard',
+    eyebrow: '工作板块',
+    title: '五个工作板块',
+    scope: { kind: 'system' },
+    breadcrumbs: [
+      { label: '系统', href: null },
+      { label: '全部项目', href: null },
+    ],
+  }
+  if (typeof mountProductShell === 'function') return mountProductShell(document.body, config)
+  return mountPageTemplate(document.body, config)
+}
+
+function scopeLabel(scope) {
+  if (scope?.kind === 'project') return `项目 ${scope.projectKey}`
+  if (scope?.kind === 'task') return `项目 ${scope.projectKey} · 任务 ${scope.taskId?.value ?? ''}`
+  return '全部项目'
+}
+
+function bootstrapDashboardPage() {
+  const template = mountBoardPage()
+  const status = template.hosts.status
+  const center = template.hosts.center ?? template.hosts.primary
+  const boardHost = element('section', undefined, 'product-board-home')
+  boardHost.setAttribute('aria-label', '五个 agent 板块')
+  center.append(boardHost)
+
+  const plansRegion = element('section', undefined, 'plan-list')
+  const plansDetails = element('details', undefined, 'plan-list-fold')
+  plansDetails.append(element('summary', '执行计划管理'), plansRegion)
+  template.hosts.support.append(plansDetails)
+
+  const initial = initialBoardState({
+    hash: window.location.hash,
+    search: window.location.search,
+  })
+  template.setBreadcrumbs([
+    { label: '系统', href: null },
+    { label: scopeLabel(initial.scope), href: null },
+  ])
+  const locationFailure = initial.kind === 'unknown' ? initial.failure : null
+  if (locationFailure) renderPageError(status, locationFailure)
+
+  let pageDisposed = false
+  let pollHandle = null
+  let controller = null
+  let renderedBoardRoot = null
+
+  const publication = createScopedReadPublication((scope) => readProductBoard(scope))
+
+  function navigateSelection(selection) {
+    if (selection.href) {
+      window.location.assign(selection.href)
+      return
+    }
+    if (window.location.hash !== selection.hash) window.location.hash = selection.hash
+  }
+
+  function renderBoard(index, { stale = false, failure } = {}) {
+    clearNode(status)
+    status.dataset.tone = stale || locationFailure ? 'warning' : 'neutral'
+    if (locationFailure) {
+      status.append(element(
+        'p',
+        `位置无法恢复 · ${locationFailure.message} · next=${locationFailure.nextAction}`,
+        'empty',
+      ))
+    }
+    if (stale) {
+      status.append(element('span', '上次读取失败，当前显示上次确认的板块内容。', 'status-note'))
+      if (failure) {
+        const details = element('details', undefined, 'status-detail')
+        details.append(
+          element('summary', '读取失败详情'),
+          element('p', `${failure.code} · ${failure.ownerId} · ${failure.message} · next=${failure.nextAction}`, 'empty'),
+        )
+        status.append(details)
+      }
+    }
+    const itemBoards = new WeakMap()
+    for (const section of index.boards) {
+      for (const lane of BOARD_LANES) {
+        for (const item of section[lane] || []) itemBoards.set(item, section.board)
+      }
+    }
+    renderedBoardRoot = renderBoardIndex(boardHost, index, {
+      element,
+      onSelect: (_ref, item) => {
+        controller.select(item, { board: itemBoards.get(item) })
+      },
+    })
+  }
+
+  function renderBoardFailure(failure) {
+    const primary = failure ?? noContentFailure()
+    renderPageError(status, primary)
+    if (locationFailure && locationFailure.code !== primary.code) {
+      status.append(element(
+        'p',
+        `位置无法恢复 · ${locationFailure.message} · next=${locationFailure.nextAction}`,
+        'empty',
+      ))
+    }
+    renderedBoardRoot = null
+    clearNode(boardHost)
+  }
+
+  function mountBoardNav(host) {
+    if (!host) return
+    clearNode(host)
+    const nav = element('nav', undefined, 'product-board-nav')
+    nav.setAttribute('aria-label', '五个工作板块')
+    for (const board of PRODUCT_BOARD_ORDER) {
+      const button = element('button', PRODUCT_BOARD_LABELS[board], 'button button--quiet product-board-nav-item')
+      button.type = 'button'
+      button.dataset.boardNav = board
+      button.addEventListener('click', () => {
+        const section = Array.from(renderedBoardRoot?.children ?? [])
+          .find((node) => node.getAttribute('data-product-board') === board)
+        if (section && typeof section.scrollIntoView === 'function') {
+          section.scrollIntoView({ block: 'start' })
+        }
+        if (typeof template.closeDrawer === 'function') template.closeDrawer()
+      })
+      nav.append(button)
+    }
+    host.append(nav)
+  }
+
+  controller = createBoardController({
+    publication,
+    initialScope: initial.scope,
+    render: renderBoard,
+    renderFailure: renderBoardFailure,
+    navigate: navigateSelection,
+  })
+  mountBoardNav(template.hosts.board)
+
+  // ── Execution-plan panel (unchanged owner) ──
+  let planControlNotice = { subscriptionId: '', text: '', error: undefined }
+  let lastSchedulerRead
+
+  async function runPlanControl(subscriptionId, action) {
+    if (pageDisposed) return
+    planControlNotice = { subscriptionId, text: planControlPendingCopy(action), error: undefined }
+    renderPlanList(lastSchedulerRead)
+    try {
+      const result = await api.planControl(subscriptionId, {
+        action,
+        idempotencyKey: planControlKey(subscriptionId, action),
+        requestedAt: new Date().toISOString(),
+      })
+      planControlNotice = { subscriptionId, text: planControlResultCopy(action, result), error: undefined }
+    } catch (error) {
+      planControlNotice = { subscriptionId, text: planControlErrorMessage(error), error }
+    }
+    if (pageDisposed) return
+    await refreshPlans()
+  }
+
+  function projectSchedulerPlan(plan) {
+    return {
+      subscriptionId: plan.subscriptionId,
+      state: plan.state,
+      nextDueAt: planNextDueAt(plan),
+      goalId: plan.goalId,
+      scheduleRevision: plan.scheduleRevision,
+      currentOccurrenceOrdinal: plan.currentOccurrenceOrdinal,
+      availableActions: planActionsForState(plan.state),
+    }
+  }
+
+  function renderPlanList(scheduler) {
+    lastSchedulerRead = scheduler
+    clearNode(plansRegion)
+    const head = element('header', undefined, 'section-head')
+    const plans = scheduler?.plans ?? []
+    head.append(element('h2', '执行计划'), element('span', `${plans.length} 项`, 'section-meta'))
+    plansRegion.append(head)
+    const panel = element('div', undefined, 'panel')
+    if (scheduler?.__error) {
+      panel.append(element(
+        'p',
+        `读取执行计划失败 · ${scheduler.__error.message} · owner=${scheduler.__error.ownerId || 'unknown'} · next=${scheduler.__error.nextAction || 'inspect the runtime error'}`,
+        'empty',
+      ))
+    } else if (scheduler?.issue) {
+      panel.append(element('p', `计划巡逻上报：${scheduler.issue.code} · ${scheduler.issue.message} · next=${scheduler.issue.nextAction}`, 'empty'))
+    } else if (plans.length === 0) {
+      panel.append(element('p', '当前没有已持久化的执行计划。', 'empty'))
+    }
+    for (const plan of plans) {
+      panel.append(renderPlanSection(projectSchedulerPlan(plan), {
+        ...(planControlNotice.subscriptionId === plan.subscriptionId
+          ? {
+              notice: planControlNotice.text,
+              ...(planControlNotice.error === undefined ? {} : { error: planControlNotice.error }),
+            }
+          : {}),
+        onControl: (action) => runPlanControl(plan.subscriptionId, action),
+      }))
+    }
+    plansRegion.append(panel)
+  }
+
+  async function refreshPlans() {
+    try {
+      const scheduler = await api.scheduler().catch((error) => ({ __error: error }))
+      if (!pageDisposed) renderPlanList(scheduler)
+    } catch (error) {
+      if (!pageDisposed) renderPlanList({ __error: error })
+    }
+  }
+
+  async function refreshPage() {
+    if (pageDisposed) return
+    await Promise.all([
+      controller.refresh(),
+      refreshPlans(),
+    ])
+  }
+
+  function disposePage(event) {
+    if (event?.persisted) return
+    if (pageDisposed) return
+    pageDisposed = true
+    if (pollHandle !== null) {
+      clearInterval(pollHandle)
+      pollHandle = null
+    }
+    template.dispose()
+  }
+
+  void refreshPage()
+  pollHandle = setInterval(() => void refreshPage(), REFRESH_MS)
+  window.addEventListener('pagehide', disposePage)
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) void refreshPage()
+  })
+}
+
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  bootstrapDashboardPage()
+}
