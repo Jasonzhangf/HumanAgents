@@ -96,6 +96,7 @@ function jsonResponse(body, status = 200) {
 
 const taskId = { scope: 'task', value: 'task-1' }
 const projectScope = { kind: 'project', projectKey: 'project-a' }
+const projectReadScope = { ...projectScope, mode: 'fake' }
 const taskScope = {
   kind: 'task',
   projectKey: 'project-a',
@@ -150,7 +151,7 @@ const unknownItem = {
 }
 
 const boardIndex = {
-  scope: projectScope,
+  scope: { kind: 'project', projectKey: 'project-a' },
   observedAt: '2026-10-21T00:00:00.000Z',
   boards: [
     {
@@ -171,7 +172,7 @@ test('unknown board items stay in the unknown lane and never become Live', async
     renderFailure: (failure) => failures.push(failure),
   })
 
-  const result = await controller.refresh(projectScope)
+  const result = await controller.refresh(projectReadScope)
   assert.equal(result.ok, true)
   assert.deepEqual(failures, [])
 
@@ -260,7 +261,7 @@ test('a failed or empty read never renders a guessed empty board', async () => {
     render: () => { renders += 1 },
     renderFailure: (failure) => failures.push(failure),
   })
-  const failed = await failedController.refresh(projectScope)
+  const failed = await failedController.refresh(projectReadScope)
   assert.equal(failed.ok, false)
   assert.equal(failed.failure.code, 'product-board.unavailable')
   assert.equal(failed.failure.ownerId, 'humanagent.app')
@@ -278,7 +279,7 @@ test('a failed or empty read never renders a guessed empty board', async () => {
     render: () => { renders += 1 },
     renderFailure: (failure) => failures.push(failure),
   })
-  const empty = await emptyController.refresh(projectScope)
+  const empty = await emptyController.refresh(projectReadScope)
   assert.equal(empty.ok, false)
   assert.equal(empty.failure.code, 'product-board.no-content')
   assert.equal(renders, 0)
@@ -307,8 +308,8 @@ test('refresh is read-only and never navigates or writes', async () => {
     navigate: () => { navigations += 1 },
   })
 
-  const first = await controller.refresh(projectScope)
-  const second = await controller.refresh(projectScope)
+  const first = await controller.refresh(projectReadScope)
+  const second = await controller.refresh(projectReadScope)
 
   assert.equal(first.ok, true)
   assert.equal(second.ok, true)
@@ -324,13 +325,24 @@ test('refresh is read-only and never navigates or writes', async () => {
 })
 
 test('initial scope comes from the URL or default project and a valid hash restores its exact scope', () => {
+  assert.deepEqual(boardScopeFromSearch('?projectKey=project-b', undefined, 'rcc'), {
+    kind: 'project',
+    projectKey: 'project-b',
+    mode: 'rcc',
+  })
+  assert.deepEqual(boardScopeFromSearch('?projectKey=project-b&mode=fake', undefined, 'rcc'), {
+    kind: 'project',
+    projectKey: 'project-b',
+    mode: 'fake',
+  })
+  assert.deepEqual(boardScopeFromSearch('', 'project-c', 'fake'), {
+    kind: 'project',
+    projectKey: 'project-c',
+    mode: 'fake',
+  })
   assert.deepEqual(boardScopeFromSearch('?projectKey=project-b'), {
     kind: 'project',
     projectKey: 'project-b',
-  })
-  assert.deepEqual(boardScopeFromSearch('', 'project-c'), {
-    kind: 'project',
-    projectKey: 'project-c',
   })
   assert.deepEqual(boardScopeFromSearch(''), { kind: 'system' })
 
@@ -349,20 +361,44 @@ test('initial scope comes from the URL or default project and a valid hash resto
   assert.deepEqual(restored.location, restoredLocation)
   assert.deepEqual(restored.scope, taskScope)
 
-  const noHash = initialBoardState({ hash: '', search: '?projectKey=project-b' })
+  const noHash = initialBoardState({
+    hash: '',
+    search: '?projectKey=project-b',
+    defaultMode: 'fake',
+  })
   assert.equal(noHash.kind, 'board')
-  assert.deepEqual(noHash.scope, { kind: 'project', projectKey: 'project-b' })
+  assert.deepEqual(noHash.scope, { kind: 'project', projectKey: 'project-b', mode: 'fake' })
+
+  const projectLocation = {
+    board: 'memory',
+    lane: 'history',
+    focus: {
+      kind: 'session',
+      sessionRef: { sourceKind: 'memory', sourceRef: 'memory-session-1' },
+      scope: projectScope,
+    },
+    scope: projectScope,
+  }
+  const restoredProject = initialBoardState({
+    hash: encodeProductLocation(projectLocation),
+    search: '?projectKey=another-project',
+    defaultMode: 'rcc',
+  })
+  assert.equal(restoredProject.kind, 'valid')
+  assert.deepEqual(restoredProject.location, projectLocation)
+  assert.deepEqual(restoredProject.scope, { kind: 'project', projectKey: 'project-a', mode: 'rcc' })
 })
 
 test('an invalid product hash is explicit and never invents a focus', () => {
   const restored = initialBoardState({
     hash: '#/boards/execution/live',
     search: '?projectKey=project-b',
+    defaultMode: 'fake',
   })
   assert.equal(restored.kind, 'unknown')
   assert.equal(restored.failure.code, 'product-location.unknown')
   assert.equal('location' in restored, false)
-  assert.deepEqual(restored.scope, { kind: 'project', projectKey: 'project-b' })
+  assert.deepEqual(restored.scope, { kind: 'project', projectKey: 'project-b', mode: 'fake' })
 })
 
 test('a project-scoped session without a task keeps the exact hash instead of inventing a task page', () => {
@@ -383,10 +419,11 @@ test('a project-scoped session without a task keeps the exact hash instead of in
 })
 
 test('the board read forwards the exact scope and rejects a body without a board index', async () => {
-  assert.equal(productBoardPath({ kind: 'system' }), '/api/product/board')
+  assert.equal(productBoardPath({ kind: 'system' }), null)
+  assert.equal(productBoardPath(projectScope), null)
   assert.equal(
-    productBoardPath(projectScope),
-    '/api/product/board?projectKey=project-a',
+    productBoardPath(projectReadScope),
+    '/api/product/board?projectKey=project-a&mode=fake',
   )
   assert.equal(
     productBoardPath(taskScope),
@@ -394,7 +431,7 @@ test('the board read forwards the exact scope and rejects a body without a board
   )
 
   const calls = []
-  const index = await readProductBoard(projectScope, {
+  const index = await readProductBoard(projectReadScope, {
     fetchImpl: async (url, init) => {
       calls.push({ url, init })
       return jsonResponse(boardIndex)
@@ -402,11 +439,27 @@ test('the board read forwards the exact scope and rejects a body without a board
   })
   assert.equal(index, boardIndex)
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].url, '/api/product/board?projectKey=project-a')
+  assert.equal(calls[0].url, '/api/product/board?projectKey=project-a&mode=fake')
   assert.equal(calls[0].init.method, 'GET')
 
+  const missingModeCalls = []
   await assert.rejects(
     () => readProductBoard(projectScope, {
+      fetchImpl: async (url) => {
+        missingModeCalls.push(url)
+        return jsonResponse(boardIndex)
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 'product-board.scope-unavailable')
+      assert.equal(error.ownerId, 'humanagent.ui.dashboard')
+      return true
+    },
+  )
+  assert.deepEqual(missingModeCalls, [])
+
+  await assert.rejects(
+    () => readProductBoard(projectReadScope, {
       fetchImpl: async () => jsonResponse({ boards: null }),
     }),
     (error) => {
