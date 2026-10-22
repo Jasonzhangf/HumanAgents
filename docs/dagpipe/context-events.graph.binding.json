@@ -4,6 +4,8 @@
     "operator": "humanagent-context-events",
     "operator_version": "1"
   },
+  "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+  "sourceContract": "event_source 只接收上游 owner 提供的原始事件流；产品层不复写 actor 分类器，不从 raw 日志重建控制决定。",
   "nodes": {
     "event_source": {
       "ownerPath": "packages/context-events/src/normalize.ts",

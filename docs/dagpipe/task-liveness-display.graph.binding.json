@@ -4,6 +4,8 @@
     "operator": "humanagent-task-liveness-display",
     "operator_version": "1"
   },
+  "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+  "sessionBoardContract": "卡片条目携带精确 task/session/instance refs 与 projectKey/mode scope；board 是展示分类，不作为身份、权限或 Live 依据。",
   "nodes": {
     "open_task_surface": {
       "ownerPath": "docs/ui/task.js",

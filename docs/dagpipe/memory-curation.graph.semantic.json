@@ -13,6 +13,8 @@
     "write_memory_event": "保存持久审计结果与待审候选"
   },
   "contracts": {
-    "outputs": "出口是已持久保存的审计结果；有候选时候选保持待审，无候选时允许以审计结果收口。二者都不表示规则或记忆已发布。"
+    "outputs": "出口是已持久保存的审计结果；有候选时候选保持待审，无候选时允许以审计结果收口。二者都不表示规则或记忆已发布。",
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "sessionBoundary": "记忆候选不是记忆 agent session，候选列表不能伪装执行索引；记忆板块读取真实 session 来源，不改记忆业务流程。"
   }
 }

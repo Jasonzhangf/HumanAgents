@@ -1,9 +1,12 @@
 {
   "id": "humanagent-memory-curation",
-  "version": "1",
+  "version": "2",
   "meta": {
     "title": "已收拢检查点沉淀为可审阅经验",
-    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a",
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "sessionBoundary": "记忆候选不是记忆 agent session；候选列表不能伪装执行索引。记忆板块的 session 读取必须有真实 owner 来源（如 MemorySessionEvidence），未确认来源时保持 unknown。",
+    "readBoundary": "本图只表达记忆业务与候选；五板块记忆索引读取复用既有记忆 session 来源，不改变记忆业务流程。"
   },
   "inputs": [
     { "id": "settled_checkpoint", "schema": "Object" }

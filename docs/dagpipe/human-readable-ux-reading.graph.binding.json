@@ -5,38 +5,44 @@
     "operator_version": "1"
   },
   "status": "DESIGN-UNVERIFIED",
+  "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
   "nodes": {
     "truth": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerSymbol": "Runtime native activity source selection feeding the existing task-scoped read",
       "implementationStatus": "candidate-native-source-selection-design",
-      "designNote": "读取同范围真实事实与责任。actual graph 来源是已由 owner 解码的 native allocation、active-turn、resumed-segment、child invocation+delivery、review 与 planner records，经 Runtime 纯选择器形成 contracts source，再从现有 agentActivity 成功值的 actualExecutionGraph 进入。缺失、不可用与未归类事实明确显示，不从日志、固定角色流程或 assignment-graph replay 补造。"
+      "designNote": "读取同范围真实事实与责任。actual graph 来源是已由 owner 解码的 native allocation、active-turn、resumed-segment、child invocation+delivery、review 与 planner records，经 Runtime 纯选择器形成 contracts source，再从现有 agentActivity 成功值的 actualExecutionGraph 进入。缺失、不可用与未归类事实明确显示，不从日志、固定角色流程或 assignment-graph replay 补造。",
+      "contract": "输入 view_request 携带 board、完整 projectKey/mode scope、可选精确 focus 与 live/history lane；输出保留 owner 已解码 exact refs、session 归属、消息 actor/source/time、typed relations、公开提交 publication 和 pending decision 对象。task.input 不能推断 human，task.updatedAt 不能代替事件时间。"
     },
     "semantic": {
       "ownerPath": "packages/context-events/src/index.ts",
       "ownerRel": "packages/context-events/src/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "复用共同语义与来源，并把 business Task、真实 result/blocker 与 typed occurrence lineage 作为不同事实识别。不得用 title、ID 前缀或 lifecycle 文案推断关系。"
+      "designNote": "复用共同语义与来源，并把 business Task、真实 result/blocker 与 typed occurrence lineage 作为不同事实识别。不得用 title、ID 前缀或 lifecycle 文案推断关系。",
+      "contract": "semantic 输出板块条目、消息、关系、公开结果与决策候选；actor/source 只使用 owner 解码值，关系只使用 typed lineage 与 exact refs，public result 只引用同一 binding 的 PublicOutputPublicationProjection。"
     },
     "purpose": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "列表按一个业务工作项组织，至少保留语义 title、真实阶段或结果与主要入口；guidance、当前计划、内部 child 与已记录实例在下一层分开读取。不把角色名称、时间、成员、技术实例 ID、commit ref 或 registry 转成默认标签。"
+      "designNote": "列表按一个业务工作项组织，至少保留语义 title、真实阶段或结果与主要入口；guidance、当前计划、内部 child 与已记录实例在下一层分开读取。不把角色名称、时间、成员、技术实例 ID、commit ref 或 registry 转成默认标签。",
+      "contract": "purpose 把同一 ProductBoardIndex 分成 Live、历史和未知；分类只来自权威状态，不来自 updatedAt 或页面流；未知不可计入 Live。"
     },
     "necessary": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "删除重复、无内容、无用途字段；保留真实 result、blocker、unknown、恢复责任与有入口的 action。succeeded 不显示不存在的 stop，missing grant 不等同真实 decision，系统 blocked 不泛化成 waiting-for-answer。"
+      "designNote": "删除重复、无内容、无用途字段；保留真实 result、blocker、unknown、恢复责任与有入口的 action。succeeded 不显示不存在的 stop，missing grant 不等同真实 decision，系统 blocked 不泛化成 waiting-for-answer。",
+      "contract": "necessary 只保留有 owner 证据的 pending decision：task-grant、task-input-request、attention-decision 分开；公开结果保留 pending/unknown 时已确认 commits；无提交不画结果块；action 必须有正式 typed authority 与可用入口。"
     },
     "present": {
       "ownerPath": "docs/ui/runtime-shell.js",
       "ownerRel": "docs/ui/runtime-shell.js",
       "ownerSymbol": "mountPageTemplate + page controller slot composition",
       "implementationStatus": "shared-template-owned-page-composition-pending",
-      "designNote": "共享 template 拥有显式 root 与 heading/status/primary/support/composer 具名 slot，三种布局共享同一 slot 实现；页面 controller 把 feature host 送入 slot，并保留任务/项目/模式、选择、URL 与正式读写 owner。详情入口经单一 shell detail carrier 进入完整 child/error/receipt/Observation 证据，不把内部实现细节堆回列表；可选空 slot 不生成可见空块。"
+      "designNote": "共享 template 拥有显式 root 与 heading/status/primary/support/composer 具名 slot，三种布局共享同一 slot 实现；页面 controller 把 feature host 送入 slot，并保留任务/项目/模式、选择、URL 与正式读写 owner。详情入口经单一 shell detail carrier 进入完整 child/error/receipt/Observation 证据，不把内部实现细节堆回列表；可选空 slot 不生成可见空块。",
+      "contract": "present 只能用 ProductTargetRef 与 ProductLocation 驱动 board/session/关系视图；打开、关闭、Back/Forward 和刷新只发出读请求，不提交决定、不重启任务、不把授权写入 URL。"
     }
   }
 }

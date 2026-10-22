@@ -1,6 +1,6 @@
 {
   "id": "humanagent-task-liveness-display",
-  "version": "2",
+  "version": "3",
   "meta": {
     "title": "任务实时性事实从运行时快照到工作卡片真实呈现",
     "requirements_version": 19,
@@ -38,7 +38,11 @@
     "scopeBoundary": "本图只覆盖承载工作卡片的页面（docs/ui/index.html、dashboard.html、task.html）经真实 dashboard 读模型取得实时性并呈现；其中页面本地传输事实只有 docs/ui/task.js 持有（它自己开 EventSource 观测该流），index.html 与 dashboard.html 只挂载工作卡片、不持有该流、也不写入卡片传输事实；只读 Observation 页（observation.js）由 humanagent-observation-read 覆盖，不复用本图",
     "truthfulReadContract": "列表与详情必须来自同一 typed 任务事实：语义 title、真实 state/blocker/result、business/occurrence lineage 与已验证入口。主列表只显示一个业务工作项；内部 child 可在详情和 Observation 完整读取。无法关联的历史记录保留独立入口，不能按 title 或 ID 前缀推断关系。",
     "actionBoundary": "action 必须具备实际 typed authority 与可用入口。succeeded 的“停止”不存在时不显示；missing grant 只链接验证过的 child control target；blocked 保留 typed error/owner/recovery；真实 decision 才提供 question/options 提交。下一步文案不得独立于 action 机械拼接。",
-    "p0Status": "本版冻结 truthful state/result/action 与 lineage 展示契约。P3/P4 必须把已冻结 typed 输入接入既有 projection/card；当前实现仍为 partial/UNVERIFIED。"
+    "p0Status": "本版冻结 truthful state/result/action 与 lineage 展示契约。P3/P4 必须把已冻结 typed 输入接入既有 projection/card；当前实现仍为 partial/UNVERIFIED。",
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "sessionBoardContract": "卡片加载精确 task 关联与 projectKey/mode scope；board 只是展示分类，不提供身份或权限。Live/历史/未知按权威状态分类，不从 updatedAt、role 或页面流连接判断 Live。",
+    "waitingFactsContract": "approval-wait、真实 decision、系统 blocked 与终态结果保持分离：缺 exact TaskGrant 显示等待该次执行授权，真实 decision 只在实际 question/options 存在时出现，系统/资源阻塞保留 typed blocker/owner/恢复入口。三者在渲染与接口层都不合并。",
+    "resultFactsContract": "卡片结果只使用同 binding 的公开提交 publication；pending/unknown 保留已确认 commits，无提交不画结果块。不用 task.output、provider 文本或最新任意 checkpoint 代替。"
   },
   "inputs": [
     {

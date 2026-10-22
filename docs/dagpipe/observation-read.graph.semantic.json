@@ -19,5 +19,11 @@
     "ownership": "http_api 与 browser_view 只保留 typed scope 和只读传输；load_task_truth/load_event_history 从声明范围读取真实 Journal；不新增跨进程 registry、HTTP proxy 或第二语义存储。浏览器侧由 runtime-api.js 原位冻结并发布同一 scope/revision 的 content 引用；runtime-shell.js 持有语义面板生命周期、偏好订阅与 GET/SSE serial/revision 隔离；semantic-observation.js 通过纯视图回调发出选择；task-dashboard.js 与 observation.js 各自在 pagehide 释放流、面板和偏好订阅。Task Dashboard 与 Pipeline Observation 是已交付的四模式偏好表面，其他共享壳页按现有展示合同不挂载该表面。该边界不声明全局事件总线、全 UI 已完成或跨进程 native Arc<T>。",
     "actualExecutionGraph": "同一 agentActivity 成功值通过 actualExecutionGraph 携带 contracts source snapshot。Runtime 纯选择同一任务范围已由 owner 解码的 native allocation、active-turn、resumed-segment、child invocation+delivery、review 与 planner records，不要求 assignment-graph fact replay，不创建 Manager、不 acquire、不 rebind；UI 只投影该 source。unavailable/not-recorded 与未归类事实明确保留，当前计划仍走既有 TaskPlanSnapshot carrier。",
     "taskTemplateSkeleton": "已提交 taskFlow 绑定在 load_task_truth 解析为只读 TaskFlowGuidance，typed 阶段、强制依赖、布局与逻辑循环随既有 task_projection 载体流到 project_semantic_views 与 browser_view，不新增节点、边或 HTTP 路径。turn-iteration 与 occurrence-repetition 只是模板元数据，不写成读 DAG 的环。模板骨架与当前计划、已记录实例保持不同含义；无绑定的旧任务保持 guidance 缺失。"
+  },
+  "productRead": {
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "composition": "五板块与 session 组合由 App 纯组合既有 owner 已读事实；Runtime 保留事实选择，UI 保留投影。新增公开读取入口时才补本图入口契约，不把内部 actual execution graph 当产品关系链。",
+    "boardIndex": "板块条目集合来自任务身份/状态与 session 事实；Live 分类来自权威状态，不从页面本地 transport 或 role 名判断；未知保持显式。",
+    "relationBoundary": "关系边只来自 typed lineage（requirementId、subscriptionId、occurrenceId、child execution、checkpoint、review、planner、tool-pair）与 exact refs，不用标题、时间或角色顺序补边。"
   }
 }

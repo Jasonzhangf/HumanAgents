@@ -6,5 +6,10 @@
     "pairing": "建立错误与修复配对",
     "projector": "生成叙述与记忆摘要投影",
     "consume": "供界面与记忆消费"
+  },
+  "contracts": {
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "source": "event_source 只接收上游 owner 已提交的原始事件流；产品层不为新界面写逐页 actor 分类器，不重建配对或控制决定。",
+    "message": "normalize 保留 actor/source/occurredAt/证据引用；缺字段显式 unknown，不用 task.updatedAt 代替事件时间。"
   }
 }
