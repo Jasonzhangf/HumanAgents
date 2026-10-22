@@ -66,6 +66,34 @@ export const TERMINAL_TASK_STATES = Object.freeze([
 ])
 
 /**
+ * The landing is one observation: the page has to be a task page, and that page
+ * has to name the task this submission created inside the same project and mode.
+ * Reading the parts from different moments of the run would let an unrelated task
+ * page count as the landing of this submission.
+ */
+export function landingEvidence(url, { projectKey, mode, taskIds }) {
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return { matched: false, task: null, reason: 'unparsable url' }
+  }
+  const onTaskPage = parsed.pathname.endsWith('/task-dashboard.html')
+    || parsed.pathname.endsWith('/task.html')
+  const task = parsed.searchParams.get('task')
+  if (!onTaskPage) return { matched: false, task, reason: 'not a task page' }
+  if (typeof task !== 'string' || task === '') return { matched: false, task, reason: 'no task in url' }
+  if (parsed.searchParams.get('projectKey') !== projectKey) {
+    return { matched: false, task, reason: 'foreign project' }
+  }
+  if (parsed.searchParams.get('mode') !== mode) return { matched: false, task, reason: 'foreign mode' }
+  if (!Array.isArray(taskIds) || !taskIds.includes(task)) {
+    return { matched: false, task, reason: 'task is not this submission' }
+  }
+  return { matched: true, task, reason: 'task page names the created task' }
+}
+
+/**
  * The rendered unavailable surface is the only place the page exposes why a
  * focus has no readable body. The collector keeps the human message and the
  * diagnostic code in separate fields because the shared evaluator checks both.
@@ -1026,17 +1054,18 @@ class AcceptanceRun {
           const id = taskIdValue(row.taskId ?? row.id)
           return typeof id === 'string' && id !== '' && !beforeIds.has(id)
         })
-        const url = new URL(this.page.url())
-        const urlTaskId = url.searchParams.get('task')
         // The submit lands on the interaction page of the task it just created;
         // the task dashboard is the other surface the product uses for the same
-        // landing. Either one has to name the task that was created.
-        const landingPage = url.pathname.endsWith('/task-dashboard.html')
-          || url.pathname.endsWith('/task.html')
-        if (landingPage && urlTaskId) {
+        // landing. Either one has to name that task in this project and mode,
+        // and every part is read from the same url.
+        const landing = landingEvidence(this.page.url(), {
+          projectKey: this.projectKey,
+          mode: ACCEPTANCE_MODE,
+          taskIds: waitRows.map((row) => taskIdValue(row.taskId ?? row.id)),
+        })
+        if (landing.matched) {
           waitLanding = true
-          const match = waitRows.find((row) => taskIdValue(row.taskId ?? row.id) === urlTaskId)
-          if (match) break
+          break
         }
         if (waitRows.length > 0) break
         if (this.serve.exitCode !== null || this.serve.signalCode !== null) break
@@ -1047,14 +1076,15 @@ class AcceptanceRun {
         // own navigation, so landing keeps a short grace window instead of being
         // reported as unconfirmed while the page is still moving.
         const landingDeadline = Date.now() + 15_000
+        const createdIds = waitRows.map((row) => taskIdValue(row.taskId ?? row.id))
         while (Date.now() < landingDeadline) {
-          const landingUrl = new URL(this.page.url())
-          const landingTask = landingUrl.searchParams.get('task')
-          const onLandingPage = landingUrl.pathname.endsWith('/task-dashboard.html')
-            || landingUrl.pathname.endsWith('/task.html')
-          if (onLandingPage && landingTask) {
+          if (landingEvidence(this.page.url(), {
+            projectKey: this.projectKey,
+            mode: ACCEPTANCE_MODE,
+            taskIds: createdIds,
+          }).matched) {
             waitLanding = true
-            if (waitRows.some((row) => taskIdValue(row.taskId ?? row.id) === landingTask)) break
+            break
           }
           await sleep(250)
         }
@@ -1127,16 +1157,18 @@ class AcceptanceRun {
     const row = interactionRows[0]
     this.taskId = taskIdValue(row.taskId ?? row.id)
     const landingUrl = new URL(this.page.url())
-    const landingMatches = landingObserved
-      && landingUrl.searchParams.get('task') === this.taskId
-      && landingUrl.searchParams.get('projectKey') === this.projectKey
-      && landingUrl.searchParams.get('mode') === ACCEPTANCE_MODE
+    const finalLanding = landingEvidence(this.page.url(), {
+      projectKey: this.projectKey,
+      mode: ACCEPTANCE_MODE,
+      taskIds: [this.taskId],
+    })
+    const landingMatches = landingObserved && finalLanding.matched
     if (landingMatches) {
       this.pass('entry.landing', `entry landed on ${landingUrl.pathname} for ${this.taskId}`, [tasksAfterFile])
     } else {
       this.unverified(
         'entry.landing',
-        `task ${this.taskId} exists but entry URL landing was not confirmed; page=${this.page.url()}`,
+        `task ${this.taskId} exists but entry URL landing was not confirmed (${finalLanding.reason}); page=${this.page.url()}`,
         [tasksAfterFile],
       )
     }

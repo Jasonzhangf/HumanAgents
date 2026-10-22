@@ -5,6 +5,7 @@ import {
   evaluateExecutionProgress,
   evaluateGrantDecision,
   evaluateNavigationState,
+  landingEvidence,
   summarizeChecks,
   unavailableSurfaceFields,
 } from './ux-rcc-approval-acceptance-browser.mjs'
@@ -264,6 +265,44 @@ function failureSurfaceFromDom(failure) {
   )
   return node
 }
+
+test('the landing is one url observation naming this submission task', () => {
+  const base = {
+    projectKey: 'project-1',
+    mode: 'rcc',
+    taskIds: ['ui-task-implicit-draft-2'],
+  }
+  const taskPage = `http://127.0.0.1:49000/task.html?task=ui-task-implicit-draft-2&projectKey=project-1&mode=rcc`
+  assert.equal(landingEvidence(taskPage, base).matched, true)
+  assert.equal(landingEvidence(
+    `http://127.0.0.1:49000/task-dashboard.html?task=ui-task-implicit-draft-2&projectKey=project-1&mode=rcc`,
+    base,
+  ).matched, true)
+
+  // A page that is not a task page, even with the right query, is not a landing.
+  assert.equal(landingEvidence(
+    `http://127.0.0.1:49000/index.html?task=ui-task-implicit-draft-2&projectKey=project-1&mode=rcc`,
+    base,
+  ).matched, false)
+
+  // A task page of another task, project or mode is not this landing.
+  assert.equal(landingEvidence(
+    `http://127.0.0.1:49000/task.html?task=other-task&projectKey=project-1&mode=rcc`,
+    base,
+  ).matched, false)
+  assert.equal(landingEvidence(
+    `http://127.0.0.1:49000/task.html?task=ui-task-implicit-draft-2&projectKey=other&mode=rcc`,
+    base,
+  ).matched, false)
+  assert.equal(landingEvidence(
+    `http://127.0.0.1:49000/task.html?task=ui-task-implicit-draft-2&projectKey=project-1&mode=fake`,
+    base,
+  ).matched, false)
+
+  // Reading the page name from one moment and the task from another moment must
+  // not produce a landing: the predicate always takes one whole url.
+  assert.equal(landingEvidence(`http://127.0.0.1:49000/index.html`, base).matched, false)
+})
 
 test('the unavailable branch passes through the real failure node collector', () => {
   const url = productUrl()
