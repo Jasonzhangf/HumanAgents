@@ -7,6 +7,7 @@ import type {
   DraftRevisionInput,
   ExecutionPolicyDefinition,
   InteractionRequestKind,
+  ProductMessageActor,
   RequirementIntent,
   TaskId,
   TaskFlowBinding,
@@ -16,6 +17,7 @@ import {
   validateDraftConfirmation,
   validateDraftPreviewReceipt,
   validateDraftRejectClosure,
+  validateProductMessageActor,
 } from '../../../contracts/src/index.js';
 import {
   assertDraftRevisionCurrent,
@@ -87,6 +89,13 @@ export interface ExplicitInput {
    */
   readonly requestKind?: InteractionRequestKind;
   readonly occurredAt?: string;
+  /**
+   * Owner-decoded actor for this input. The real HTTP entry derives a human
+   * actor from the verified product principal and never accepts it from the
+   * client; legacy or unauthenticated callers leave it absent. Absence stays
+   * absent on disk so an old interaction is never rewritten as human.
+   */
+  readonly actor?: ProductMessageActor;
 }
 
 export interface MatchedTask {
@@ -127,6 +136,7 @@ export interface ExplicitInteractionSnapshot {
   readonly rawInput: string;
   readonly requestKind?: InteractionRequestKind;
   readonly occurredAt?: string;
+  readonly actor?: ProductMessageActor;
   readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   readonly nextAction: string;
   readonly condition?: string;
@@ -196,6 +206,7 @@ interface ExplicitInteractionRecordState {
   readonly rawInput: string;
   readonly requestKind?: InteractionRequestKind;
   readonly occurredAt?: string;
+  readonly actor?: ProductMessageActor;
   readonly state: ExplicitInteractionState;
   readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   readonly nextAction: string;
@@ -220,6 +231,7 @@ interface InteractionRecord {
   readonly rawInput: string;
   readonly requestKind?: InteractionRequestKind;
   readonly occurredAt?: string;
+  readonly actor?: ProductMessageActor;
   state: ExplicitInteractionState;
   owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   nextAction: string;
@@ -293,7 +305,10 @@ export class ExplicitIntake {
   private nextInteractionSeq = 1;
   private nextDraftSeq = 1;
 
-  constructor(private readonly journal?: ExplicitIntakeJournalPort) {
+  constructor(
+    private readonly journal?: ExplicitIntakeJournalPort,
+    private readonly now: () => Date = () => new Date(),
+  ) {
     const restored = journal?.load();
     if (restored) this.restoreState(restored);
   }
@@ -368,8 +383,25 @@ export class ExplicitIntake {
         },
       );
     }
+    if (input.actor !== undefined) {
+      try {
+        validateProductMessageActor(input.actor);
+      } catch (error) {
+        throw new ExplicitIntakeError(
+          'actor-invalid',
+          error instanceof Error ? error.message : String(error),
+          {
+            owner: 'explicit-intake',
+            nextAction: 'provide-an-owner-decoded-actor',
+            condition: 'decoded-actor-with-real-source',
+            cause: error,
+          },
+        );
+      }
+    }
 
     const interactionId = `interaction-${this.nextInteractionSeq}`;
+    const occurredAt = input.occurredAt ?? this.now().toISOString();
     this.persistMutation(() => {
       this.nextInteractionSeq += 1;
       this.interactions.set(interactionId, {
@@ -378,7 +410,8 @@ export class ExplicitIntake {
         sourceRef: input.sourceRef,
         rawInput: input.rawInput,
         ...(input.requestKind === undefined ? {} : { requestKind: input.requestKind }),
-        ...(input.occurredAt === undefined ? {} : { occurredAt: input.occurredAt }),
+        occurredAt,
+        ...(input.actor === undefined ? {} : { actor: structuredClone(input.actor) }),
         state: 'received',
         owner: 'explicit-intake',
         nextAction: 'start-matching',
@@ -398,6 +431,7 @@ export class ExplicitIntake {
       rawInput: interaction.rawInput,
       requestKind: interaction.requestKind,
       occurredAt: interaction.occurredAt,
+      actor: interaction.actor,
       owner: interaction.owner,
       nextAction: interaction.nextAction,
       condition: interaction.condition,
