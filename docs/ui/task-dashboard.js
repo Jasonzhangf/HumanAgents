@@ -81,7 +81,6 @@ import {
 import {
   isExactControllableTarget,
   openDecisionModal,
-  readbackState,
   renderInterventionEntry,
   renderPendingDecision,
 } from './product-control-view.js'
@@ -379,6 +378,64 @@ function productScopeForFocus(focus, fallback) {
   return focus?.scope?.kind === 'task' ? focus.scope : fallback
 }
 
+function productTaskScopeValue(scope) {
+  if (scope?.kind !== 'task') return undefined
+  const value = typeof scope.taskId === 'object' ? scope.taskId?.value : scope.taskId
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/**
+ * The flat read scope declared by decision 1. A task identity crosses as a
+ * string, and a session focus contributes its exact session reference; the
+ * internal `{scope,value}` object and every authority field stay on the page.
+ */
+function productFlatReadScope(focus, scope) {
+  if (scope?.kind !== 'task' && scope?.kind !== 'project') return undefined
+  const read = { projectKey: scope.projectKey }
+  if (scope.mode === 'fake' || scope.mode === 'rcc' || scope.mode === 'dsh') read.mode = scope.mode
+  if (scope.kind === 'task') {
+    const taskIdValue = productTaskScopeValue(scope)
+    if (taskIdValue === undefined) return undefined
+    read.taskId = taskIdValue
+  }
+  if (focus?.kind === 'session') {
+    const sessionId = focus.sessionRef?.sourceRef
+    if (typeof sessionId === 'string' && sessionId !== '') read.sessionId = sessionId
+  }
+  return read
+}
+
+function productDecisionReadScope(scope) {
+  return productFlatReadScope(undefined, scope)
+}
+
+/**
+ * A decision belongs to the focus only when its owner-supplied target names
+ * the same task and read scope. A waiting state is the only state this page
+ * treats as an approval; a resolved, revoked or unknown decision never becomes
+ * a pending block.
+ */
+function decisionMatchesFocus(decision, focus, scope) {
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision)) return false
+  if (decision.kind !== 'task-grant' || decision.state !== 'waiting') return false
+  // A waiting approval must offer the formal continue action. A revoke-only
+  // card is grant management, not a pending decision.
+  if (!Array.isArray(decision.actions) || !decision.actions.includes('grant')) return false
+  const target = decision.target
+  if (target?.kind !== 'interaction' || !isExactControllableTarget(target)) return false
+  const scopeTaskId = productTaskScopeValue(scope)
+  if (scopeTaskId === undefined || target.taskRef?.value !== scopeTaskId) return false
+  if (target.scope?.projectKey !== scope.projectKey || target.scope?.mode !== scope.mode) return false
+  if (target.scope?.taskId?.value !== scopeTaskId) return false
+  if (productTaskScopeValue(focus?.scope) !== scopeTaskId) return false
+  return focus?.taskRef?.value === scopeTaskId
+}
+
+function selectProductPendingDecision(value, focus, scope) {
+  if (value === null || value === undefined) return null
+  return decisionMatchesFocus(value, focus, scope) ? value : undefined
+}
+
 function normalizeProductLocationRead(value) {
   if (value === undefined || value === null) {
     return {
@@ -424,6 +481,19 @@ function renderProductRelationUnavailable(host, make, title, failure) {
   return node
 }
 
+function renderProductDecisionUnavailable(host, make, failure) {
+  const node = make('div', undefined, 'product-focus-decision-unavailable')
+  node.setAttribute('data-product-role', 'decision-unavailable')
+  node.setAttribute('role', 'alert')
+  node.append(
+    make('strong', '待决定事项读取不可用'),
+    make('p', `${failure.code} · ${failure.message}`),
+    make('p', failure.nextAction, 'muted'),
+  )
+  host.append(node)
+  return node
+}
+
 /**
  * The task focus controller.
  *
@@ -463,6 +533,9 @@ export function createTaskFocusController({
     sessionRead: 'idle',
     outputRead: 'idle',
     relationRead: 'idle',
+    decisionRead: 'idle',
+    decision: undefined,
+    decisionFailure: undefined,
     controlWrites: 0,
   }
 
@@ -599,6 +672,34 @@ export function createTaskFocusController({
     renderRelationGaps(state.gaps)
   }
 
+  function renderDecision(decisionResult) {
+    if (decisionResult.status === 'rejected') {
+      renderProductDecisionUnavailable(centerHost, make, state.decisionFailure
+        ?? productFailure(decisionResult.reason, 'product-decision.read.failed'))
+      return
+    }
+    const decision = state.decision
+    if (!decision) return
+    const decisionHost = make('div', undefined, 'product-focus-decision')
+    decisionHost.dataset.productFocusControl = 'decision'
+    renderPendingDecision(decisionHost, decision, {
+      element: make,
+      onIntent: (intent, selectedDecision) => {
+        // A focus change replaces state.decision; a stale card handler must not
+        // open an approval for the previous task.
+        if (state.decision !== selectedDecision) return
+        openDecisionModal({
+          decision: selectedDecision,
+          transport: controlTransport,
+          element: make,
+          host: decisionHost,
+          title: '审批执行授权',
+        })
+      },
+    })
+    centerHost.append(decisionHost)
+  }
+
   function focusSelectionTarget(ref, direction) {
     if (direction !== 'upstream' && direction !== 'downstream') return undefined
     const wanted = productRelationRefKey(ref)
@@ -637,10 +738,14 @@ export function createTaskFocusController({
     state.sessionRead = 'pending'
     state.relationRead = 'pending'
     state.outputRead = 'pending'
+    state.decisionRead = 'pending'
+    state.decision = undefined
+    state.decisionFailure = undefined
     renderPending()
 
-    const sessionPromise = typeof transport.readProductSession === 'function'
-      ? Promise.resolve().then(() => transport.readProductSession(scope))
+    const sessionReadScope = productFlatReadScope(focus, scope)
+    const sessionPromise = sessionReadScope !== undefined && typeof transport.readProductSession === 'function'
+      ? Promise.resolve().then(() => transport.readProductSession(sessionReadScope))
       : Promise.reject(productFailure(
         { code: 'product-session.read.unavailable', message: '当前页面没有会话读取入口。', ownerId: 'humanagent.ui.task-dashboard' },
         'product-session.read.unavailable',
@@ -655,10 +760,21 @@ export function createTaskFocusController({
       ? Promise.resolve().then(() => transport.readProductOutput(scope.taskId))
       : Promise.resolve(undefined)
 
-    const [sessionResult, relationResult, outputResult] = await Promise.allSettled([
+    const decisionReadScope = productDecisionReadScope(scope)
+    const decisionPromise = decisionReadScope === undefined
+      ? Promise.resolve(null)
+      : typeof transport.readProductDecision === 'function'
+        ? Promise.resolve().then(() => transport.readProductDecision(decisionReadScope))
+        : Promise.reject(productFailure(
+          { code: 'product-decision.read.unavailable', message: '当前页面没有待决定事项读取入口。', ownerId: 'humanagent.ui.task-dashboard' },
+          'product-decision.read.unavailable',
+        ))
+
+    const [sessionResult, relationResult, outputResult, decisionResult] = await Promise.allSettled([
       sessionPromise,
       relationsPromise,
       outputPromise,
+      decisionPromise,
     ])
     if (disposed || requestSerial !== serial) {
       return { ok: false, superseded: true, focus, scope }
@@ -668,8 +784,22 @@ export function createTaskFocusController({
     state.outputRead = outputResult.status === 'fulfilled'
       ? (selectProductOutputPublication(outputResult.value) === undefined ? 'empty' : 'ready')
       : 'failed'
+    const decisionValue = decisionResult.status === 'fulfilled' ? decisionResult.value : undefined
+    const selectedDecision = decisionResult.status === 'fulfilled'
+      ? selectProductPendingDecision(decisionValue, focus, scope)
+      : undefined
+    state.decision = selectedDecision
+    state.decisionRead = decisionResult.status === 'fulfilled'
+      ? (decisionValue === null || decisionValue === undefined
+          ? 'empty'
+          : selectedDecision === undefined ? 'mismatch' : 'ready')
+      : (decisionResult.reason?.code === 'product-decision.read.unavailable' ? 'unavailable' : 'failed')
+    state.decisionFailure = decisionResult.status === 'rejected'
+      ? productFailure(decisionResult.reason, 'product-decision.read.failed')
+      : undefined
     renderCenter(sessionResult, outputResult, focus, scope)
     renderRelations(relationResult, focus)
+    renderDecision(decisionResult)
     return { ok: true, focus, scope }
   }
 
@@ -827,20 +957,25 @@ let productCenterHost = null
 let productRelationHost = null
 
 function productTaskScope() {
-  if (!explicitScope) return undefined
-  const value = typeof explicitScope.taskId === 'object'
-    ? explicitScope.taskId.value
-    : explicitScope.taskId
+  // Focus navigation rewrites the query and hash together, so the live URL is
+  // the current product task. The initial scope is the fallback for a page
+  // opened without a complete explicit task query.
+  const live = taskReadScopeFromQuery()
+  const source = live.kind === 'task' ? live : explicitScope
+  if (!source) return undefined
+  const value = typeof source.taskId === 'object'
+    ? source.taskId.value
+    : source.taskId
   if (typeof value !== 'string' || value === '') return undefined
   return {
     kind: 'task',
-    projectKey: explicitScope.projectKey,
-    mode: explicitScope.mode,
+    projectKey: source.projectKey,
+    mode: source.mode,
     taskId: { scope: 'task', value },
   }
 }
 
-function productLocationMatchesTask(value) {
+export function productLocationMatchesTask(value) {
   const scope = productTaskScope()
   if (!scope || !value) return false
   if (value.scope?.kind === 'task') {
@@ -890,10 +1025,31 @@ function readPageProductLocation() {
   }
 }
 
-function writePageProductLocation(next) {
+function productPageQuery(scope) {
+  const params = new URLSearchParams()
+  if (scope?.kind === 'task') {
+    const value = typeof scope.taskId === 'object' ? scope.taskId?.value : scope.taskId
+    if (typeof value === 'string' && value !== '') params.set('task', value)
+    params.set('projectKey', scope.projectKey)
+    params.set('mode', scope.mode)
+  } else if (scope?.kind === 'project') {
+    params.set('projectKey', scope.projectKey)
+    if (explicitScope) params.set('mode', explicitScope.mode)
+  }
+  return params
+}
+
+export function writePageProductLocation(next) {
   const hash = encodeProductLocation(next)
   const url = new URL(location.href)
-  window.history.pushState(productLocationHistoryState(next), '', `${url.pathname}${url.search}${hash}`)
+  const query = productPageQuery(next?.scope).toString()
+  // The query and hash always describe the same focus scope. Retaining the
+  // old task query made refresh and Back/Forward reject the new focus.
+  window.history.pushState(
+    productLocationHistoryState(next),
+    '',
+    `${url.pathname}${query ? `?${query}` : ''}${hash}`,
+  )
 }
 
 function productScopeQuery(scope) {
@@ -908,6 +1064,24 @@ function productScopeQuery(scope) {
   } else if (explicitScope) {
     params.set('projectKey', explicitScope.projectKey)
     params.set('mode', explicitScope.mode)
+  }
+  return params
+}
+
+function productReadQuery(scope) {
+  const params = new URLSearchParams()
+  const projectKey = typeof scope?.projectKey === 'string' && scope.projectKey !== ''
+    ? scope.projectKey
+    : explicitScope?.projectKey
+  const mode = scope?.mode === 'fake' || scope?.mode === 'rcc' || scope?.mode === 'dsh'
+    ? scope.mode
+    : explicitScope?.mode
+  if (projectKey) params.set('projectKey', projectKey)
+  if (mode) params.set('mode', mode)
+  const taskValue = typeof scope?.taskId === 'object' ? scope.taskId?.value : scope?.taskId
+  if (typeof taskValue === 'string' && taskValue !== '') params.set('taskId', taskValue)
+  if (typeof scope?.sessionId === 'string' && scope.sessionId !== '') {
+    params.set('sessionId', scope.sessionId)
   }
   return params
 }
@@ -929,7 +1103,8 @@ async function fetchProductRead(path, params) {
 
 function pageProductTransport() {
   return {
-    readProductSession: (scope) => fetchProductRead('/api/product/session', productScopeQuery(scope)),
+    readProductSession: (scope) => fetchProductRead('/api/product/session', productReadQuery(scope)),
+    readProductDecision: (scope) => fetchProductRead('/api/product/decision', productReadQuery(scope)),
     readProductRelations: (scope) => fetchProductRead('/api/product/relations', productScopeQuery(scope)),
     readProductOutput: (taskIdValue) => {
       const params = new URLSearchParams()
@@ -951,31 +1126,10 @@ function productDashboardIsLive() {
   return Boolean(dashboard && ['created', 'admitted', 'running', 'settling', 'waiting'].includes(dashboard.state))
 }
 
-function productPendingDecision(focus) {
-  if (!taskGrantIntent || taskGrantReadState !== 'ready' || !taskGrantRead) return undefined
-  if (!isExactControllableTarget(focus)) return undefined
-  const scope = productTaskScope()
-  if (!scope) return undefined
-  const readback = readbackState(taskGrantRead.readback)
-  if (readback.kind === 'unknown') return undefined
-  return {
-    kind: 'task-grant',
-    target: { kind: 'interaction', taskRef: scope.taskId, scope },
-    question: '是否批准继续执行这个任务？',
-    actions: readback.kind === 'granted' ? ['revoke'] : ['grant'],
-    state: 'waiting',
-    ...(Number.isSafeInteger(readback.revision) ? { revision: readback.revision } : {}),
-    readback: {
-      grant: readback.grant,
-      commit: readback.commit,
-    },
-    recoveryOwner: 'humanagent.app.ui-runtime.task-control',
-  }
-}
-
-// The product center stays in the main layer. Formal controls are mounted under
-// it only when the focus is exact and the runtime reports a live state; a
-// permission question appears only when the grant readback is a real fact.
+// The product center stays in the main layer. The live intervention entry is
+// mounted only when the focus is exact and the runtime reports a live state.
+// The pending decision is owned by the focus controller's owner read; this
+// page never synthesizes one from the URL or a grant readback.
 function renderProductSessionExtras(host, { focus }) {
   if (!focus || !isExactControllableTarget(focus)) return
   if (productDashboardIsLive()) {
@@ -987,23 +1141,6 @@ function renderProductSessionExtras(host, { focus }) {
     })
     host.append(interventionHost)
   }
-  const decision = productPendingDecision(focus)
-  if (decision === undefined) return
-  const decisionHost = element('div', undefined, 'product-focus-decision')
-  decisionHost.dataset.productFocusControl = 'decision'
-  renderPendingDecision(decisionHost, decision, {
-    element,
-    onIntent: () => {
-      openDecisionModal({
-        decision,
-        transport: productFocusController?.transport ?? api,
-        element,
-        host: decisionHost,
-        title: '审批执行授权',
-      })
-    },
-  })
-  host.append(decisionHost)
 }
 
 function ensureProductFocus() {
