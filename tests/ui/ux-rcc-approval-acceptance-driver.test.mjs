@@ -123,12 +123,22 @@ test('grant evaluation requires the exact waiting task and a formal grant action
     readback: { grant: null, commit: null },
   }
   assert.equal(evaluateGrantDecision({ decision: waiting, taskId: 'task-1' }).ok, true)
+  assert.equal(evaluateGrantDecision({ decision: waiting, taskId: 'task-2' }).ok, false)
   assert.equal(evaluateGrantDecision({ decision: null, taskId: 'task-1' }).ok, false)
   assert.equal(evaluateGrantDecision({
     decision: { ...waiting, target: { ...target, taskRef: { scope: 'task', value: 'task-2' } } },
     taskId: 'task-1',
   }).ok, false)
   assert.equal(evaluateGrantDecision({ decision: { ...waiting, actions: ['revoke'] }, taskId: 'task-1' }).ok, false)
+  // A project-scope read must still prove the decision names one task inside that scope.
+  assert.equal(evaluateGrantDecision({
+    decision: waiting,
+    scope: { projectKey: 'project-1', mode: 'rcc' },
+  }).ok, true)
+  assert.equal(evaluateGrantDecision({
+    decision: waiting,
+    scope: { projectKey: 'other-project', mode: 'rcc' },
+  }).ok, false)
 })
 
 test('execution progress must leave waiting and expose a real execution or result signal', () => {

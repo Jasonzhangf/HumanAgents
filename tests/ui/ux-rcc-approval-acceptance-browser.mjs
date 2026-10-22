@@ -188,11 +188,21 @@ export function summarizeChecks(checks) {
   }
 }
 
-export function evaluateGrantDecision({ decision, taskId }) {
+export function evaluateGrantDecision({ decision, taskId, scope }) {
   const actions = Array.isArray(decision?.actions) ? decision.actions : []
+  const decisionTaskId = decision?.target?.taskRef?.value
   const exactTarget = decision?.kind === 'task-grant'
     && decision?.target?.kind === 'interaction'
-    && sameTaskId(decision?.target?.taskRef, taskIdObject(taskId))
+    && typeof decisionTaskId === 'string' && decisionTaskId.length > 0
+    // A decision that names another task than the caller asked for is not this
+    // task's approval. When the caller has no prior task expectation (the
+    // project-scope read), the decision must still name exactly one task inside
+    // the requested product scope.
+    && (taskId === undefined || taskId === null
+      ? decision?.target?.scope?.projectKey === scope?.projectKey
+        && decision?.target?.scope?.mode === scope?.mode
+        && decision?.target?.scope?.taskId?.value === decisionTaskId
+      : sameTaskId(decision?.target?.taskRef, taskIdObject(taskId)))
   const ok = decision?.kind === 'task-grant'
     && decision?.state === 'waiting'
     && actions.includes('grant')
@@ -200,7 +210,7 @@ export function evaluateGrantDecision({ decision, taskId }) {
   return {
     ok,
     detail: ok
-      ? `real task-grant waiting for task ${String(taskIdValue(taskId))} actions=${actions.join(',')}`
+      ? `real task-grant waiting for task ${String(decisionTaskId)} actions=${actions.join(',')}`
       : `decision=${decision?.kind ?? 'null'} state=${decision?.state ?? 'n/a'} target=${decision?.target?.taskRef?.value ?? 'n/a'} actions=${actions.join(',') || 'none'}`,
   }
 }
@@ -443,6 +453,7 @@ class AcceptanceRun {
     this.httpReceipts = []
     this.browserWrites = []
     this.browserWriteResponses = []
+    this.browserFailures = []
     this.browserSessionRequests = []
     this.consoleErrors = []
     this.pageErrors = []
@@ -874,6 +885,23 @@ class AcceptanceRun {
       if (!SAFE_REQUEST_METHODS.has(request.method())) {
         this.browserWriteResponses.push(record)
       }
+      if (!response.ok()) {
+        // A failing page request must carry its own reason into the evidence,
+        // otherwise the run can only report that the flow stopped.
+        const failure = { ...record, body: undefined, bodyError: undefined }
+        this.browserFailures.push(failure)
+        response.text().then((text) => {
+          try {
+            failure.body = text.trim() === '' ? null : JSON.parse(text)
+          } catch {
+            failure.body = text.slice(0, 2_000)
+          }
+          failure.observed = true
+        }, (error) => {
+          failure.bodyError = error?.message ?? String(error)
+          failure.observed = true
+        })
+      }
     })
     this.page.on('console', (message) => {
       if (message.type() === 'error') {
@@ -985,8 +1013,9 @@ class AcceptanceRun {
     }
     const tasksAfterFile = await this.writeJson('tasks-after-entry.json', after?.body ?? null)
     const entryEventsFile = await this.writeJson('entry-browser-writes.json', this.browserWrites)
+    const entryFailuresFile = await this.writeJson('entry-browser-failures.json', this.browserFailures)
     if (!after?.response.ok) {
-      this.fail('entry.task', `GET /api/tasks after entry status=${after?.response.status ?? 'n/a'}`, [tasksAfterFile, entryEventsFile])
+      this.fail('entry.task', `GET /api/tasks after entry status=${after?.response.status ?? 'n/a'}`, [tasksAfterFile, entryEventsFile, entryFailuresFile])
       throw stop(FAIL, 'task list could not be read after submission')
     }
     if (newRows.length !== 1) {
@@ -996,7 +1025,7 @@ class AcceptanceRun {
       this.fail(
         'entry.task',
         `expected exactly one new task, observed ${newRows.length}: ${newRows.map((row) => taskIdValue(row.taskId ?? row.id)).join(',') || 'none'}`,
-        [tasksAfterFile, entryEventsFile, failureFile, failureShot].filter(Boolean),
+        [tasksAfterFile, entryEventsFile, entryFailuresFile, failureFile, failureShot].filter(Boolean),
       )
       throw stop(FAIL, 'real form did not produce one new task')
     }
@@ -1093,7 +1122,15 @@ class AcceptanceRun {
       ok: true,
       bodyFile: decisionFile,
     })
-    const evaluation = evaluateGrantDecision({ decision: this.decision, taskId: this.taskId })
+    // The waiting grant belongs to the task the runtime prepared for this
+    // requirement; the page-level draft task id is not that task. The decision
+    // is exact only when it names one task, that task is inside this project
+    // scope, and the formal grant action is offered for it.
+    const decisionTaskId = this.decision?.target?.taskRef?.value
+    const evaluation = evaluateGrantDecision({
+      decision: this.decision,
+      scope: { projectKey: this.projectKey, mode: ACCEPTANCE_MODE },
+    })
     if (!evaluation.ok) {
       this.fail('approval.decision', evaluation.detail, [decisionFile, timelineFile])
       throw stop(FAIL, 'decision is not an exact waiting task-grant')
@@ -1150,6 +1187,11 @@ class AcceptanceRun {
       throw stop(FAIL, 'decision target is missing')
     }
     this.approvalTaskId = approvalTaskId
+    // From here on the acceptance tracks the task that really carries the
+    // approval and the execution. The entry task only proves that the form
+    // produced a task; it is not the granted task.
+    this.entryTaskId = this.entryTaskId ?? this.taskId
+    this.taskId = approvalTaskId
     await this.page.goto(`${this.base}${this.taskDashboardPath(approvalTaskId)}`, {
       waitUntil: 'domcontentloaded',
       timeout: 45_000,
