@@ -145,7 +145,7 @@ function exactTaskControlScopeQuery(scope) {
 // Product reads carry one exact read scope. Only projectKey, mode and the
 // optional taskId cross this boundary; principal, owner and authority fields
 // in the caller's object are dropped instead of forwarded.
-function productReadScopeQuery(scope) {
+function productReadScopeQuery(scope, { includeSession = false } = {}) {
   if (scope === null || typeof scope !== 'object'
     || typeof scope.projectKey !== 'string' || scope.projectKey.trim() === ''
     || (scope.mode !== 'fake' && scope.mode !== 'rcc')) {
@@ -157,6 +157,12 @@ function productReadScopeQuery(scope) {
       throw new TypeError('product read taskId must be a non-empty string')
     }
     query.set('taskId', scope.taskId)
+  }
+  if (includeSession && scope.sessionId !== undefined) {
+    if (typeof scope.sessionId !== 'string' || scope.sessionId.trim() === '') {
+      throw new TypeError('product read sessionId must be a non-empty string')
+    }
+    query.set('sessionId', scope.sessionId)
   }
   return `?${query}`
 }
@@ -264,7 +270,8 @@ export function createRuntimeApi(options = {}) {
     resetDisplayPreference: () => request('/api/ui/display-preference', { method: 'DELETE' }),
     dashboard: () => request('/api/dashboard'),
     readProductBoard: (scope) => request(`/api/product/board${productReadScopeQuery(scope)}`),
-    readProductSession: (scope) => request(`/api/product/session${productReadScopeQuery(scope)}`),
+    readProductSession: (scope) => request(`/api/product/session${productReadScopeQuery(scope, { includeSession: true })}`),
+    readProductDecision: (scope) => request(`/api/product/decision${productReadScopeQuery(scope)}`),
     readProductRelations: (scope) => request(`/api/product/relations${productReadScopeQuery(scope)}`),
     readProductOutput: (taskId) => request(`/api/product/output${productOutputQuery(taskId)}`),
     listTasks: () => request('/api/tasks'),
