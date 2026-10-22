@@ -346,6 +346,20 @@ export class AccessControlService {
     });
   }
 
+  /**
+   * Issues a durable browser session for a request that arrives over the
+   * local loopback interface. The local operator is the same human who runs
+   * the serve process, so pairing this browser would only ask them to copy a
+   * code between two processes on the same machine. The session uses the
+   * existing credential generation, so logout and generation invalidation
+   * keep working; only the pairing step is dropped, and only for loopback.
+   */
+  async issueLocalSession(): Promise<AccessSession> {
+    const current = await this.readCurrentCredential();
+    this.credential = current;
+    return this.issueSession(current.sessionGeneration);
+  }
+
   async verifySession(cookieHeader: string | undefined): Promise<SessionVerification> {
     const token = parseCookies(cookieHeader).get(SESSION_COOKIE_NAME);
     if (!token) return { state: 'missing' };

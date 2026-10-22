@@ -72,6 +72,7 @@ import {
   readDaemonLease,
   runSupervisorServeStartup,
   SERVE_OWNER,
+  stopDaemonOwner,
   SUPERVISOR_RESTART_REQUEST_OPTION,
   waitForDaemonLeaseHandoff,
   type SupervisorStartup,
@@ -848,6 +849,7 @@ function helpText(): string {
     '  --protocol <name>        responses、openai 或 anthropic',
     '  humanagent pair          使用当前产品的凭据直接签发一次性配对码',
     '  humanagent restart       使用原 serve owner 的启动声明完成一次代码交接',
+    '  humanagent stop          正式停止当前 serve owner，不启动替代进程',
     '  humanagent product use --control-root <path>  声明后续裸命令使用的默认产品',
     '  --help                   显示帮助',
     '  --json                   以机器可读 JSON 输出错误',
@@ -1570,6 +1572,38 @@ export async function main(args: readonly string[]): Promise<void> {
       startup,
     });
     console.log(JSON.stringify({ command, ...completion }, null, 2));
+    return;
+  }
+  if (command === 'stop') {
+    const paths = await resolveRuntimePaths({ workspace, controlRoot });
+    await ensureControlLayout(paths);
+    const lease = await readDaemonLease(paths);
+    if (lease === undefined) {
+      console.log(JSON.stringify({ command, status: 'not-running' }, null, 2));
+      return;
+    }
+    if (lease.ownerId !== SERVE_OWNER) {
+      throw new AppLifecycleError(
+        'daemon-stop.owner-mismatch',
+        `daemon lease ${lease.leaseId} belongs to ${lease.ownerId}, not ${SERVE_OWNER}`,
+        'inspect the active daemon owner before stopping the serve process',
+        'humanagent.app.serve',
+      );
+    }
+    // The recorded owner is stopped through its verified loopback identity
+    // endpoint. No replacement is started and no forced termination exists, so
+    // an owner that refuses to exit is reported instead of being guess-killed.
+    const termination = await stopDaemonOwner(paths, lease);
+    const latest = await readDaemonLease(paths);
+    console.log(JSON.stringify({
+      command,
+      status: termination.termination === 'already-dead' ? 'not-running' : 'stopped',
+      leaseId: lease.leaseId,
+      generation: lease.generation,
+      pid: lease.pid,
+      termination: termination.termination,
+      disposed: latest?.disposedAt !== undefined,
+    }, null, 2));
     return;
   }
   if (command === 'pair') {

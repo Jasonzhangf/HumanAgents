@@ -500,7 +500,7 @@ async function waitForProcessExit(pid: number, timeoutMs: number, pollIntervalMs
   return true;
 }
 
-interface TakeoverTerminationReceipt {
+export interface TakeoverTerminationReceipt {
   readonly termination: 'graceful' | 'forced' | 'already-dead';
   readonly gracefulStopError?: string;
 }
@@ -556,6 +556,20 @@ async function stopActiveDaemon(
     `daemon PID ${pid} did not exit after SIGTERM`,
     'inspect the exact daemon PID and retry after it exits; forced termination is not available in this runtime',
   );
+}
+
+/**
+ * Stops the serve owner recorded by the daemon lease through its verified
+ * loopback identity endpoint. This is the formal stop counterpart of the
+ * restart handover: it replaces nothing and starts nothing, so an owner that
+ * cannot exit stays a typed failure instead of being force-killed.
+ */
+export async function stopDaemonOwner(
+  paths: RuntimePaths,
+  existing: SupervisorLeaseRecord,
+  options: SupervisorTakeoverStopOptions = {},
+): Promise<TakeoverTerminationReceipt> {
+  return await stopActiveDaemon(paths, existing, options);
 }
 
 function leaseOwnedError(record: SupervisorLeaseRecord): AppLifecycleError {
