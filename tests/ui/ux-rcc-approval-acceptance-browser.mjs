@@ -43,6 +43,13 @@ import { fileURLToPath } from 'node:url'
 import {
   decodeProductLocation,
 } from '../../docs/ui/product-location.js'
+import {
+  evaluateSessionReadEvidence,
+  isContractUnavailableFocus,
+  isGroundedRelationEndpoint,
+  productTargetKey,
+  sameProductReadScope,
+} from './ux-product-acceptance-browser.mjs'
 
 const scriptPath = fileURLToPath(import.meta.url)
 const repoRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)))
@@ -126,31 +133,6 @@ export function taskRows(list) {
   return rows
 }
 
-export function productTargetKey(ref) {
-  const scope = ref?.scope
-  const scopeKey = scope?.kind === 'task'
-    ? `task:${scope.projectKey}:${scope.mode}:${taskIdValue(scope.taskId)}`
-    : scope?.kind === 'project'
-      ? `project:${scope.projectKey}`
-      : scope?.kind === 'system' ? 'system' : 'invalid-scope'
-  if (ref?.kind === 'interaction') {
-    return `interaction:${taskIdValue(ref.taskRef)}:${scopeKey}`
-  }
-  if (ref?.kind === 'session') {
-    return [
-      'session',
-      ref.sessionRef?.sourceKind,
-      ref.sessionRef?.sourceRef,
-      taskIdValue(ref.taskRef) ?? '',
-      scopeKey,
-    ].join(':')
-  }
-  if (ref?.kind === 'execution-instance') {
-    return `execution-instance:${taskIdValue(ref.taskRef)}:${JSON.stringify(ref.instance)}:${scopeKey}`
-  }
-  return `unknown:${JSON.stringify(ref)}`
-}
-
 function taskScopeFromValue(taskId) {
   return {
     kind: 'task',
@@ -158,32 +140,6 @@ function taskScopeFromValue(taskId) {
     mode: ACCEPTANCE_MODE,
     taskId: taskIdObject(taskId),
   }
-}
-
-function sameScope(left, right) {
-  if (!left || !right || left.kind !== 'task' || right.kind !== 'task') return false
-  return left.projectKey === right.projectKey
-    && left.mode === right.mode
-    && sameTaskId(left.taskId, right.taskId)
-}
-
-function sessionQueryFromLocation(location) {
-  const params = new URLSearchParams()
-  const scope = location?.scope
-  if (scope?.kind === 'task') {
-    params.set('projectKey', scope.projectKey)
-    params.set('mode', scope.mode)
-    params.set('taskId', String(taskIdValue(scope.taskId)))
-  } else if (scope?.kind === 'project') {
-    params.set('projectKey', scope.projectKey)
-  }
-  if (location?.focus?.kind === 'session') {
-    const sourceKind = location.focus.sessionRef?.sourceKind
-    const sourceRef = location.focus.sessionRef?.sourceRef
-    if (typeof sourceKind === 'string' && sourceKind !== '') params.set('sessionKind', sourceKind)
-    if (typeof sourceRef === 'string' && sourceRef !== '') params.set('sessionId', sourceRef)
-  }
-  return params
 }
 
 function queryRecord(url) {
@@ -274,42 +230,108 @@ export function evaluateExecutionProgress({ dashboard, output, session }) {
   }
 }
 
+function receiptMatchesNavigationRequest(receipt, expectedScope, expectedTarget) {
+  const search = receipt?.search
+  if (!isRecord(search)) return false
+  if (expectedScope?.kind === 'task') {
+    if (search.projectKey !== expectedScope.projectKey) return false
+    if (search.mode !== expectedScope.mode) return false
+    if (search.taskId !== String(taskIdValue(expectedScope.taskId))) return false
+  } else if (expectedScope?.kind === 'project') {
+    if (search.projectKey !== expectedScope.projectKey) return false
+    if (search.taskId !== undefined) return false
+  } else {
+    return false
+  }
+  if (expectedTarget?.kind === 'session') {
+    if (search.sessionId !== expectedTarget.sessionRef?.sourceRef) return false
+    if (typeof search.sessionKind === 'string' && search.sessionKind !== ''
+      && search.sessionKind !== expectedTarget.sessionRef?.sourceKind) return false
+  }
+  return true
+}
+
+/**
+ * Bind one navigation to the target fixed before the click, not to whatever
+ * focus the URL happens to decode to afterwards. The visible URL, the request
+ * query and the response body must all describe that exact target; the body
+ * checks are owned by F4-B's evaluateSessionReadEvidence.
+ */
 export function evaluateNavigationState({
   actualUrl,
   expectedTarget,
   expectedScope,
-  sessionStatus,
-  sessionBodyText,
-}) {
+  receipts = [],
+  surface,
+  contractUnavailable = false,
+} = {}) {
   const decoded = decodeProductLocation(actualUrl)
   if (decoded.kind !== 'valid') {
-    return { ok: false, detail: `invalid product location: ${decoded.reason ?? 'unknown'}` }
+    return {
+      ok: false,
+      state: 'url',
+      detail: `invalid product location: ${decoded.reason ?? 'unknown'}`,
+    }
   }
+  if (!expectedTarget || !expectedScope) {
+    return {
+      ok: false,
+      state: 'expectation',
+      detail: 'a fixed relation target and its scope are required',
+    }
+  }
+  const focusOk = productTargetKey(decoded.location.focus) === productTargetKey(expectedTarget)
+  const scopeOk = sameProductReadScope(decoded.location.scope, expectedScope)
   const url = new URL(actualUrl)
-  const focusKey = productTargetKey(decoded.location.focus)
-  const expectedKey = productTargetKey(expectedTarget)
-  const focusOk = focusKey === expectedKey
-  const scopeOk = sameScope(decoded.location.scope, expectedScope)
-  const queryTask = url.searchParams.get('task')
-  const queryProjectKey = url.searchParams.get('projectKey')
-  const queryMode = url.searchParams.get('mode')
-  const queryScopeOk = decoded.location.scope?.kind === 'task'
-    && queryTask === String(taskIdValue(decoded.location.scope.taskId))
-    && queryProjectKey === decoded.location.scope.projectKey
-    && queryMode === decoded.location.scope.mode
-  const sessionOk = Number.isInteger(sessionStatus)
-    && sessionStatus >= 200
-    && sessionStatus < 300
-  const bodyOk = typeof sessionBodyText === 'string' && sessionBodyText.trim().length > 0
-  const ok = focusOk && scopeOk && queryScopeOk && sessionOk && bodyOk
+  const queryScopeOk = expectedScope.kind === 'task'
+    ? url.searchParams.get('task') === String(taskIdValue(expectedScope.taskId))
+      && url.searchParams.get('projectKey') === expectedScope.projectKey
+      && url.searchParams.get('mode') === expectedScope.mode
+    : expectedScope.kind === 'project'
+      ? url.searchParams.get('projectKey') === expectedScope.projectKey
+      : false
+  if (!focusOk || !scopeOk || !queryScopeOk) {
+    return {
+      ok: false,
+      state: 'url',
+      focusOk,
+      scopeOk,
+      queryScopeOk,
+      detail: `focus=${focusOk} scope=${scopeOk} query=${queryScopeOk}`,
+    }
+  }
+  const requestOk = contractUnavailable === true
+    || (Array.isArray(receipts)
+      && receipts.some((receipt) =>
+        receiptMatchesNavigationRequest(receipt, expectedScope, expectedTarget)))
+  if (!requestOk) {
+    return {
+      ok: false,
+      state: 'request',
+      focusOk,
+      scopeOk,
+      queryScopeOk,
+      requestOk,
+      detail: 'no session request matches the fixed relation target',
+    }
+  }
+  const evidence = evaluateSessionReadEvidence({
+    receipts,
+    surface,
+    expectedScope,
+    expectedFocus: expectedTarget,
+    contractUnavailable: contractUnavailable === true,
+  })
   return {
-    ok,
+    ok: evidence.ok,
+    state: evidence.state,
     focusOk,
     scopeOk,
     queryScopeOk,
-    sessionOk,
-    bodyOk,
-    detail: `focus=${focusOk} scope=${scopeOk} query=${queryScopeOk} session=${sessionStatus ?? 'n/a'} body=${bodyOk}`,
+    requestOk,
+    bodyState: evidence.state,
+    bodyDetail: evidence.detail,
+    detail: `focus=${focusOk} scope=${scopeOk} query=${queryScopeOk} request=${requestOk} body=${evidence.state}(${evidence.detail})`,
   }
 }
 
@@ -803,9 +825,51 @@ class AcceptanceRun {
         path: url.pathname,
         search: Object.fromEntries(url.searchParams.entries()),
         status: response.status(),
+        ok: response.ok(),
       }
-      if (url.pathname === '/api/product/session') {
+      if (url.pathname === '/api/product/session' && request.method() === 'GET') {
+        record.body = undefined
+        record.bodyError = undefined
+        record.settled = false
         this.browserSessionRequests.push(record)
+        // Read the real navigation response. If the page abandons the stream,
+        // re-read the same request with the session cookie instead of treating
+        // an unreadable body as a successful one.
+        const settleAuthoritatively = () => {
+          const path = `${url.pathname}?${url.searchParams.toString()}`
+          return this.authedFetch(path).then(async (res) => {
+            if (!res.ok) {
+              record.bodyError = `authoritative re-read HTTP ${res.status}`
+            } else {
+              try {
+                record.body = await res.json()
+                record.authoritative = true
+              } catch (error) {
+                record.bodyError = error?.message ?? String(error)
+              }
+            }
+          }, (error) => {
+            record.bodyError = error?.message ?? String(error)
+          }).finally(() => {
+            record.settled = true
+          })
+        }
+        const grace = setTimeout(() => {
+          if (!record.settled) settleAuthoritatively()
+        }, 2_000)
+        response.text().then((text) => {
+          try {
+            record.body = text.trim() === '' ? null : JSON.parse(text)
+            record.authoritative = false
+          } catch (error) {
+            record.bodyError = error?.message ?? String(error)
+          }
+          record.settled = true
+          clearTimeout(grace)
+        }, () => {
+          if (!record.settled) settleAuthoritatively()
+          clearTimeout(grace)
+        })
       }
       if (!SAFE_REQUEST_METHODS.has(request.method())) {
         this.browserWriteResponses.push(record)
@@ -1432,21 +1496,50 @@ class AcceptanceRun {
       throw new Error('relation layer did not open')
     }
     const originalUrl = this.page.url()
+    const originalScope = {
+      ...taskScopeFromValue(this.taskId),
+      projectKey: this.projectKey,
+    }
+    const originalTarget = {
+      kind: 'interaction',
+      taskRef: taskIdObject(this.taskId),
+      scope: originalScope,
+    }
     const nodes = this.page.locator('.product-relation-node:not([data-product-relation-current="true"])')
     const nodeCount = await nodes.count()
     if (nodeCount === 0) {
       throw new Error(`real relations=${relations.length} but no selectable relation node rendered`)
     }
-    const node = nodes.first()
-    const targetJson = await node.getAttribute('data-product-target')
+    let node
+    let targetJson
     let target
-    try {
-      target = JSON.parse(targetJson)
-    } catch {
-      target = undefined
+    let targetUnavailable
+    for (let index = 0; index < nodeCount; index += 1) {
+      const candidate = nodes.nth(index)
+      const candidateJson = await candidate.getAttribute('data-product-target')
+      if (typeof candidateJson !== 'string') continue
+      let candidateTarget
+      try {
+        candidateTarget = JSON.parse(candidateJson)
+      } catch {
+        continue
+      }
+      if (!candidateTarget || typeof candidateTarget !== 'object') continue
+      if (!isGroundedRelationEndpoint(relations, candidateTarget)) continue
+      const unavailable = isContractUnavailableFocus(candidateTarget)
+      if (target === undefined || (targetUnavailable === true && unavailable === false)) {
+        node = candidate
+        targetJson = candidateJson
+        target = candidateTarget
+        targetUnavailable = unavailable
+      }
+      if (!unavailable) break
     }
-    if (!target || typeof target !== 'object') {
-      throw new Error('selectable relation node did not expose a real target')
+    if (node === undefined || target === undefined) {
+      throw new Error('no rendered relation target is a grounded real relation endpoint')
+    }
+    if (!target.scope || (target.scope.kind !== 'task' && target.scope.kind !== 'project')) {
+      throw new Error('selected relation target has no readable scope')
     }
     const relationShot = await this.capture('relations-open')
     if (!relationShot) throw new Error('relations-open screenshot was not saved')
@@ -1465,36 +1558,38 @@ class AcceptanceRun {
     if (selectedDecoded.kind !== 'valid') {
       throw new Error(`selected URL did not decode: ${selectedDecoded.reason ?? 'unknown'}`)
     }
-    const selectedSession = await this.waitForBrowserSession(sessionMark)
-    const directSession = await this.readJson(
-      'nav-session-response',
-      `/api/product/session?${sessionQueryFromLocation(selectedDecoded.location)}`,
-    )
-    const selectedBody = await this.page.locator('[data-product-role="session-view"]').innerText().catch(() => '')
-    const selectedEval = evaluateNavigationState({
-      actualUrl: selectedUrl,
-      expectedTarget: selectedDecoded.location.focus,
-      expectedScope: selectedDecoded.location.scope,
-      sessionStatus: selectedSession?.status ?? directSession.response.status,
-      sessionBodyText: selectedBody,
-    })
+    let selected
+    try {
+      selected = await this.waitForNavigationEvidence('relations.select', sessionMark, {
+        actualUrl: selectedUrl,
+        expectedScope: target.scope,
+        expectedTarget: target,
+        contractUnavailable: targetUnavailable,
+      })
+    } catch (error) {
+      const selectedFailureShot = await this.capture('relation-target-failure')
+      this.fail(
+        'relations.select',
+        error?.message ?? String(error),
+        [relationShot, selectedFailureShot, ...(error?.evidenceFiles ?? [])].filter(Boolean),
+      )
+      throw error
+    }
     const targetShot = await this.capture('relation-target')
     const selectedEvidence = [
       relationShot,
       targetShot,
-      directSession.bodyFile,
+      ...selected.evidenceFiles,
     ].filter(Boolean)
-    if (!selectedEval.ok || !directSession.response.ok) {
-      this.fail(
-        'relations.select',
-        `${selectedEval.detail} direct-session=${directSession.response.status} url=${selectedUrl}`,
-        selectedEvidence,
-      )
+    const selectedOk = selected.evaluation.ok === true
+      && productTargetKey(selectedDecoded.location.focus) === productTargetKey(target)
+    if (!selectedOk) {
+      this.fail('relations.select', selected.evaluation.detail, selectedEvidence)
       throw new Error('selected relation did not produce one consistent real read')
     }
     this.pass(
       'relations.select',
-      `${selectedEval.detail} target=${productTargetKey(target)}`,
+      `${selected.evaluation.detail} target=${productTargetKey(target)}`,
       selectedEvidence,
     )
 
@@ -1507,25 +1602,37 @@ class AcceptanceRun {
       return current?.getAttribute('data-product-target') === expectedTarget
     }, targetJson, { timeout: 20_000 })
     const refreshedUrl = this.page.url()
-    const refreshedSession = await this.waitForBrowserSession(refreshMark)
-    const refreshedBody = await this.page.locator('[data-product-role="session-view"]').innerText().catch(() => '')
-    const refreshedEval = evaluateNavigationState({
-      actualUrl: refreshedUrl,
-      expectedTarget: selectedDecoded.location.focus,
-      expectedScope: selectedDecoded.location.scope,
-      sessionStatus: refreshedSession?.status,
-      sessionBodyText: refreshedBody,
-    })
-    const refreshShot = await this.capture('relation-refresh')
-    if (!refreshedEval.ok || refreshedUrl !== selectedUrl) {
+    let refreshed
+    try {
+      refreshed = await this.waitForNavigationEvidence('relations.refresh', refreshMark, {
+        actualUrl: refreshedUrl,
+        expectedScope: target.scope,
+        expectedTarget: target,
+        contractUnavailable: targetUnavailable,
+      })
+    } catch (error) {
+      const refreshFailureShot = await this.capture('relation-refresh-failure')
       this.fail(
         'relations.refresh',
-        `${refreshedEval.detail} same-url=${refreshedUrl === selectedUrl}`,
-        [refreshShot, directSession.bodyFile].filter(Boolean),
+        error?.message ?? String(error),
+        [refreshFailureShot, ...(error?.evidenceFiles ?? [])].filter(Boolean),
+      )
+      throw error
+    }
+    const refreshShot = await this.capture('relation-refresh')
+    if (refreshedUrl !== selectedUrl) {
+      this.fail(
+        'relations.refresh',
+        `${refreshed.evaluation.detail} same-url=false`,
+        [refreshShot, ...refreshed.evidenceFiles].filter(Boolean),
       )
       throw new Error('refresh did not retain the exact selected target')
     }
-    this.pass('relations.refresh', `${refreshedEval.detail} same-url=true`, [refreshShot].filter(Boolean))
+    this.pass(
+      'relations.refresh',
+      `${refreshed.evaluation.detail} same-url=true`,
+      [refreshShot, ...refreshed.evidenceFiles].filter(Boolean),
+    )
 
     const backMark = this.browserSessionRequests.length
     await this.page.goBack({ waitUntil: 'domcontentloaded' })
@@ -1533,34 +1640,37 @@ class AcceptanceRun {
     await this.openRelationLayer()
     const backUrl = this.page.url()
     const backDecoded = decodeProductLocation(backUrl)
-    const backSession = await this.waitForBrowserSession(backMark)
-    const backBody = await this.page.locator('[data-product-role="session-view"]').innerText().catch(() => '')
-    const backTaskScope = {
-      ...taskScopeFromValue(this.taskId),
-      projectKey: this.projectKey,
-    }
-    const backEval = evaluateNavigationState({
-      actualUrl: backUrl,
-      expectedTarget: {
-        kind: 'interaction',
-        taskRef: taskIdObject(this.taskId),
-        scope: backTaskScope,
-      },
-      expectedScope: backTaskScope,
-      sessionStatus: backSession?.status,
-      sessionBodyText: backBody,
-    })
-    const backShot = await this.capture('relation-back')
-    const backHashOk = backUrl === originalUrl
-    if (!backEval.ok || !backHashOk || backDecoded.kind !== 'valid') {
+    let back
+    try {
+      back = await this.waitForNavigationEvidence('relations.back', backMark, {
+        actualUrl: backUrl,
+        expectedScope: originalScope,
+        expectedTarget: originalTarget,
+      })
+    } catch (error) {
+      const backFailureShot = await this.capture('relation-back-failure')
       this.fail(
         'relations.back',
-        `${backEval.detail} original-url=${backHashOk} decoded=${backDecoded.kind}`,
-        [backShot, directSession.bodyFile].filter(Boolean),
+        error?.message ?? String(error),
+        [backFailureShot, ...(error?.evidenceFiles ?? [])].filter(Boolean),
+      )
+      throw error
+    }
+    const backShot = await this.capture('relation-back')
+    const backHashOk = backUrl === originalUrl
+    if (!backHashOk || backDecoded.kind !== 'valid') {
+      this.fail(
+        'relations.back',
+        `${back.evaluation.detail} original-url=${backHashOk} decoded=${backDecoded.kind}`,
+        [backShot, ...back.evidenceFiles].filter(Boolean),
       )
       throw new Error('Back did not restore the exact original task focus')
     }
-    this.pass('relations.back', `${backEval.detail} original-url=true`, [backShot].filter(Boolean))
+    this.pass(
+      'relations.back',
+      `${back.evaluation.detail} original-url=true`,
+      [backShot, ...back.evidenceFiles].filter(Boolean),
+    )
 
     const forwardMark = this.browserSessionRequests.length
     await this.page.goForward({ waitUntil: 'domcontentloaded' })
@@ -1572,25 +1682,37 @@ class AcceptanceRun {
     }, targetJson, { timeout: 20_000 })
     const forwardUrl = this.page.url()
     const forwardDecoded = decodeProductLocation(forwardUrl)
-    const forwardSession = await this.waitForBrowserSession(forwardMark)
-    const forwardBody = await this.page.locator('[data-product-role="session-view"]').innerText().catch(() => '')
-    const forwardEval = evaluateNavigationState({
-      actualUrl: forwardUrl,
-      expectedTarget: forwardDecoded.kind === 'valid' ? forwardDecoded.location.focus : selectedDecoded.location.focus,
-      expectedScope: forwardDecoded.kind === 'valid' ? forwardDecoded.location.scope : selectedDecoded.location.scope,
-      sessionStatus: forwardSession?.status,
-      sessionBodyText: forwardBody,
-    })
-    const forwardShot = await this.capture('relation-forward')
-    if (!forwardEval.ok || forwardUrl !== selectedUrl || forwardDecoded.kind !== 'valid') {
+    let forward
+    try {
+      forward = await this.waitForNavigationEvidence('relations.forward', forwardMark, {
+        actualUrl: forwardUrl,
+        expectedScope: target.scope,
+        expectedTarget: target,
+        contractUnavailable: targetUnavailable,
+      })
+    } catch (error) {
+      const forwardFailureShot = await this.capture('relation-forward-failure')
       this.fail(
         'relations.forward',
-        `${forwardEval.detail} selected-url=${forwardUrl === selectedUrl} decoded=${forwardDecoded.kind}`,
-        [forwardShot, directSession.bodyFile].filter(Boolean),
+        error?.message ?? String(error),
+        [forwardFailureShot, ...(error?.evidenceFiles ?? [])].filter(Boolean),
+      )
+      throw error
+    }
+    const forwardShot = await this.capture('relation-forward')
+    if (forwardUrl !== selectedUrl || forwardDecoded.kind !== 'valid') {
+      this.fail(
+        'relations.forward',
+        `${forward.evaluation.detail} selected-url=${forwardUrl === selectedUrl} decoded=${forwardDecoded.kind}`,
+        [forwardShot, ...forward.evidenceFiles].filter(Boolean),
       )
       throw new Error('Forward did not restore the exact selected target')
     }
-    this.pass('relations.forward', `${forwardEval.detail} selected-url=true`, [forwardShot].filter(Boolean))
+    this.pass(
+      'relations.forward',
+      `${forward.evaluation.detail} selected-url=true`,
+      [forwardShot, ...forward.evidenceFiles].filter(Boolean),
+    )
 
     const writesBeforeClose = this.browserWrites.length
     const closed = await this.closeRelationLayer()
@@ -1612,15 +1734,123 @@ class AcceptanceRun {
     )
   }
 
-  async waitForBrowserSession(mark, timeoutMs = 30_000) {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      const match = this.browserSessionRequests.slice(mark).find((entry) =>
-        entry.status >= 200 && entry.status < 300)
-      if (match) return match
-      await sleep(250)
+  async readFocusSessionSurface() {
+    const center = this.page.locator('.product-focus-center[data-product-focus-state="ready"]')
+    const centerReady = await center.count() === 1
+    return {
+      centerReady,
+      focusScope: centerReady
+        ? await center.getAttribute('data-product-focus-scope', { timeout: 500 }).catch(() => null)
+        : null,
+      sessionHostCount: await this.page.locator('.product-focus-session').count(),
+      messageCount: await this.page.locator('.product-focus-session .product-session-message').count(),
+      messageEventIds: await this.page.locator('.product-focus-session .product-session-message')
+        .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-message-event-id')))
+        .catch(() => []),
+      messageTexts: await this.page.locator('.product-focus-session .product-session-message-body')
+        .allInnerTexts()
+        .catch(() => []),
+      emptyCount: await this.page.locator('.product-focus-session .product-session-empty').count(),
+      unavailableCount: await this.page
+        .locator('.product-focus-session .product-focus-failure[data-product-role="focus-failure"]').count(),
+      unavailableCode: await this.page
+        .locator('.product-focus-session .product-focus-failure-message').first()
+        .innerText({ timeout: 500 }).catch(() => ''),
     }
-    return undefined
+  }
+
+  async recordNavigationReceipts(label, receipts) {
+    const files = []
+    for (let index = 0; index < receipts.length; index += 1) {
+      const entry = receipts[index]
+      const bodyFile = await this.writeJson(`${label}-session-${index + 1}`, entry.body ?? null)
+      files.push(bodyFile)
+      this.httpReceipts.push({
+        name: `${label}.session-${index + 1}`,
+        source: 'browser',
+        method: entry.method,
+        path: entry.path,
+        search: entry.search,
+        status: entry.status,
+        ok: entry.ok,
+        bodyFile,
+      })
+    }
+    return files
+  }
+
+  /**
+   * Settle one navigation against its fixed target. A ready center alone is
+   * not enough: the request query, HTTP status, response scope, message
+   * targets and visible event ids/texts must all describe the same target.
+   */
+  async waitForNavigationEvidence(label, mark, {
+    actualUrl,
+    expectedScope,
+    expectedTarget,
+    contractUnavailable = false,
+    timeoutMs = 30_000,
+  }) {
+    const deadline = Date.now() + timeoutMs
+    let firstStaleAt
+    let last
+    const fail = (detail, evidenceFiles) => {
+      const error = new Error(`${label}: ${detail}`)
+      error.evidenceFiles = evidenceFiles
+      return error
+    }
+    while (Date.now() < deadline) {
+      const receipts = this.browserSessionRequests.slice(mark)
+      const pending = receipts.some((entry) => entry.settled !== true)
+      const surface = await this.readFocusSessionSurface()
+      const hasReceipt = receipts.length > 0
+      if (surface.centerReady && !pending && (hasReceipt || contractUnavailable)) {
+        const evaluation = evaluateNavigationState({
+          actualUrl,
+          expectedTarget,
+          expectedScope,
+          receipts,
+          surface,
+          contractUnavailable,
+        })
+        if (evaluation.ok) {
+          const evidenceFiles = await this.recordNavigationReceipts(label, receipts)
+          return {
+            surface,
+            receipts,
+            evaluation,
+            statusSummary: receipts.map((entry) => entry.status).join(',') || 'none',
+            evidenceFiles,
+          }
+        }
+        last = evaluation
+        // A non-2xx answer or a wrong target is final. A stale body or a
+        // transient scope/blank from the previous render is allowed one short
+        // settle window, after which it is a real failure.
+        if (evaluation.state !== 'stale' && evaluation.state !== 'blank'
+          && evaluation.state !== 'scope') {
+          const evidenceFiles = await this.recordNavigationReceipts(label, receipts)
+          throw fail(evaluation.detail, evidenceFiles)
+        }
+        if (firstStaleAt === undefined) firstStaleAt = Date.now()
+        if (Date.now() - firstStaleAt >= 1_500) {
+          const evidenceFiles = await this.recordNavigationReceipts(label, receipts)
+          throw fail(evaluation.detail, evidenceFiles)
+        }
+      }
+      await sleep(100)
+    }
+    const surface = await this.readFocusSessionSurface().catch(() => undefined)
+    const timeoutFile = await this.writeJson(`timeout-${label}`, {
+      url: actualUrl,
+      surface,
+      last,
+      receipts: this.browserSessionRequests.slice(mark),
+    })
+    throw fail(
+      `navigation did not settle (${last?.detail ?? 'no ready center'}); surface=${JSON.stringify(surface)}`,
+      [timeoutFile],
+    )
   }
 
   async verifyTaskTerminal() {
