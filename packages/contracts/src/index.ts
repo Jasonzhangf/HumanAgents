@@ -1905,6 +1905,7 @@ export * from './inspection.js';
 export * from './i2-history.js';
 export * from './agent-activity.js';
 export * from './interaction-provider-settlement.js';
+export * from './product-read.js';
 
 /**
  * Requirement pipeline node identity. Single source of truth for the thirteen nodes of

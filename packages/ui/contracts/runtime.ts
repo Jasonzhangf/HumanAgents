@@ -4,6 +4,8 @@ import type {
   InteractionTraceEntry,
   LifecycleState,
   OrganId,
+  ProductReadMode,
+  ProductReadScope,
   SemanticObservationEnvelope,
   TaskAgentActivityCurrency,
   TaskAgentActivitySourceKind,
@@ -20,6 +22,22 @@ import type { TaskActualExecutionGraphProjection } from './actual-execution-grap
 export type { RuntimeCheckpointFilter } from './checkpoint-history.js';
 
 export type { TaskDetailProjection };
+export type {
+  ProductBoardIndex,
+  ProductBoardItem,
+  ProductBoardKind,
+  ProductBoardSection,
+  ProductLocation,
+  ProductMessage,
+  ProductMessageActor,
+  ProductPendingDecision,
+  ProductPendingDecisionAction,
+  ProductReadMode,
+  ProductReadScope,
+  ProductRelation,
+  ProductRelationKind,
+  ProductTargetRef,
+} from '@humanagent/contracts';
 
 /**
  * I1-C（设计稿 §17.3）：唯一的 canonical concrete specialization。
@@ -123,7 +141,7 @@ export interface SemanticObservationViewProjection {
 
 // UI phase-one runtime surface. The browser consumes these typed projections from
 // the HumanAgent Runtime API; it never reads Journal, DSH session, or RCC frames.
-export type RuntimeMode = 'fake' | 'rcc' | 'dsh';
+export type RuntimeMode = ProductReadMode;
 
 export type RuntimeSurfaceState =
   | 'ready'
@@ -390,15 +408,7 @@ export type RuntimeReadResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly failure: RuntimeReadFailure };
 
-export type RuntimeReadScope =
-  | { readonly kind: 'system' }
-  | { readonly kind: 'project'; readonly projectKey: string }
-  | {
-      readonly kind: 'task';
-      readonly projectKey: string;
-      readonly mode: RuntimeMode;
-      readonly taskId: TaskId;
-    };
+export type RuntimeReadScope = ProductReadScope;
 
 export interface RuntimeProjectTaskReadRow {
   readonly scope: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
