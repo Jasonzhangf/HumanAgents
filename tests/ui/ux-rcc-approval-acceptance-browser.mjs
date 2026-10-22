@@ -46,6 +46,7 @@ import {
 import {
   evaluateSessionReadEvidence,
   isContractUnavailableFocus,
+  readFocusFailureNode,
   isGroundedRelationEndpoint,
   productTargetKey,
   sameProductReadScope,
@@ -63,6 +64,23 @@ export const TERMINAL_TASK_STATES = Object.freeze([
   'blocked',
   'cancelled',
 ])
+
+/**
+ * The rendered unavailable surface is the only place the page exposes why a
+ * focus has no readable body. The collector keeps the human message and the
+ * diagnostic code in separate fields because the shared evaluator checks both.
+ */
+export function unavailableSurfaceFields(node) {
+  if (node === undefined || node === null) {
+    return { unavailableCount: 0, unavailableCode: '', unavailableCodeRows: 0, unavailableMessage: '' }
+  }
+  return {
+    unavailableCount: 1,
+    unavailableCode: typeof node.code === 'string' ? node.code : '',
+    unavailableCodeRows: Number.isInteger(node.codeRows) ? node.codeRows : 0,
+    unavailableMessage: typeof node.message === 'string' ? node.message : '',
+  }
+}
 
 const ACTIVE_TASK_STATES = new Set([
   'created',
@@ -1027,21 +1045,33 @@ class AcceptanceRun {
     // own retry control. Retrying through that control is the human path, and it
     // also proves the page keeps the interaction it already started.
     while (attempt.newRows.length === 0 && attemptCount < 3 && this.serve.exitCode === null) {
-      const failureDeadline = Date.now() + 5_000
+      // The response body is read asynchronously, so the rejection is only
+      // usable as evidence once every recorded failure has its parsed body.
+      const failureDeadline = Date.now() + 10_000
       while (Date.now() < failureDeadline
-        && this.browserFailures.some((entry) => entry.observed !== true)) {
-        await sleep(100)
+        && (this.browserFailures.length === 0
+          || this.browserFailures.some((entry) => entry.observed !== true))) {
+        await sleep(200)
       }
       const observedFailure = this.browserFailures.slice()
       const failureFile = await this.writeJson(`entry-provider-failure-${attemptCount}.json`, observedFailure)
       const failureShot = await this.capture(`entry-provider-failure-${attemptCount}`)
       const retryLabel = await this.page.locator('#entry-form button[type="submit"]')
         .innerText().catch(() => '')
-      this.pass(
-        'entry.provider-retry',
-        `submission ${attemptCount} produced no task after a typed rejection (${observedFailure.map((entry) => `${entry.status} ${entry.path} ${entry.body?.error?.code ?? ''}`).join(',') || 'none recorded'}); the page offers ${JSON.stringify(retryLabel)}`,
-        [failureFile, failureShot].filter(Boolean),
-      )
+      // This step may only claim a typed rejection when the runtime really
+      // answered with one and the page really offered its own retry control.
+      const typedRejection = observedFailure.filter((entry) => {
+        const code = entry?.body?.error?.code
+        return typeof code === 'string' && code !== ''
+          && Number.isInteger(entry?.status) && entry.status >= 400
+      })
+      const retryOffered = /重试/.test(retryLabel)
+      const retryDetail = `submission ${attemptCount} produced no task; runtime rejections=${typedRejection.map((entry) => `${entry.status} ${entry.path} ${entry.body?.error?.code}`).join(',') || 'none'}; page retry control=${JSON.stringify(retryLabel)}`
+      if (typedRejection.length > 0 && retryOffered) {
+        this.pass('entry.provider-retry', `${retryDetail} (typed rejection, retry offered by the page)`, [failureFile, failureShot].filter(Boolean))
+      } else {
+        this.unverified('entry.provider-retry', `${retryDetail} (no typed rejection or no retry control)`, [failureFile, failureShot].filter(Boolean))
+      }
       this.browserFailures.length = 0
       attemptCount += 1
       attempt = await submitAndWait()
@@ -1874,6 +1904,14 @@ class AcceptanceRun {
   async readFocusSessionSurface() {
     const center = this.page.locator('.product-focus-center[data-product-focus-state="ready"]')
     const centerReady = await center.count() === 1
+    const focusFailure = this.page
+      .locator('.product-focus-session .product-focus-failure[data-product-role="focus-failure"]')
+    const unavailableCount = await focusFailure.count()
+    const unavailable = unavailableCount > 0
+      ? await focusFailure.first()
+        .evaluate(readFocusFailureNode, undefined, { timeout: 500 })
+        .catch(() => undefined)
+      : undefined
     return {
       centerReady,
       focusScope: centerReady
@@ -1888,11 +1926,11 @@ class AcceptanceRun {
         .allInnerTexts()
         .catch(() => []),
       emptyCount: await this.page.locator('.product-focus-session .product-session-empty').count(),
-      unavailableCount: await this.page
-        .locator('.product-focus-session .product-focus-failure[data-product-role="focus-failure"]').count(),
-      unavailableCode: await this.page
-        .locator('.product-focus-session .product-focus-failure-message').first()
-        .innerText({ timeout: 500 }).catch(() => ''),
+      // The rendered failure keeps the human message in the main layer and the
+      // original diagnostic code in the closed detail. Both are read from that
+      // structure, so this collector hands the shared evaluator the same fields
+      // it declares instead of reusing the removed main-layer code text.
+      ...unavailableSurfaceFields(unavailable),
     }
   }
 

@@ -6,7 +6,9 @@ import {
   evaluateGrantDecision,
   evaluateNavigationState,
   summarizeChecks,
+  unavailableSurfaceFields,
 } from './ux-rcc-approval-acceptance-browser.mjs'
+import { readFocusFailureNode } from './ux-product-acceptance-browser.mjs'
 
 const taskScope = {
   kind: 'task',
@@ -203,6 +205,93 @@ test('navigation evaluation binds the fixed target to request, body and visible 
       unavailableCode: 'product-session.read.unavailable-target',
       unavailableCodeRows: 1,
       unavailableMessage: '该执行实例暂无正文读取入口。',
+    }),
+  })
+  assert.equal(unavailable.ok, true)
+  assert.equal(unavailable.bodyState, 'unavailable')
+})
+
+// renderProductFocusFailure emits a main human message and a closed technical
+// detail whose record-ref rows carry the diagnostic code. This reproduces that
+// structure so the unavailable branch is exercised through the same collector
+// the RCC page uses, instead of hand-filling fields that collector may not
+// produce.
+function domElement(tag, text, className) {
+  const node = {
+    tagName: String(tag).toUpperCase(),
+    className: className ?? '',
+    children: [],
+    _text: text === undefined ? '' : String(text),
+    get textContent() {
+      return `${node._text}${node.children.map((child) => child.textContent).join('')}`
+    },
+    get innerText() {
+      return `${node._text}${node.children.map((child) => child.innerText).join('')}`
+    },
+    append(...items) {
+      for (const item of items) {
+        if (item === undefined || item === null) continue
+        if (typeof item === 'string') {
+          node.children.push(domElement('span', item))
+        } else {
+          node.children.push(item)
+        }
+      }
+    },
+  }
+  return node
+}
+
+function failureSurfaceFromDom(failure) {
+  const node = domElement('div', undefined, 'product-focus-failure')
+  const technical = domElement('details', undefined, 'product-focus-failure-detail')
+  const entries = domElement('dl', undefined, 'record-ref')
+  for (const [label, value] of [
+    ['code', failure.code],
+    ['owner', failure.ownerId],
+    ['message', failure.message],
+    ['nextAction', failure.nextAction],
+  ]) {
+    const row = domElement('div')
+    row.append(domElement('dt', label), domElement('dd', value))
+    entries.append(row)
+  }
+  technical.append(entries)
+  node.append(
+    domElement('p', failure.message, 'product-focus-failure-message'),
+    domElement('p', failure.nextAction, 'product-focus-failure-next'),
+    technical,
+  )
+  return node
+}
+
+test('the unavailable branch passes through the real failure node collector', () => {
+  const url = productUrl()
+  const collected = readFocusFailureNode(failureSurfaceFromDom({
+    code: 'product-session.read.unavailable-target',
+    ownerId: 'humanagent.ui.product-session',
+    message: '该执行实例暂无正文读取入口。',
+    nextAction: '返回任务看板后重新选择。',
+  }))
+  // The page collector builds these fields itself; hand-writing them here would
+  // hide a collector that stops producing what the evaluator requires.
+  const fields = unavailableSurfaceFields(collected)
+  assert.equal(fields.unavailableCount, 1)
+  assert.equal(fields.unavailableCode, 'product-session.read.unavailable-target')
+  assert.equal(fields.unavailableCodeRows, 1)
+  assert.equal(fields.unavailableMessage, '该执行实例暂无正文读取入口。')
+  const unavailable = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [],
+    contractUnavailable: true,
+    surface: focusSurface({
+      messageCount: 0,
+      messageEventIds: [],
+      messageTexts: [],
+      emptyCount: 0,
+      ...fields,
     }),
   })
   assert.equal(unavailable.ok, true)
