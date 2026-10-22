@@ -26,6 +26,37 @@ import {
   renderAgentActivityDetail,
 } from './agent-activity.js'
 
+export const OBSERVATION_SCOPE_PARAM = 'scope'
+
+/**
+ * Observation recursion is URL view state, not a second page store. These pure
+ * helpers read and project that one state, so the page can return up one level
+ * without dropping the task read scope (task/projectKey/mode) and without
+ * issuing a control write.
+ */
+export function observationScopeFromSearch(search) {
+  const params = search instanceof URLSearchParams ? search : new URLSearchParams(search ?? '')
+  const raw = params.get(OBSERVATION_SCOPE_PARAM)
+  return typeof raw === 'string' && raw.trim() !== '' ? raw : undefined
+}
+
+export function observationScopeSearch(search, scopeRef) {
+  const params = search instanceof URLSearchParams
+    ? new URLSearchParams(search)
+    : new URLSearchParams(search ?? '')
+  if (scopeRef === undefined || scopeRef === null || scopeRef === '') {
+    params.delete(OBSERVATION_SCOPE_PARAM)
+  } else {
+    params.set(OBSERVATION_SCOPE_PARAM, scopeRef)
+  }
+  return params
+}
+
+export async function observationRead(transport, { taskId, scopeRef, selectedNodeId, agentQuery, scope }) {
+  return transport.observation(taskId, scopeRef, selectedNodeId, agentQuery, scope)
+}
+
+function bootstrapObservation() {
 // Node order, display row and agent ownership are read from the HTTP projection only. The page keeps
 // no second node-order table and no keyword-based attribution: `projection.nodes[].row` comes from
 // `PIPELINE_ROWS` in packages/contracts, and `projection.agentFrames` is the only ownership source.
@@ -100,7 +131,7 @@ let returnFocusPending = false
 let selectedNodeId
 // The scope the page is currently showing, so a node click reloads the same scope with the node
 // selected instead of re-deriving scope refs on the page.
-let currentScopeRef
+let currentScopeRef = observationScopeFromSearch(location.search)
 
 // Ownership frames and handoffs of the projection the page is currently rendering. They are typed
 // projection facts, not page-owned tables: the page only groups and displays them.
@@ -940,7 +971,13 @@ function renderObservation(projection) {
     const button = element('button', crumb.title, 'segment')
     button.type = 'button'
     button.addEventListener('click', () => {
-      void load(crumb.ref === rootScopeRef ? undefined : crumb.ref)
+      const nextScopeRef = crumb.ref === rootScopeRef ? undefined : crumb.ref
+      // Breadcrumb navigation is read view state: one URL projection plus one
+      // read of the same task scope. It never writes control state or opens a
+      // second navigation store.
+      const params = observationScopeSearch(location.search, nextScopeRef)
+      window.history.pushState(null, '', `${location.pathname}?${params.toString()}${location.hash}`)
+      void load(nextScopeRef)
     })
     breadcrumbs.append(button)
   })
@@ -1020,9 +1057,17 @@ async function load(scopeRef) {
   }
   const serial = ++loadSerial
   try {
-    const projection = await api.observation(taskId, scopeRef, selectedNodeId, agentQuery, explicitScope)
+    const projection = await observationRead(api, {
+      taskId,
+      scopeRef,
+      selectedNodeId,
+      agentQuery,
+      scope: explicitScope,
+    })
     if (serial !== loadSerial) return
     currentScopeRef = scopeRef
+    const params = observationScopeSearch(location.search, scopeRef)
+    window.history.replaceState(null, '', `${location.pathname}?${params.toString()}${location.hash}`)
     agentReadPending = false
     agentReadFailure = undefined
     renderObservation(projection)
@@ -1069,7 +1114,7 @@ void (async () => {
   const { status: runtimeStatus, error } = await loadRuntimeStatus()
   runtimeMode = runtimeStatus?.mode || ''
   renderRuntimeStatus(status, runtimeStatus, error)
-  await load()
+  await load(currentScopeRef)
   // The controller starts after this page's first read settled, so applying
   // the resolved default cannot outrun the node-flow it needs to render.
   await initializeDisplayPreference()
@@ -1087,3 +1132,16 @@ window.addEventListener('pagehide', (event) => {
   semanticObservationHost = null
   template.dispose()
 })
+
+// 浏览器前进/后退只恢复 URL 已表达的读取选择；不重放 checkpoint、执行历史
+// 或副作用，也不提交任何决定。
+window.addEventListener('popstate', () => {
+  const nextScopeRef = observationScopeFromSearch(location.search)
+  void load(nextScopeRef)
+})
+
+}
+
+if (typeof document !== 'undefined' && typeof window !== 'undefined' && typeof location !== 'undefined') {
+  bootstrapObservation()
+}
