@@ -21,10 +21,13 @@ import {
   MEMORY_SESSION_SOURCE_UNAVAILABLE,
   createMemoryReviewReason,
   memoryBoardSection,
+  readProductBoard,
   readMemorySurface,
   renderMemoryCandidates,
   renderMemorySessions,
+  resolveMemoryReadScope,
 } from '../../docs/ui/memory.js'
+import { createRuntimeApi } from '../../docs/ui/runtime-api.js'
 
 function createElement(tag, textValue, className) {
   const listeners = new Map()
@@ -330,4 +333,115 @@ test('refresh reads board and candidate summary without any review write', async
   assert.deepEqual(partial.board, { ok: false, failure })
   assert.equal('value' in partial.board, false)
   assert.deepEqual(partial.summary, { ok: true, value: reviewView })
+})
+
+test('memory board project read sends projectKey and mode to the formal reader', async () => {
+  const calls = []
+  const formal = createRuntimeApi({
+    fetchImpl: async (url) => {
+      calls.push(url)
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ boards: [] }),
+      }
+    },
+  })
+
+  const index = await readProductBoard(
+    { kind: 'project', projectKey: 'project-a', mode: 'rcc' },
+    { readBoard: formal.readProductBoard },
+  )
+
+  assert.deepEqual(index, { boards: [] })
+  assert.equal(calls.length, 1)
+  const params = new URL(calls[0], 'http://humanagent.local').searchParams
+  assert.equal(params.get('projectKey'), 'project-a')
+  assert.equal(params.get('mode'), 'rcc')
+})
+
+test('memory board project read refuses a missing mode instead of using a default', async () => {
+  const calls = []
+  await assert.rejects(
+    () => readProductBoard(
+      { kind: 'project', projectKey: 'project-a' },
+      {
+        readBoard: async (scope) => {
+          calls.push(scope)
+          return { boards: [] }
+        },
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, 'memory.scope-unavailable')
+      assert.equal(error.ownerId, 'humanagent.ui.memory')
+      return true
+    },
+  )
+  assert.deepEqual(calls, [])
+})
+
+test('memory board read without a bound scope refuses explicitly without a request', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => readProductBoard(
+      { kind: 'system' },
+      {
+        readBoard: async () => {
+          calls += 1
+          return { boards: [] }
+        },
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, 'memory.scope-unavailable')
+      assert.equal(error.ownerId, 'humanagent.ui.memory')
+      assert.equal(typeof error.nextAction, 'string')
+      assert.ok(error.nextAction.length > 0)
+      return true
+    },
+  )
+  assert.equal(calls, 0)
+})
+
+test('memory scope binds URL scope or the sole system project without guessing', async () => {
+  const fromUrl = await resolveMemoryReadScope({
+    search: '?projectKey=project-b&mode=rcc',
+    statusReader: async () => {
+      throw new Error('URL scope must not read runtime status')
+    },
+    systemReader: async () => {
+      throw new Error('URL scope must not read the system projects')
+    },
+  })
+  assert.deepEqual(fromUrl, { kind: 'project', projectKey: 'project-b', mode: 'rcc' })
+
+  const fromSystem = await resolveMemoryReadScope({
+    search: '',
+    statusReader: async () => ({ status: { mode: 'fake' }, error: null }),
+    systemReader: async () => ({
+      projects: [{ scope: { projectKey: 'project-a' }, tasks: [] }],
+      runtime: { mode: 'fake' },
+    }),
+  })
+  assert.deepEqual(fromSystem, { kind: 'project', projectKey: 'project-a', mode: 'fake' })
+
+  await assert.rejects(
+    () => resolveMemoryReadScope({
+      search: '',
+      statusReader: async () => ({ status: { mode: 'fake' }, error: null }),
+      systemReader: async () => ({
+        projects: [
+          { scope: { projectKey: 'project-a' }, tasks: [] },
+          { scope: { projectKey: 'project-b' }, tasks: [] },
+        ],
+        runtime: { mode: 'fake' },
+      }),
+    }),
+    (error) => {
+      assert.equal(error.code, 'memory.scope-unavailable')
+      assert.equal(error.ownerId, 'humanagent.ui.memory')
+      return true
+    },
+  )
 })

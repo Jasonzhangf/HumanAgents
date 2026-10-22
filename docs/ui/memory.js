@@ -1,12 +1,11 @@
-import { RuntimeApiError } from './runtime-api.js'
 import {
+  RUNTIME_READ_MODES,
   api,
   appendPairingEntry,
   clearNode,
   element as defaultElement,
   loadRuntimeStatus,
   mountPageTemplate,
-  projectReadScopeFromQuery,
   renderRuntimeStatus,
   stateTone,
 } from './runtime-shell.js'
@@ -39,6 +38,31 @@ function openDetailFactory(options) {
 function taskIdValue(taskId) {
   if (taskId && typeof taskId === 'object') return taskId.value
   return taskId
+}
+
+function textValue(value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function readMode(value) {
+  return RUNTIME_READ_MODES.includes(value) ? value : undefined
+}
+
+function memoryScopeFailure(message = '记忆板块读取需要完整的 projectKey 和 mode。') {
+  const failure = new Error(message)
+  failure.code = 'memory.scope-unavailable'
+  failure.ownerId = 'humanagent.ui.memory'
+  failure.nextAction = 'open the memory page from a project that carries projectKey and mode'
+  return failure
+}
+
+function typedFailure(cause, fallback) {
+  const failure = new Error(cause?.message || fallback.message)
+  failure.code = cause?.code || fallback.code
+  failure.ownerId = cause?.ownerId || fallback.ownerId
+  failure.nextAction = cause?.nextAction || fallback.nextAction
+  if (cause?.status !== undefined) failure.status = cause.status
+  return failure
 }
 
 function failureCopy(failure) {
@@ -346,28 +370,85 @@ export function createMemoryReviewReason(host, options = {}) {
   return { section, input, readReason }
 }
 
+function defaultProjectKeyFromSystemRead(systemRead) {
+  const keys = []
+  const liveKeys = []
+  for (const project of Array.isArray(systemRead?.projects) ? systemRead.projects : []) {
+    const key = textValue(project?.scope?.projectKey)
+    if (!key) continue
+    if (!keys.includes(key)) keys.push(key)
+    const hasLiveRuntime = Array.isArray(project?.tasks)
+      && project.tasks.some((row) => row?.basis === 'live-runtime')
+    if (hasLiveRuntime && !liveKeys.includes(key)) liveKeys.push(key)
+  }
+  if (liveKeys.length === 1) return liveKeys[0]
+  return keys.length === 1 ? keys[0] : ''
+}
+
 /**
- * The product board route is not exported by runtime-api.js yet. Keep the
- * exact `readProductBoard(scope)` call site local and read-only until H2's
- * named export lands; the page consumer injects its own reader.
+ * Bind the memory board read to the same project/mode pair the dashboard uses.
+ * URL selection wins; otherwise the runtime status supplies the mode and the
+ * system read supplies the one unambiguous project. An absent or ambiguous
+ * project stays unresolved instead of inventing a system scope.
  */
-export async function readProductBoard(scope) {
-  const params = new URLSearchParams()
-  if (scope?.kind === 'project') {
-    params.set('projectKey', scope.projectKey)
-  } else if (scope?.kind === 'task') {
-    params.set('projectKey', scope.projectKey)
-    params.set('mode', scope.mode)
-    params.set('taskId', String(taskIdValue(scope.taskId)))
-  } else {
-    params.set('scope', 'system')
+export async function resolveMemoryReadScope({
+  search = '',
+  statusReader = loadRuntimeStatus,
+  systemReader = api.systemDashboard,
+} = {}) {
+  const params = search instanceof URLSearchParams
+    ? search
+    : new URLSearchParams(typeof search === 'string' ? search : '')
+  let projectKey = textValue(params.get('projectKey'))
+  let mode = readMode(params.get('mode'))
+  if (projectKey && mode !== undefined) return { kind: 'project', projectKey, mode }
+
+  if (mode === undefined) {
+    let runtime
+    try {
+      runtime = await statusReader()
+    } catch (error) {
+      throw typedFailure(error, memoryScopeFailure())
+    }
+    if (runtime?.error) throw typedFailure(runtime.error, memoryScopeFailure())
+    mode = readMode(runtime?.status?.mode)
   }
-  const response = await fetch(`/api/product/board?${params}`, { method: 'GET' })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    throw new RuntimeApiError(body.error ? { ...body, ...body.error } : body, response.status)
+
+  if (!projectKey) {
+    let systemRead
+    try {
+      systemRead = await systemReader()
+    } catch (error) {
+      throw typedFailure(error, memoryScopeFailure())
+    }
+    projectKey = defaultProjectKeyFromSystemRead(systemRead)
+    if (mode === undefined) mode = readMode(systemRead?.runtime?.mode)
   }
-  return body
+
+  if (!projectKey || mode === undefined) throw memoryScopeFailure()
+  return { kind: 'project', projectKey, mode }
+}
+
+function memoryBoardReadScope(scope) {
+  const projectKey = textValue(scope?.projectKey)
+  const mode = readMode(scope?.mode)
+  if ((scope?.kind !== 'project' && scope?.kind !== 'task') || !projectKey || mode === undefined) {
+    throw memoryScopeFailure()
+  }
+  if (scope.kind === 'task') {
+    const taskId = taskIdValue(scope.taskId)
+    if (typeof taskId !== 'string' || taskId === '') throw memoryScopeFailure()
+    return { projectKey, mode, taskId }
+  }
+  return { projectKey, mode }
+}
+
+/**
+ * Read the product board through the formal runtime API. The memory page never
+ * composes its own transport parameters or falls back to a system scope.
+ */
+export async function readProductBoard(scope, { readBoard = api.readProductBoard } = {}) {
+  return readBoard(memoryBoardReadScope(scope))
 }
 
 function mountMemoryPage(root) {
@@ -380,7 +461,8 @@ function mountMemoryPage(root) {
   })
   const { primary, support, status } = template.hosts
   const reason = createMemoryReviewReason()
-  const scope = projectReadScopeFromQuery()
+  let scope
+  let scopeFailure = null
   let disposed = false
 
   function showReviewError(error) {
@@ -396,7 +478,13 @@ function mountMemoryPage(root) {
   async function refresh() {
     const [runtime, surface] = await Promise.all([
       loadRuntimeStatus(),
-      readMemorySurface({ readBoard: readProductBoard, readSummary: api.memorySummary, scope }),
+      readMemorySurface({
+        readBoard: () => (scope
+          ? readProductBoard(scope)
+          : Promise.reject(scopeFailure ?? memoryScopeFailure())),
+        readSummary: api.memorySummary,
+        scope,
+      }),
     ])
     if (disposed) return
 
@@ -433,7 +521,17 @@ function mountMemoryPage(root) {
     template.dispose()
   })
 
-  void refresh()
+  async function start() {
+    try {
+      scope = await resolveMemoryReadScope({ search: window.location.search })
+    } catch (failure) {
+      scopeFailure = failure
+    }
+    if (disposed) return
+    await refresh()
+  }
+
+  void start()
 }
 
 if (typeof document !== 'undefined') {
