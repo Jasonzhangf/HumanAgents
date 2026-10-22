@@ -1633,6 +1633,28 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     source.indexOf('async function renderInteraction'),
     source.indexOf('function renderTask()'),
   );
+  // The page-level `renderInteraction` delegates its interaction panel to the
+  // shared task product controller. Import the real controller instead of
+  // re-creating its confirmation UI in the harness, so these assertions still
+  // cover product code rather than a local stub.
+  const taskPage = await import(pathToFileURL(resolve('docs/ui/task.js')).href) as {
+    readonly createTaskProductController: (options: {
+      readonly host: Node;
+      readonly interactionHost: Node;
+      readonly decisionHost: Node;
+      readonly status: Node;
+      readonly make: (tag: string, text?: string, className?: string) => Node;
+      readonly transport: {
+        readonly confirmExplicitRequirement: (
+          interactionId: string,
+          payload: { readonly draftId: string; readonly inputRevision: number },
+        ) => Promise<unknown>;
+      };
+    }) => {
+      readonly setInteraction: (input: { readonly interactionId: string; readonly snapshot: unknown }) => unknown;
+      readonly refresh: () => Promise<unknown>;
+    };
+  };
   class Node {
     children: Node[] = [];
     textContent = '';
@@ -1641,6 +1663,7 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     disabled = false;
     href = '';
     attrs: Record<string, string> = {};
+    dataset: Record<string, string> = {};
     handlers: Record<string, () => Promise<void>> = {};
     append(...nodes: Node[]) { this.children.push(...nodes); }
     setAttribute(key: string, value: string) { this.attrs[key] = value; }
@@ -1669,7 +1692,11 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
   const pageLeaving = false;
   let activeInteractionId;
   main.append(primary, composer);
+  const interactionHost = element('div');
+  const decisionHost = element('div');
+  const status = element('p');
   let confirmed = 0;
+  let confirmedPayload: { readonly draftId: string; readonly inputRevision: number } | undefined;
   const api = {
     async inspectExplicitInteraction() {
       return {
@@ -1679,12 +1706,24 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
         draft: { draftId: 'draft-7', inputRevision: 1, proposal: 'prepare release evidence' },
       };
     },
-    async confirmExplicitRequirement(interactionId: string) {
+    async confirmExplicitRequirement(
+      interactionId: string,
+      payload: { readonly draftId: string; readonly inputRevision: number },
+    ) {
       assert.equal(interactionId, 'interaction-confirm');
       confirmed += 1;
+      confirmedPayload = payload;
       return { requirement: { requirementId: 'requirement:draft-7:1' } };
     },
   };
+  const productController = taskPage.createTaskProductController({
+    host: primary,
+    interactionHost,
+    decisionHost,
+    status,
+    make: (tag: string, text?: string, className?: string) => element(tag, text, className),
+    transport: api,
+  });
   const window = { location: { href: './task.html?task=new&interaction=interaction-confirm' } };
   const advance = async () => ({
     state: 'awaiting-confirmation',
@@ -1724,16 +1763,25 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     'attachInteractionCardHost',
     'interactionCard',
     'technicalDetailTrigger',
-    `${interactionSource}; return renderInteraction('interaction-confirm', undefined)`,
-  )(element, main, primary, composer, pageLeaving, activeInteractionId, api, advance, window, document, clearNode, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard, technicalDetailTrigger);
-  const feedback = nodes.find((node) => node.attrs.role === 'status');
+    'productController',
+    `let detail; ${interactionSource}; return renderInteraction('interaction-confirm', undefined)`,
+  )(element, main, primary, composer, pageLeaving, activeInteractionId, api, advance, window, document, clearNode, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard, technicalDetailTrigger, productController);
   const confirm = nodes.find((node) => node.textContent === '按此方案继续');
-  if (!feedback || !confirm) throw new Error('expected confirmation controls');
+  if (!confirm) throw new Error('expected confirmation controls');
   await confirm.handlers.click();
+  // The controller re-renders the interaction panel after the confirmation, so
+  // read the receipt from the node produced by that render.
+  const feedback = nodes.find(
+    (node) => node.attrs.role === 'status' && node.textContent.includes('已进入 FIFO'),
+  );
+  if (!feedback) throw new Error('expected the FIFO receipt');
   assert.equal(confirmed, 1);
+  // The human layer reports the FIFO receipt without technical ids, so the exact
+  // requirement identity is asserted at the transport boundary instead.
+  assert.equal(confirmedPayload?.draftId, 'draft-7');
+  assert.equal(confirmedPayload?.inputRevision, 1);
   assert.equal(window.location.href, './task.html?task=new&interaction=interaction-confirm');
   assert.equal(feedback.textContent.includes('已进入 FIFO'), true);
-  assert.equal(feedback.textContent.includes('requirement:draft-7:1'), true);
   assert.equal(nodes.some((node) => node.textContent === '打开任务列表' && node.href === './tasks.html'), true);
 });
 
