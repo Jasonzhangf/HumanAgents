@@ -4,6 +4,8 @@
     "operator": "humanagent-memory-curation",
     "operator_version": "1"
   },
+  "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+  "sessionBoundary": "记忆候选不是记忆 agent session；候选列表不能伪装执行索引，记忆板块 session 读取须有真实 owner 来源。",
   "nodes": {
     "wake_memory_agent": {
       "ownerPath": "packages/runtime/src/memory/events.ts",

@@ -5,6 +5,7 @@
     "operator_version": "1"
   },
   "status": "DESIGN-PLANNED",
+  "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
   "nodes": {
     "open_formal_task_navigation": {
       "ownerPath": "docs/ui/runtime-shell.js",
@@ -18,7 +19,8 @@
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
       "ownerSymbol": "UiRuntimeService.verifyControllableTaskTarget",
       "implementationStatus": "pending-backend-owner-implementation",
-      "designNote": "验证实际 live child Task，而不是按标题或父 Task 猜测；返回 targetScope、child taskId 与业务/occurrence 关系。缺 scope、错误 owner、stale 或未 prepared 均显式拒绝。"
+      "designNote": "验证实际 live child Task，而不是按标题或父 Task 猜测；返回 targetScope、child taskId 与业务/occurrence 关系。缺 scope、错误 owner、stale 或未 prepared 均显式拒绝。",
+      "contract": "输出同时携带 decision kind、question/options、revision 与 targetScope。TaskGrant、TaskInputRequest、Attention 分开；blocked 不自动成为等待人，无 question/options 不伪造审批。"
     },
     "submit_scoped_task_control": {
       "ownerPath": "docs/ui/runtime-api.js",
@@ -32,7 +34,8 @@
       "ownerRel": "docs/ui/task-dashboard.js",
       "ownerSymbol": "taskGrantControl refresh/grant/revoke convergence",
       "implementationStatus": "planned-control-result-convergence",
-      "designNote": "回执与最新读回分开保存；未知 readback 保留 receipt，不显示 denied、不自动重提，也不把父 task 状态当作 child 授权。"
+      "designNote": "回执与最新读回分开保存；未知 readback 保留 receipt，不显示 denied、不自动重提，也不把父 task 状态当作 child 授权。",
+      "contract": "批准/拒绝/revoke 提交返回既有 typed receipt/readback；后续读取是新请求，等待期间不造回边；关闭、收起、刷新不写拒绝。"
     }
   }
 }

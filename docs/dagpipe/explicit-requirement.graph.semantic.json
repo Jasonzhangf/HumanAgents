@@ -14,5 +14,10 @@
     "submit_single_authorization": "按精确 revision 单次最终提交；同一 canonical 四字段模板进入 RequirementEnvelope.normalizedInput 并追加需求队列；重复提交幂等，放弃草稿形成闭合",
     "compile_execution_policy": "编译执行策略",
     "persist_authorized_plan": "持久化执行计划并形成队列/任务交接"
+  },
+  "contracts": {
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "singleConfirmation": "新建任务表单提交是唯一确认；一次提交整理并按 FIFO 投递，不要求第二次确认。已有任务的目标、范围或处理方式变更单独确认。",
+    "controlBoundary": "steer、停止、权限撤销不进入需求队列或 task payload；消息式介入不构成新建任务。confirm/submit 只在新建路径被复用，不用于已有任务变更。"
   }
 }

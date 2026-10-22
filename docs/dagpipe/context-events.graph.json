@@ -1,9 +1,12 @@
 {
   "id": "humanagent-context-events",
-  "version": "1",
+  "version": "2",
   "meta": {
     "title": "发生事件从来源到 UI/Memory 消费的统一领域投影",
-    "baseline": "22d8268fe4785a154fa5c910c6b54712fc2c3967"
+    "baseline": "22d8268fe4785a154fa5c910c6b54712fc2c3967",
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "sourceContract": "事件来源必须由上游 owner 提供并保留已有 event ref、actor/source、原发生时间、适用目标与证据引用。本图只归一化与配对，不生成或替换身份，不从 raw 日志重建控制决定。",
+    "consumptionContract": "UI/Memory 消费复用归一与配对结果；不新增逐页 actor 分类器。消息呈现只使用 owner 已解码 actor/source/time，缺字段保持缺失或显式 unknown。"
   },
   "inputs": [
     { "id": "raw_event_stream", "schema": "Object" }

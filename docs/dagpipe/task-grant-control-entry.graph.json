@@ -1,6 +1,6 @@
 {
   "id": "humanagent-task-grant-control-entry",
-  "version": "1",
+  "version": "2",
   "meta": {
     "title": "正式任务入口到任务控制回执与最新读回收敛",
     "status": "DESIGN-PLANNED",
@@ -14,7 +14,33 @@
       "unconfirmed": "返回已记录控制回执，并明确最新控制状态暂不能确认",
       "rejected": "返回实际 typed apiError 或 blocked current.error/current.nextStep，不改写 Task 成功或停止完成状态"
     },
-    "operatorStatus": "本图是实施前设计。除已有 API 与 UI owner 外，目标验证绑定到待实施的后端 owner；拓扑校验不代表产品行为或运行时接线已通过。"
+    "operatorStatus": "本图是实施前设计。除已有 API 与 UI owner 外，目标验证绑定到待实施的后端 owner；拓扑校验不代表产品行为或运行时接线已通过。",
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "decisionTargetContract": "可展示的问题与决策来自实际控制对象：TaskGrant 读回、TaskInputRequest、Attention，且只在有真实 question/options 时成立。精确 target 必须包含 taskId、成对 projectKey/mode、控制对象种类与 owner 提供的 revision。blocked 或 generic nextStep 不自动成为等待人。",
+    "decisionReceiptContract": "grant/revoke/decision 提交返回既有 typed receipt 或 readback，不做 bool success。回执与最新读回分开保存；readback 未知时保留回执，不显示 denied、不自动重提。",
+    "resumeContract": "批准后实际继续沿既有 release/恢复路径；后续读取作为新请求，不在等待期间制造回边。关闭、收起、导航离开与刷新不写拒绝。",
+    "nodeContracts": {
+      "open_formal_task_navigation": {
+        "input": "formal_task_navigation_request { taskId, projectKey, mode, explicit control intent }",
+        "output": "explicit_task_control_intent { taskId, scope, intent }",
+        "forbidden": "默认导航不等于控制意图；不保存或恢复授权状态"
+      },
+      "verify_controllable_task_target": {
+        "input": "explicit_task_control_intent",
+        "output": "verified_task_control_target { targetScope, child taskId, decision kind, question/options, revision }",
+        "forbidden": "不按标题/父 Task 猜测目标；不对无 question/options 对象伪造审批"
+      },
+      "submit_scoped_task_control": {
+        "input": "verified_task_control_target",
+        "output": "recorded_task_control_receipt { typed receipt/readback }",
+        "forbidden": "不接受 UI 自报 principal/owner/authority；不把提交当授权继承"
+      },
+      "converge_control_receipt_and_readback": {
+        "input": "recorded_task_control_receipt",
+        "output": "task_control_outcome { receipt, latest readback or explicit unconfirmed }",
+        "forbidden": "未知 readback 不显示 denied，不自动重提"
+      }
+    }
   },
   "inputs": [
     {

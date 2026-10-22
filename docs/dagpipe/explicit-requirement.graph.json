@@ -1,6 +1,6 @@
 {
   "id": "humanagent-explicit-requirement",
-  "version": "4",
+  "version": "5",
   "meta": {
     "title": "用户新任务从可读草稿、修订、精确确认到单次最终提交并进入需求队列与执行计划",
     "requirements_version": 19,
@@ -43,7 +43,11 @@
     "lineageContract": "business TaskIdentity.source.requirementId、Subscription.goalId、已提交 occurrence claim/binding 是唯一层级来源；公开关系必须由这些 typed 字段建立，不按 title 或 ID 前缀猜测。无法建立关系的历史记录保留独立可读入口。",
     "constraintFidelityContract": "用户确认的 goal、scope、constraints、deliverables 由服务层现有 canonical JSON 模板统一承载。同一 normalizedInput 必须从 typed revision 进入 RequirementEnvelope，再进入 Task.directive 与首次 executor 输入；Task.title 使用独立 structuredProposal.title，不得使用整段 JSON。closed-turn Planner 读取同一 Task.directive，且计划节点、验收项与 decision 必须遵守其中 constraints/deliverables；提示词传达不证明模型实际合规。",
     "constraintFidelityOwner": "packages/app/src/ui-runtime/service.ts typed confirmation/template serializer/dispatch；packages/runtime/src/orchestration/closed-turn-planner-call.ts Planner output contract；tests/app/new-task-identity-public-consumer.test.ts public HTTP consumer",
-    "p0Status": "本版只冻结需求和 DAG 责任。P1/P2 必须实现 typed taskFlow/title 传播、唯一执行 owner、prepared lineage 与精确 TaskGrant admission；当前实现仍为 partial/UNVERIFIED。"
+    "p0Status": "本版只冻结需求和 DAG 责任。P1/P2 必须实现 typed taskFlow/title 传播、唯一执行 owner、prepared lineage 与精确 TaskGrant admission；当前实现仍为 partial/UNVERIFIED。",
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "singleConfirmationContract": "新建任务表单提交本身就是用户对该新任务的确认；同一次提交处理中整理并按 FIFO 投递 RequirementEnvelope，不要求第二次确认。已有任务的目标、范围或处理方式变更须单独确认。",
+    "controlBoundaryContract": "steer、停止、权限撤销等控制命令不混入业务需求队列或 task payload；消息式介入不构成新建任务。User task account 的 interaction 入口与新建草稿确认路径复用 existing 语义，不从 UI actor 字段自报授权。",
+    "nodeContract": "新建任务相关节点只沿 sensory_inbox → explicit_normalize → create_reviewable_draft → revise_draft_to_approval → confirm_exact_revision → validate_draft_revision → submit_single_authorization → compile_execution_policy → persist_authorized_plan → requirement_result 单链确认；已有任务变更不重复走新建确认。"
   },
   "inputs": [
     {

@@ -12,6 +12,9 @@
     "requestBoundary": "控制意图只在用户点击 grant 或 revoke 后形成请求；业务任务提交不是授权，UI 不要求用户填写 principal、revision、ID 或 capability。",
     "resultBoundary": "控制回执只说明控制命令结果，不改写 Task 状态。最新读回失败时保留已记录回执，不推断 denied，不自动重提。",
     "singleWriter": "任务控制领域状态仍由既有控制 owner 写入；本图只表达 UI 导航、目标验证、请求和结果收敛。",
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "decisionContract": "可展示问题与决策来自真实控制对象 TaskGrant/TaskInputRequest/Attention；只有有 question/options 的对象才能要求决定。blocked 保留真实 blocker、owner 与恢复入口，不泛化为等待人。",
+    "receiptContract": "正式决定提交返回 typed receipt/readback；批准后实际继续沿既有 release/恢复路径。关闭、收起、导航离开与刷新不写拒绝，回执与最新读回分别保存。",
     "exclusions": [
       "只读 Observation",
       "agent 编排",
