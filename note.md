@@ -366,3 +366,19 @@ M1 水位修复已合 main `1f731d76`：两个既有语义 builder 透传当前 
 巡检补证已合 main `e9fdffab`，仅扩原公开 HTTP fixture：同一定义ID的不同版本返回不可比较、definition-mismatch、空定义和空结果；原兼容 checkId 比较保留。临时去除 Core 判断时断言实际失败，恢复后通过；生产 Core 未改，没有新测试矩阵。此项只证明 F04 不兼容公开接口子条款。
 
 三棵本轮来源 worktree 均已正常关闭，原业务数据保留。完整目标继续 ACTIVE/INCOMPLETE：本次水位交付不代替 F07 公开正文/形成中状态展示；下一定向观察在进行。G13/F19 的非空义务、旧历史与实际文件效果保全已找回原 C3a 执行证据，按原范围复用，不重复测试。
+
+## 2026-10-22 HumanAgent 交互 UX 修复交付
+
+本轮修复已合入 main `df4448ba` 并推送到 origin/main，安装 0.1.0032，正式 restart 把 53007 实例更新到 generation 56，旧实例 clean 收拢，安装后 `/api/liveness` 200。
+
+用户可见的部分现在按事实工作：五个板块都能显示真实的 Live 与历史卡片；中间会话消息带真实 actor、来源和时间以及已提交结果；右侧证据关系链支持聚焦、层级返回、后退与前进并在刷新后保持；桌面可关闭关系层，手机把导航和关系合进同一个底部抽屉；交互 Agent 用人类口径，orchestrator 侧保持工程口径；Live 会话有明确的人类身份介入入口；真实审批走弹窗并在关闭时零写入，批准后同一任务继续执行到 succeeded 并匹配到真实提交。
+
+交付前修掉了一个会挡住后退的真实缺陷：任务看板从任务列表打开时 URL 不带产品路由，人第一次选择关系节点才 push 一条带路由的历史，于是点击后退会把 URL 退回不可解码的入口地址、焦点停在刚选的节点上，看起来像「后退没反应」。修法是首次读取后就用 replaceState 把当前读取位置补进当前历史条目，不新增条目、不改控制真源；红测先失败、修复后 21/21 通过。
+
+真实链路证据两次独立全绿：一次 34 项全通过（含真实表单落地、真实 task-grant 等待、弹窗批准与关闭零写、grant 200 与持久读回、执行 succeeded 与 commits=1 和工作区真实 demo.txt、真实关系 1 条与 4 条缺口、选择/刷新/后退正文一致/前进、关联层关闭零写、serve 退出与临时目录删除），另一次 34 项同样全通过。安装后再用已安装 CLI 跑同一条链路，仍然 34 项全通过。
+
+独立复核共五轮：R5 FAIL（1 个 P1 加 2 个 P2，指出 RCC 驱动的不可用表面仍从已删除的主层文案取 code、重试分支把未验证的拒绝记成通过、历史脚本仍是 P2）→ 修复 → R5b FAIL（只剩我引入的新 P2：把真实不可用节点计数写死成 1）→ 修复 → R5c PASS → R6 FAIL（落地判定把不同页面时刻的条件拼在一起）→ 修复 → R6b PASS。所有 P1 均已关闭，剩余一条历史脚本 `interaction-page-wiring-browser.mjs` 继续是 P2：它仍在等已被移除的旧首页表单，当前不覆盖新建入口，也不作为本轮通过证据。
+
+一个既有问题必须说清：`pnpm run test:compiled:services` 在本次候选和 origin/main 上都失败同样 13 项（303/309/324/360/377/378/379/380/381/389/390/397/399），与本轮改动无关，因此 `pnpm build:release` 的全量门禁现在过不去。产物改用同一条 release 流水线的其余阶段生成并全部通过：typecheck、build:raw、release 测试 14/14、package:candidate、package:smoke（含浏览器配对、显式输入 201、任务列表 200）。
+
+自有资源已收口：三棵本轮 worktree 全部关闭并 prune，12 个保留的隔离 attempt 目录先核对无存活 listener 再删除，清单与去向记录在证据目录的 `resource-inventory.json` 与 `lead-rcc-RESOURCE-CLOSURE.md`。历史存量 worktree `navigation-authorization-20261019` 不属于本轮任务域，未改动。完整证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-repair-exec-20261021/`。
