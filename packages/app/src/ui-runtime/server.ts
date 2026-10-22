@@ -1278,6 +1278,11 @@ async function handleRequest(
       writeJson(response, 200, await readProduct(() => service.productSessionRead(scope)));
       return;
     }
+    if (path === '/api/product/relations' && method === 'GET') {
+      const scope = requireBoundProductBoardScope(url, service);
+      writeJson(response, 200, await readProduct(() => service.productRelations(scope)));
+      return;
+    }
     if (path === '/api/product/output' && method === 'GET') {
       const taskId = url.searchParams.get('taskId')?.trim();
       if (!taskId) {
