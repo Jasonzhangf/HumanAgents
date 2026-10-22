@@ -21,6 +21,7 @@ import {
 } from '../../packages/contracts/src/index.js';
 import { computeInspectionDefinitionDigest } from '../../packages/core/src/index.js';
 import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { createJsonlI2JournalPort } from '../../packages/app/src/i2-journal.js';
 import {
@@ -36,6 +37,8 @@ import {
 import { productRelationRefKey } from '../../packages/app/src/ui-runtime/product-relations.js';
 import type { RuntimeInspectionOccurrenceProjection } from '../../packages/ui/contracts/runtime.js';
 import { TaskIdentityConsumer, type TaskIdentityPort } from '../../packages/runtime/src/orchestration/task-identity.js';
+import type { ExplicitInput } from '../../packages/runtime/src/intake/explicit-intake.js';
+import type { RuntimeTaskCoordinator } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
 import { SubscriptionControlPort } from '../../packages/runtime/src/subscriptions/index.js';
 
@@ -60,6 +63,7 @@ interface Fixture {
   readonly identities: Map<string, TaskIdentityRecord>;
   readonly subscriptions: SubscriptionControlPort;
   readonly i2: ReturnType<typeof createJsonlI2JournalPort>;
+  readonly grants: JsonlTaskGrantJournal;
 }
 
 function externalRef(seed: string): JournalCommitRef {
@@ -219,7 +223,7 @@ function settled(input: {
   };
 }
 
-async function makeFixture(withI2: boolean): Promise<Fixture> {
+async function makeFixture(withI2: boolean, withGrants = false): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-s2-wiring-'));
   const identities = new Map<string, TaskIdentityRecord>();
   const identityPort: TaskIdentityPort = {
@@ -242,6 +246,7 @@ async function makeFixture(withI2: boolean): Promise<Fixture> {
     journal: new JsonlOrganJournal(organPath),
   });
   const uiJournal = new UiRuntimeJournal(join(root, 'ui-runtime.jsonl'));
+  const grants = new JsonlTaskGrantJournal(new JsonlOrganJournal(join(root, 'task-grants.jsonl')));
   const service = new UiRuntimeService({
     mode: 'fake',
     organId,
@@ -269,9 +274,13 @@ async function makeFixture(withI2: boolean): Promise<Fixture> {
     },
     taskIdentity: new TaskIdentityConsumer(identityPort),
     subscriptionControl: subscriptions,
+    ...(withGrants ? {
+      taskGrantPort: grants,
+      runtimeComposition: { admitExecution: async () => {} },
+    } : {}),
     ...(withI2 ? { i2History: { journal: i2 } } : {}),
   });
-  return { root, service, identities, subscriptions, i2 };
+  return { root, service, identities, subscriptions, i2, grants };
 }
 
 function rememberIdentity(
@@ -449,6 +458,20 @@ test('service productRelations composes evidence-backed lineage and occurrence e
     assert.ok(childEdges[0]!.evidenceRefs.some((ref) =>
       ref.locator.includes(`/subscriptions/${claim.subscriptionId}/occurrences/${claim.occurrenceId}`)));
 
+    const parentScope = {
+      kind: 'task' as const,
+      projectKey,
+      mode: 'fake' as const,
+      taskId: parent.taskId,
+    };
+    const parentResult = await fixture.service.productRelations(parentScope);
+    const parentEdges = parentResult.relations.filter((relation) => relation.kind === 'child-execution');
+    assert.equal(parentEdges.length, 1, JSON.stringify(parentResult.gaps));
+    assert.ok(sameProductTargetRef(parentEdges[0]!.source, parentRef));
+    assert.ok(sameProductTargetRef(parentEdges[0]!.target, childRef));
+    assert.ok(parentEdges[0]!.evidenceRefs.some((ref) =>
+      ref.locator.includes(`/subscriptions/${claim.subscriptionId}/occurrences/${claim.occurrenceId}`)));
+
     const occurrenceEdges = result.relations.filter((relation) => relation.kind === 'occurrence');
     assert.equal(occurrenceEdges.length, 1);
     assert.ok(sameProductTargetRef(occurrenceEdges[0]!.source, childRef));
@@ -611,4 +634,183 @@ test('projection display state keeps item failure and real outcome distinctions'
     outcome: 'completed',
   }), 'completed');
   assert.equal(inspectionDisplayFactFromProjection(base, id('task', 'display-task')).openedAt, base.openedAt);
+});
+
+async function waitForTaskState(
+  service: UiRuntimeService,
+  taskId: TaskId,
+  expected: readonly string[],
+): Promise<string> {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const state = service.taskDashboard(taskId).state;
+    if (expected.includes(state)) return state;
+    if (Date.now() >= deadline) {
+      throw new Error(`task ${taskId.value} stayed in state ${state}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+test('unbound explicit interactions stay in project scope and never enter a task session', async () => {
+  const fixture = await makeFixture(false);
+  try {
+    const first = await fixture.service.receiveExplicitInput({
+      sourceRef: 'entry-unbound-1',
+      rawInput: 'unbound draft one',
+      channel: 'business',
+      occurredAt: '2026-10-21T10:10:00.000Z',
+    } satisfies ExplicitInput);
+    const second = await fixture.service.receiveExplicitInput({
+      sourceRef: 'entry-unbound-2',
+      rawInput: 'unbound clarification two',
+      channel: 'business',
+      occurredAt: '2026-10-21T10:11:00.000Z',
+    } satisfies ExplicitInput);
+    const alpha = fixture.service.createTask({ title: 'Alpha task' });
+    const beta = fixture.service.createTask({ title: 'Beta task' });
+
+    for (const task of [alpha, beta]) {
+      const session = await fixture.service.productSessionRead({
+        kind: 'task',
+        projectKey,
+        mode: 'fake',
+        taskId: task.taskId,
+      });
+      assert.equal(
+        session.messages.some((message) =>
+          message.text === 'unbound draft one' || message.text === 'unbound clarification two'),
+        false,
+        `unbound interaction leaked into task ${task.taskId.value}`,
+      );
+    }
+    const flatTask = await fixture.service.productSessionRead({
+      projectKey,
+      mode: 'fake',
+      taskId: alpha.taskId.value,
+    });
+    assert.equal(
+      flatTask.messages.some((message) =>
+        message.text === 'unbound draft one' || message.text === 'unbound clarification two'),
+      false,
+      'the flat string task scope keeps the same exact task boundary',
+    );
+
+    const project = await fixture.service.productSessionRead({ kind: 'project', projectKey });
+    const projectInteractions = project.messages.filter((message) =>
+      message.ref.sourceId === 'explicit-intake');
+    assert.equal(projectInteractions.length, 2);
+    for (const message of projectInteractions) {
+      assert.equal(message.targetRef.kind, 'session');
+      assert.equal(message.targetRef.taskRef, undefined);
+    }
+
+    const exactFirst = await fixture.service.productSessionRead({
+      projectKey,
+      mode: 'fake',
+      sessionId: first,
+    });
+    assert.deepEqual(exactFirst.messages.map((message) => message.text), ['unbound draft one']);
+    const exactSecond = await fixture.service.productSessionRead({
+      projectKey,
+      mode: 'fake',
+      sessionId: second,
+    });
+    assert.deepEqual(exactSecond.messages.map((message) => message.text), ['unbound clarification two']);
+    const unmodified = await fixture.service.productSessionRead({ kind: 'project', projectKey });
+    assert.equal(
+      unmodified.messages.filter((message) => message.ref.sourceId === 'explicit-intake').length,
+      2,
+      'a read without sessionId keeps the existing project-session behavior',
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('productPendingDecision reports only a real grant-blocked waiting task', async () => {
+  const fixture = await makeFixture(false, true);
+  try {
+    const waiting = fixture.service.createTask({ title: 'Waiting task' });
+    const idle = fixture.service.createTask({ title: 'Idle task' });
+    const coordinator = (fixture.service as unknown as {
+      readonly coordinator: RuntimeTaskCoordinator;
+    }).coordinator;
+    coordinator.prepareExecution(waiting.taskId, { prompt: 'needs a grant' });
+    const scope = {
+      kind: 'task' as const,
+      projectKey,
+      mode: 'fake' as const,
+      taskId: waiting.taskId,
+    };
+
+    const decision = await fixture.service.productPendingDecision(scope);
+    if (decision?.kind !== 'task-grant') throw new Error('the waiting task has no task-grant decision');
+    assert.equal(decision.state, 'waiting');
+    assert.deepEqual(decision.actions, ['grant']);
+    assert.ok(sameProductTargetRef(decision.target, {
+      kind: 'interaction',
+      taskRef: waiting.taskId,
+      scope: { kind: 'task', projectKey, mode: 'fake', taskId: waiting.taskId },
+    }));
+    assert.equal(decision.readback.grant, null);
+    assert.equal(decision.readback.commit, null);
+
+    const projectDecision = await fixture.service.productPendingDecision({
+      kind: 'project',
+      projectKey,
+    });
+    assert.equal(projectDecision?.kind, 'task-grant');
+
+    const capability = {
+      actionId: 'task.execute',
+      capabilities: ['provider.execution'],
+      scope: { organId, taskId: waiting.taskId },
+    };
+    await fixture.grants.grant({
+      requestId: 'grant-waiting-1',
+      taskId: waiting.taskId,
+      owner: 'review-fix-owner',
+      capability,
+      expectedRevision: 0,
+    });
+    assert.equal(await fixture.service.productPendingDecision(scope), null);
+
+    await fixture.grants.revoke({
+      requestId: 'revoke-waiting-1',
+      taskId: waiting.taskId,
+      owner: 'review-fix-owner',
+      expectedRevision: 1,
+    });
+    assert.equal(
+      await fixture.service.productPendingDecision(scope),
+      null,
+      'a revoked grant is not a waiting decision',
+    );
+    assert.equal(await fixture.service.productPendingDecision({
+      kind: 'task',
+      projectKey,
+      mode: 'fake',
+      taskId: idle.taskId,
+    }), null);
+
+    const ended = fixture.service.createTask({ title: 'Ended without grant' });
+    const endedAllocation = coordinator.prepareExecution(ended.taskId, { prompt: 'finish without grant' });
+    await coordinator.releaseExecution(ended.taskId, endedAllocation.operationId);
+    const terminal = await waitForTaskState(
+      fixture.service,
+      ended.taskId,
+      ['succeeded', 'failed', 'stopped', 'cancelled'],
+    );
+    assert.ok(['succeeded', 'failed', 'stopped', 'cancelled'].includes(terminal));
+    const endedDecision = await fixture.service.productPendingDecision({
+      kind: 'task',
+      projectKey,
+      mode: 'fake',
+      taskId: ended.taskId,
+    });
+    assert.equal(endedDecision, null, 'an ended task is not a waiting decision');
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
 });

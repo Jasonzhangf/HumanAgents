@@ -25,6 +25,7 @@ import {
   type ExecutionRuntimePort,
   type EvidenceRef,
   validateCodeSearchReport,
+  validateProductPendingDecision,
   type Checkpoint,
   type Occurrence,
   type OccurrenceTaskBinding,
@@ -272,6 +273,7 @@ import type {
   AgentRoleDisplay,
   LifecycleState,
   ProductBoardIndex,
+  ProductPendingDecision,
   PublicOutputBinding,
   PublicOutputJournalPort,
   PublicOutputPublication,
@@ -514,6 +516,15 @@ export interface ExplicitProviderSettlementReadInput {
 export interface ExplicitProviderSettlementReadPort {
   read(input: ExplicitProviderSettlementReadInput): Promise<InteractionParentCommittedFact<InteractionProviderSettlementReceipt>>;
 }
+
+export interface ProductSessionReadScope {
+  readonly projectKey: string;
+  readonly mode: 'fake' | 'rcc';
+  readonly taskId?: string;
+  readonly sessionId?: string;
+}
+
+export type ProductReadRequestScope = ProductBoardScope | ProductSessionReadScope;
 
 export interface UiRuntimeTaskControlTarget {
   readonly projectKey: string;
@@ -3555,8 +3566,7 @@ export class UiRuntimeService {
         ...(taskRef === undefined ? {} : { taskRef }),
       };
     }).filter((fact) => selection.taskId === undefined
-      || fact.taskRef === undefined
-      || fact.taskRef.value === selection.taskId.value);
+      || fact.taskRef?.value === selection.taskId.value);
   }
 
   private explicitInteractionMessages(
@@ -3566,11 +3576,14 @@ export class UiRuntimeService {
     const scope = productSelectionScope(selection);
     return this.explicitIntake.exportState().interactions.flatMap((interaction) => {
       const recordedTaskRef = this.explicitInteractionTaskRef(interaction);
-      if (selection.taskId !== undefined && recordedTaskRef !== undefined
-        && recordedTaskRef.value !== selection.taskId.value) {
+      // A task session only carries interactions the owner actually bound to
+      // that task. An unbound draft, clarification or status query stays in the
+      // project overview; the selected task id is never a fallback owner.
+      if (selection.taskId !== undefined
+        && recordedTaskRef?.value !== selection.taskId.value) {
         return [];
       }
-      const taskId = recordedTaskRef ?? selection.taskId;
+      const taskId = recordedTaskRef;
       const targetRef: ProductMessageFact['targetRef'] = recordedTaskRef !== undefined
         ? {
             kind: 'interaction',
@@ -3580,7 +3593,6 @@ export class UiRuntimeService {
         : {
             kind: 'session',
             sessionRef: { sourceKind: 'explicit-intake', sourceRef: interaction.interactionId },
-            ...(selection.taskId === undefined ? {} : { taskRef: selection.taskId }),
             scope,
           };
       return [{
@@ -3618,6 +3630,24 @@ export class UiRuntimeService {
       return { projectKey: scope.projectKey, mode: scope.mode, taskId: scope.taskId };
     }
     return { projectKey: scope.projectKey, mode: this.mode };
+  }
+
+  private productSelectionForRequest(scope: ProductReadRequestScope): ProductReadSelection {
+    if ('kind' in scope) return this.productSelectionFor(scope);
+    if (scope.mode !== this.mode) {
+      throw new UiRuntimeApiError(
+        'product-read.mode-mismatch',
+        APP_OWNER,
+        `read scope mode ${scope.mode} is not the serve-bound mode ${this.mode}`,
+        'read the product board with the bound project mode',
+        409,
+      );
+    }
+    return {
+      projectKey: scope.projectKey,
+      mode: scope.mode,
+      ...(scope.taskId === undefined ? {} : { taskId: id('task', scope.taskId) }),
+    };
   }
 
   private async productMemoryRead(): Promise<RuntimeReadResult<ProductMemoryReadFacts>> {
@@ -3749,8 +3779,8 @@ export class UiRuntimeService {
    * owner-decoded actor/time from explicit intake, never a task input or update
    * time.
    */
-  async productSessionRead(scope: ProductBoardScope): Promise<ProductSessionRead> {
-    const selection = this.productSelectionFor(scope);
+  async productSessionRead(scope: ProductReadRequestScope): Promise<ProductSessionRead> {
+    const selection = this.productSelectionForRequest(scope);
     const facts = await this.productBoardReadFacts(selection);
     const boardIndex = composeProductBoardIndex(facts.input);
     const selectedTaskId = selection.taskId;
@@ -3759,15 +3789,60 @@ export class UiRuntimeService {
       : facts.snapshots
           .filter((snapshot) => snapshot.taskId.value === selectedTaskId.value)
           .map((snapshot) => ({ taskId: snapshot.taskId, events: snapshot.recentEvents }));
+    const messages = composeProductSessionMessages({
+      selection,
+      organId: this.options.organId,
+      messages: this.explicitInteractionMessages(selection, this.options.organId),
+      taskEvents,
+    });
+    const sessionId = 'kind' in scope ? undefined : scope.sessionId;
     return {
       boardIndex,
-      messages: composeProductSessionMessages({
-        selection,
-        organId: this.options.organId,
-        messages: this.explicitInteractionMessages(selection, this.options.organId),
-        taskEvents,
-      }),
+      messages: sessionId === undefined
+        ? messages
+        : messages.filter((message) =>
+          (message.targetRef.kind === 'session'
+            && message.targetRef.sessionRef.sourceRef === sessionId)
+          || (message.ref.sourceId === 'explicit-intake' && message.ref.eventId === sessionId)),
     };
+  }
+
+  async productPendingDecision(scope: ProductReadRequestScope): Promise<ProductPendingDecision | null> {
+    const selection = this.productSelectionForRequest(scope);
+    const port = this.options.taskGrantPort;
+    // Without the durable grant readback no task can be proven grant-blocked.
+    if (port === undefined) return null;
+    for (const task of this.coordinator.taskSnapshots()) {
+      if (selection.taskId !== undefined && task.taskId.value !== selection.taskId.value) continue;
+      // A retained prepared operation is the real admission wait. A waiting
+      // row without that custody, or with any recorded grant fact, is not a
+      // pending grant decision.
+      if (task.state !== 'waiting' || task.executionRelease !== 'prepared') continue;
+      const readback = await port.readTaskGrant(task.taskId);
+      if (readback.grant !== null) continue;
+      const target = {
+        kind: 'interaction' as const,
+        taskRef: task.taskId,
+        scope: {
+          kind: 'task' as const,
+          projectKey: selection.projectKey,
+          mode: selection.mode,
+          taskId: task.taskId,
+        },
+      };
+      const decision: ProductPendingDecision = {
+        kind: 'task-grant',
+        target,
+        question: '是否批准继续执行这个任务？',
+        actions: ['grant'],
+        state: 'waiting',
+        readback: { grant: readback.grant, commit: readback.commit },
+        recoveryOwner: 'humanagent.app.ui-runtime.task-control',
+      };
+      validateProductPendingDecision(decision);
+      return decision;
+    }
+    return null;
   }
 
   /**
@@ -3788,9 +3863,24 @@ export class UiRuntimeService {
       preserveExecutionRows: true,
     });
     const read = composeProductSessionRead({ ...facts.input, organId: this.options.organId });
+    // A task focus keeps the focus task, the children whose committed lineage
+    // points at it and the upstream parent it was executed under. Unrelated
+    // tasks stay out of the focused read.
+    const focusedTaskIds = new Set<string>();
+    if (focused !== undefined) {
+      focusedTaskIds.add(focused.value);
+      const focusSnapshot = snapshots.find((snapshot) => snapshot.taskId.value === focused.value);
+      const parentTaskId = focusSnapshot?.executionLineage?.parentTaskId;
+      if (parentTaskId !== undefined) focusedTaskIds.add(parentTaskId.value);
+      for (const snapshot of snapshots) {
+        if (snapshot.executionLineage?.parentTaskId.value === focused.value) {
+          focusedTaskIds.add(snapshot.taskId.value);
+        }
+      }
+    }
     const targeted = focused === undefined
       ? snapshots
-      : snapshots.filter((snapshot) => snapshot.taskId.value === focused.value);
+      : snapshots.filter((snapshot) => focusedTaskIds.has(snapshot.taskId.value));
     const tasks: ProductTaskRelationFact[] = targeted.map((snapshot) => ({
       taskId: snapshot.taskId,
       ...(snapshot.identitySource === undefined ? {} : { identitySource: snapshot.identitySource }),

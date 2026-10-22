@@ -242,7 +242,7 @@ test('T1 keeps decoded actors and real event time; unknown sources never become 
     organId,
     interactions: {
       ok: true,
-      value: [interaction({ interactionId: 'interaction-1' })],
+      value: [interaction({ interactionId: 'interaction-1', taskRef: taskA })],
     },
     taskEvents: [{ taskId: taskA, events: [event()] }],
     messages: [messageFact('human', 'event-human'), messageFact('agent', 'event-agent')],
