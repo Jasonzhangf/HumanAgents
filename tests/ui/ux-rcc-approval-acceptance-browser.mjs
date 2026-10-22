@@ -1042,6 +1042,23 @@ class AcceptanceRun {
         if (this.serve.exitCode !== null || this.serve.signalCode !== null) break
         await sleep(1_000)
       }
+      if (!waitLanding && waitRows.length > 0) {
+        // The task row can appear from the runtime before the page finishes its
+        // own navigation, so landing keeps a short grace window instead of being
+        // reported as unconfirmed while the page is still moving.
+        const landingDeadline = Date.now() + 15_000
+        while (Date.now() < landingDeadline) {
+          const landingUrl = new URL(this.page.url())
+          const landingTask = landingUrl.searchParams.get('task')
+          const onLandingPage = landingUrl.pathname.endsWith('/task-dashboard.html')
+            || landingUrl.pathname.endsWith('/task.html')
+          if (onLandingPage && landingTask) {
+            waitLanding = true
+            if (waitRows.some((row) => taskIdValue(row.taskId ?? row.id) === landingTask)) break
+          }
+          await sleep(250)
+        }
+      }
       return { after: waitAfter, newRows: waitRows, landingObserved: waitLanding }
     }
     let attempt = await submitAndWait()
