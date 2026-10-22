@@ -17,6 +17,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createTaskProductController } from '../../docs/ui/task.js'
+import { createRuntimeApi } from '../../docs/ui/runtime-api.js'
 
 function createElement(tag, text, className) {
   const listeners = new Map()
@@ -371,4 +372,99 @@ test('draws no result block when no public commit is available', async () => {
 
   assert.equal(find(host, '[data-product-role="public-result"]').length, 0)
   assert.doesNotMatch(text(host), /已提交结果/)
+})
+
+test('task session read receives the flat product scope, not the internal target', async () => {
+  const sessionScopes = []
+  const outputCalls = []
+  const { controller } = createController({
+    transport: {
+      readProductSession: async (scope) => {
+        sessionScopes.push(scope)
+        return { messages: [] }
+      },
+      readProductOutput: async (...args) => {
+        outputCalls.push(args)
+        return { commits: [], resultAvailable: false }
+      },
+    },
+  })
+
+  await controller.refresh()
+
+  assert.equal(sessionScopes.length, 1)
+  const scope = sessionScopes[0]
+  assert.equal(scope.projectKey, 'humanagent')
+  assert.equal(scope.mode, 'fake')
+  assert.equal(typeof scope.taskId, 'string')
+  assert.equal(scope.taskId, 'task-w3')
+  assert.equal(scope.kind, undefined)
+  assert.equal('sessionId' in scope, false, 'no interaction is known, so no sessionId is invented')
+
+  assert.equal(outputCalls.length, 1)
+  assert.equal(outputCalls[0][0], 'task-w3')
+  assert.equal(typeof outputCalls[0][1].taskId, 'string')
+  assert.equal(outputCalls[0][1].kind, undefined)
+})
+
+test('the real runtime api accepts the flat scope without throwing before the request', async () => {
+  const requested = []
+  const api = createRuntimeApi({
+    fetchImpl: async (url) => {
+      requested.push(String(url))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ messages: [], commits: [], resultAvailable: false }),
+      }
+    },
+  })
+  const { controller } = createController({ transport: api })
+
+  await controller.refresh()
+
+  const sessionUrl = requested.find((url) => url.startsWith('/api/product/session'))
+  assert.ok(sessionUrl, 'the session read reached fetch')
+  const params = new URLSearchParams(sessionUrl.slice(sessionUrl.indexOf('?') + 1))
+  assert.equal(params.get('projectKey'), 'humanagent')
+  assert.equal(params.get('mode'), 'fake')
+  assert.equal(params.get('taskId'), 'task-w3')
+})
+
+test('task session read passes the exact interaction as sessionId when known', async () => {
+  const sessionScopes = []
+  const { controller } = createController({
+    transport: {
+      readProductSession: async (scope) => {
+        sessionScopes.push(scope)
+        return { messages: [] }
+      },
+    },
+  })
+
+  controller.setInteraction({
+    interactionId: 'interaction-1',
+    snapshot: snapshot('awaiting-confirmation'),
+  })
+  await controller.refresh()
+
+  assert.equal(sessionScopes.length, 1)
+  assert.equal(sessionScopes[0].sessionId, 'interaction-1')
+  assert.equal(sessionScopes[0].taskId, 'task-w3')
+})
+
+test('a failed session read keeps an explicit unavailable status', async () => {
+  const { controller, host } = createController({
+    transport: {
+      readProductSession: async () => {
+        throw new Error('session read failed')
+      },
+    },
+  })
+
+  await controller.refresh()
+
+  const rendered = text(host)
+  assert.match(rendered, /来源不可用/)
+  assert.match(rendered, /session read failed/)
 })
