@@ -16,6 +16,7 @@ import {
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
+import type { ProductBoardScope } from './product-session-read.js';
 import { decodeTaskAgentActivitySelectionQuery } from './agent-activity-read.js';
 import type { CheckpointHistoryReadInput } from './checkpoint-history.js';
 import type { RuntimeReadResult, RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
@@ -24,6 +25,7 @@ import type { TaskCheckpointAssetBodyQuery } from './service.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 import { AppLifecycleError } from '../errors.js';
 import { CheckpointSubmissionError } from '../../../runtime/src/checkpoints/errors.js';
+import { RuntimeTaskControlError } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { ConfirmedControlExpectedConflict } from './reentry-current-facts.js';
 import {
   AccessControlError,
@@ -187,6 +189,58 @@ function optionalI2ReadScope(url: URL): { readonly projectKey: string; readonly 
   const mode = url.searchParams.get('mode');
   if (projectKey === null && mode === null) return undefined;
   return requireReadScope(url);
+}
+
+function productBoardReadScope(
+  url: URL,
+  projectKey: string,
+  mode: 'fake' | 'rcc',
+): ProductBoardScope {
+  const rawTaskId = url.searchParams.get('taskId');
+  if (rawTaskId === null) return { kind: 'project', projectKey };
+  const taskId = rawTaskId.trim();
+  if (!taskId) {
+    throw new UiRuntimeApiError(
+      'read.scope.invalid',
+      APP_OWNER,
+      'product read taskId must be non-empty',
+      'send taskId=<task-id> or omit it',
+      400,
+    );
+  }
+  return { kind: 'task', projectKey, mode, taskId: id('task', taskId) };
+}
+
+function requireBoundProductBoardScope(url: URL, service: UiRuntimeService): ProductBoardScope {
+  const { projectKey, mode } = requireReadScope(url);
+  if (!service.isBoundReadScope(projectKey, mode)) {
+    throw new UiRuntimeApiError(
+      'product-read.scope-not-bound',
+      APP_OWNER,
+      `product read scope ${projectKey}/${mode} is outside the serve-bound scope`,
+      'read the product board with the serve-bound project and mode',
+      409,
+    );
+  }
+  return productBoardReadScope(url, projectKey, mode);
+}
+
+async function readProduct<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof UiRuntimeApiError) throw error;
+    if (error instanceof RuntimeTaskControlError) {
+      throw new UiRuntimeApiError(
+        error.code,
+        error.ownerId,
+        error.message,
+        error.nextAction,
+        error.code.endsWith('.not.found') ? 404 : 409,
+      );
+    }
+    throw error;
+  }
 }
 
 function requireHistoryLimit(url: URL, family: 'context-history' | 'checkpoints' | 'i2-history'): number {
@@ -1214,6 +1268,30 @@ async function handleRequest(
         400,
       );
     }
+    if (path === '/api/product/board' && method === 'GET') {
+      const scope = requireBoundProductBoardScope(url, service);
+      writeJson(response, 200, await readProduct(() => service.productBoardIndex(scope)));
+      return;
+    }
+    if (path === '/api/product/session' && method === 'GET') {
+      const scope = requireBoundProductBoardScope(url, service);
+      writeJson(response, 200, await readProduct(() => service.productSessionRead(scope)));
+      return;
+    }
+    if (path === '/api/product/output' && method === 'GET') {
+      const taskId = url.searchParams.get('taskId')?.trim();
+      if (!taskId) {
+        throw new UiRuntimeApiError(
+          'read.scope.invalid',
+          APP_OWNER,
+          'product output requires a non-empty taskId',
+          'send taskId=<task-id>',
+          400,
+        );
+      }
+      writeJson(response, 200, await readProduct(() => service.productPublicOutput(id('task', taskId))));
+      return;
+    }
     if (path === '/api/tasks' && method === 'GET') {
       writeJson(response, 200, await service.listTasksWithIdentitySource());
       return;
@@ -1241,6 +1319,9 @@ async function handleRequest(
       return;
     }
     if (path === '/api/explicit/inputs' && method === 'POST') {
+      const cookie = request.headers.cookie;
+      const verification = await accessControl.verifyProductPrincipal(Array.isArray(cookie) ? cookie[0] : cookie);
+      if (verification.state !== 'valid') throw sessionError(verification);
       const body = await readBody(request);
       const channel = requireString(body, 'channel');
       if (channel === 'control') {
@@ -1257,10 +1338,17 @@ async function handleRequest(
       }
       const inputRevision = body.inputRevision === undefined ? 1 : requirePositiveInteger(body, 'inputRevision');
       const requestKind = optionalInteractionRequestKind(body);
+      const occurredAt = optionalString(body, 'occurredAt') ?? new Date().toISOString();
       const interactionId = await service.receiveExplicitInput({
         sourceRef: requireString(body, 'sourceRef'),
         rawInput: requireString(body, 'rawInput'),
         channel,
+        actor: {
+          kind: 'human',
+          sourceKind: 'product-principal',
+          sourceRef: verification.principal.owner,
+        },
+        occurredAt,
         ...(requestKind === undefined ? {} : { requestKind }),
       }, inputRevision);
       writeJson(response, 201, { interactionId });

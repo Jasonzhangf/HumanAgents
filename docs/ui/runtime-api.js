@@ -142,6 +142,32 @@ function exactTaskControlScopeQuery(scope) {
   return query
 }
 
+// Product reads carry one exact read scope. Only projectKey, mode and the
+// optional taskId cross this boundary; principal, owner and authority fields
+// in the caller's object are dropped instead of forwarded.
+function productReadScopeQuery(scope) {
+  if (scope === null || typeof scope !== 'object'
+    || typeof scope.projectKey !== 'string' || scope.projectKey.trim() === ''
+    || (scope.mode !== 'fake' && scope.mode !== 'rcc')) {
+    throw new TypeError('product read scope requires projectKey and mode=fake|rcc')
+  }
+  const query = new URLSearchParams({ projectKey: scope.projectKey, mode: scope.mode })
+  if (scope.taskId !== undefined) {
+    if (typeof scope.taskId !== 'string' || scope.taskId.trim() === '') {
+      throw new TypeError('product read taskId must be a non-empty string')
+    }
+    query.set('taskId', scope.taskId)
+  }
+  return `?${query}`
+}
+
+function productOutputQuery(taskId) {
+  if (typeof taskId !== 'string' || taskId.trim() === '') {
+    throw new TypeError('product output requires a non-empty taskId')
+  }
+  return `?${new URLSearchParams({ taskId })}`
+}
+
 // The session is the only principal source. Only the formal request fields
 // cross this boundary, so a page cannot smuggle owner, confirmedBy or
 // authority into a control write.
@@ -237,6 +263,9 @@ export function createRuntimeApi(options = {}) {
     }),
     resetDisplayPreference: () => request('/api/ui/display-preference', { method: 'DELETE' }),
     dashboard: () => request('/api/dashboard'),
+    readProductBoard: (scope) => request(`/api/product/board${productReadScopeQuery(scope)}`),
+    readProductSession: (scope) => request(`/api/product/session${productReadScopeQuery(scope)}`),
+    readProductOutput: (taskId) => request(`/api/product/output${productOutputQuery(taskId)}`),
     listTasks: () => request('/api/tasks'),
     updateTask: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}`, {
       method: 'PATCH',
