@@ -271,6 +271,7 @@ import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/
 import type {
   AgentRoleDisplay,
   LifecycleState,
+  ProductBoardIndex,
   PublicOutputBinding,
   PublicOutputJournalPort,
   PublicOutputPublication,
@@ -296,6 +297,19 @@ import {
 import { createJsonlI2JournalPort } from '../i2-journal.js';
 import { readTaskAgentActivity, type DecodedTaskAgentActivitySelectionQuery,
   type AssembleTaskAgentActivityRemainingSourcesOptions } from './agent-activity-read.js';
+import {
+  composeProductBoardIndex,
+  composeProductSessionMessages,
+  productSelectionScope,
+  type ProductBoardScope,
+  type ProductInteractionFact,
+  type ProductMessageFact,
+  type ProductMemoryReadFacts,
+  type ProductReadSelection,
+  type ProductSessionRead,
+  type ProductTaskEventFact,
+} from './product-session-read.js';
+import { productResultText, selectProductOutput, type ProductOutputView } from './product-output-read.js';
 import type {
   ConfiguredProjectCatalog,
   ConfiguredProjectReadSource,
@@ -3452,20 +3466,223 @@ export class UiRuntimeService {
   }
 
   private dashboardFromSnapshots(tasks: readonly RuntimeTaskSnapshotInput[]): RuntimeDashboardProjection {
+    const interactions = this.explicitIntake.exportState().interactions;
+    const taskTitles = new Map(tasks.map((task) => [task.taskId.value, task.title]));
+    // Recent inputs are the persisted explicit interactions, not task rows.
+    // The interaction owner records `occurredAt` and the verified principal
+    // actor when the real HTTP entry decoded them. Absence stays absent: an
+    // interaction with no event time is not shown with a fake task time, and an
+    // interaction with no human actor is never relabeled human.
+    const recentInputs = interactions
+      .filter((interaction) => interaction.occurredAt !== undefined)
+      .sort((left, right) => (right.occurredAt ?? '').localeCompare(left.occurredAt ?? ''))
+      .slice(0, 5)
+      .map((interaction) => {
+        const taskRef = this.explicitInteractionTaskRef(interaction);
+        return {
+          text: interaction.rawInput,
+          receivedAt: interaction.occurredAt!,
+          ...(taskRef === undefined ? {} : { taskId: taskRef }),
+          ...(taskRef === undefined ? {} : { taskTitle: taskTitles.get(taskRef.value) ?? taskRef.value }),
+          source: interaction.actor?.kind === 'human' ? 'human' as const : 'task' as const,
+        };
+      });
     return projectRuntimeDashboard({
       mode: this.mode,
       tasks,
-      recentInputs: tasks
-        .filter((task) => task.input.trim().length > 0)
-        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-        .map((task) => ({
-          text: task.input,
-          receivedAt: task.updatedAt,
-          taskId: task.taskId,
-          taskTitle: task.title,
-          source: 'human',
-        })),
+      recentInputs,
     });
+  }
+
+  private explicitInteractionTaskRef(
+    interaction: ExplicitIntakeState['interactions'][number],
+  ): TaskId | undefined {
+    return interaction.confirmation?.taskRef
+      ?? (interaction.draft === undefined ? undefined : this.dispatchLedger.get(interaction.draft.draftId)?.taskId)
+      ?? (interaction.revision === undefined ? undefined : this.dispatchLedger.get(interaction.revision.draftId)?.taskId);
+  }
+
+  private explicitInteractionFacts(
+    selection: ProductReadSelection,
+  ): readonly ProductInteractionFact[] {
+    return this.explicitIntake.exportState().interactions.map((interaction) => {
+      const taskRef = this.explicitInteractionTaskRef(interaction);
+      return {
+        interactionId: interaction.interactionId,
+        state: interaction.state,
+        rawInput: interaction.rawInput,
+        ...(interaction.occurredAt === undefined ? {} : { occurredAt: interaction.occurredAt }),
+        ...(taskRef === undefined ? {} : { taskRef }),
+      };
+    }).filter((fact) => selection.taskId === undefined
+      || fact.taskRef === undefined
+      || fact.taskRef.value === selection.taskId.value);
+  }
+
+  private explicitInteractionMessages(
+    selection: ProductReadSelection,
+    organId: OrganId,
+  ): readonly ProductMessageFact[] {
+    const scope = productSelectionScope(selection);
+    return this.explicitIntake.exportState().interactions.flatMap((interaction) => {
+      const recordedTaskRef = this.explicitInteractionTaskRef(interaction);
+      if (selection.taskId !== undefined && recordedTaskRef !== undefined
+        && recordedTaskRef.value !== selection.taskId.value) {
+        return [];
+      }
+      const taskId = recordedTaskRef ?? selection.taskId;
+      const targetRef: ProductMessageFact['targetRef'] = recordedTaskRef !== undefined
+        ? {
+            kind: 'interaction',
+            taskRef: recordedTaskRef,
+            scope: { kind: 'task', projectKey: selection.projectKey, mode: selection.mode, taskId: recordedTaskRef },
+          }
+        : {
+            kind: 'session',
+            sessionRef: { sourceKind: 'explicit-intake', sourceRef: interaction.interactionId },
+            ...(selection.taskId === undefined ? {} : { taskRef: selection.taskId }),
+            scope,
+          };
+      return [{
+        ref: {
+          eventId: interaction.interactionId,
+          sourceId: 'explicit-intake',
+          scope: { organId, ...(taskId === undefined ? {} : { taskId }) },
+        },
+        targetRef,
+        actor: interaction.actor ?? {
+          kind: 'unknown',
+          sourceKind: 'explicit-intake',
+          sourceRef: interaction.interactionId,
+        },
+        ...(interaction.occurredAt === undefined
+          ? { occurredAtUnavailableReason: 'the explicit intake owner did not persist an event time' }
+          : { occurredAt: interaction.occurredAt }),
+        text: interaction.rawInput,
+        evidenceRefs: [],
+      }];
+    });
+  }
+
+  private productSelectionFor(scope: ProductBoardScope): ProductReadSelection {
+    if (scope.kind === 'task') {
+      if (scope.mode !== this.mode) {
+        throw new UiRuntimeApiError(
+          'product-read.mode-mismatch',
+          APP_OWNER,
+          `task scope mode ${scope.mode} is not the serve-bound mode ${this.mode}`,
+          'read the product board with the bound project mode',
+          409,
+        );
+      }
+      return { projectKey: scope.projectKey, mode: scope.mode, taskId: scope.taskId };
+    }
+    return { projectKey: scope.projectKey, mode: this.mode };
+  }
+
+  private async productMemoryRead(): Promise<RuntimeReadResult<ProductMemoryReadFacts>> {
+    const reviewState = this.memory.reviewState;
+    if (reviewState === undefined) {
+      return { ok: false, failure: {
+        code: 'memory.review-state-unavailable',
+        ownerId: APP_OWNER,
+        message: 'the bound memory composition has no review-state reader',
+        nextAction: 'bind the memory review-state reader before enumerating the memory board',
+      } };
+    }
+    try {
+      const review = await reviewState();
+      return { ok: true, value: {
+        analysisState: review.analysis.state,
+        candidateCount: review.candidates.length,
+      } };
+    } catch (error) {
+      return { ok: false, failure: {
+        code: 'memory.review-state-failed',
+        ownerId: APP_OWNER,
+        message: `memory review-state read failed: ${error instanceof Error ? error.message : String(error)}`,
+        nextAction: 'restore the memory review-state reader before enumerating the memory board',
+      } };
+    }
+  }
+
+  private async productBoardReadFacts(
+    selection: ProductReadSelection,
+  ): Promise<{
+    readonly input: Parameters<typeof composeProductBoardIndex>[0];
+    readonly snapshots: readonly RuntimeTaskSnapshotInput[];
+  }> {
+    const observedAt = this.now().toISOString();
+    const snapshots = await this.snapshotsWithIdentitySource();
+    const taskList: RuntimeReadResult<RuntimeTaskListProjection> = {
+      ok: true,
+      value: projectRuntimeTaskList({ mode: this.mode, tasks: snapshots }),
+    };
+    const source = this.boundProjectSource();
+    const selectedTaskId = selection.taskId;
+    const selected = selectedTaskId === undefined
+      ? snapshots
+      : snapshots.filter((snapshot) => snapshot.taskId.value === selectedTaskId.value);
+    const agentActivity = await Promise.all(selected.map((snapshot) =>
+      this.taskAgentActivityFor(source, this.mode, snapshot.taskId)));
+    return {
+      snapshots,
+      input: {
+        selection,
+        observedAt,
+        taskList,
+        agentActivity,
+        interactions: { ok: true, value: this.explicitInteractionFacts(selection) },
+        memory: await this.productMemoryRead(),
+      },
+    };
+  }
+
+  /**
+   * Public product board read. It only composes the A1 board module from the
+   * existing task-list, per-task agent activity, explicit interaction, and
+   * memory readers. Inspection occurrences still need an owner reader that
+   * returns `InspectionOccurrenceRecord`; until then that board reports an
+   * explicit source-unavailable failure instead of pretending it is empty.
+   */
+  async productBoardIndex(scope: ProductBoardScope): Promise<ProductBoardIndex> {
+    return composeProductBoardIndex((await this.productBoardReadFacts(this.productSelectionFor(scope))).input);
+  }
+
+  /**
+   * Public product session read for one exact project/task scope. The board is
+   * composed once from the same facts; interaction messages carry the
+   * owner-decoded actor/time from explicit intake, never a task input or update
+   * time.
+   */
+  async productSessionRead(scope: ProductBoardScope): Promise<ProductSessionRead> {
+    const selection = this.productSelectionFor(scope);
+    const facts = await this.productBoardReadFacts(selection);
+    const boardIndex = composeProductBoardIndex(facts.input);
+    const selectedTaskId = selection.taskId;
+    const taskEvents: readonly ProductTaskEventFact[] = selectedTaskId === undefined
+      ? []
+      : facts.snapshots
+          .filter((snapshot) => snapshot.taskId.value === selectedTaskId.value)
+          .map((snapshot) => ({ taskId: snapshot.taskId, events: snapshot.recentEvents }));
+    return {
+      boardIndex,
+      messages: composeProductSessionMessages({
+        selection,
+        organId: this.options.organId,
+        messages: this.explicitInteractionMessages(selection, this.options.organId),
+        taskEvents,
+      }),
+    };
+  }
+
+  /**
+   * Public committed result for one task. It is selected from the existing
+   * authoritative publication reader, so task.output, provider text and
+   * checkpoints never enter the public body.
+   */
+  async productPublicOutput(taskId: TaskId): Promise<ProductOutputView> {
+    return selectProductOutput(await this.authoritativePublicOutputForTask(taskId));
   }
 
   taskDashboard(taskId: TaskId, authoritativePublication?: PublicOutputPublicationProjection): RuntimeTaskDashboardView {
@@ -3803,23 +4020,28 @@ export class UiRuntimeService {
         },
         currentState: task.currentState,
         priorInput: task.input,
-        investigation: task.output ? [task.output] : [],
+        // `investigation` and `output` keep the legacy TaskDetail surface for
+        // existing consumers. They are not committed public results: the real
+        // unified public result is `productPublicOutput`. `task.output` is the
+        // runtime's internal execution value and must never be rendered as the
+        // public body.
+        investigation: [],
         proposal: task.nextStep,
         nextAction: task.nextStep,
         requiredDecisions: [],
         customInputAllowed: false,
-        output: task.output
-          ? {
+        output: task.publicOutput === undefined || task.publicOutput.commits.length === 0
+          ? undefined
+          : {
             taskId: task.taskId,
             state: task.state === 'succeeded' || task.state === 'failed' || task.state === 'waiting'
               ? task.state
               : 'partial',
-            summary: task.output,
+            summary: productResultText(selectProductOutput(toPublicOutputProjection(task.publicOutput))),
             result: {},
             artifactRefs: [],
             evidenceRefs: task.events.flatMap((event) => event.evidenceRefs),
-          }
-          : undefined,
+          },
         observationRef: `task://${task.taskId.value}/observation`,
       });
     } catch (error) {
