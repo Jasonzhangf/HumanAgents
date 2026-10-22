@@ -404,7 +404,6 @@ function interactionTargetRef(
   return {
     kind: 'session',
     sessionRef: { sourceKind: 'explicit-intake', sourceRef: fact.interactionId },
-    ...(selection.taskId === undefined ? {} : { taskRef: selection.taskId }),
     scope: productSelectionScope(selection),
   };
 }
@@ -738,8 +737,13 @@ export function composeProductBoardIndex(input: ProductBoardComposeInput): Produ
     interaction.failures.push(input.interactions.failure);
   } else {
     for (const fact of input.interactions.value) {
-      if (input.selection.taskId !== undefined && fact.taskRef !== undefined
-        && fact.taskRef.value !== input.selection.taskId.value) {
+      if (input.selection.taskId !== undefined && fact.taskRef === undefined) {
+        // An interaction without a recorded task owner belongs to the project
+        // overview only. Do not mount it on whichever task is selected.
+        continue;
+      }
+      if (input.selection.taskId !== undefined
+        && fact.taskRef?.value !== input.selection.taskId.value) {
         interaction.failures.push(failure(
           'interaction.scope-mismatch',
           `interaction ${fact.interactionId} belongs to another task`,
@@ -797,11 +801,11 @@ function interactionMessage(
   selection: ProductReadSelection,
   organId: OrganId,
 ): ProductMessage | undefined {
-  if (selection.taskId !== undefined && fact.taskRef !== undefined
-    && fact.taskRef.value !== selection.taskId.value) {
+  if (selection.taskId !== undefined
+    && fact.taskRef?.value !== selection.taskId.value) {
     return undefined;
   }
-  const taskId = fact.taskRef ?? selection.taskId;
+  const taskId = fact.taskRef;
   return {
     ref: {
       eventId: fact.interactionId,
