@@ -1803,8 +1803,20 @@ async function handleRequest(
     }
     const taskStop = /^\/api\/tasks\/([^/]+)\/stop$/.exec(path);
     if (taskStop && method === 'POST') {
-      const result = await service.stop(id('task', decodeURIComponent(taskStop[1]!)));
-      writeJson(response, 202, result);
+      const cookie = request.headers.cookie;
+      const verification = await accessControl.verifyProductPrincipal(Array.isArray(cookie) ? cookie[0] : cookie);
+      if (verification.state !== 'valid') throw sessionError(verification);
+      const taskId = id('task', decodeURIComponent(taskStop[1]!));
+      const scope = optionalTaskControlScope(url);
+      const targetScope = scope === undefined
+        ? undefined
+        : await service.verifyControllableTaskTarget(taskId, scope.projectKey, scope.mode);
+      const result = await service.stop(taskId);
+      writeJson(response, 202, {
+        ...result,
+        principalOwner: verification.principal.owner,
+        ...(targetScope === undefined ? {} : { targetScope }),
+      });
       return;
     }
     const taskStopRetry = /^\/api\/tasks\/([^/]+)\/stop\/retry$/.exec(path);

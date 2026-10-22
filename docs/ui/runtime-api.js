@@ -133,6 +133,45 @@ export function taskControlScopeQuery({ projectKey, mode } = {}) {
   return `?${new URLSearchParams({ projectKey, mode })}`
 }
 
+// Formal intervention requires an exact target. The legacy reads keep the
+// optional scope, but an approve/reject/stop request cannot fall back to an
+// unscoped route.
+function exactTaskControlScopeQuery(scope) {
+  const query = taskControlScopeQuery(scope)
+  if (!query) throw new TypeError('formal task control requires projectKey and mode')
+  return query
+}
+
+// The session is the only principal source. Only the formal request fields
+// cross this boundary, so a page cannot smuggle owner, confirmedBy or
+// authority into a control write.
+function formalTaskControlBody(input = {}, { capability = true } = {}) {
+  if (input === null || typeof input !== 'object') {
+    throw new TypeError('formal task control input must be an object')
+  }
+  if (typeof input.requestId !== 'string' || input.requestId === ''
+    || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) {
+    throw new TypeError('formal task control requires a requestId and a non-negative expectedRevision')
+  }
+  const body = {}
+  if (input.requestId !== undefined) body.requestId = input.requestId
+  if (input.expectedRevision !== undefined) body.expectedRevision = input.expectedRevision
+  if (capability && input.capability !== undefined) {
+    if (typeof input.capability !== 'object' || input.capability === null
+      || typeof input.capability.actionId !== 'string' || input.capability.actionId === ''
+      || !Array.isArray(input.capability.capabilities)
+      || input.capability.capabilities.length === 0
+      || input.capability.capabilities.some((entry) => typeof entry !== 'string' || entry === '')) {
+      throw new TypeError('formal task control capability must declare an actionId and non-empty capabilities')
+    }
+    body.capability = {
+      actionId: input.capability.actionId,
+      capabilities: input.capability.capabilities,
+    }
+  }
+  return body
+}
+
 function appendI2TaskScope(query, scope) {
   const readScope = scope === null || scope === undefined ? undefined : scope
   for (const [key, value] of new URLSearchParams(taskControlScopeQuery(readScope))) query.set(key, value)
@@ -224,6 +263,31 @@ export function createRuntimeApi(options = {}) {
         body: JSON.stringify(input),
       },
     ),
+    // Formal intervention surface. The UI labels these actions 批准/拒绝, but
+    // only the existing grant/revoke/stop routes exist; no approve/reject
+    // server action is invented. The exact scope is mandatory.
+    readTaskDecision: (taskId, scope) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/control/grant${exactTaskControlScopeQuery(scope)}`,
+    ),
+    interveneTask: (taskId, input = {}, scope) => {
+      const query = exactTaskControlScopeQuery(scope)
+      if (input.action === 'grant') {
+        return request(`/api/tasks/${encodeURIComponent(taskId)}/control/grant${query}`, {
+          method: 'POST',
+          body: JSON.stringify(formalTaskControlBody(input)),
+        })
+      }
+      if (input.action === 'revoke') {
+        return request(`/api/tasks/${encodeURIComponent(taskId)}/control/revoke${query}`, {
+          method: 'POST',
+          body: JSON.stringify(formalTaskControlBody(input, { capability: false })),
+        })
+      }
+      if (input.action === 'stop') {
+        return request(`/api/tasks/${encodeURIComponent(taskId)}/stop${query}`, { method: 'POST' })
+      }
+      return Promise.reject(new TypeError(`unsupported task intervention action: ${String(input.action)}`))
+    },
     submitTaskContextCorrection: (taskId, body, taskScope) => request(
       `/api/tasks/${encodeURIComponent(taskId)}/control/context-correction${taskControlScopeQuery(taskScope)}`, {
         method: 'POST',
