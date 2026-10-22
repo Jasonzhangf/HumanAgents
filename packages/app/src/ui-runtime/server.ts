@@ -15,7 +15,7 @@ import {
 } from '../../../contracts/src/index.js';
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
-import type { UiRuntimeService } from './service.js';
+import type { ProductSessionReadScope, UiRuntimeService } from './service.js';
 import type { ProductBoardScope } from './product-session-read.js';
 import { decodeTaskAgentActivitySelectionQuery } from './agent-activity-read.js';
 import type { CheckpointHistoryReadInput } from './checkpoint-history.js';
@@ -223,6 +223,46 @@ function requireBoundProductBoardScope(url: URL, service: UiRuntimeService): Pro
     );
   }
   return productBoardReadScope(url, projectKey, mode);
+}
+
+function optionalProductReadId(url: URL, field: 'taskId' | 'sessionId'): string | undefined {
+  const raw = url.searchParams.get(field);
+  if (raw === null) return undefined;
+  const value = raw.trim();
+  if (!value) {
+    throw new UiRuntimeApiError(
+      'read.scope.invalid',
+      APP_OWNER,
+      `product read ${field} must be non-empty`,
+      `send ${field}=<id> or omit it`,
+      400,
+    );
+  }
+  return value;
+}
+
+function requireBoundProductSessionScope(
+  url: URL,
+  service: UiRuntimeService,
+): ProductSessionReadScope {
+  const { projectKey, mode } = requireReadScope(url);
+  if (!service.isBoundReadScope(projectKey, mode)) {
+    throw new UiRuntimeApiError(
+      'product-read.scope-not-bound',
+      APP_OWNER,
+      `product read scope ${projectKey}/${mode} is outside the serve-bound scope`,
+      'read the product session with the serve-bound project and mode',
+      409,
+    );
+  }
+  const taskId = optionalProductReadId(url, 'taskId');
+  const sessionId = optionalProductReadId(url, 'sessionId');
+  return {
+    projectKey,
+    mode,
+    ...(taskId === undefined ? {} : { taskId }),
+    ...(sessionId === undefined ? {} : { sessionId }),
+  };
 }
 
 async function readProduct<T>(operation: () => Promise<T>): Promise<T> {
@@ -1274,13 +1314,18 @@ async function handleRequest(
       return;
     }
     if (path === '/api/product/session' && method === 'GET') {
-      const scope = requireBoundProductBoardScope(url, service);
+      const scope = requireBoundProductSessionScope(url, service);
       writeJson(response, 200, await readProduct(() => service.productSessionRead(scope)));
       return;
     }
     if (path === '/api/product/relations' && method === 'GET') {
       const scope = requireBoundProductBoardScope(url, service);
       writeJson(response, 200, await readProduct(() => service.productRelations(scope)));
+      return;
+    }
+    if (path === '/api/product/decision' && method === 'GET') {
+      const scope = requireBoundProductBoardScope(url, service);
+      writeJson(response, 200, await readProduct(() => service.productPendingDecision(scope)));
       return;
     }
     if (path === '/api/product/output' && method === 'GET') {
