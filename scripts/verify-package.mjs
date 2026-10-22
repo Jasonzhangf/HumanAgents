@@ -65,12 +65,14 @@ try {
     const response = await fetch(`${baseUrl}${path}`);
     if (response.status !== 200) throw new Error(`package smoke UI route failed: ${path} ${response.status}`);
   }
+  // A browser on the same machine is the local operator. It must be able to
+  // read the business API before any pairing exchange; the server adopts a
+  // durable local session on the first loopback request.
   const unpairedTasks = await fetch(`${baseUrl}/api/tasks`);
-  if (unpairedTasks.status !== 401) throw new Error(`package smoke unpaired API was not rejected: ${unpairedTasks.status}`);
-  const unpairedPayload = await unpairedTasks.json().catch(() => ({}));
-  if (unpairedPayload.error?.code !== 'auth.session.missing') throw new Error('package smoke unpaired API did not return auth.session.missing');
+  if (unpairedTasks.status !== 200) throw new Error(`package smoke local API was not admitted: ${unpairedTasks.status}`);
+  await unpairedTasks.json().catch(() => ({}));
   unpairedStatus = unpairedTasks.status;
-  unpairedCode = unpairedPayload.error.code;
+  unpairedCode = 'local-access';
   const pairing = JSON.parse(execFileSync(cli, ['pair', '--workspace', workspace, '--control-root', controlRoot], { encoding: 'utf8' }));
   if (typeof pairing.code !== 'string' || typeof pairing.expiresAt !== 'string') {
     throw new Error('package smoke pairing challenge was invalid');
