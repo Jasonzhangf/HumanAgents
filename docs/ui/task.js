@@ -36,10 +36,9 @@ function productScopeOf(scope) {
     return undefined
   }
   return {
-    kind: 'task',
     projectKey: scope.projectKey,
     mode: scope.mode,
-    taskId: scope.taskId,
+    taskId: scope.taskId.value,
   }
 }
 
@@ -47,7 +46,7 @@ function productScopeQuery(scope) {
   return {
     projectKey: scope.projectKey,
     mode: scope.mode,
-    taskId: scope.taskId.value,
+    taskId: scope.taskId,
   }
 }
 
@@ -473,14 +472,28 @@ export function createTaskProductController(options = {}) {
       }
       return undefined
     }
-    const query = productScopeQuery(productScope)
-    const sessionRead = typeof transport.readProductSession === 'function'
-      ? await transport.readProductSession(productScope)
-      : await readProductJson('/api/product/session', query)
+    if (sessionStatus) sessionStatus.textContent = ''
+    // The exact interaction is the session reference when the page knows it.
+    // A task detail view without an interaction read must not invent one.
+    const readScope = typeof state.interactionId === 'string' && state.interactionId !== ''
+      ? { ...productScope, sessionId: state.interactionId }
+      : productScope
+    const query = productScopeQuery(readScope)
+    let sessionRead
+    try {
+      sessionRead = typeof transport.readProductSession === 'function'
+        ? await transport.readProductSession(readScope)
+        : await readProductJson('/api/product/session', query)
+    } catch (error) {
+      sessionRead = undefined
+      if (sessionStatus) {
+        sessionStatus.textContent = `来源不可用：${error?.message || '无法读取当前会话。'}`
+      }
+    }
     let resolvedOutput
     try {
       resolvedOutput = typeof transport.readProductOutput === 'function'
-        ? await transport.readProductOutput(productScope.taskId.value, productScope)
+        ? await transport.readProductOutput(readScope.taskId, readScope)
         : await readProductJson('/api/product/output', query)
     } catch {
       resolvedOutput = undefined
@@ -497,7 +510,6 @@ export function createTaskProductController(options = {}) {
         publicOutput: resolvedOutput.publication ?? resolvedOutput,
       }, { element: make })
     }
-    sessionStatus.textContent = ''
     renderDecision(pendingDecisionOf(sessionRead))
     return { session: sessionRead, output: resolvedOutput }
   }
