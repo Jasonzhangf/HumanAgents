@@ -75,6 +75,8 @@ function focusSurface({
   emptyCount = 0,
   unavailableCount = 0,
   unavailableCode = '',
+  unavailableCodeRows = 0,
+  unavailableMessage = '',
 } = {}) {
   return {
     centerReady,
@@ -86,6 +88,8 @@ function focusSurface({
     emptyCount,
     unavailableCount,
     unavailableCode,
+    unavailableCodeRows,
+    unavailableMessage,
   }
 }
 
@@ -187,6 +191,8 @@ test('navigation evaluation binds the fixed target to request, body and visible 
       emptyCount: 0,
       unavailableCount: 1,
       unavailableCode: 'product-session.read.unavailable-target',
+      unavailableCodeRows: 1,
+      unavailableMessage: '该执行实例暂无正文读取入口。',
     }),
   })
   assert.equal(unavailable.ok, true)
@@ -239,6 +245,8 @@ test('navigation evaluation rejects stale or foreign visible bodies', () => {
       messageTexts: ['上一个 target 的旧正文'],
       unavailableCount: 1,
       unavailableCode: 'product-session.read.unavailable-target',
+      unavailableCodeRows: 1,
+      unavailableMessage: '该执行实例暂无正文读取入口。',
     }),
   })
   assert.equal(unavailableStale.ok, false)

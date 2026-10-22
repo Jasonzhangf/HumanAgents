@@ -1026,10 +1026,13 @@ class AcceptanceRun {
   }
 
   async waitForRealDecision() {
+    // The waiting grant belongs to the task the runtime prepared for this
+    // requirement, which is not the page-level draft task id. The project-scope
+    // read is the only read that can surface it before the human opens that
+    // task, so the poll must not narrow to the draft task.
     const path = `/api/product/decision?${new URLSearchParams({
       projectKey: this.projectKey,
       mode: ACCEPTANCE_MODE,
-      taskId: this.taskId,
     })}`
     const deadline = Date.now() + DECISION_TIMEOUT_MS
     let lastBody
@@ -1098,9 +1101,9 @@ class AcceptanceRun {
     this.pass('approval.decision', evaluation.detail, [decisionFile, timelineFile])
   }
 
-  taskDashboardPath() {
+  taskDashboardPath(taskId = this.taskId) {
     const params = new URLSearchParams({
-      task: this.taskId,
+      task: taskId,
       projectKey: this.projectKey,
       mode: ACCEPTANCE_MODE,
     })
@@ -1139,7 +1142,15 @@ class AcceptanceRun {
   }
 
   async approveInBrowser() {
-    await this.page.goto(`${this.base}${this.taskDashboardPath()}`, {
+    // The decision names its own task; approve through that exact task page so
+    // the rendered control and the granted task are the same target.
+    const approvalTaskId = this.decision?.target?.taskRef?.value
+    if (typeof approvalTaskId !== 'string' || approvalTaskId.length === 0) {
+      this.fail('approval.target', 'decision did not name the task to approve', [])
+      throw stop(FAIL, 'decision target is missing')
+    }
+    this.approvalTaskId = approvalTaskId
+    await this.page.goto(`${this.base}${this.taskDashboardPath(approvalTaskId)}`, {
       waitUntil: 'domcontentloaded',
       timeout: 45_000,
     })
@@ -1159,13 +1170,13 @@ class AcceptanceRun {
       throw stop(FAIL, 'approval control was not rendered')
     }
     const targetTaskId = await card.locator('[data-product-role="control-target"]').getAttribute('data-task-id')
-    if (targetTaskId !== this.taskId) {
+    if (targetTaskId !== approvalTaskId) {
       const shot = await this.capture('approval-wrong-target')
-      this.fail('approval.ui', `decision target=${String(targetTaskId)} expected=${this.taskId}`, [shot].filter(Boolean))
+      this.fail('approval.ui', `decision target=${String(targetTaskId)} expected=${approvalTaskId}`, [shot].filter(Boolean))
       throw stop(FAIL, 'approval control targets the wrong task')
     }
     const entryShot = await this.capture('approval-entry')
-    this.pass('approval.ui', `real task-grant card rendered for ${this.taskId}`, [entryShot].filter(Boolean))
+    this.pass('approval.ui', `real task-grant card rendered for ${approvalTaskId}`, [entryShot].filter(Boolean))
 
     const cardApprove = card.locator('[data-product-role="decision-grant"]')
     if (await cardApprove.count() !== 1 || await cardApprove.isDisabled()) {
