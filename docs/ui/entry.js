@@ -22,6 +22,174 @@ import {
   projectInteractionCardFromEntries,
   projectInteractionCardFromSnapshot,
 } from './interaction-card-page.js'
+import { locationFromHash } from './product-location.js'
+
+// ── Page seams shared with the W4 product consumer ──────────────────────────
+//
+// The entry page is the one authorization point for a genuine new task. The
+// seams below keep the risky invariants in pure, injectable functions: one
+// submit never creates twice, navigation and refresh never re-submit, browser
+// back keeps the draft, and a confirmed task lands on the interaction task page
+// with its exact read scope.
+
+export function shouldDisposeEntryPage(event) {
+  return !event?.persisted
+}
+
+export function createSubmissionGate() {
+  let current = null
+  return {
+    get pending() {
+      return current !== null
+    },
+    begin(operation) {
+      if (current !== null) return { started: false, result: current }
+      const run = (async () => {
+        try {
+          return await operation()
+        } finally {
+          current = null
+        }
+      })()
+      current = run
+      return { started: true, result: run }
+    },
+  }
+}
+
+export function entryDraftState(state, draft) {
+  const base = state && typeof state === 'object' ? state : {}
+  return { ...base, entryDraft: { ...draft } }
+}
+
+export function entryDraftFromState(state) {
+  const draft = state?.entryDraft
+  if (!draft || typeof draft.rawInput !== 'string') return null
+  return {
+    rawInput: draft.rawInput,
+    ...(draft.execution && typeof draft.execution === 'object' ? { execution: draft.execution } : {}),
+  }
+}
+
+function taskIdValue(taskId) {
+  return taskId && typeof taskId === 'object' ? taskId.value : taskId
+}
+
+function normalizedHint(projectKey, mode) {
+  const key = typeof projectKey === 'string' ? projectKey.trim() : ''
+  if (!key) return {}
+  if (mode === 'fake' || mode === 'rcc') return { projectKey: key, mode }
+  return { projectKey: key }
+}
+
+/**
+ * Read the entry read scope from the explicit URL or a product location hash.
+ * The entry page is a write surface, so it only accepts an exact declared
+ * project/mode; it never invents one from a task list or a title.
+ */
+export function entryScopeFromLocation({ search, hash } = {}) {
+  const params = search instanceof URLSearchParams
+    ? search
+    : new URLSearchParams(typeof search === 'string' && search.startsWith('?') ? search.slice(1) : search || '')
+  const queryScope = normalizedHint(params.get('projectKey'), params.get('mode'))
+  if (queryScope.projectKey) return queryScope
+
+  if (typeof hash === 'string' && hash.includes('#/boards/')) {
+    const decoded = locationFromHash(hash)
+    if (decoded.kind === 'valid' && decoded.location.scope) {
+      const scope = decoded.location.scope
+      if (scope.kind === 'task') return normalizedHint(scope.projectKey, scope.mode)
+      if (scope.kind === 'project') return normalizedHint(scope.projectKey, undefined)
+    }
+  }
+  return {}
+}
+
+/**
+ * Find the exact task read scope inside a system project read. A row keeps its
+ * own committed projectKey/mode; the entry page only accepts that exact row and
+ * never reconstructs a scope from a task id alone.
+ */
+export function taskScopeFromSystemRead(read, taskId) {
+  const id = taskIdValue(taskId)
+  if (!read || !Array.isArray(read.projects)) return null
+  for (const project of read.projects) {
+    if (!Array.isArray(project?.tasks)) continue
+    for (const row of project.tasks) {
+      const rowId = taskIdValue(row?.scope?.taskId ?? row?.task?.taskId)
+      if (rowId !== id || row.scope?.kind !== 'task') continue
+      return {
+        kind: 'task',
+        projectKey: row.scope.projectKey,
+        mode: row.scope.mode,
+        taskId: { scope: 'task', value: id },
+      }
+    }
+  }
+  return null
+}
+
+export function resolveSubmittedTaskScope({ taskId, hint, systemRead, statusMode }) {
+  const id = taskIdValue(taskId)
+  if (!id) return null
+  const exact = taskScopeFromSystemRead(systemRead, id)
+  if (exact) return exact
+
+  const key = hint?.projectKey
+  const mode = hint?.mode === 'fake' || hint?.mode === 'rcc'
+    ? hint.mode
+    : (statusMode === 'fake' || statusMode === 'rcc' ? statusMode : undefined)
+  if (key) {
+    return mode
+      ? { kind: 'task', projectKey: key, mode, taskId: { scope: 'task', value: id } }
+      : null
+  }
+  return null
+}
+
+export function taskLandingHref(taskId, scope, interactionId) {
+  const params = new URLSearchParams({ task: String(taskIdValue(taskId)) })
+  if (scope?.kind === 'task') {
+    params.set('projectKey', scope.projectKey)
+    params.set('mode', scope.mode)
+  } else if (scope?.kind === 'project') {
+    params.set('projectKey', scope.projectKey)
+  }
+  if (interactionId) params.set('interaction', String(interactionId))
+  return `./task.html?${params.toString()}`
+}
+
+function taskScopeUnresolved() {
+  return Object.assign(new Error('任务已提交，但无法定位本次任务的确切读取范围。'), {
+    code: 'entry.task-scope-unresolved',
+    ownerId: 'humanagent.app.ui',
+    nextAction: 'open the task from the project list so the URL carries projectKey and mode',
+  })
+}
+
+/**
+ * Resolve and build the confirmed task's interaction landing. The scope comes
+ * from the exact project read row or the explicit entry URL; a missing scope is
+ * an explicit failure, never an unscoped navigation or a new-task write.
+ */
+export async function resolveTaskLanding({ api, taskId, search, hash, statusMode, interactionId }) {
+  const hint = entryScopeFromLocation({ search, hash })
+  const hasExactScope = Boolean(hint.projectKey && hint.mode)
+  const systemRead = hasExactScope ? undefined : await api.systemDashboard()
+  const scope = resolveSubmittedTaskScope({ taskId, hint, systemRead, statusMode })
+  if (!scope) throw taskScopeUnresolved()
+  return { scope, href: taskLandingHref(taskId, scope, interactionId) }
+}
+
+export async function readEntryQueue(api) {
+  const [runtimeStatus, tasks] = await Promise.all([api.status(), api.listTasks()])
+  return { runtimeStatus, tasks }
+}
+
+// The page seams above are pure and import-safe in Node. Everything below owns
+// the real DOM surface and only runs when the page is actually mounted in a
+// browser, so the product consumer can exercise the seams without a document.
+if (typeof document !== 'undefined') {
 
 const pageRoot = document.querySelector('#page-root')
 const interactionCardHost = document.querySelector('[data-interaction-work-card-host][data-entry="entry"]')
@@ -37,9 +205,44 @@ const template = mountPageTemplate(pageRoot, {
 const { status } = template.hosts
 let interactionCard = null
 let pageLeaving = false
+const submissionGate = createSubmissionGate()
+
+/**
+ * Keep this attempt's user input in a page-owning history state so browser
+ * Back and a reload can restore the draft without a second submission. Only the
+ * declared input is kept; every other key belongs to the browser or the
+ * product location and is left untouched.
+ */
+function retainEntryDraft() {
+  if (typeof window.history !== 'object' || typeof window.history.replaceState !== 'function') return
+  const form = document.querySelector('#entry-form')
+  if (!(form instanceof HTMLFormElement)) return
+  const controls = {
+    rawInput: form.elements.namedItem('rawInput')?.value ?? '',
+    execution: executionInputs(form),
+  }
+  const state = entryDraftState(window.history.state, controls)
+  try {
+    window.history.replaceState(state, '', window.location.href)
+  } catch {
+    // A replaceState rejection (sandboxed history) must not block the input.
+  }
+}
+
+function restoreEntryDraft(form) {
+  const draft = entryDraftFromState(window.history.state)
+  if (!draft || !form) return
+  const raw = form.elements.namedItem('rawInput')
+  if (raw) raw.value = draft.rawInput
+  const restored = draft.execution || {}
+  for (const [name, value] of Object.entries(restored)) {
+    const control = form.elements.namedItem(name)
+    if (control && typeof value === 'string') control.value = value
+  }
+}
 
 function disposeEntryPage(event) {
-  if (event?.persisted) return
+  if (!shouldDisposeEntryPage(event)) return
   if (pageLeaving) return
   pageLeaving = true
   interactionCard?.dispose()
@@ -58,6 +261,7 @@ function presentInteractionCard(projection) {
 let interactionId
 let confirmation
 let latestState = 'received'
+let latestRuntimeStatus = null
 let submitting = false
 let pendingSubmission
 const cardState = { sequence: 0, entries: [] }
@@ -167,11 +371,13 @@ function renderDraft(snapshot) {
         }))
         return
       }
-      if (submitting || !pendingSubmission) return
+      if (submissionGate.pending || !pendingSubmission) return
+      const run = submissionGate.begin(() => executeSubmission(pendingSubmission, answer))
+      if (!run.started) return
       submitting = true
       button.disabled = true
       clearEntryError()
-      void executeSubmission(pendingSubmission, answer)
+      void run.result
         .catch((error) => handleSubmissionError(error, button))
         .finally(() => {
           submitting = false
@@ -315,8 +521,9 @@ function taskRows(tasks) {
 async function refreshQueue() {
   if (pageLeaving) return
   try {
-    const [runtimeStatus, tasks] = await Promise.all([api.status(), api.listTasks()])
+    const { runtimeStatus, tasks } = await readEntryQueue(api)
     if (pageLeaving) return
+    latestRuntimeStatus = runtimeStatus
     renderStatus(runtimeStatus, taskRows(tasks))
   } catch (error) {
     if (pageLeaving) return
@@ -329,15 +536,12 @@ async function refreshQueue() {
   }
 }
 
-// Land on the real business Task row after a submission. The row carries the
-// runtime's own executions and controlTarget links; Observation stays a
-// deliberate deeper read-only navigation.
-function focusSubmittedTask(taskIdValue) {
-  const link = [...template.hosts.primary.querySelectorAll('#entry-live .task-row-link')]
-    .find((candidate) => candidate.dataset.taskId === taskIdValue)
-  if (link) link.scrollIntoView({ block: 'center' })
-}
-
+/**
+ * Move a confirmed new-task submission into the interaction main line. It
+ * resolves the exact task scope and lands on the interaction task page. A read
+ * that cannot find the scope stays an explicit landing failure; it never falls
+ * back to an unscoped task read or a second create.
+ */
 async function landOnSubmittedTask(identity) {
   let taskIdValue
   let lookupError
@@ -349,9 +553,26 @@ async function landOnSubmittedTask(identity) {
     lookupError = error
   }
   if (pageLeaving) return
-  await refreshQueue()
-  if (taskIdValue) focusSubmittedTask(taskIdValue)
-  if (lookupError) throw lookupError
+  if (!taskIdValue) {
+    await refreshQueue()
+    if (lookupError) throw lookupError
+    throw taskLandingUnresolved('entry.task-not-ready', '任务已提交，但任务列表尚未返回本次任务。')
+  }
+  try {
+    const landing = await resolveTaskLanding({
+      api,
+      taskId: taskIdValue,
+      search: window.location.search,
+      hash: window.location.hash,
+      statusMode: latestRuntimeStatus?.mode,
+      interactionId,
+    })
+    if (pageLeaving) return
+    window.location.assign(landing.href)
+  } catch (error) {
+    if (lookupError) throw lookupError
+    throw error
+  }
 }
 
 function value(form, name) {
@@ -746,7 +967,7 @@ function field(labelText, control) {
 function renderForm() {
   const section = element('section', undefined, 'section')
   const head = element('header', undefined, 'section-head')
-  head.append(element('h2', '用户任务'), element('span', '提交即确认本次新任务需求', 'section-meta'))
+  head.append(element('h2', '用户任务'), element('span', '一次提交即确认本次新任务', 'section-meta'))
   section.append(head)
 
   const panel = element('div', undefined, 'panel')
@@ -755,7 +976,7 @@ function renderForm() {
   const textarea = element('textarea')
   textarea.name = 'rawInput'
   textarea.required = true
-  textarea.placeholder = '描述要处理的一个任务'
+  textarea.placeholder = '描述要处理的一个新任务'
   form.append(field('任务输入', textarea))
 
   const mode = element('select')
@@ -870,6 +1091,9 @@ function renderForm() {
   mode.addEventListener('change', syncExecutionFields)
   frequency.addEventListener('change', syncExecutionFields)
   syncExecutionFields()
+  restoreEntryDraft(form)
+  syncExecutionFields()
+  form.addEventListener('input', retainEntryDraft)
 
   // Once a real interaction exists, this attempt's identity is fixed. The
   // execution trigger is disabled with the goal text so a retry cannot rebind
@@ -882,7 +1106,7 @@ function renderForm() {
 
   form.addEventListener('submit', (event) => {
     event.preventDefault()
-    if (submitting) return
+    if (submissionGate.pending) return
     const rawInput = textarea.value.trim()
     if (!rawInput) {
       setEntryError(Object.assign(new Error('请先填写任务输入。'), {
@@ -892,19 +1116,22 @@ function renderForm() {
       }))
       return
     }
+    const run = submissionGate.begin(async () => {
+      const selection = selectionInputs(rawInput, form)
+      if (!pendingSubmission || !selectionsEqual(pendingSubmission.selection, selection)) {
+        pendingSubmission = await prepareSubmission(rawInput, form)
+      }
+      retainEntryDraft()
+      await executeSubmission(pendingSubmission)
+    })
+    if (!run.started) return
     submitting = true
     submitButton.disabled = true
     textarea.readOnly = true
     clearEntryError()
     status.dataset.tone = 'warning'
     status.textContent = '正在整理并提交任务…'
-    void (async () => {
-      const selection = selectionInputs(rawInput, form)
-      if (!pendingSubmission || !selectionsEqual(pendingSubmission.selection, selection)) {
-        pendingSubmission = await prepareSubmission(rawInput, form)
-      }
-      await executeSubmission(pendingSubmission)
-    })().catch((error) => handleSubmissionError(error, submitButton)).finally(() => {
+    void run.result.catch((error) => handleSubmissionError(error, submitButton)).finally(() => {
       submitting = false
       submitButton.disabled = false
       if (interactionId) {
@@ -932,3 +1159,5 @@ async function load() {
 void load().catch((error) => {
   if (!pageLeaving) renderPageError(status, error)
 })
+
+}
