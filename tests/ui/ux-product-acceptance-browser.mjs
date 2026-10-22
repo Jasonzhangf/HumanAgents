@@ -130,6 +130,8 @@ export function evaluateRelationSurface({
     // A scope with only explicit gaps has no selectable target; the honest
     // surface is the gap copy itself and no fabricated relation nodes.
     const ok = renderedRelationCount === 0
+      && renderedNodeCount === 0
+      && renderedCurrentCount === 0
       && renderedGapCount === gapCount
     return {
       ok,
@@ -140,6 +142,228 @@ export function evaluateRelationSurface({
     ok: null,
     detail: 'UNVERIFIED: the real scope returned neither relations nor explicit gaps',
   }
+}
+
+export function productScopeKey(scope) {
+  if (scope?.kind === 'system') return 'system'
+  if (scope?.kind === 'project') return `project:${scope.projectKey}`
+  if (scope?.kind === 'task') {
+    return `task:${scope.projectKey}:${scope.mode}:${taskIdValue(scope.taskId)}`
+  }
+  return 'invalid-scope'
+}
+
+export function sameProductReadScope(left, right) {
+  if (left?.kind === 'project' && right?.kind === 'project') {
+    return left.projectKey === right.projectKey
+  }
+  if (left?.kind === 'task' && right?.kind === 'task') {
+    return left.projectKey === right.projectKey
+      && left.mode === right.mode
+      && taskIdValue(left.taskId) === taskIdValue(right.taskId)
+  }
+  return false
+}
+
+/**
+ * The page rejects these focus kinds before it calls the session transport.
+ * That is a declared unavailable target, not a successful body read.
+ */
+export function isContractUnavailableFocus(focus) {
+  if (focus?.kind === 'execution-instance') return true
+  if (focus?.kind === 'session') {
+    return focus.sessionRef?.sourceKind !== 'explicit-intake'
+  }
+  return false
+}
+
+export function isGroundedRelationEndpoint(relations, target) {
+  const key = productTargetKey(target)
+  if (key.startsWith('unknown:')) return false
+  return groundedUniqueRelations(relations).some((relation) =>
+    productTargetKey(relation.source) === key || productTargetKey(relation.target) === key)
+}
+
+function sessionReceiptHttpOk(receipt) {
+  return Number.isInteger(receipt?.status) && receipt.status >= 200 && receipt.status < 300
+}
+
+function receiptSearchMatchesFocus(search, expectedScope, expectedFocus) {
+  if (!search || typeof search !== 'object') return true
+  if (expectedScope?.kind === 'task') {
+    if (search.projectKey !== expectedScope.projectKey) return false
+    if (search.mode !== expectedScope.mode) return false
+    if (search.taskId !== taskIdValue(expectedScope.taskId)) return false
+  }
+  if (expectedFocus?.kind === 'session') {
+    if (search.sessionId !== expectedFocus.sessionRef?.sourceRef) return false
+    if (typeof search.sessionKind === 'string' && search.sessionKind !== ''
+      && search.sessionKind !== expectedFocus.sessionRef?.sourceKind) {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * A ready focus center alone is not proof of a successful body read: the page
+ * also renders a ready center for a rejected sessionResult. Bind the HTTP
+ * receipt's status, scope and message targets to the visible session body. A
+ * contract-declared unavailable target must render its explicit unavailable
+ * node and must not keep an old body.
+ */
+export function evaluateSessionReadEvidence({
+  receipts = [],
+  surface,
+  expectedScope,
+  expectedFocus,
+  contractUnavailable = false,
+} = {}) {
+  if (surface?.centerReady !== true) {
+    return { ok: false, state: 'pending', detail: 'focus center is not ready' }
+  }
+  if (expectedScope !== undefined && surface.focusScope !== productScopeKey(expectedScope)) {
+    return {
+      ok: false,
+      state: 'scope',
+      detail: `focus scope ${surface.focusScope ?? '(missing)'} != ${productScopeKey(expectedScope)}`,
+    }
+  }
+  if (surface.sessionHostCount !== 1) {
+    return {
+      ok: false,
+      state: 'blank',
+      detail: `focus session host count=${surface.sessionHostCount ?? 'missing'} (want 1)`,
+    }
+  }
+  const failed = receipts.find((receipt) => !sessionReceiptHttpOk(receipt))
+  if (failed !== undefined) {
+    return {
+      ok: false,
+      state: 'failed',
+      detail: `session read HTTP ${failed.status ?? '(missing)'} (want 2xx)`,
+    }
+  }
+  if (receipts.length === 0) {
+    if (contractUnavailable !== true) {
+      return {
+        ok: false,
+        state: 'failed',
+        detail: 'no session HTTP receipt and the focus is not contract-unavailable',
+      }
+    }
+    if (surface.unavailableCount !== 1) {
+      return {
+        ok: false,
+        state: 'blank',
+        detail: 'contract-unavailable focus must render one explicit unavailable node',
+      }
+    }
+    if (!String(surface.unavailableCode ?? '').includes('product-session.read.unavailable-target')) {
+      return {
+        ok: false,
+        state: 'failed',
+        detail: `contract-unavailable focus rendered ${surface.unavailableCode || '(no code)'}`,
+      }
+    }
+    if (surface.messageCount !== 0 || surface.emptyCount !== 0) {
+      return { ok: false, state: 'stale', detail: 'contract-unavailable focus shows a stale body' }
+    }
+    return { ok: true, state: 'unavailable', detail: 'explicit contract unavailable (no body read)' }
+  }
+  const matching = receipts.filter((receipt) =>
+    sameProductReadScope(receipt.body?.boardIndex?.scope, expectedScope))
+  if (matching.length === 0) {
+    return {
+      ok: false,
+      state: 'scope',
+      detail: `session body scope does not match ${productScopeKey(expectedScope)}`,
+    }
+  }
+  const receipt = matching[matching.length - 1]
+  if (!receiptSearchMatchesFocus(receipt.search, expectedScope, expectedFocus)) {
+    return {
+      ok: false,
+      state: 'target',
+      detail: 'session request target does not match the current focus',
+    }
+  }
+  const messages = Array.isArray(receipt.body?.messages) ? receipt.body.messages : undefined
+  if (messages === undefined) {
+    return { ok: false, state: 'failed', detail: 'session body has no messages array' }
+  }
+  const wrongTarget = messages.find((message) =>
+    productTargetKey(message?.targetRef) !== productTargetKey(expectedFocus))
+  if (wrongTarget !== undefined) {
+    return {
+      ok: false,
+      state: 'target',
+      detail: `session body target ${productTargetKey(wrongTarget?.targetRef)} != focus ${productTargetKey(expectedFocus)}`,
+    }
+  }
+  if (surface.unavailableCount > 0) {
+    return {
+      ok: false,
+      state: 'failed',
+      detail: 'successful session read rendered as a failure/unavailable node',
+    }
+  }
+  if (messages.length === 0) {
+    if (surface.messageCount !== 0) {
+      return {
+        ok: false,
+        state: 'stale',
+        detail: `session body is empty but page shows ${surface.messageCount} messages`,
+      }
+    }
+    if (surface.emptyCount !== 1) {
+      return {
+        ok: false,
+        state: 'blank',
+        detail: 'session body is empty but page has no explicit empty state',
+      }
+    }
+    return { ok: true, state: 'empty', detail: 'explicit empty session body' }
+  }
+  if (surface.emptyCount !== 0) {
+    return {
+      ok: false,
+      state: 'stale',
+      detail: 'session body has messages but page shows an empty state',
+    }
+  }
+  if (surface.messageCount !== messages.length) {
+    return {
+      ok: false,
+      state: 'stale',
+      detail: `page message nodes=${surface.messageCount} != session body messages=${messages.length}`,
+    }
+  }
+  if (Array.isArray(surface.messageEventIds) && surface.messageEventIds.length === messages.length) {
+    const expectedEventIds = messages.map((message) =>
+      typeof message?.ref?.eventId === 'string' && message.ref.eventId !== ''
+        ? message.ref.eventId
+        : null)
+    if (surface.messageEventIds.some((value, index) => (value ?? null) !== expectedEventIds[index])) {
+      return {
+        ok: false,
+        state: 'stale',
+        detail: 'rendered message event ids do not match the session body',
+      }
+    }
+  }
+  if (Array.isArray(surface.messageTexts) && surface.messageTexts.length === messages.length) {
+    const normalize = (value) => String(value ?? '').replace(/\s+/g, ' ').trim()
+    const expectedTexts = messages.map((message) => normalize(message?.text) || '正文未提供')
+    if (surface.messageTexts.some((value, index) => normalize(value) !== expectedTexts[index])) {
+      return {
+        ok: false,
+        state: 'stale',
+        detail: 'rendered message text does not match the session body',
+      }
+    }
+  }
+  return { ok: true, state: 'messages', detail: `session body messages=${messages.length} matches page` }
 }
 
 function parseJson(text) {
@@ -421,6 +645,7 @@ async function main() {
     await context.addCookies([sessionCookie])
     const page = await context.newPage()
     const requests = []
+    const sessionReceipts = []
     const writes = []
     page.on('request', (request) => {
       const url = new URL(request.url())
@@ -435,6 +660,34 @@ async function main() {
         writes.push(`${method} ${url.pathname}`)
       }
     })
+    page.on('response', (response) => {
+      const request = response.request()
+      if (request.method() !== 'GET') return
+      const url = new URL(response.url())
+      if (url.pathname !== '/api/product/session') return
+      const entry = {
+        method: 'GET',
+        path: url.pathname,
+        search: Object.fromEntries(url.searchParams.entries()),
+        status: response.status(),
+        ok: response.ok(),
+        body: undefined,
+        bodyError: undefined,
+        settled: false,
+      }
+      sessionReceipts.push(entry)
+      response.text().then((text) => {
+        try {
+          entry.body = parseJson(text)
+        } catch (error) {
+          entry.bodyError = error?.message ?? String(error)
+        }
+        entry.settled = true
+      }, (error) => {
+        entry.bodyError = error?.message ?? String(error)
+        entry.settled = true
+      })
+    })
     const consoleErrors = []
     page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 300)) })
     page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`.slice(0, 300)))
@@ -446,13 +699,97 @@ async function main() {
     const capture = async (name) => {
       await page.screenshot({ path: join(shotsDir, `${name}.png`), fullPage: true })
     }
-    const waitForFocusReady = () => page.locator('.product-focus-center[data-product-focus-state="ready"]')
-      .waitFor({ state: 'visible', timeout: 20_000 })
+    const readFocusSessionSurface = async () => {
+      const center = page.locator('.product-focus-center[data-product-focus-state="ready"]')
+      const centerReady = await center.count() === 1
+      return {
+        centerReady,
+        focusScope: centerReady
+          ? await center.getAttribute('data-product-focus-scope').catch(() => null)
+          : null,
+        sessionHostCount: await page.locator('.product-focus-session').count(),
+        messageCount: await page.locator('.product-focus-session .product-session-message').count(),
+        messageEventIds: await page.locator('.product-focus-session .product-session-message')
+          .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-message-event-id')))
+          .catch(() => []),
+        messageTexts: await page.locator('.product-focus-session .product-session-message-body')
+          .allInnerTexts()
+          .catch(() => []),
+        emptyCount: await page.locator('.product-focus-session .product-session-empty').count(),
+        unavailableCount: await page
+          .locator('.product-focus-session .product-focus-failure[data-product-role="focus-failure"]').count(),
+        unavailableCode: await page
+          .locator('.product-focus-session .product-focus-failure-message').first().innerText().catch(() => ''),
+      }
+    }
+    const recordBrowserSessionReceipts = async (label, receipts) => {
+      for (let index = 0; index < receipts.length; index += 1) {
+        const entry = receipts[index]
+        const bodyFile = `${label}-session-${index + 1}.json`
+        await writeFile(join(evidenceRoot, bodyFile), JSON.stringify(entry.body ?? null, null, 2))
+        httpReceipts.push({
+          name: `${label}.session-${index + 1}`,
+          source: 'browser',
+          method: entry.method,
+          path: entry.path,
+          search: entry.search,
+          status: entry.status,
+          ok: entry.ok,
+          bodyFile,
+        })
+      }
+    }
+    // A ready center alone is not success: a rejected sessionResult also renders
+    // state=ready. Settle one new session receipt (or a contract-unavailable
+    // node) and bind its status, scope and messages to the visible body.
+    const waitForFocusReady = async (label, sinceReceipt, options = {}) => {
+      const deadline = Date.now() + 20_000
+      let last
+      while (Date.now() < deadline) {
+        const surface = await readFocusSessionSurface()
+        const receipts = sessionReceipts.slice(sinceReceipt)
+        const settled = receipts.every((entry) => entry.settled === true)
+        const settleReason = receipts.length > 0
+          || options.contractUnavailable === true
+          || surface.unavailableCount > 0
+        if (surface.centerReady && settled && settleReason) {
+          const evaluation = evaluateSessionReadEvidence({
+            receipts,
+            surface,
+            expectedScope: options.expectedScope,
+            expectedFocus: options.expectedFocus,
+            contractUnavailable: options.contractUnavailable === true,
+          })
+          if (evaluation.ok) {
+            await recordBrowserSessionReceipts(label, receipts)
+            return {
+              surface,
+              receipts,
+              evaluation,
+              statusSummary: receipts.map((entry) => entry.status).join(',') || 'none',
+            }
+          }
+          if (receipts.length > 0 || (options.contractUnavailable !== true && surface.unavailableCount > 0)) {
+            await recordBrowserSessionReceipts(label, receipts)
+            throw new Error(`${label}: ${evaluation.detail}`)
+          }
+          last = evaluation
+        }
+        await page.waitForTimeout(100)
+      }
+      throw new Error(`${label}: focus session did not settle (${last?.detail ?? 'no ready center'})`)
+    }
     const sessionRequestsSince = (index) => requests.slice(index).filter((entry) =>
       entry.method === 'GET' && entry.path === '/api/product/session')
     const requestMatchesScope = (entries, scope, focus) => entries.some((entry) => {
-      if (entry.search.projectKey !== scope.projectKey || entry.search.mode !== scope.mode) return false
-      if (scope.kind !== 'task' || entry.search.taskId !== taskIdValue(scope.taskId)) return false
+      if (scope?.kind === 'task') {
+        if (entry.search.projectKey !== scope.projectKey || entry.search.mode !== scope.mode) return false
+        if (entry.search.taskId !== taskIdValue(scope.taskId)) return false
+      } else if (scope?.kind === 'project') {
+        if (entry.search.projectKey !== scope.projectKey) return false
+      } else {
+        return false
+      }
       if (focus?.kind === 'session' && entry.search.sessionId !== focus.sessionRef?.sourceRef) return false
       return true
     })
@@ -491,8 +828,16 @@ async function main() {
 
     const taskPath = taskDashboardPath(taskId, { projectKey, mode: 'fake' })
     const taskRequestMark = requests.length
+    const taskReceiptMark = sessionReceipts.length
     await goto(taskPath)
-    await waitForFocusReady()
+    const taskReceipt = await waitForFocusReady('T2.target-page', taskReceiptMark, {
+      expectedScope: { kind: 'task', projectKey, mode: 'fake', taskId: { value: taskId } },
+      expectedFocus: {
+        kind: 'interaction',
+        taskRef: { value: taskId },
+        scope: { kind: 'task', projectKey, mode: 'fake', taskId: { value: taskId } },
+      },
+    })
     await page.waitForTimeout(500)
     await writeFile(join(evidenceRoot, 'console-task.log'), consoleErrors.join('\n'))
     const targetState = await urlState()
@@ -506,20 +851,17 @@ async function main() {
     const targetRequestOk = requestMatchesScope(sessionRequestsSince(taskRequestMark), {
       kind: 'task', projectKey, mode: 'fake', taskId: { value: taskId },
     })
-    record('T2.target-page', targetTitleOk && targetUrlOk && targetRequestOk,
-      `rendered title=${JSON.stringify(targetState.title)} expected=${JSON.stringify(expectedRenderedTitle)} task=${targetState.task} scope=${targetState.focusScope} session-request-scope=${targetRequestOk}`)
-    const sessionHost = await page.locator('[data-product-role="session-view"]').count()
-    const messageNodes = await page.locator('.product-session-message').count()
-    const emptyCopy = await page.locator('.product-session-empty').count()
-    const unavailableShown = await page.locator('.product-board-failure, [data-product-unavailable]').count()
-    record('T2.session-surface', sessionHost > 0,
-      `session views=${sessionHost} message nodes=${messageNodes} empty-copy=${emptyCopy} explicit-unavailable=${unavailableShown}`)
+    const targetSessionOk = taskReceipt.evaluation.ok === true
+    record('T2.target-page', targetTitleOk && targetUrlOk && targetRequestOk && targetSessionOk,
+      `rendered title=${JSON.stringify(targetState.title)} expected=${JSON.stringify(expectedRenderedTitle)} task=${targetState.task} scope=${targetState.focusScope} session-request-scope=${targetRequestOk} body=${taskReceipt.evaluation.state}(${taskReceipt.statusSummary})`)
+    record('T2.session-surface', taskReceipt.surface.sessionHostCount === 1,
+      `session host=${taskReceipt.surface.sessionHostCount} message nodes=${taskReceipt.surface.messageCount} empty-copy=${taskReceipt.surface.emptyCount} focus-failure=${taskReceipt.surface.unavailableCount} body-state=${taskReceipt.evaluation.state}`)
     await capture('t2-task-session')
 
     // T7 distinguishes a mounted session with no committed result from a missing page surface.
     const resultSurface = {
       focusReady: await page.locator('.product-focus-center[data-product-focus-state="ready"]').count() === 1,
-      sessionViewCount: sessionHost,
+      sessionViewCount: await page.locator('[data-product-role="session-view"]').count(),
       resultBlockCount: await page.locator('[data-product-role="public-result"]').count(),
       commitNodeCount: await page.locator('.product-session-commit').count(),
       output,
@@ -568,65 +910,101 @@ async function main() {
           `grounded relations=${groundedRelations.length} relation-open=${relationOpen} selectable target nodes=${targetNodeCount}`)
       } else {
         const originalHref = page.url()
-        const targetJson = await targetNodes.first().getAttribute('data-product-target')
+        let targetNode
+        let targetJson
         let target
-        try {
-          target = JSON.parse(targetJson)
-        } catch {
-          target = undefined
+        for (let index = 0; index < targetNodeCount && target === undefined; index += 1) {
+          const candidate = targetNodes.nth(index)
+          const candidateJson = await candidate.getAttribute('data-product-target')
+          if (typeof candidateJson !== 'string') continue
+          let candidateTarget
+          try {
+            candidateTarget = JSON.parse(candidateJson)
+          } catch {
+            continue
+          }
+          if (!isGroundedRelationEndpoint(relations?.relations, candidateTarget)) continue
+          targetNode = candidate
+          targetJson = candidateJson
+          target = candidateTarget
         }
+        if (targetNode === undefined || target === undefined) {
+          record('T4.relation-selection', false,
+            `grounded relations=${groundedRelations.length} relation-open=${relationOpen} no rendered target is a real relation endpoint`)
+        } else {
+        try {
         const selectMark = requests.length
-        await targetNodes.first().click({ timeout: 5_000 })
+        const selectReceiptMark = sessionReceipts.length
+        await targetNode.click({ timeout: 5_000 })
         await page.waitForFunction((expectedTarget) => {
           const current = document.querySelector('.product-relation-node[data-product-relation-current="true"]')
           return Boolean(location.hash.startsWith('#/boards/'))
             && current?.getAttribute('data-product-target') === expectedTarget
         }, targetJson, { timeout: 10_000 })
         await page.waitForLoadState('domcontentloaded').catch(() => {})
-        if (target?.scope?.kind === 'task') {
-          const selectedScopeKey = `task:${target.scope.projectKey}:${target.scope.mode}:${taskIdValue(target.scope.taskId)}`
-          await page.waitForFunction((expectedScope) => {
-            const focus = document.querySelector('.product-focus-center[data-product-focus-state="ready"]')
-            return focus?.getAttribute('data-product-focus-scope') === expectedScope
-          }, selectedScopeKey, { timeout: 10_000 })
-        }
         const selectedState = await urlState()
         const selectedDecoded = decodeProductLocation(selectedState.href)
+        const selectedContractUnavailable = isContractUnavailableFocus(target)
+        const selectedReceipt = await waitForFocusReady('T4.relation-selection', selectReceiptMark, {
+          expectedScope: selectedDecoded.kind === 'valid' ? selectedDecoded.location.scope : target.scope,
+          expectedFocus: selectedDecoded.kind === 'valid' ? selectedDecoded.location.focus : target,
+          contractUnavailable: selectedContractUnavailable,
+        })
         const selectedOk = target !== undefined
           && selectedDecoded.kind === 'valid'
           && productTargetKey(selectedDecoded.location.focus) === productTargetKey(target)
           && selectedDecoded.location.scope.kind === 'task'
+          && isGroundedRelationEndpoint(relations?.relations, target)
           && selectedState.task === taskIdValue(selectedDecoded.location.scope.taskId)
           && selectedState.projectKey === selectedDecoded.location.scope.projectKey
           && selectedState.mode === selectedDecoded.location.scope.mode
-          && requestMatchesScope(
-            sessionRequestsSince(selectMark),
-            selectedDecoded.location.scope,
-            selectedDecoded.location.focus,
-          )
+          && (selectedContractUnavailable
+            ? selectedReceipt.evaluation.state === 'unavailable'
+            : requestMatchesScope(
+              sessionRequestsSince(selectMark),
+              selectedDecoded.location.scope,
+              selectedDecoded.location.focus,
+            ))
         record('T4.relation-selection', selectedOk,
-          `target=${productTargetKey(target)} query-task=${selectedState.task} focus-scope=${selectedState.focusScope} session-request-scope=${sessionRequestsSince(selectMark).length > 0}`)
+          `target=${productTargetKey(target)} query-task=${selectedState.task} focus-scope=${selectedState.focusScope} session-request-scope=${sessionRequestsSince(selectMark).length > 0} body=${selectedReceipt.evaluation.state}(${selectedReceipt.statusSummary})`)
         const selectedHref = page.url()
 
         const refreshMark = requests.length
+        const refreshReceiptMark = sessionReceipts.length
         await page.reload({ waitUntil: 'domcontentloaded' })
-        await waitForFocusReady()
+        const refreshContractUnavailable = isContractUnavailableFocus(target)
+        const refreshedReceipt = await waitForFocusReady('T4.refresh', refreshReceiptMark, {
+          expectedScope: selectedDecoded.location.scope,
+          expectedFocus: target,
+          contractUnavailable: refreshContractUnavailable,
+        })
         const refreshedState = await urlState()
         const refreshedDecoded = decodeProductLocation(refreshedState.href)
         const refreshOk = refreshedState.href === selectedHref
           && refreshedDecoded.kind === 'valid'
           && productTargetKey(refreshedDecoded.location.focus) === productTargetKey(target)
-          && requestMatchesScope(
-            sessionRequestsSince(refreshMark),
-            refreshedDecoded.location.scope,
-            refreshedDecoded.location.focus,
-          )
+          && refreshedReceipt.evaluation.ok === true
+          && (refreshContractUnavailable
+            ? refreshedReceipt.evaluation.state === 'unavailable'
+            : requestMatchesScope(
+              sessionRequestsSince(refreshMark),
+              refreshedDecoded.location.scope,
+              refreshedDecoded.location.focus,
+            ))
         record('T4.refresh', refreshOk,
-          `same-url=${refreshedState.href === selectedHref} focus-scope=${refreshedState.focusScope} session-request-scope=${sessionRequestsSince(refreshMark).length > 0}`)
+          `same-url=${refreshedState.href === selectedHref} focus-scope=${refreshedState.focusScope} session-request-scope=${sessionRequestsSince(refreshMark).length > 0} body=${refreshedReceipt.evaluation.state}(${refreshedReceipt.statusSummary})`)
 
         const backMark = requests.length
+        const backReceiptMark = sessionReceipts.length
         await page.goBack({ waitUntil: 'domcontentloaded' })
-        await waitForFocusReady()
+        const backReceipt = await waitForFocusReady('T4.back', backReceiptMark, {
+          expectedScope: { kind: 'task', projectKey, mode: 'fake', taskId: { value: taskId } },
+          expectedFocus: {
+            kind: 'interaction',
+            taskRef: { value: taskId },
+            scope: { kind: 'task', projectKey, mode: 'fake', taskId: { value: taskId } },
+          },
+        })
         await page.waitForFunction((expectedScope) => {
           const focus = document.querySelector('.product-focus-center[data-product-focus-state="ready"]')
           return focus?.getAttribute('data-product-focus-scope') === expectedScope
@@ -636,15 +1014,22 @@ async function main() {
           && backState.task === taskId
           && backState.hash === ''
           && backState.focusScope === exactScopeKey
+          && backReceipt.evaluation.ok === true
           && requestMatchesScope(sessionRequestsSince(backMark), {
             kind: 'task', projectKey, mode: 'fake', taskId: { value: taskId },
           })
         record('T4.back', backOk,
-          `url-restored=${backState.href === originalHref} task=${backState.task} hash=${backState.hash || '(none)'} scope=${backState.focusScope}`)
+          `url-restored=${backState.href === originalHref} task=${backState.task} hash=${backState.hash || '(none)'} scope=${backState.focusScope} body=${backReceipt.evaluation.state}(${backReceipt.statusSummary})`)
 
         const forwardMark = requests.length
+        const forwardReceiptMark = sessionReceipts.length
         await page.goForward({ waitUntil: 'domcontentloaded' })
-        await waitForFocusReady()
+        const forwardContractUnavailable = isContractUnavailableFocus(target)
+        const forwardReceipt = await waitForFocusReady('T4.forward', forwardReceiptMark, {
+          expectedScope: selectedDecoded.location.scope,
+          expectedFocus: target,
+          contractUnavailable: forwardContractUnavailable,
+        })
         if (target?.scope?.kind === 'task') {
           const selectedScopeKey = `task:${target.scope.projectKey}:${target.scope.mode}:${taskIdValue(target.scope.taskId)}`
           await page.waitForFunction((expectedScope) => {
@@ -657,14 +1042,24 @@ async function main() {
         const forwardOk = forwardState.href === selectedHref
           && forwardDecoded.kind === 'valid'
           && productTargetKey(forwardDecoded.location.focus) === productTargetKey(target)
-          && requestMatchesScope(
-            sessionRequestsSince(forwardMark),
-            forwardDecoded.location.scope,
-            forwardDecoded.location.focus,
-          )
+          && forwardReceipt.evaluation.ok === true
+          && (forwardContractUnavailable
+            ? forwardReceipt.evaluation.state === 'unavailable'
+            : requestMatchesScope(
+              sessionRequestsSince(forwardMark),
+              forwardDecoded.location.scope,
+              forwardDecoded.location.focus,
+            ))
         record('T4.forward', forwardOk,
-          `url-restored=${forwardState.href === selectedHref} focus-scope=${forwardState.focusScope} session-request-scope=${sessionRequestsSince(forwardMark).length > 0}`)
+          `url-restored=${forwardState.href === selectedHref} focus-scope=${forwardState.focusScope} session-request-scope=${sessionRequestsSince(forwardMark).length > 0} body=${forwardReceipt.evaluation.state}(${forwardReceipt.statusSummary})`)
+        } catch (error) {
+          const message = `${error?.name ?? 'Error'}: ${error?.message ?? String(error)}`
+          const id = ['T4.relation-selection', 'T4.refresh', 'T4.back', 'T4.forward']
+            .find((candidate) => message.includes(candidate)) ?? 'T4.relation-selection'
+          record(id, false, message)
+        }
       }
+    }
     }
 
     // T6 closing the relation layer is an explicit successful click with no write request.
