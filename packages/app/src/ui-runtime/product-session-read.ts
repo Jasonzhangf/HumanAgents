@@ -21,6 +21,7 @@ import type { InspectionOccurrenceRecord } from '../../../contracts/src/inspecti
 import type {
   RuntimeAgentActivityEntryProjection,
   RuntimeAgentActivityProjection,
+  RuntimeInspectionOccurrenceProjection,
   RuntimeLivenessProjection,
   RuntimeReadFailure,
   RuntimeReadResult,
@@ -117,6 +118,26 @@ export interface ProductTaskEventFact {
 }
 
 /**
+ * Minimal inspection display fact derived from the I2 occurrence projection.
+ * The projection does not carry the full immutable definition object, so this
+ * fact keeps only the owner-reported occurrence/definition identity, the real
+ * `openedAt`, and a display state derived from the occurrence outcome and item
+ * outcomes. It never invents a definition body.
+ */
+export interface ProductInspectionDisplayFact {
+  readonly kind: 'inspection-display';
+  readonly occurrenceId: string;
+  readonly definitionId: string;
+  readonly taskId: TaskId;
+  readonly displayState: string;
+  readonly openedAt: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+/** A1 accepts either a full record or the projection-derived display fact. */
+export type ProductInspectionFact = InspectionOccurrenceRecord | ProductInspectionDisplayFact;
+
+/**
  * A message fact whose actor/time were already decoded by its owner. Facts
  * without an event time receive an explicit unavailable reason; this composer
  * never substitutes a task update time.
@@ -137,7 +158,7 @@ export interface ProductBoardComposeInput {
   readonly taskList?: RuntimeReadResult<RuntimeTaskListProjection>;
   readonly agentActivity?: readonly RuntimeReadResult<RuntimeAgentActivityProjection>[];
   readonly interactions?: RuntimeReadResult<readonly ProductInteractionFact[]>;
-  readonly inspections?: RuntimeReadResult<readonly InspectionOccurrenceRecord[]>;
+  readonly inspections?: RuntimeReadResult<readonly ProductInspectionFact[]>;
   readonly memory?: RuntimeReadResult<ProductMemoryReadFacts>;
   readonly memorySessions?: RuntimeReadResult<readonly ProductMemorySessionFact[]>;
   readonly liveness?: readonly ProductTaskLivenessFact[];
@@ -513,6 +534,43 @@ function inspectionDisplayState(record: InspectionOccurrenceRecord): string {
   return 'recorded';
 }
 
+/**
+ * Display state for the projection-derived inspection fact. The occurrence
+ * `outcome` is the owner's authoritative settlement result; before settlement
+ * the item outcomes carry the only observed facts. A failed item stays failed
+ * even though an inspection "negative result" is still a completed check.
+ */
+export function inspectionDisplayStateFromProjection(
+  occurrence: RuntimeInspectionOccurrenceProjection,
+): string {
+  if (occurrence.items.some((item) => item.outcome === 'failed')) return 'failed';
+  if (occurrence.outcome === 'completed') return 'completed';
+  if (occurrence.outcome === 'failed') return 'failed';
+  if (occurrence.outcome === 'blocked') return 'blocked';
+  if (occurrence.outcome === 'cancelled') return 'cancelled';
+  if (occurrence.outcome === 'pending') return 'open';
+  return 'unknown';
+}
+
+/**
+ * Projection-to-display-fact adapter. It keeps the real `openedAt` and the
+ * exact occurrence/definition identity without a fabricated definition body.
+ */
+export function inspectionDisplayFactFromProjection(
+  occurrence: RuntimeInspectionOccurrenceProjection,
+  taskId: TaskId,
+): ProductInspectionDisplayFact {
+  return {
+    kind: 'inspection-display',
+    occurrenceId: occurrence.occurrenceId,
+    definitionId: occurrence.definitionId,
+    taskId,
+    displayState: inspectionDisplayStateFromProjection(occurrence),
+    openedAt: occurrence.openedAt,
+    evidenceRefs: occurrence.evidenceRefs,
+  };
+}
+
 function inspectionItem(
   record: InspectionOccurrenceRecord,
   selection: ProductReadSelection,
@@ -530,6 +588,30 @@ function inspectionItem(
     displayState: inspectionDisplayState(record),
     evidenceRefs: record.evidenceRefs,
   };
+}
+
+function inspectionDisplayFactItem(
+  fact: ProductInspectionDisplayFact,
+  selection: ProductReadSelection,
+): ProductBoardItem {
+  return {
+    lane: 'history',
+    ref: {
+      kind: 'session',
+      sessionRef: { sourceKind: 'inspection-occurrence', sourceRef: fact.occurrenceId },
+      taskRef: fact.taskId,
+      scope: taskScope(selection, fact.taskId),
+    },
+    title: fact.definitionId,
+    displayState: fact.displayState,
+    evidenceRefs: fact.evidenceRefs,
+  };
+}
+
+function isInspectionDisplayFact(
+  fact: ProductInspectionFact,
+): fact is ProductInspectionDisplayFact {
+  return (fact as ProductInspectionDisplayFact).kind === 'inspection-display';
 }
 
 function memorySessionItem(
@@ -678,17 +760,24 @@ export function composeProductBoardIndex(input: ProductBoardComposeInput): Produ
   } else if (!input.inspections.ok) {
     inspection.failures.push(input.inspections.failure);
   } else {
-    for (const record of input.inspections.value) {
+    for (const fact of input.inspections.value) {
+      const display = isInspectionDisplayFact(fact);
+      const taskId = display ? fact.taskId : fact.occurrence.scope.taskId;
+      const occurrenceId = display ? fact.occurrenceId : fact.occurrence.occurrenceId;
       if (input.selection.taskId !== undefined
-        && record.occurrence.scope.taskId.value !== input.selection.taskId.value) {
+        && taskId.value !== input.selection.taskId.value) {
         inspection.failures.push(failure(
           'inspection.scope-mismatch',
-          `inspection occurrence ${record.occurrence.occurrenceId} belongs to another task`,
+          `inspection occurrence ${occurrenceId} belongs to another task`,
           're-read inspection occurrences with the selected task',
         ));
         continue;
       }
-      pushItem(inspection, inspectionItem(record, input.selection));
+      if (display) {
+        pushItem(inspection, inspectionDisplayFactItem(fact, input.selection));
+      } else {
+        pushItem(inspection, inspectionItem(fact, input.selection));
+      }
     }
   }
 
