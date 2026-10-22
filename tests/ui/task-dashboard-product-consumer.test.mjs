@@ -99,9 +99,53 @@ const sessionRef = {
   taskRef: taskId,
   scope: taskScope,
 }
+const explicitSessionRef = {
+  kind: 'session',
+  sessionRef: { sourceKind: 'explicit-intake', sourceRef: 'interaction-1' },
+  taskRef: taskId,
+  scope: taskScope,
+}
+const explicitChildRef = {
+  kind: 'session',
+  sessionRef: { sourceKind: 'explicit-intake', sourceRef: 'interaction-2' },
+  taskRef: taskId,
+  scope: taskScope,
+}
+const inspectionSessionRef = {
+  kind: 'session',
+  sessionRef: { sourceKind: 'inspection-occurrence', sourceRef: 'occurrence-1' },
+  taskRef: taskId,
+  scope: taskScope,
+}
 const childRef = {
   kind: 'session',
   sessionRef: { sourceKind: 'provider', sourceRef: 'child-1' },
+  taskRef: taskId,
+  scope: taskScope,
+}
+const instanceOne = {
+  kind: 'execution-instance',
+  instance: {
+    kind: 'native-execution',
+    execution: { runtimeId: 'runtime-a', executionEpoch: 3 },
+  },
+  taskRef: taskId,
+  scope: taskScope,
+}
+const instanceTwo = {
+  kind: 'execution-instance',
+  instance: {
+    kind: 'incarnation',
+    incarnation: {
+      runtimeId: 'runtime-b',
+      generation: 2,
+      agentInstanceId: 'agent-2',
+      roleId: 'role-2',
+      taskId,
+      assignmentId: 'assignment-2',
+      executionEpoch: 4,
+    },
+  },
   taskRef: taskId,
   scope: taskScope,
 }
@@ -192,8 +236,50 @@ const {
   createTaskFocusController,
   dedupeProductRelations,
   productLocationMatchesTask,
+  renderProductSessionExtras,
   writePageProductLocation,
 } = await import('../../docs/ui/task-dashboard.js')
+
+function taskRowItem(scope, lane) {
+  const taskIdValue = typeof scope.taskId === 'object' ? scope.taskId.value : scope.taskId
+  const taskRef = { scope: 'task', value: taskIdValue }
+  return {
+    ref: {
+      kind: 'interaction',
+      taskRef,
+      scope: { kind: 'task', projectKey: scope.projectKey, mode: scope.mode, taskId: taskRef },
+    },
+    lane,
+    ...(lane === 'unknown' ? { unknownReason: 'the task list reported an unknown state' } : {}),
+    title: `任务 ${taskIdValue}`,
+    displayState: lane === 'live' ? 'running' : 'succeeded',
+    evidenceRefs: [],
+  }
+}
+
+function boardIndexFor(scope, lane) {
+  return {
+    scope: {
+      kind: 'task',
+      projectKey: scope.projectKey,
+      mode: scope.mode,
+      taskId: { scope: 'task', value: scope.taskId },
+    },
+    observedAt: '2026-10-21T00:00:00.000Z',
+    boards: [{
+      board: 'orchestration',
+      live: lane === 'live' ? [taskRowItem(scope, lane)] : [],
+      history: lane === 'history' ? [taskRowItem(scope, lane)] : [],
+      unknown: lane === 'unknown' ? [taskRowItem(scope, lane)] : [],
+    }],
+  }
+}
+
+function interventions(root) {
+  return walk(root).filter(
+    (node) => node.dataset?.productFocusControl === 'intervention',
+  )
+}
 
 function harness({
   relations = [
@@ -210,6 +296,8 @@ function harness({
   writeLocation,
   closeRelationLayer,
   grantTaskControl,
+  stopControl,
+  onSessionRendered,
 } = {}) {
   const centerHost = createElement('section')
   const relationHost = createElement('aside')
@@ -237,9 +325,9 @@ function harness({
     revokeTaskGrant: async () => {
       throw new Error('the consumer must not revoke from a read or close')
     },
-    stop: async () => {
+    stop: stopControl ?? (async () => {
       throw new Error('the consumer must not stop from a read or close')
-    },
+    }),
   }
   const controller = createTaskFocusController({
     centerHost,
@@ -249,6 +337,7 @@ function harness({
     readLocation,
     writeLocation: writeLocation ?? ((next) => writes.push(next)),
     closeRelationLayer: closeRelationLayer ?? (() => closes.push('closed')),
+    ...(onSessionRendered === undefined ? {} : { onSessionRendered }),
   })
   return {
     controller,
@@ -287,7 +376,10 @@ test('the focus location carries the exact scope and focus through the URL codec
   const reopened = harness()
   reopened.controller.applyLocation(submissions[0].location)
   await reopened.controller.settled()
-  assert.match(text(reopened.centerHost), /CENTER-BODY/)
+  // A provider session has no declared body reader. Restoring its exact focus
+  // must not re-label the original task body as that session's body.
+  assert.match(text(reopened.centerHost), /product-session\.read\.unavailable-target/)
+  assert.doesNotMatch(text(reopened.centerHost), /CENTER-BODY/)
   assert.equal(reopened.controller.state().focus.sessionRef.sourceRef, 'session-1')
 })
 
@@ -362,7 +454,7 @@ test('a late session response for the old focus is discarded', async () => {
   const { controller, centerHost } = harness({ sessionRead })
 
   const firstLoad = controller.load()
-  const focusSwitch = controller.focusTo(childRef)
+  const focusSwitch = controller.focusTo(explicitChildRef)
 
   second.resolve({ messages: [message('NEW-FOCUS-BODY')], boardIndex: { boards: [] } })
   await focusSwitch
@@ -426,8 +518,8 @@ test('relation gaps keep fact-absent and unrecorded distinct', async () => {
   assert.match(body, /未记录/)
 })
 
-test('the session read carries the exact session id of the current focus', async () => {
-  const { controller, relationHost, sessionReads } = harness()
+test('the session read carries the exact source kind and reference of the current focus', async () => {
+  const { controller, sessionReads } = harness()
   await controller.load()
   assert.deepEqual(sessionReads.at(-1), {
     projectKey: 'project-7',
@@ -435,27 +527,135 @@ test('the session read carries the exact session id of the current focus', async
     taskId: 'task-1',
   })
 
-  const sessionButton = walk(relationHost).find(
-    (node) => node.tagName === 'BUTTON'
-      && node.getAttribute?.('data-product-target-kind') === 'session',
-  )
-  assert.ok(sessionButton)
-  sessionButton.click()
-  await controller.settled()
+  await controller.focusTo(explicitSessionRef)
   assert.deepEqual(sessionReads.at(-1), {
     projectKey: 'project-7',
     mode: 'rcc',
     taskId: 'task-1',
-    sessionId: 'session-1',
+    sessionRef: {
+      sourceKind: 'explicit-intake',
+      sourceRef: 'interaction-1',
+    },
   })
 
-  await controller.focusTo(childRef)
+  await controller.focusTo(explicitChildRef)
   assert.deepEqual(sessionReads.at(-1), {
     projectKey: 'project-7',
     mode: 'rcc',
     taskId: 'task-1',
-    sessionId: 'child-1',
+    sessionRef: {
+      sourceKind: 'explicit-intake',
+      sourceRef: 'interaction-2',
+    },
   })
+})
+
+test('an execution-instance focus is explicitly unavailable and never shows task messages', async () => {
+  const { controller, centerHost, sessionReads } = harness({
+    messages: [message('TASK-LEVEL-BODY')],
+  })
+  await controller.load()
+  assert.match(text(centerHost), /TASK-LEVEL-BODY/)
+  const readsBefore = sessionReads.length
+
+  await controller.focusTo(instanceOne)
+  assert.equal(sessionReads.length, readsBefore, 'an instance without a body reader sends no task-level read')
+  assert.equal(controller.state().sessionRead, 'unavailable')
+  assert.match(text(centerHost), /product-session\.read\.unavailable-target/)
+  assert.match(text(centerHost), /该执行实例暂无正文读取入口/)
+  assert.match(text(centerHost), /runtime-a/)
+  assert.match(text(centerHost), /executionEpoch 3/)
+  assert.doesNotMatch(text(centerHost), /TASK-LEVEL-BODY/)
+
+  const firstResult = text(centerHost)
+  await controller.focusTo(instanceTwo)
+  assert.equal(sessionReads.length, readsBefore, 'the second instance also sends no task-level read')
+  assert.match(text(centerHost), /runtime-b/)
+  assert.match(text(centerHost), /generation 2/)
+  assert.match(text(centerHost), /agentInstanceId agent-2/)
+  assert.match(text(centerHost), /roleId role-2/)
+  assert.match(text(centerHost), /assignmentId assignment-2/)
+  assert.match(text(centerHost), /executionEpoch 4/)
+  assert.doesNotMatch(text(centerHost), /runtime-a/)
+  assert.doesNotMatch(text(centerHost), /TASK-LEVEL-BODY/)
+  assert.notEqual(text(centerHost), firstResult, 'two instances never collapse to the same result')
+})
+
+test('a session kind without a body reader is unavailable instead of an empty task read', async () => {
+  const { controller, centerHost, sessionReads } = harness({
+    messages: [message('TASK-LEVEL-BODY')],
+  })
+  await controller.load()
+  const readsBefore = sessionReads.length
+
+  await controller.focusTo(inspectionSessionRef)
+  assert.equal(sessionReads.length, readsBefore, 'the task-level read is not reused for another source kind')
+  assert.equal(controller.state().sessionRead, 'unavailable')
+  assert.match(text(centerHost), /product-session\.read\.unavailable-target/)
+  assert.match(text(centerHost), /inspection-occurrence/)
+  assert.match(text(centerHost), /暂无正文读取入口/)
+  assert.doesNotMatch(text(centerHost), /TASK-LEVEL-BODY/)
+})
+
+test('crossing from a history task to a Live task mounts intervention only after the matching focus read', async () => {
+  const sessionRead = async (scope) => ({
+    messages: [message(`BODY-${scope.taskId}`)],
+    boardIndex: boardIndexFor(scope, scope.taskId === 'task-1' ? 'history' : 'live'),
+  })
+  const stops = []
+  const { controller, centerHost } = harness({
+    sessionRead,
+    stopControl: async (taskIdValue) => {
+      stops.push(taskIdValue)
+      return { execution: { state: 'stopping' } }
+    },
+    onSessionRendered: renderProductSessionExtras,
+  })
+  await controller.load()
+  assert.equal(controller.state().focusLane, 'history')
+  assert.equal(interventions(centerHost).length, 0)
+
+  const switching = controller.focusTo(interactionB)
+  assert.equal(interventions(centerHost).length, 0, 'the old intervention is cleared before the new fact arrives')
+  await switching
+  await controller.settled()
+
+  assert.equal(controller.state().focusLane, 'live')
+  assert.equal(interventions(centerHost).length, 1)
+  const stopButton = walk(interventions(centerHost)[0]).find(
+    (node) => node.getAttribute?.('data-product-control-action') === 'stop',
+  )
+  assert.ok(stopButton)
+  stopButton.click()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(stops.length, 1)
+  assert.equal(stops[0], 'task-2', 'the mounted control targets the current focus task')
+})
+
+test('crossing from a Live task to a history task removes intervention and keeps the history read read-only', async () => {
+  const sessionRead = async (scope) => ({
+    messages: [message(`BODY-${scope.taskId}`)],
+    boardIndex: boardIndexFor(scope, scope.taskId === 'task-1' ? 'live' : 'history'),
+  })
+  const { controller, centerHost } = harness({
+    sessionRead,
+    onSessionRendered: renderProductSessionExtras,
+  })
+  await controller.load()
+  assert.equal(interventions(centerHost).length, 1)
+
+  const switching = controller.focusTo(interactionB)
+  assert.equal(interventions(centerHost).length, 0, 'a Live entry never follows the focus into history')
+  await switching
+  await controller.settled()
+
+  assert.equal(controller.state().focusLane, 'history')
+  assert.equal(interventions(centerHost).length, 0)
+  assert.match(text(centerHost), /BODY-task-2/)
+  assert.equal(
+    walk(centerHost).filter((node) => node.getAttribute?.('data-product-control-action')).length,
+    0,
+  )
 })
 
 test('cross-task focus writes one matching query and hash and restores the same focus', async () => {
