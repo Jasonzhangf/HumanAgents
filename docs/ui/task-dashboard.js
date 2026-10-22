@@ -545,7 +545,7 @@ function productFocusTargetUnavailable(target) {
       code: 'product-session.read.unavailable-target',
       ownerId: 'humanagent.ui.task-dashboard',
       message: '该执行实例暂无正文读取入口。',
-      nextAction: '请从执行活动列表查看实例摘要；实例正文需要由对应读取 owner 接入后再显示。',
+      nextAction: '请回到对应任务查看执行摘要；实例正文需要接入读取入口后才能显示。',
       ...(detail === undefined ? {} : { detail }),
     }
   }
@@ -553,7 +553,7 @@ function productFocusTargetUnavailable(target) {
     return {
       code: 'product-session.read.unavailable-target',
       ownerId: 'humanagent.ui.task-dashboard',
-      message: `该会话来源（${target.sessionRef.sourceKind}）暂无正文读取入口。`,
+      message: '该会话来源暂无正文读取入口。',
       nextAction: '请在该来源自己的读取界面查看正文；当前页面不会用任务消息代替来源正文。',
       ...(detail === undefined ? {} : { detail }),
     }
@@ -697,13 +697,33 @@ function renderProductFocusFailure(host, make, title, failure) {
   const node = make('div', undefined, 'product-focus-failure')
   node.setAttribute('data-product-role', 'focus-failure')
   node.setAttribute('role', 'alert')
+  const technical = make('details', undefined, 'plan-detail product-focus-failure-detail')
+  technical.open = false
+  technical.append(make('summary', '技术详情'))
+  const entries = make('dl', undefined, 'record-ref')
+  const detailRows = [
+    ['code', failure.code],
+    ['owner', failure.ownerId],
+    ['message', failure.message],
+    ['nextAction', failure.nextAction],
+    ...(typeof failure.detail === 'string' && failure.detail !== ''
+      ? [['来源与实例身份', failure.detail]]
+      : []),
+  ]
+  for (const [label, value] of detailRows) {
+    const row = make('div')
+    row.append(
+      make('dt', label),
+      make('dd', value === undefined || value === null || value === '' ? '未提供' : String(value)),
+    )
+    entries.append(row)
+  }
+  technical.append(entries)
   node.append(
     make('strong', title),
-    make('p', `${failure.code} · ${failure.message}`, 'product-focus-failure-message'),
+    make('p', failure.message, 'product-focus-failure-message'),
     make('p', failure.nextAction, 'product-focus-failure-next'),
-    ...(typeof failure.detail === 'string' && failure.detail !== ''
-      ? [make('p', failure.detail, 'product-focus-failure-detail')]
-      : []),
+    technical,
   )
   host.append(node)
   return node

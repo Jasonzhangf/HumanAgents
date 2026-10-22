@@ -76,6 +76,25 @@ function text(node) {
   return walk(node).map((entry) => entry._text).filter(Boolean).join(' ')
 }
 
+function mainLayerText(node) {
+  if (String(node.tagName).toUpperCase() === 'DETAILS') return ''
+  return [node._text, ...node.children.map((child) => mainLayerText(child))]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function detailsFor(node) {
+  return walk(node).filter((entry) => String(entry.tagName).toUpperCase() === 'DETAILS')
+}
+
+function detailsText(node) {
+  return detailsFor(node)
+    .flatMap((entry) => walk(entry))
+    .map((entry) => entry._text)
+    .filter(Boolean)
+    .join(' ')
+}
+
 function byRole(root, role) {
   return walk(root).filter((node) => node.getAttribute?.('data-product-role') === role)
 }
@@ -562,23 +581,38 @@ test('an execution-instance focus is explicitly unavailable and never shows task
   assert.equal(sessionReads.length, readsBefore, 'an instance without a body reader sends no task-level read')
   assert.equal(controller.state().sessionRead, 'unavailable')
   assert.match(text(centerHost), /product-session\.read\.unavailable-target/)
-  assert.match(text(centerHost), /该执行实例暂无正文读取入口/)
-  assert.match(text(centerHost), /runtime-a/)
-  assert.match(text(centerHost), /executionEpoch 3/)
+  const mainOne = mainLayerText(centerHost)
+  assert.match(mainOne, /该执行实例暂无正文读取入口/)
+  assert.match(mainOne, /回到对应任务查看执行摘要/)
+  assert.doesNotMatch(mainOne, /runtimeId|runtime-a|executionEpoch|generation|agentInstanceId|roleId|assignmentId|taskId/)
+  const foldedOne = detailsFor(centerHost)
+  assert.equal(foldedOne.length, 1, 'instance identity has one on-demand technical detail block')
+  assert.equal(foldedOne[0].open, false, 'technical identity starts folded')
+  const detailOne = detailsText(centerHost)
+  assert.match(detailOne, /runtimeId runtime-a/)
+  assert.match(detailOne, /executionEpoch 3/)
   assert.doesNotMatch(text(centerHost), /TASK-LEVEL-BODY/)
 
-  const firstResult = text(centerHost)
+  const firstResult = detailOne
   await controller.focusTo(instanceTwo)
   assert.equal(sessionReads.length, readsBefore, 'the second instance also sends no task-level read')
-  assert.match(text(centerHost), /runtime-b/)
-  assert.match(text(centerHost), /generation 2/)
-  assert.match(text(centerHost), /agentInstanceId agent-2/)
-  assert.match(text(centerHost), /roleId role-2/)
-  assert.match(text(centerHost), /assignmentId assignment-2/)
-  assert.match(text(centerHost), /executionEpoch 4/)
-  assert.doesNotMatch(text(centerHost), /runtime-a/)
+  const mainTwo = mainLayerText(centerHost)
+  assert.match(mainTwo, /该执行实例暂无正文读取入口/)
+  assert.doesNotMatch(mainTwo, /runtimeId|runtime-b|executionEpoch|generation|agentInstanceId|roleId|assignmentId|taskId/)
+  const foldedTwo = detailsFor(centerHost)
+  assert.equal(foldedTwo.length, 1, 'the second instance keeps its identity in one technical detail block')
+  assert.equal(foldedTwo[0].open, false, 'the second technical identity starts folded')
+  const detailTwo = detailsText(centerHost)
+  assert.match(detailTwo, /runtimeId runtime-b/)
+  assert.match(detailTwo, /generation 2/)
+  assert.match(detailTwo, /agentInstanceId agent-2/)
+  assert.match(detailTwo, /roleId role-2/)
+  assert.match(detailTwo, /assignmentId assignment-2/)
+  assert.match(detailTwo, /executionEpoch 4/)
+  assert.match(detailTwo, /taskId task-1/)
+  assert.doesNotMatch(detailTwo, /runtime-a/)
   assert.doesNotMatch(text(centerHost), /TASK-LEVEL-BODY/)
-  assert.notEqual(text(centerHost), firstResult, 'two instances never collapse to the same result')
+  assert.notEqual(detailTwo, firstResult, 'two instances keep distinct technical identities')
 })
 
 test('a session kind without a body reader is unavailable instead of an empty task read', async () => {
@@ -592,8 +626,15 @@ test('a session kind without a body reader is unavailable instead of an empty ta
   assert.equal(sessionReads.length, readsBefore, 'the task-level read is not reused for another source kind')
   assert.equal(controller.state().sessionRead, 'unavailable')
   assert.match(text(centerHost), /product-session\.read\.unavailable-target/)
-  assert.match(text(centerHost), /inspection-occurrence/)
-  assert.match(text(centerHost), /暂无正文读取入口/)
+  const main = mainLayerText(centerHost)
+  assert.match(main, /该会话来源暂无正文读取入口/)
+  assert.match(main, /当前页面不会用任务消息代替来源正文/)
+  assert.doesNotMatch(main, /inspection-occurrence|occurrence-1|sourceKind|sourceRef/)
+  const folded = detailsFor(centerHost)
+  assert.equal(folded.length, 1, 'session source identity has one on-demand technical detail block')
+  assert.equal(folded[0].open, false, 'session source identity starts folded')
+  assert.match(detailsText(centerHost), /inspection-occurrence/)
+  assert.match(detailsText(centerHost), /occurrence-1/)
   assert.doesNotMatch(text(centerHost), /TASK-LEVEL-BODY/)
 })
 
