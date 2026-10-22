@@ -292,6 +292,9 @@ function productFailure(error, fallbackCode = 'product-read.failed') {
     nextAction: typeof error?.nextAction === 'string' && error.nextAction
       ? error.nextAction
       : '重试同一读取；如果仍然失败，打开技术详情核对来源。',
+    ...(typeof error?.detail === 'string' && error.detail !== ''
+      ? { detail: error.detail }
+      : {}),
   }
 }
 
@@ -384,9 +387,213 @@ function productTaskScopeValue(scope) {
   return typeof value === 'string' && value !== '' ? value : undefined
 }
 
+function productTargetTaskId(value) {
+  const taskValue = typeof value === 'object' ? value?.value : value
+  return typeof taskValue === 'string' && taskValue !== ''
+    ? { scope: 'task', value: taskValue }
+    : undefined
+}
+
+function productTargetScope(scope) {
+  if (scope?.kind === 'project') {
+    return typeof scope.projectKey === 'string' && scope.projectKey !== ''
+      ? { kind: 'project', projectKey: scope.projectKey }
+      : undefined
+  }
+  if (scope?.kind !== 'task') return undefined
+  const taskRef = productTargetTaskId(scope.taskId)
+  if (taskRef === undefined
+    || typeof scope.projectKey !== 'string' || scope.projectKey === ''
+    || (scope.mode !== 'fake' && scope.mode !== 'rcc' && scope.mode !== 'dsh')) {
+    return undefined
+  }
+  return {
+    kind: 'task',
+    projectKey: scope.projectKey,
+    mode: scope.mode,
+    taskId: taskRef,
+  }
+}
+
+function productExecutionInstanceIdentity(instance) {
+  if (!instance || typeof instance !== 'object' || Array.isArray(instance)) return undefined
+  if (instance.kind === 'native-execution') {
+    const execution = instance.execution
+    if (typeof execution?.runtimeId !== 'string' || execution.runtimeId === '') return undefined
+    if (!Number.isSafeInteger(execution.executionEpoch) || execution.executionEpoch < 1) return undefined
+    return {
+      kind: 'native-execution',
+      execution: {
+        runtimeId: execution.runtimeId,
+        executionEpoch: execution.executionEpoch,
+      },
+    }
+  }
+  if (instance.kind === 'incarnation') {
+    const incarnation = instance.incarnation
+    if (!incarnation || typeof incarnation !== 'object' || Array.isArray(incarnation)) return undefined
+    const incarnationTaskRef = productTargetTaskId(incarnation.taskId)
+    if (typeof incarnation.runtimeId !== 'string' || incarnation.runtimeId === '') return undefined
+    if (!Number.isSafeInteger(incarnation.generation) || incarnation.generation < 1) return undefined
+    if (typeof incarnation.agentInstanceId !== 'string' || incarnation.agentInstanceId === '') return undefined
+    if (typeof incarnation.roleId !== 'string' || incarnation.roleId === '') return undefined
+    if (incarnationTaskRef === undefined) return undefined
+    if (typeof incarnation.assignmentId !== 'string' || incarnation.assignmentId === '') return undefined
+    if (!Number.isSafeInteger(incarnation.executionEpoch) || incarnation.executionEpoch < 1) return undefined
+    return {
+      kind: 'incarnation',
+      incarnation: {
+        runtimeId: incarnation.runtimeId,
+        generation: incarnation.generation,
+        agentInstanceId: incarnation.agentInstanceId,
+        roleId: incarnation.roleId,
+        taskId: incarnationTaskRef,
+        assignmentId: incarnation.assignmentId,
+        executionEpoch: incarnation.executionEpoch,
+      },
+    }
+  }
+  return undefined
+}
+
+/**
+ * Build the complete, discriminated read target for one focus. Only the exact
+ * fields already present in the owner target cross this boundary. A missing or
+ * inconsistent identity returns undefined; the page never derives a target
+ * from a title, a URL label or a synthesized session id.
+ */
+function productFocusReadTarget(focus) {
+  if (!focus || typeof focus !== 'object' || Array.isArray(focus)) return undefined
+  const scope = productTargetScope(focus.scope)
+  if (scope === undefined) return undefined
+  if (focus.kind === 'interaction') {
+    const taskRef = productTargetTaskId(focus.taskRef)
+    if (taskRef === undefined || scope.kind !== 'task' || scope.taskId.value !== taskRef.value) {
+      return undefined
+    }
+    return { kind: 'interaction', taskRef, scope }
+  }
+  if (focus.kind === 'session') {
+    const sourceKind = focus.sessionRef?.sourceKind
+    const sourceRef = focus.sessionRef?.sourceRef
+    if (typeof sourceKind !== 'string' || sourceKind === '') return undefined
+    if (typeof sourceRef !== 'string' || sourceRef === '') return undefined
+    const taskRef = focus.taskRef === undefined ? undefined : productTargetTaskId(focus.taskRef)
+    if (focus.taskRef !== undefined && taskRef === undefined) return undefined
+    if (scope.kind === 'task') {
+      if (taskRef === undefined || scope.taskId.value !== taskRef.value) return undefined
+    } else if (taskRef !== undefined) {
+      return undefined
+    }
+    return {
+      kind: 'session',
+      sessionRef: { sourceKind, sourceRef },
+      ...(taskRef === undefined ? {} : { taskRef }),
+      scope,
+    }
+  }
+  if (focus.kind === 'execution-instance') {
+    if (scope.kind !== 'task') return undefined
+    const taskRef = productTargetTaskId(focus.taskRef)
+    if (taskRef === undefined || scope.taskId.value !== taskRef.value) return undefined
+    const instance = productExecutionInstanceIdentity(focus.instance)
+    if (instance === undefined) return undefined
+    return { kind: 'execution-instance', instance, taskRef, scope }
+  }
+  return undefined
+}
+
+function productExecutionInstanceIdentityText(instance) {
+  if (instance?.kind === 'native-execution') {
+    const execution = instance.execution ?? {}
+    return `runtimeId ${execution.runtimeId} · executionEpoch ${execution.executionEpoch}`
+  }
+  if (instance?.kind === 'incarnation') {
+    const incarnation = instance.incarnation ?? {}
+    return [
+      `runtimeId ${incarnation.runtimeId}`,
+      `generation ${incarnation.generation}`,
+      `agentInstanceId ${incarnation.agentInstanceId}`,
+      `roleId ${incarnation.roleId}`,
+      `taskId ${incarnation.taskId?.value}`,
+      `assignmentId ${incarnation.assignmentId}`,
+      `executionEpoch ${incarnation.executionEpoch}`,
+    ].join(' · ')
+  }
+  return '实例身份未提供'
+}
+
+function productFocusTargetDetail(target) {
+  if (target?.kind === 'execution-instance') {
+    return `执行实例：${productExecutionInstanceIdentityText(target.instance)}`
+  }
+  if (target?.kind === 'session') {
+    return `会话来源：${target.sessionRef.sourceKind} · ${target.sessionRef.sourceRef}`
+  }
+  return undefined
+}
+
+/**
+ * A body reader may be absent for a focus that is still a valid read target.
+ * That absence is a typed result, not an empty message list and not the task
+ * body under another name.
+ */
+function productFocusTargetUnavailable(target) {
+  const detail = productFocusTargetDetail(target)
+  if (target?.kind === 'execution-instance') {
+    return {
+      code: 'product-session.read.unavailable-target',
+      ownerId: 'humanagent.ui.task-dashboard',
+      message: '该执行实例暂无正文读取入口。',
+      nextAction: '请从执行活动列表查看实例摘要；实例正文需要由对应读取 owner 接入后再显示。',
+      ...(detail === undefined ? {} : { detail }),
+    }
+  }
+  if (target?.kind === 'session') {
+    return {
+      code: 'product-session.read.unavailable-target',
+      ownerId: 'humanagent.ui.task-dashboard',
+      message: `该会话来源（${target.sessionRef.sourceKind}）暂无正文读取入口。`,
+      nextAction: '请在该来源自己的读取界面查看正文；当前页面不会用任务消息代替来源正文。',
+      ...(detail === undefined ? {} : { detail }),
+    }
+  }
+  return {
+    code: 'product-session.read.unavailable',
+    ownerId: 'humanagent.ui.task-dashboard',
+    message: '当前焦点没有可用的正文读取入口。',
+    nextAction: '重新选择精确的交互、会话或执行实例。',
+  }
+}
+
+/**
+ * Dispatch one focus to its declared body owner. Explicit intake reads narrow
+ * the real interaction messages. A target without a body reader returns the
+ * typed unavailable result above; it never falls back to the task body.
+ */
+function productSessionReadForTarget(target, transport) {
+  if (target === undefined) return Promise.reject(productFocusTargetUnavailable(undefined))
+  if (target.kind === 'execution-instance') {
+    return Promise.reject(productFocusTargetUnavailable(target))
+  }
+  if (target.kind === 'session' && target.sessionRef.sourceKind !== 'explicit-intake') {
+    return Promise.reject(productFocusTargetUnavailable(target))
+  }
+  if (typeof transport.readProductSession !== 'function') {
+    return Promise.reject(productFailure(
+      { code: 'product-session.read.unavailable', message: '当前页面没有会话读取入口。', ownerId: 'humanagent.ui.task-dashboard' },
+      'product-session.read.unavailable',
+    ))
+  }
+  const read = productFlatReadScope(target, target.scope)
+  if (read === undefined) return Promise.reject(productFocusTargetUnavailable(target))
+  return Promise.resolve().then(() => transport.readProductSession(read))
+}
+
 /**
  * The flat read scope declared by decision 1. A task identity crosses as a
- * string, and a session focus contributes its exact session reference; the
+ * string. An explicit intake session contributes both owner words, sourceKind
+ * and sourceRef, so the read cannot collapse two sources into one id. The
  * internal `{scope,value}` object and every authority field stay on the page.
  */
 function productFlatReadScope(focus, scope) {
@@ -399,8 +606,11 @@ function productFlatReadScope(focus, scope) {
     read.taskId = taskIdValue
   }
   if (focus?.kind === 'session') {
-    const sessionId = focus.sessionRef?.sourceRef
-    if (typeof sessionId === 'string' && sessionId !== '') read.sessionId = sessionId
+    const sourceKind = focus.sessionRef?.sourceKind
+    const sourceRef = focus.sessionRef?.sourceRef
+    if (typeof sourceKind !== 'string' || sourceKind === '') return undefined
+    if (typeof sourceRef !== 'string' || sourceRef === '') return undefined
+    read.sessionRef = { sourceKind, sourceRef }
   }
   return read
 }
@@ -436,6 +646,35 @@ function selectProductPendingDecision(value, focus, scope) {
   return decisionMatchesFocus(value, focus, scope) ? value : undefined
 }
 
+/**
+ * The focus's own lane from the product read that just completed. The lookup
+ * uses the exact owner target key, so a stale task row or another task's card
+ * can never make this focus actionable. A missing match stays undefined and
+ * therefore fail-closed.
+ */
+function productFocusLane(sessionValue, focus) {
+  const boards = sessionValue?.boardIndex?.boards
+  if (!Array.isArray(boards) || !focus) return undefined
+  const wanted = productRelationRefKey(focus)
+  // An interaction focus is the task-level interaction stream, so its Live or
+  // history state is the task row's lane, not an explicit intake card that
+  // happens to share the same interaction target key.
+  const taskRowBoards = focus.kind === 'interaction'
+    ? new Set(['orchestration', 'inspection'])
+    : undefined
+  for (const board of boards) {
+    if (!board || typeof board !== 'object') continue
+    if (taskRowBoards !== undefined && !taskRowBoards.has(board.board)) continue
+    for (const lane of ['live', 'history', 'unknown']) {
+      const items = Array.isArray(board[lane]) ? board[lane] : []
+      for (const item of items) {
+        if (productRelationRefKey(item?.ref) === wanted) return lane
+      }
+    }
+  }
+  return undefined
+}
+
 function normalizeProductLocationRead(value) {
   if (value === undefined || value === null) {
     return {
@@ -462,6 +701,9 @@ function renderProductFocusFailure(host, make, title, failure) {
     make('strong', title),
     make('p', `${failure.code} · ${failure.message}`, 'product-focus-failure-message'),
     make('p', failure.nextAction, 'product-focus-failure-next'),
+    ...(typeof failure.detail === 'string' && failure.detail !== ''
+      ? [make('p', failure.detail, 'product-focus-failure-detail')]
+      : []),
   )
   host.append(node)
   return node
@@ -531,6 +773,7 @@ export function createTaskFocusController({
     relations: [],
     gaps: [],
     sessionRead: 'idle',
+    focusLane: undefined,
     outputRead: 'idle',
     relationRead: 'idle',
     decisionRead: 'idle',
@@ -584,7 +827,7 @@ export function createTaskFocusController({
     }
   }
 
-  function renderCenter(sessionResult, outputResult, focus, scope) {
+  function renderCenter(sessionResult, outputResult, focus, scope, focusLane) {
     centerHost.replaceChildren()
     const section = make('section', undefined, 'product-focus-center')
     section.setAttribute('data-product-focus-state', 'ready')
@@ -624,6 +867,8 @@ export function createTaskFocusController({
       onSessionRendered(section, {
         focus,
         scope,
+        lane: focusLane,
+        transport: controlTransport,
         relations: state.relations,
         output: outputResult.status === 'fulfilled' ? outputResult.value : undefined,
       })
@@ -736,6 +981,7 @@ export function createTaskFocusController({
     state.focus = focus
     state.scope = scope
     state.sessionRead = 'pending'
+    state.focusLane = undefined
     state.relationRead = 'pending'
     state.outputRead = 'pending'
     state.decisionRead = 'pending'
@@ -743,13 +989,7 @@ export function createTaskFocusController({
     state.decisionFailure = undefined
     renderPending()
 
-    const sessionReadScope = productFlatReadScope(focus, scope)
-    const sessionPromise = sessionReadScope !== undefined && typeof transport.readProductSession === 'function'
-      ? Promise.resolve().then(() => transport.readProductSession(sessionReadScope))
-      : Promise.reject(productFailure(
-        { code: 'product-session.read.unavailable', message: '当前页面没有会话读取入口。', ownerId: 'humanagent.ui.task-dashboard' },
-        'product-session.read.unavailable',
-      ))
+    const sessionPromise = productSessionReadForTarget(productFocusReadTarget(focus), transport)
     const relationsPromise = typeof transport.readProductRelations === 'function'
       ? Promise.resolve().then(() => transport.readProductRelations(scope))
       : Promise.reject(productFailure(
@@ -780,7 +1020,13 @@ export function createTaskFocusController({
       return { ok: false, superseded: true, focus, scope }
     }
 
-    state.sessionRead = sessionResult.status === 'fulfilled' ? 'ready' : 'failed'
+    const focusLane = sessionResult.status === 'fulfilled'
+      ? productFocusLane(sessionResult.value, focus)
+      : undefined
+    state.focusLane = focusLane
+    state.sessionRead = sessionResult.status === 'fulfilled'
+      ? 'ready'
+      : (sessionResult.reason?.code === 'product-session.read.unavailable-target' ? 'unavailable' : 'failed')
     state.outputRead = outputResult.status === 'fulfilled'
       ? (selectProductOutputPublication(outputResult.value) === undefined ? 'empty' : 'ready')
       : 'failed'
@@ -797,7 +1043,7 @@ export function createTaskFocusController({
     state.decisionFailure = decisionResult.status === 'rejected'
       ? productFailure(decisionResult.reason, 'product-decision.read.failed')
       : undefined
-    renderCenter(sessionResult, outputResult, focus, scope)
+    renderCenter(sessionResult, outputResult, focus, scope, focusLane)
     renderRelations(relationResult, focus)
     renderDecision(decisionResult)
     return { ok: true, focus, scope }
@@ -1080,8 +1326,11 @@ function productReadQuery(scope) {
   if (mode) params.set('mode', mode)
   const taskValue = typeof scope?.taskId === 'object' ? scope.taskId?.value : scope?.taskId
   if (typeof taskValue === 'string' && taskValue !== '') params.set('taskId', taskValue)
-  if (typeof scope?.sessionId === 'string' && scope.sessionId !== '') {
-    params.set('sessionId', scope.sessionId)
+  if (typeof scope?.sessionRef?.sourceKind === 'string' && scope.sessionRef.sourceKind !== '') {
+    params.set('sessionKind', scope.sessionRef.sourceKind)
+  }
+  if (typeof scope?.sessionRef?.sourceRef === 'string' && scope.sessionRef.sourceRef !== '') {
+    params.set('sessionId', scope.sessionRef.sourceRef)
   }
   return params
 }
@@ -1127,15 +1376,16 @@ function productDashboardIsLive() {
 }
 
 // The product center stays in the main layer. The live intervention entry is
-// mounted only when the focus is exact and the runtime reports a live state.
-// The pending decision is owned by the focus controller's owner read; this
-// page never synthesizes one from the URL or a grant readback.
-function renderProductSessionExtras(host, { focus }) {
+// mounted only when the focus is exact and the focus's own completed read
+// classifies it as Live. The page never borrows the state of the task that
+// opened the page. The pending decision is owned by the focus controller's
+// owner read; this page never synthesizes one from the URL or a grant readback.
+export function renderProductSessionExtras(host, { focus, lane, transport }) {
   if (!focus || !isExactControllableTarget(focus)) return
-  if (productDashboardIsLive()) {
+  if (lane === 'live') {
     const interventionHost = element('div', undefined, 'product-focus-intervention')
     interventionHost.dataset.productFocusControl = 'intervention'
-    renderInterventionEntry(interventionHost, focus, productFocusController?.transport ?? api, {
+    renderInterventionEntry(interventionHost, focus, transport ?? productFocusController?.transport ?? api, {
       element,
       modalHost: host,
     })
