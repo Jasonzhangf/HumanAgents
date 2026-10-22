@@ -458,6 +458,49 @@ async function requireSession(accessControl: AccessControlService, request: Inco
   return verification.session;
 }
 
+/**
+ * True only for the two addresses that denote this machine. A serve process is
+ * owned by the local operator, so asking that same operator to copy a pairing
+ * code between two processes on one host adds a step without adding an
+ * identity; loopback requests therefore adopt a local session instead.
+ * Everything that is not loopback keeps the pairing requirement unchanged.
+ */
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (typeof address !== 'string' || address.length === 0) return false;
+  const normalized = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
+  return normalized === '127.0.0.1' || normalized === '::1';
+}
+
+interface ResolvedSession {
+  readonly session: AccessSession;
+  readonly adopted: boolean;
+}
+
+/**
+ * Resolves the request session once for every authenticated route. A valid
+ * cookie is used as-is. A loopback request that carries no session at all
+ * adopts a fresh local session and writes its cookie on this response, so the
+ * next request from the same browser carries it. An expired or invalid cookie
+ * keeps its typed failure, so generation invalidation and expiry stay
+ * observable; only the pairing step is dropped, and only for a local browser
+ * that has no session yet.
+ */
+async function resolveSession(
+  accessControl: AccessControlService,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<ResolvedSession> {
+  const cookie = request.headers.cookie;
+  const verification = await accessControl.verifySession(Array.isArray(cookie) ? cookie[0] : cookie);
+  if (verification.state === 'valid') return { session: verification.session, adopted: false };
+  if (verification.state === 'missing' && isLoopbackAddress(request.socket.remoteAddress)) {
+    const session = await accessControl.issueLocalSession();
+    response.setHeader('set-cookie', accessControl.sessionCookie(session));
+    return { session, adopted: true };
+  }
+  throw sessionError(verification);
+}
+
 function bearerToken(request: IncomingMessage): string | undefined {
   const header = request.headers.authorization;
   if (Array.isArray(header)) return undefined;
@@ -938,9 +981,24 @@ async function handleRequest(
       const pairingCommand = formatPairingCommand({
         controlRoot: productRoot,
       });
-      writeJson(response, 200, verification.state === 'valid'
-        ? { authenticated: true, expiresAt: new Date(verification.session.expiresAt).toISOString(), pairingCommand }
-        : { authenticated: false, pairingCommand });
+      if (verification.state === 'valid') {
+        writeJson(response, 200, { authenticated: true, expiresAt: new Date(verification.session.expiresAt).toISOString(), pairingCommand });
+        return;
+      }
+      if (
+        (verification.state === 'missing' || verification.state === 'expired')
+        && isLoopbackAddress(request.socket.remoteAddress)
+      ) {
+        const session = await accessControl.issueLocalSession();
+        writeJson(response, 200, {
+          authenticated: true,
+          expiresAt: new Date(session.expiresAt).toISOString(),
+          pairingCommand,
+          localAccess: true,
+        }, { 'set-cookie': accessControl.sessionCookie(session) });
+        return;
+      }
+      writeJson(response, 200, { authenticated: false, pairingCommand });
       return;
     }
     if (path === '/api/auth/pair' && method === 'POST') {
@@ -997,7 +1055,7 @@ async function handleRequest(
       requireSupervisor(accessControl, request, identity);
     }
     if (path.startsWith('/api/') && !supervisorControlled) {
-      await requireSession(accessControl, request);
+      await resolveSession(accessControl, request, response);
       if (path === '/api/executions/' || path.startsWith('/api/executions/')) {
         if (isClosing()) {
           throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
@@ -1019,10 +1077,10 @@ async function handleRequest(
           503,
         );
       }
-      const cookie = request.headers.cookie;
-      const verification = await accessControl.verifyProductPrincipal(Array.isArray(cookie) ? cookie[0] : cookie);
-      if (verification.state !== 'valid') throw sessionError(verification);
-      const principalOwner = verification.principal.owner;
+      // The common /api/ guard already resolved the request session, including
+      // a loopback local adoption, so the product principal owner is the stable
+      // credential owner for this control root.
+      const principalOwner = accessControl.readProductPrincipalOwner();
       const taskId = id('task', decodeURIComponent((taskGrantControl ?? taskRevokeControl)![1]!));
       const scope = optionalTaskControlScope(url);
       const targetScope = scope === undefined
@@ -1058,9 +1116,6 @@ async function handleRequest(
     const taskContextCorrection = /^\/api\/tasks\/([^/]+)\/control\/context-correction$/.exec(path);
     const taskCheckpointReentry = /^\/api\/tasks\/([^/]+)\/control\/checkpoint-reentry$/.exec(path);
     if ((taskContextCorrection || taskCheckpointReentry) && method === 'POST') {
-      const cookie = request.headers.cookie;
-      const verification = await accessControl.verifyProductPrincipal(Array.isArray(cookie) ? cookie[0] : cookie);
-      if (verification.state !== 'valid') throw sessionError(verification);
       const taskId = id('task', decodeURIComponent((taskContextCorrection ?? taskCheckpointReentry)![1]!));
       const { projectKey, mode } = requireTaskControlScope(url);
       const taskScope = await service.resolveConfirmedTaskControlScope(taskId, projectKey, mode);
@@ -1369,9 +1424,6 @@ async function handleRequest(
       return;
     }
     if (path === '/api/explicit/inputs' && method === 'POST') {
-      const cookie = request.headers.cookie;
-      const verification = await accessControl.verifyProductPrincipal(Array.isArray(cookie) ? cookie[0] : cookie);
-      if (verification.state !== 'valid') throw sessionError(verification);
       const body = await readBody(request);
       const channel = requireString(body, 'channel');
       if (channel === 'control') {
@@ -1396,7 +1448,7 @@ async function handleRequest(
         actor: {
           kind: 'human',
           sourceKind: 'product-principal',
-          sourceRef: verification.principal.owner,
+          sourceRef: accessControl.readProductPrincipalOwner(),
         },
         occurredAt,
         ...(requestKind === undefined ? {} : { requestKind }),
@@ -1864,7 +1916,7 @@ async function handleRequest(
     }
     const taskSemanticStream = /^\/api\/tasks\/([^/]+)\/semantic\/stream$/.exec(path);
     if (taskSemanticStream && method === 'GET') {
-      const session = await requireSession(accessControl, request);
+      const { session } = await resolveSession(accessControl, request, response);
       const taskId = id('task', decodeURIComponent(taskSemanticStream[1]!));
       const readScope = optionalI2ReadScope(url);
       const initial = await service.scopedSemanticObservation(taskId, readScope?.projectKey, readScope?.mode);
@@ -1941,9 +1993,6 @@ async function handleRequest(
     }
     const taskStop = /^\/api\/tasks\/([^/]+)\/stop$/.exec(path);
     if (taskStop && method === 'POST') {
-      const cookie = request.headers.cookie;
-      const verification = await accessControl.verifyProductPrincipal(Array.isArray(cookie) ? cookie[0] : cookie);
-      if (verification.state !== 'valid') throw sessionError(verification);
       const taskId = id('task', decodeURIComponent(taskStop[1]!));
       const scope = optionalTaskControlScope(url);
       const targetScope = scope === undefined
@@ -1952,7 +2001,7 @@ async function handleRequest(
       const result = await service.stop(taskId);
       writeJson(response, 202, {
         ...result,
-        principalOwner: verification.principal.owner,
+        principalOwner: accessControl.readProductPrincipalOwner(),
         ...(targetScope === undefined ? {} : { targetScope }),
       });
       return;
@@ -1994,13 +2043,11 @@ async function handleRequest(
     if (executionEvents && method === 'GET') {
       const operationId = id('operation', decodeURIComponent(executionEvents[1]!));
       service.operationTask(operationId);
-      const cookie = request.headers.cookie;
-      const verification = await accessControl.verifySession(Array.isArray(cookie) ? cookie[0] : cookie);
-      if (verification.state !== 'valid') throw sessionError(verification);
+      const { session } = await resolveSession(accessControl, request, response);
       if (isClosing()) {
         throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
       }
-      streamEvents(request, response, service, operationId, verification.session, accessControl, sseRegistry);
+      streamEvents(request, response, service, operationId, session, accessControl, sseRegistry);
       return;
     }
     const executionMemoryContext = /^\/api\/executions\/([^/]+)\/memory-context$/.exec(path);

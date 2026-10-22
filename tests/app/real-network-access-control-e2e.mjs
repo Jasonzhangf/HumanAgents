@@ -698,10 +698,14 @@ async function pairingAndSseCase() {
     const cookie = cookieValue(paired.setCookie);
 
     const { operationId } = await createTaskAndStart(serve, cookie);
-    const unauthorizedSse = await openSse(`${serve.banner.url}/api/executions/${encodeURIComponent(operationId)}/events`);
-    assert.equal(unauthorizedSse.response.status, 401);
-    assert.doesNotMatch(unauthorizedSse.response.headers['content-type'] ?? '', /text\/event-stream/);
-    assert.equal(unauthorizedSse.response.body?.error?.code, 'auth.session.missing');
+    // A loopback stream with no session is admitted under the local session
+    // contract, so it must open as a real event stream instead of a typed
+    // session failure. Close it immediately: this case only classifies the
+    // unpaired loopback stream.
+    const localSse = await openSse(`${serve.banner.url}/api/executions/${encodeURIComponent(operationId)}/events`);
+    assert.equal(localSse.response.status, 200);
+    assert.match(localSse.response.headers['content-type'] ?? '', /text\/event-stream/);
+    await localSse.close();
 
     const stream = await openSse(`${serve.banner.url}/api/executions/${encodeURIComponent(operationId)}/events`, cookie);
     await stream.waitFor((event) => event.data?.kind !== undefined || event.event !== undefined, 'first SSE event');
@@ -717,7 +721,7 @@ async function pairingAndSseCase() {
     return {
       pairExitCode: pair.exit.code,
       paired: { status: paired.status, cookieFlags: ['Path=/'] },
-      unauthorizedSse: { status: unauthorizedSse.response.status, contentType: unauthorizedSse.response.headers['content-type'] },
+      localSse: { status: localSse.response.status, contentType: localSse.response.headers['content-type'] },
       logout: { status: logout.status, sseClosed: true },
     };
   } finally {
@@ -780,8 +784,16 @@ async function healthCase() {
     const legacy = await request(`${serve.banner.url}/api/health/probe`);
     assert.equal(legacy.status, 405);
     assert.equal(legacy.headers.allow, 'POST');
-    const unauthProbe = await request(`${serve.banner.url}/api/health/probe`, { method: 'POST' });
-    assert.equal(unauthProbe.status, 401);
+    // Loopback is the local operator: a browser with no session is adopted
+    // instead of being sent to the pairing page, and that adopted session is a
+    // real session for the business routes.
+    const localSession = await request(`${serve.banner.url}/api/auth/session`);
+    assert.equal(localSession.status, 200);
+    assert.equal(localSession.body?.authenticated, true);
+    assert.equal(localSession.body?.localAccess, true);
+    const localCookie = cookieValue(localSession.setCookie);
+    const localTasks = await request(`${serve.banner.url}/api/tasks`, { headers: { cookie: localCookie } });
+    assert.equal(localTasks.status, 200);
     const pair = await runPair(serve);
     const paired = await postPair(serve.banner.url, pair.receipt.code);
     assert.equal(paired.status, 200);
@@ -801,7 +813,8 @@ async function healthCase() {
     return {
       liveness: { status: liveness.status, body: liveness.body },
       legacyProbe: { status: legacy.status, allow: legacy.headers.allow },
-      unauthProbe: { status: unauthProbe.status, code: unauthProbe.body?.error?.code },
+      localSession: { status: localSession.status, authenticated: localSession.body?.authenticated, localAccess: localSession.body?.localAccess },
+      localTasks: { status: localTasks.status },
       snapshotBefore: { status: snapshotBefore.status, code: snapshotBefore.body?.error?.code },
       probe: { status: probe.status, state: probe.body?.healthState, checkedAt: probe.body?.checkedAt },
       snapshotAfter: { status: snapshotAfter.status, state: snapshotAfter.body?.healthState },
@@ -1084,8 +1097,13 @@ async function credentialWatchFailureActiveStopCase() {
     },
   });
   try {
+    // The loopback operator is still admitted here: this case proves the
+    // watch failure surfaces during close, not that a session was refused.
     const tasksBefore = await request(`${runtime.server.url}/api/tasks`);
-    assert.equal(tasksBefore.status, 401, 'credential watch failure harness must keep the business API protected');
+    assert.equal(tasksBefore.status, 200, 'credential watch failure harness keeps the business API serving');
+    const localSession = await request(`${runtime.server.url}/api/auth/session`);
+    assert.equal(localSession.status, 200);
+    assert.equal(localSession.body?.authenticated, true);
     const task = runtime.service.createTask({ title: 'credential watch failure close task' });
     runtime.service.startExecution(task.taskId, { prompt: 'hold active until close-watch failure shutdown' });
     const deadline = Date.now() + 5_000;

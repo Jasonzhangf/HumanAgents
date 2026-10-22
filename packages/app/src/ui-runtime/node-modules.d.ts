@@ -9,6 +9,7 @@ declare module 'node:http' {
   }
   export interface ServerResponse {
     writeHead(status: number, headers?: Readonly<Record<string, string | number>>): void;
+    setHeader(name: string, value: string): void;
     write(chunk: string): boolean;
     end(chunk?: string | Uint8Array, callback?: () => void): void;
     end(callback: () => void): void;

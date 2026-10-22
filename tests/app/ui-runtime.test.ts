@@ -111,6 +111,7 @@ import {
 } from '../../packages/runtime/src/orchestration/index.js';
 import {
   createUiRuntimeRequestDispatcher,
+  isLoopbackAddress,
   startUiRuntimeServer,
 } from '../../packages/app/src/ui-runtime/server.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
@@ -10846,4 +10847,63 @@ test('explicit provider settlement control GET reports unavailable without a com
     await server.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('loopback API access adopts a local session without a pairing code', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-loopback-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: 'project-ui-loopback',
+      roleId: 'execution',
+    },
+  });
+  const origin = new URL(runtime.server.url).origin;
+  try {
+    // A browser on this machine has no cookie yet. Every request below uses
+    // rawFetch, so nothing injects the harness session: this is the real
+    // unpaired local browser that used to be sent to the pairing page.
+    const sessionResponse = await rawFetch(`${origin}/api/auth/session`);
+    assert.equal(sessionResponse.status, 200);
+    const sessionBody = await sessionResponse.json() as {
+      readonly authenticated: boolean;
+      readonly localAccess?: boolean;
+    };
+    assert.equal(sessionBody.authenticated, true);
+    assert.equal(sessionBody.localAccess, true);
+    const adoptedCookie = (sessionResponse.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    assert.ok(adoptedCookie.startsWith('HA_SESSION='), 'the adopted session is written as the browser cookie');
+
+    const tasksResponse = await rawFetch(`${origin}/api/tasks`);
+    assert.equal(tasksResponse.status, 200, 'a loopback request reads the public task list without pairing');
+    const tasksBody = await tasksResponse.json() as { readonly tasks?: readonly unknown[] };
+    assert.equal(tasksResponse.status, 200);
+    assert.ok(tasksBody !== undefined && typeof tasksBody === 'object', 'the task list answers with a real body');
+
+    const persisted = await rawFetch(`${origin}/api/tasks`, { headers: { cookie: adoptedCookie } });
+    assert.equal(persisted.status, 200, 'the adopted cookie is a real session for the next request');
+  } finally {
+    await runtime.server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('loopback classification accepts only the two local addresses', () => {
+  assert.equal(isLoopbackAddress('127.0.0.1'), true);
+  assert.equal(isLoopbackAddress('::1'), true);
+  assert.equal(isLoopbackAddress('::ffff:127.0.0.1'), true);
+  assert.equal(isLoopbackAddress('::ffff:192.168.1.10'), false);
+  assert.equal(isLoopbackAddress('192.168.1.10'), false);
+  assert.equal(isLoopbackAddress(''), false);
+  assert.equal(isLoopbackAddress(undefined), false);
 });

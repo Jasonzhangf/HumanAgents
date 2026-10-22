@@ -8042,3 +8042,100 @@ test('ACP opencode driver commits a checkpoint and a run manifest through the re
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// The formal stop is the counterpart of the formal restart: it closes the
+// recorded serve owner through the verified loopback identity endpoint, starts
+// no replacement, and leaves the lease disposed. Running it twice must report
+// the already-dead owner instead of pretending to stop something again.
+test('CLI stop closes the recorded serve owner and reports the lease as disposed', async () => {
+  const fixture = await createConfiguredWorkspace('humanagent-app-cli-stop-');
+  const paths = await resolveRuntimePaths({ controlRoot: fixture.controlRoot, workspace: fixture.workspace });
+  const controlRoot = paths.controlRoot;
+  const workspace = paths.workspaceCwd;
+  await ensureControlLayout(paths);
+  await writeFile(
+    join(controlRoot, 'config.toml'),
+    (await readFile(join(controlRoot, 'config.toml'), 'utf8'))
+      .replace('[project]\n', `[project]\nworkspace = ${JSON.stringify(workspace)}\n`),
+    'utf8',
+  );
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const home = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-stop-home-'));
+  const env: Record<string, string | undefined> = { ...process.env, HOME: home };
+  delete env.HUMANAGENT_HOME;
+
+  const runCli = (args: readonly string[]): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { cwd: fixture.root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`CLI ${args.join(' ')} timed out: stdout=${stdout.slice(-800)}; stderr=${stderr.slice(-800)}`));
+    }, 60_000);
+    child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+    child.once('error', (error) => { clearTimeout(timeout); reject(error); });
+    child.once('exit', (code) => { clearTimeout(timeout); resolve({ code, stdout, stderr }); });
+  });
+
+  const serve = spawn(process.execPath, [
+    cli,
+    'serve',
+    '--workspace',
+    'workspace',
+    '--control-root',
+    'control',
+    '--provider',
+    'fake',
+    '--port',
+    '0',
+  ], { cwd: fixture.root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let serveStderr = '';
+  serve.stderr.on('data', (chunk: Uint8Array) => { serveStderr += String(chunk); });
+  await new Promise<void>((resolve, reject) => {
+    let output = '';
+    const timeout = setTimeout(() => reject(new Error(`serve startup timed out: ${output}; stderr=${serveStderr}`)), 30_000);
+    serve.stdout.on('data', (chunk: Uint8Array) => {
+      output += String(chunk);
+      try {
+        const parsed = JSON.parse(output.trim()) as { readonly url?: string };
+        if (parsed.url !== undefined) {
+          clearTimeout(timeout);
+          resolve();
+        }
+      } catch {
+        // The CLI may print partial JSON while the process is starting.
+      }
+    });
+    serve.once('exit', (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`serve exited before startup (${String(code)}): stderr=${serveStderr}`));
+    });
+  });
+  const exited = new Promise<number | null>((resolve) => { serve.once('exit', (code) => resolve(code)); });
+
+  try {
+    const stopped = await runCli(['stop', '--workspace', 'workspace', '--control-root', 'control']);
+    assert.equal(stopped.code, 0, `stop stderr=${stopped.stderr}`);
+    const receipt = JSON.parse(stopped.stdout) as {
+      readonly command: string;
+      readonly status: string;
+      readonly termination: string;
+      readonly disposed: boolean;
+    };
+    assert.equal(receipt.command, 'stop');
+    assert.equal(receipt.status, 'stopped');
+    assert.equal(receipt.termination, 'graceful');
+    assert.equal(receipt.disposed, true);
+    assert.equal(await exited, 0, 'the serve owner exits after the formal stop');
+
+    const again = await runCli(['stop', '--workspace', 'workspace', '--control-root', 'control']);
+    assert.equal(again.code, 0, `second stop stderr=${again.stderr}`);
+    const againReceipt = JSON.parse(again.stdout) as { readonly status: string; readonly termination: string };
+    assert.equal(againReceipt.status, 'not-running');
+    assert.equal(againReceipt.termination, 'already-dead');
+  } finally {
+    if (serve.exitCode === null) serve.kill('SIGTERM');
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
