@@ -96,6 +96,15 @@ const interactionFocus = {
   taskRef: { scope: 'task', value: 'task-1' },
   scope: taskScope,
 }
+const executionFocus = {
+  kind: 'execution-instance',
+  instance: {
+    kind: 'native-execution',
+    execution: { runtimeId: 'runtime-1', executionEpoch: 1 },
+  },
+  taskRef: { scope: 'task', value: 'task-1' },
+  scope: taskScope,
+}
 const readySurface = {
   centerReady: true,
   focusScope: 'task:project-1:fake:task-1',
@@ -104,10 +113,84 @@ const readySurface = {
   emptyCount: 0,
   unavailableCount: 0,
   unavailableCode: '',
+  unavailableMessage: '',
 }
 const sessionBody = {
   boardIndex: { scope: taskScope },
   messages: [{ targetRef: interactionFocus, text: 'real body' }],
+}
+
+// Minimal DOM shared by docs/ui/task-dashboard.js renderProductFocusFailure
+// (L695-728): the alert keeps only the human-readable message; the raw code
+// lives in the closed technical detail's dl.record-ref rows.
+function domElement(tagName, { className = '', text = '', children = [], attributes = {} } = {}) {
+  const node = {
+    tagName: tagName.toUpperCase(),
+    className,
+    children,
+    attributes: new Map(Object.entries(attributes)),
+    get textContent() {
+      return `${text}${children.map((child) => child.textContent).join('')}`
+    },
+    getAttribute(name) {
+      return node.attributes.has(name) ? node.attributes.get(name) : null
+    },
+  }
+  return node
+}
+
+function rendererFocusFailureNode({
+  code = 'product-session.read.unavailable-target',
+  message = '该执行实例暂无正文读取入口。',
+  nextAction = '请回到对应任务查看执行摘要；实例正文需要接入读取入口后才能显示。',
+  detail = '执行实例：native-execution · runtime-1 · executionEpoch 1',
+  rows = [
+    ['code', code],
+    ['owner', 'humanagent.ui.task-dashboard'],
+    ['message', message],
+    ['nextAction', nextAction],
+    ['来源与实例身份', detail],
+  ],
+} = {}) {
+  const records = domElement('dl', {
+    className: 'record-ref',
+    children: rows.map(([label, value]) => domElement('div', {
+      children: [
+        domElement('dt', { text: label }),
+        domElement('dd', { text: value }),
+      ],
+    })),
+  })
+  return domElement('div', {
+    className: 'product-focus-failure',
+    attributes: { 'data-product-role': 'focus-failure', role: 'alert' },
+    children: [
+      domElement('strong', { text: '当前会话读取失败' }),
+      domElement('p', { className: 'product-focus-failure-message', text: message }),
+      domElement('p', { className: 'product-focus-failure-next', text: nextAction }),
+      domElement('details', {
+        className: 'plan-detail product-focus-failure-detail',
+        children: [
+          domElement('summary', { text: '技术详情' }),
+          records,
+        ],
+      }),
+    ],
+  })
+}
+
+function surfaceFromFocusFailure(node, overrides = {}) {
+  const fields = driverModule.readFocusFailureNode(node)
+  return {
+    ...readySurface,
+    messageCount: 0,
+    emptyCount: 0,
+    unavailableCount: 1,
+    unavailableCode: fields.code,
+    unavailableCodeRows: fields.codeRows,
+    unavailableMessage: fields.message,
+    ...overrides,
+  }
 }
 
 test('a session read with HTTP 500 cannot settle as a successful target body', () => {
@@ -117,7 +200,8 @@ test('a session read with HTTP 500 cannot settle as a successful target body', (
       ...readySurface,
       messageCount: 0,
       unavailableCount: 1,
-      unavailableCode: 'product-session.read.failed · upstream failed',
+      unavailableCode: 'product-session.read.failed',
+      unavailableMessage: '上游读取失败。',
     },
     expectedScope: taskScope,
     expectedFocus: interactionFocus,
@@ -154,7 +238,8 @@ test('a rejected session center with no successful receipt cannot count as ready
       ...readySurface,
       messageCount: 0,
       unavailableCount: 1,
-      unavailableCode: 'product-session.read.failed · transport rejected',
+      unavailableCode: 'product-session.read.failed',
+      unavailableMessage: '传输层拒绝读取。',
     },
     expectedScope: taskScope,
     expectedFocus: interactionFocus,
@@ -225,27 +310,20 @@ test('successful session evidence must match the rendered body and focus target'
 })
 
 test('a contract-unavailable target must show explicit unavailable and no stale body', () => {
-  const focus = {
-    kind: 'execution-instance',
-    instance: {
-      kind: 'native-execution',
-      execution: { runtimeId: 'runtime-1', executionEpoch: 1 },
-    },
-    taskRef: { scope: 'task', value: 'task-1' },
-    scope: taskScope,
-  }
   const unavailableSurface = {
     ...readySurface,
     messageCount: 0,
     emptyCount: 0,
     unavailableCount: 1,
-    unavailableCode: 'product-session.read.unavailable-target · 该执行实例暂无正文读取入口。',
+    unavailableCode: 'product-session.read.unavailable-target',
+    unavailableCodeRows: 1,
+    unavailableMessage: '该执行实例暂无正文读取入口。',
   }
   const explicit = driverModule.evaluateSessionReadEvidence({
     receipts: [],
     surface: unavailableSurface,
     expectedScope: taskScope,
-    expectedFocus: focus,
+    expectedFocus: executionFocus,
     contractUnavailable: true,
   })
   assert.equal(explicit.ok, true)
@@ -253,12 +331,88 @@ test('a contract-unavailable target must show explicit unavailable and no stale 
 
   const blank = driverModule.evaluateSessionReadEvidence({
     receipts: [],
-    surface: { ...unavailableSurface, unavailableCount: 0, unavailableCode: '' },
+    surface: {
+      ...unavailableSurface,
+      unavailableCount: 0,
+      unavailableCode: '',
+      unavailableCodeRows: 0,
+      unavailableMessage: '',
+    },
     expectedScope: taskScope,
-    expectedFocus: focus,
+    expectedFocus: executionFocus,
     contractUnavailable: true,
   })
   assert.equal(blank.ok, false)
+})
+
+test('focus failure extraction reads the structured code, never the main-layer copy', () => {
+  const node = rendererFocusFailureNode()
+  const fields = driverModule.readFocusFailureNode(node)
+  assert.deepEqual(fields, {
+    code: 'product-session.read.unavailable-target',
+    codeRows: 1,
+    message: '该执行实例暂无正文读取入口。',
+  })
+
+  const evaluation = driverModule.evaluateSessionReadEvidence({
+    receipts: [],
+    surface: surfaceFromFocusFailure(node),
+    expectedScope: taskScope,
+    expectedFocus: executionFocus,
+    contractUnavailable: true,
+  })
+  assert.equal(evaluation.ok, true)
+  assert.equal(evaluation.state, 'unavailable')
+})
+
+test('contract-unavailable rejects a missing structured code', () => {
+  // renderProductFocusFailure writes `未提供` when failure.code is absent
+  // (docs/ui/task-dashboard.js L717-720).
+  const node = rendererFocusFailureNode({
+    rows: [
+      ['code', '未提供'],
+      ['owner', 'humanagent.ui.task-dashboard'],
+      ['message', '该执行实例暂无正文读取入口。'],
+      ['nextAction', '请回到对应任务查看执行摘要。'],
+    ],
+  })
+  const evaluation = driverModule.evaluateSessionReadEvidence({
+    receipts: [],
+    surface: surfaceFromFocusFailure(node),
+    expectedScope: taskScope,
+    expectedFocus: executionFocus,
+    contractUnavailable: true,
+  })
+  assert.equal(evaluation.ok, false)
+  assert.match(evaluation.detail, /code/i)
+})
+
+test('contract-unavailable rejects a main layer that leaks the technical code', () => {
+  const node = rendererFocusFailureNode({
+    message: 'product-session.read.unavailable-target · 该执行实例暂无正文读取入口。',
+  })
+  const evaluation = driverModule.evaluateSessionReadEvidence({
+    receipts: [],
+    surface: surfaceFromFocusFailure(node),
+    expectedScope: taskScope,
+    expectedFocus: executionFocus,
+    contractUnavailable: true,
+  })
+  assert.equal(evaluation.ok, false)
+  assert.match(evaluation.detail, /leak|human-readable/i)
+})
+
+test('contract-unavailable rejects a stale body left below the alert', () => {
+  const node = rendererFocusFailureNode()
+  const evaluation = driverModule.evaluateSessionReadEvidence({
+    receipts: [],
+    surface: surfaceFromFocusFailure(node, { messageCount: 1, emptyCount: 1 }),
+    expectedScope: taskScope,
+    expectedFocus: executionFocus,
+    contractUnavailable: true,
+  })
+  assert.equal(evaluation.ok, false)
+  assert.equal(evaluation.state, 'stale')
 })
 
 test('gap-only relation surface rejects fabricated relation nodes', () => {
