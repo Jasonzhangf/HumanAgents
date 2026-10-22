@@ -265,6 +265,7 @@ export function createRuntimeApi(options = {}) {
     dashboard: () => request('/api/dashboard'),
     readProductBoard: (scope) => request(`/api/product/board${productReadScopeQuery(scope)}`),
     readProductSession: (scope) => request(`/api/product/session${productReadScopeQuery(scope)}`),
+    readProductRelations: (scope) => request(`/api/product/relations${productReadScopeQuery(scope)}`),
     readProductOutput: (taskId) => request(`/api/product/output${productOutputQuery(taskId)}`),
     listTasks: () => request('/api/tasks'),
     updateTask: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}`, {
