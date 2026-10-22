@@ -70,15 +70,20 @@ export const TERMINAL_TASK_STATES = Object.freeze([
  * focus has no readable body. The collector keeps the human message and the
  * diagnostic code in separate fields because the shared evaluator checks both.
  */
-export function unavailableSurfaceFields(node) {
-  if (node === undefined || node === null) {
-    return { unavailableCount: 0, unavailableCode: '', unavailableCodeRows: 0, unavailableMessage: '' }
-  }
+export function unavailableSurfaceFields(node, observedCount) {
+  const count = Number.isInteger(observedCount)
+    ? observedCount
+    : (node === undefined || node === null ? 0 : 1)
+  const countable = count < 0 ? 0 : count
+  // The evaluator requires exactly one rendered failure. A page that shows more
+  // than one is reported as that count with no usable fields, so a duplicated or
+  // leftover node cannot pass as the single typed failure.
+  const readable = countable === 1 ? node : undefined
   return {
-    unavailableCount: 1,
-    unavailableCode: typeof node.code === 'string' ? node.code : '',
-    unavailableCodeRows: Number.isInteger(node.codeRows) ? node.codeRows : 0,
-    unavailableMessage: typeof node.message === 'string' ? node.message : '',
+    unavailableCount: countable,
+    unavailableCode: typeof readable?.code === 'string' ? readable.code : '',
+    unavailableCodeRows: Number.isInteger(readable?.codeRows) ? readable.codeRows : 0,
+    unavailableMessage: typeof readable?.message === 'string' ? readable.message : '',
   }
 }
 
@@ -1930,7 +1935,7 @@ class AcceptanceRun {
       // original diagnostic code in the closed detail. Both are read from that
       // structure, so this collector hands the shared evaluator the same fields
       // it declares instead of reusing the removed main-layer code text.
-      ...unavailableSurfaceFields(unavailable),
+      ...unavailableSurfaceFields(unavailable, unavailableCount),
     }
   }
 

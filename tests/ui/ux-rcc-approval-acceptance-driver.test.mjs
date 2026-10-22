@@ -275,7 +275,7 @@ test('the unavailable branch passes through the real failure node collector', ()
   }))
   // The page collector builds these fields itself; hand-writing them here would
   // hide a collector that stops producing what the evaluator requires.
-  const fields = unavailableSurfaceFields(collected)
+  const fields = unavailableSurfaceFields(collected, 1)
   assert.equal(fields.unavailableCount, 1)
   assert.equal(fields.unavailableCode, 'product-session.read.unavailable-target')
   assert.equal(fields.unavailableCodeRows, 1)
@@ -296,6 +296,27 @@ test('the unavailable branch passes through the real failure node collector', ()
   })
   assert.equal(unavailable.ok, true)
   assert.equal(unavailable.bodyState, 'unavailable')
+
+  // A page that renders a second unavailable node is not the single typed
+  // failure the evaluator accepts, even when the first node looks correct.
+  const duplicated = focusSurface({
+    messageCount: 0,
+    messageEventIds: [],
+    messageTexts: [],
+    emptyCount: 0,
+    ...unavailableSurfaceFields(collected, 2),
+  })
+  assert.equal(duplicated.unavailableCount, 2)
+  assert.equal(duplicated.unavailableCode, '')
+  const rejected = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [],
+    contractUnavailable: true,
+    surface: duplicated,
+  })
+  assert.equal(rejected.ok, false)
 })
 
 test('navigation evaluation rejects stale or foreign visible bodies', () => {
