@@ -4,6 +4,8 @@
     "operator": "humanagent-explicit-requirement",
     "operator_version": "1"
   },
+  "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+  "singleConfirmationContract": "新建任务表单提交是一次确认；同一提交整理并 FIFO 投递，不要求第二次确认。已有任务变更单独确认，控制命令不进入需求队列或 task payload。",
   "nodes": {
     "requirement_result": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",

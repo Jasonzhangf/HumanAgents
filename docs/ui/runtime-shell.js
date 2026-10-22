@@ -1397,6 +1397,14 @@ function createShellLayerFrame({ ariaLabel, eyebrow, titleText = '', titleId }) 
   return { layer, eyebrow: eyebrowNode, title, body, close }
 }
 
+// Every next-layer surface shares one visible carrier. Opening a new shell layer
+// closes the previous one so the product never stacks two drawers.
+function closeOtherShellLayers(keep) {
+  for (const openLayer of document.querySelectorAll('dialog.shell-layer[open]')) {
+    if (openLayer !== keep) openLayer.close()
+  }
+}
+
 // The contextual 技术详情 disclosure. It reuses the shell-layer frame, so it opens as the same
 // desktop side panel / mobile bottom drawer. Exact typed values (code/owner/message/nextAction
 // and the control-plane footer) live here; the primary layer keeps only human copy. The
@@ -1920,6 +1928,7 @@ export function mountShellLayer(context = {}, mountRoot = document.body) {
     const item = SHELL_SECTIONS.find((entry) => entry.id === id)
     if (!item) return
     closeTechnicalDetailLayer()
+    for (const openDrawer of document.querySelectorAll('dialog.product-drawer[open]')) openDrawer.close()
     leaveDrawerReads()
     returnFocus = triggers.get(id) || null
     openPanelId = id
@@ -1995,6 +2004,8 @@ export function mountShellLayer(context = {}, mountRoot = document.body) {
     applyDisplayMode,
     initializeDisplayPreference,
     disposeDisplayPreference,
+    host: controls,
+    layer,
     dispose,
   }
 }
@@ -2010,7 +2021,7 @@ const PAGE_LAYOUTS = Object.freeze({
 // and the shared detail/focus carrier. Page controllers keep business reads,
 // writes, selection and URL state; optional slots stay visually absent until
 // the controller publishes real content.
-export function mountPageTemplate(root, config = {}) {
+function buildPageTemplate(root, config = {}, { withTopbar = true } = {}) {
   if (!(root instanceof HTMLElement)) throw new TypeError('mountPageTemplate requires an HTMLElement root')
   const layout = PAGE_LAYOUTS[config.layout] || PAGE_LAYOUTS.collection
   const active = typeof config.active === 'string' ? config.active : ''
@@ -2064,7 +2075,7 @@ export function mountPageTemplate(root, config = {}) {
   composer.dataset.pageSlot = 'composer'
   page.append(primary, support, composer)
 
-  const header = layout === PAGE_LAYOUTS.standalone ? null : makeTopbar(active)
+  const header = layout === PAGE_LAYOUTS.standalone || !withTopbar ? null : makeTopbar(active)
   if (header) root.append(header)
   root.append(page)
 
@@ -2078,6 +2089,8 @@ export function mountPageTemplate(root, config = {}) {
       applyDisplayMode: shellLayer.applyDisplayMode,
       initializeDisplayPreference: shellLayer.initializeDisplayPreference,
       disposeDisplayPreference: shellLayer.disposeDisplayPreference,
+      host: shellLayer.host,
+      layer: shellLayer.layer,
       dispose: shellLayer.dispose,
     }
   }
@@ -2109,6 +2122,303 @@ export function mountPageTemplate(root, config = {}) {
     shell,
     detail,
     setBreadcrumbs,
+    dispose,
+  }
+}
+
+export function mountPageTemplate(root, config = {}) {
+  return buildPageTemplate(root, config, { withTopbar: true })
+}
+
+function productShellUsesDrawer() {
+  if (typeof window.matchMedia === 'function') return window.matchMedia('(max-width: 900px)').matches
+  return typeof window.innerWidth === 'number' ? window.innerWidth <= 900 : false
+}
+
+const PRODUCT_DRAWER_TABS = Object.freeze({
+  board: '板块导航',
+  detail: '细节与关联',
+})
+
+/**
+ * Product shell over the existing page template. It adds the five-board rail,
+ * the center workspace, a closable desktop relation rail, one shared mobile
+ * drawer host and the existing edge configuration entries. The shell owns only
+ * layout and drawer lifetime: pages still render board, center and relation
+ * content into the returned hosts, and URL/product-position logic stays in the
+ * page controller or U1's product-location module.
+ *
+ * @param {HTMLElement} root
+ * @param {Object} config same shape as mountPageTemplate
+ * @returns {Object} base template surface plus product hosts and drawer methods
+ */
+export function mountProductShell(root, config = {}) {
+  if (!(root instanceof HTMLElement)) throw new TypeError('mountProductShell requires an HTMLElement root')
+  const base = buildPageTemplate(root, config, { withTopbar: false })
+  const layout = base.layout
+  const hosts = {
+    ...base.hosts,
+    board: null,
+    center: base.hosts.primary,
+    relation: null,
+    drawer: null,
+    config: base.shell?.host ?? null,
+  }
+
+  if (layout === PAGE_LAYOUTS.standalone) {
+    return {
+      ...base,
+      hosts,
+      openBoard() {},
+      openRelation() {},
+      closeRelation() {},
+      toggleRelation() {},
+      openDrawer() {},
+      setDrawerTab() {},
+      closeDrawer() {},
+    }
+  }
+
+  const frame = element('div', undefined, 'product-frame')
+  frame.dataset.productShell = 'true'
+  frame.dataset.relation = 'closed'
+
+  const topbar = element('header', undefined, 'product-topbar')
+  const brand = element('a', 'HumanAgent', 'brand')
+  brand.href = './dashboard.html'
+  const topbarActions = element('div', undefined, 'product-topbar-actions')
+  const boardToggle = element('button', '板块', 'button product-topbar-button product-board-toggle')
+  boardToggle.type = 'button'
+  boardToggle.setAttribute('aria-label', '打开工作板块')
+  boardToggle.dataset.productAction = 'board'
+  const relationToggle = element('button', '关联', 'button product-topbar-button product-relation-toggle')
+  relationToggle.type = 'button'
+  relationToggle.setAttribute('aria-label', '打开任务关联')
+  relationToggle.dataset.productAction = 'relation'
+  topbarActions.append(boardToggle, relationToggle)
+  topbar.append(brand, topbarActions)
+
+  const workspace = element('div', undefined, 'product-workspace')
+  const boardLayer = element('aside', undefined, 'product-board-layer')
+  boardLayer.setAttribute('aria-label', '工作板块')
+  const boardHead = element('div', undefined, 'product-layer-head')
+  boardHead.append(element('h2', '工作板块', 'product-layer-title'))
+  const board = element('div', undefined, 'product-board-body')
+  board.dataset.productSlot = 'board'
+  boardLayer.append(boardHead, board)
+
+  const centerPage = base.hosts.page
+  centerPage.classList.add('product-center')
+
+  const relationLayer = element('aside', undefined, 'product-relation-layer')
+  relationLayer.setAttribute('aria-label', '任务关联')
+  relationLayer.dataset.open = 'false'
+  relationLayer.hidden = true
+  const relationHead = element('div', undefined, 'product-layer-head')
+  const relationClose = element('button', '关闭', 'button button--quiet product-relation-close')
+  relationClose.type = 'button'
+  relationClose.setAttribute('aria-label', '关闭任务关联')
+  relationHead.append(element('h2', '任务关联', 'product-layer-title'), relationClose)
+  const relation = element('div', undefined, 'product-relation-body')
+  relation.dataset.productSlot = 'relation'
+  relationLayer.append(relationHead, relation)
+
+  workspace.append(boardLayer, centerPage, relationLayer)
+  frame.append(topbar, workspace)
+  root.insertBefore(frame, root.firstChild)
+
+  hosts.board = board
+  hosts.relation = relation
+  if (hosts.config) hosts.config.classList.add('product-edge-config')
+
+  const {
+    layer: drawerLayer,
+    eyebrow: drawerEyebrow,
+    title: drawerTitle,
+    body: drawer,
+    close: drawerClose,
+  } = createShellLayerFrame({
+    ariaLabel: '工作区',
+    eyebrow: '工作区',
+    titleText: PRODUCT_DRAWER_TABS.board,
+    titleId: 'product-drawer-title',
+  })
+  drawerLayer.classList.add('product-drawer')
+  drawerLayer.dataset.productDrawer = 'true'
+  const drawerTabs = element('div', undefined, 'product-drawer-tabs')
+  drawerTabs.setAttribute('role', 'tablist')
+  drawerTabs.setAttribute('aria-label', '移动端工作区')
+  const tabButtons = new Map()
+  for (const [tab, label] of Object.entries(PRODUCT_DRAWER_TABS)) {
+    const button = element('button', label, 'button button--quiet product-drawer-tab')
+    button.type = 'button'
+    button.dataset.productDrawerTab = tab
+    button.setAttribute('role', 'tab')
+    button.addEventListener('click', () => setDrawerTab(tab))
+    drawerTabs.append(button)
+    tabButtons.set(tab, button)
+  }
+  drawer.classList.add('product-drawer-body')
+  drawer.dataset.productSlot = 'drawer'
+  drawerLayer.insertBefore(drawerTabs, drawer)
+  frame.append(drawerLayer)
+  hosts.drawer = drawer
+
+  let currentTab = 'board'
+  let activeHost = null
+  let activeHome = null
+  let returnFocus = null
+  let disposed = false
+
+  function setDrawerTabState(tab) {
+    currentTab = tab
+    drawerEyebrow.textContent = '工作区'
+    drawerTitle.textContent = PRODUCT_DRAWER_TABS[tab]
+    for (const [key, button] of tabButtons) {
+      button.setAttribute('aria-selected', String(key === tab))
+    }
+  }
+
+  function restoreActiveHost() {
+    if (!activeHost || !activeHome) return
+    activeHome.append(activeHost)
+    activeHost = null
+    activeHome = null
+  }
+
+  function placeActiveHost(tab) {
+    const next = tab === 'board' ? hosts.board : hosts.relation
+    if (activeHost === next) return
+    restoreActiveHost()
+    activeHost = next
+    activeHome = next.parentNode
+    drawer.append(next)
+  }
+
+  function setDrawerTab(tab) {
+    if (!Object.hasOwn(PRODUCT_DRAWER_TABS, tab)) {
+      throw new TypeError(`setDrawerTab requires one of ${Object.keys(PRODUCT_DRAWER_TABS).join(', ')}`)
+    }
+    setDrawerTabState(tab)
+    if (drawerLayer.open) placeActiveHost(tab)
+    return tab
+  }
+
+  function openDrawer(tab = 'board', trigger) {
+    if (!Object.hasOwn(PRODUCT_DRAWER_TABS, tab)) {
+      throw new TypeError(`openDrawer requires one of ${Object.keys(PRODUCT_DRAWER_TABS).join(', ')}`)
+    }
+    if (disposed) return drawerLayer
+    if (trigger instanceof HTMLElement) returnFocus = trigger
+    else if (!drawerLayer.open) returnFocus = document.activeElement
+    closeOtherShellLayers(drawerLayer)
+    setDrawerTabState(tab)
+    placeActiveHost(tab)
+    if (!drawerLayer.open) drawerLayer.showModal()
+    ;(tabButtons.get(tab) || drawerClose).focus()
+    return drawerLayer
+  }
+
+  function handleDrawerClose() {
+    restoreActiveHost()
+    const target = returnFocus
+    returnFocus = null
+    if (target?.isConnected) target.focus()
+  }
+
+  function closeDrawer() {
+    if (drawerLayer.open) drawerLayer.close()
+    else restoreActiveHost()
+  }
+
+  function openBoard(trigger) {
+    if (disposed) return
+    if (productShellUsesDrawer()) {
+      openDrawer('board', trigger)
+      return
+    }
+    if (trigger instanceof HTMLElement) returnFocus = trigger
+    else returnFocus = document.activeElement
+    hosts.board.focus?.()
+  }
+
+  function relationIsOpen() {
+    return relationLayer.dataset.open === 'true'
+  }
+
+  function openRelation(trigger) {
+    if (disposed) return
+    if (productShellUsesDrawer()) {
+      openDrawer('detail', trigger)
+      return
+    }
+    if (trigger instanceof HTMLElement) returnFocus = trigger
+    else returnFocus = document.activeElement
+    relationLayer.hidden = false
+    relationLayer.dataset.open = 'true'
+    frame.dataset.relation = 'open'
+    relationClose.focus()
+  }
+
+  function closeRelation() {
+    if (productShellUsesDrawer()) {
+      if (drawerLayer.open && currentTab === 'detail') closeDrawer()
+      return
+    }
+    if (!relationIsOpen()) return
+    relationLayer.dataset.open = 'false'
+    relationLayer.hidden = true
+    frame.dataset.relation = 'closed'
+    const target = returnFocus
+    returnFocus = null
+    if (target?.isConnected) target.focus()
+  }
+
+  function toggleRelation(trigger) {
+    if (productShellUsesDrawer()) {
+      if (drawerLayer.open && currentTab === 'detail') closeDrawer()
+      else openDrawer('detail', trigger)
+      return
+    }
+    if (relationIsOpen()) closeRelation()
+    else openRelation(trigger)
+  }
+
+  boardToggle.addEventListener('click', () => openBoard(boardToggle))
+  relationToggle.addEventListener('click', () => toggleRelation(relationToggle))
+  relationClose.addEventListener('click', closeRelation)
+  drawerLayer.addEventListener('close', handleDrawerClose)
+  drawerLayer.addEventListener('cancel', (event) => {
+    event.preventDefault()
+    closeDrawer()
+  })
+  const onPageHide = () => closeDrawer()
+  window.addEventListener('pagehide', onPageHide)
+
+  function dispose() {
+    if (disposed) return
+    disposed = true
+    window.removeEventListener('pagehide', onPageHide)
+    if (drawerLayer.open) drawerLayer.close()
+    else restoreActiveHost()
+    base.dispose()
+    if (drawerLayer.isConnected) drawerLayer.remove()
+  }
+
+  return {
+    root: base.root,
+    layout,
+    hosts,
+    shell: base.shell,
+    detail: base.detail,
+    setBreadcrumbs: base.setBreadcrumbs,
+    openBoard,
+    openRelation,
+    closeRelation,
+    toggleRelation,
+    openDrawer,
+    setDrawerTab,
+    closeDrawer,
     dispose,
   }
 }

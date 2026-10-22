@@ -28,6 +28,11 @@
       ],
       "verification": "本候选设计只校正 source/owner 语义；Runtime、App、UI 与双入口行为仍为 UNVERIFIED。"
     },
+    "product-read": {
+      "purpose": "五板块、精确 session、人读消息、有据关系、公开结果、待决定事项、主动介入与位置选择按 docs/goals/ux-repair-interface-map-2026-10-21.md 的最小契约实现；本图不新增业务节点。",
+      "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+      "verification": "接口映射与 T1–T11 测试映射已落盘；实现、红测、真实入口与安装验收均未完成。"
+    },
     "task-description": {
       "purpose": "同范围任务看板已读输入 → 按已声明四字段形状识别 → 按任务要求组织内容 → 完整保留必要要求 → 现有共享抽屉呈现；原始输入在现有任务技术详情按需读取。",
       "implementationPaths": [
@@ -36,6 +41,13 @@
       ],
       "verification": "任务说明消费者有局部行为断言；整体阅读图仍为 UNVERIFIED。"
     }
+  },
+  "nodeOwners": {
+    "truth": "既有 task inventory / agent activity / turn history / journal 读取；App 只做纯组合",
+    "semantic": "packages/context-events 归一与配对；packages/contracts typed refs",
+    "purpose": "packages/ui/projection/runtime.ts",
+    "necessary": "packages/ui/projection/runtime.ts",
+    "present": "docs/ui 页面 controller 与共享 shell"
   },
   "implementationStatus": "UNVERIFIED"
 }

@@ -1,182 +1,540 @@
 import {
+  RUNTIME_READ_MODES,
   api,
   appendPairingEntry,
   clearNode,
-  element,
+  element as defaultElement,
   loadRuntimeStatus,
   mountPageTemplate,
   renderRuntimeStatus,
   stateTone,
 } from './runtime-shell.js'
 import { bindMemoryReviewAction } from './memory-actions.js'
+import { renderProductBoardSection } from './product-board-view.js'
 
-const template = mountPageTemplate(document.getElementById('page-root'), {
-  layout: 'collection',
-  active: 'Memory',
-  eyebrow: 'Memory Agent',
-  title: '记忆与候选审核',
-  lede: '查看模型整理状态、证据来源和作用域；接受、拒绝或延期都由你明确决定。',
+export const MEMORY_SESSION_TITLE = '记忆 agent session'
+export const MEMORY_SESSION_SOURCE_UNAVAILABLE = 'session 来源不可用'
+export const MEMORY_CANDIDATES_TITLE = '候选（非 session）'
+
+const CANDIDATE_STATE_LABELS = Object.freeze({
+  candidate: '待审核',
+  approved: '已接受',
+  active: '已启用',
+  superseded: '已被替代',
+  expired: '已过期',
+  archived: '已归档',
+  rejected: '已拒绝',
+  deferred: '已延期',
 })
-const { primary, support, status } = template.hosts
 
-const reasonField = element('label', '审核理由')
-const reasonInput = element('textarea')
-reasonInput.dataset.memoryReviewReason = ''
-reasonInput.placeholder = '写明审核理由'
-reasonInput.setAttribute('aria-label', '审核理由')
-reasonField.append(reasonInput)
-const reasonSection = element('section', undefined, 'section')
-reasonSection.dataset.memorySupport = 'review-reason'
-reasonSection.append(
-  element('h2', '审核理由'),
-  element('p', '接受、拒绝或延期前，请写明理由。理由会随这次决定提交。', 'muted'),
-  reasonField,
-)
+function makeFactory(options) {
+  return typeof options?.element === 'function' ? options.element : defaultElement
+}
 
-function memoryTechnicalDetail(label, buildDetail) {
-  const button = element('button', label, 'button button--quiet')
+function openDetailFactory(options) {
+  return typeof options?.openDetail === 'function' ? options.openDetail : () => {}
+}
+
+function taskIdValue(taskId) {
+  if (taskId && typeof taskId === 'object') return taskId.value
+  return taskId
+}
+
+function textValue(value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function readMode(value) {
+  return RUNTIME_READ_MODES.includes(value) ? value : undefined
+}
+
+function memoryScopeFailure(message = '记忆板块读取需要完整的 projectKey 和 mode。') {
+  const failure = new Error(message)
+  failure.code = 'memory.scope-unavailable'
+  failure.ownerId = 'humanagent.ui.memory'
+  failure.nextAction = 'open the memory page from a project that carries projectKey and mode'
+  return failure
+}
+
+function typedFailure(cause, fallback) {
+  const failure = new Error(cause?.message || fallback.message)
+  failure.code = cause?.code || fallback.code
+  failure.ownerId = cause?.ownerId || fallback.ownerId
+  failure.nextAction = cause?.nextAction || fallback.nextAction
+  if (cause?.status !== undefined) failure.status = cause.status
+  return failure
+}
+
+function failureCopy(failure) {
+  return {
+    code: failure?.code ?? 'memory.read.failed',
+    ownerId: failure?.ownerId ?? 'humanagent.app',
+    message: failure?.message ?? '读取失败。',
+    nextAction: failure?.nextAction ?? 'retry the read',
+  }
+}
+
+function failureEntries(failure, prefix) {
+  const copy = failureCopy(failure)
+  return [
+    [`${prefix}.code`, copy.code],
+    [`${prefix}.ownerId`, copy.ownerId],
+    [`${prefix}.message`, copy.message],
+    [`${prefix}.nextAction`, copy.nextAction],
+  ]
+}
+
+function detailButton(make, label, detail, openDetail) {
+  const button = make('button', label, 'button button--quiet')
   button.type = 'button'
   button.dataset.memoryTechnicalDetail = ''
-  button.addEventListener('click', () => template.detail.open(buildDetail(), button))
+  button.addEventListener('click', () => openDetail(detail, button))
   return button
 }
 
-function readReviewReason() {
-  const reason = reasonInput.value.trim()
-  if (!reason) reasonInput.focus()
-  return reason
-}
-
-function showReviewError(error) {
-  status.dataset.tone = 'danger'
-  clearNode(status)
-  status.append(
-    element('strong', error.code),
-    element('span', ` · ${error.message} · owner=${error.ownerId} · next=${error.nextAction}`),
+function appendReadFailure(root, failure, make, openDetail, label = '技术详情') {
+  const copy = failureCopy(failure)
+  root.append(
+    make('p', `读取失败：${copy.message}`, 'panel muted'),
+    make('p', `恢复：${copy.nextAction}`, 'muted'),
+    detailButton(make, label, {
+      title: '记忆读取技术详情',
+      eyebrow: '只读证据',
+      entries: failureEntries(failure, 'failure'),
+    }, openDetail),
   )
-  appendPairingEntry(status, error)
 }
 
-function render(view) {
-  for (const section of primary.querySelectorAll('[data-memory-section]')) section.remove()
-  reasonSection.remove()
-  if (view.skillCandidates.some((candidate) => candidate.state === 'candidate')) {
-    support.append(reasonSection)
+function candidateStateText(state) {
+  return CANDIDATE_STATE_LABELS[state] ?? String(state ?? '未知')
+}
+
+function candidateScopeText(candidate) {
+  const parts = [`记忆库：${candidate.namespace ?? '未知'}`]
+  if (candidate.projectKey) parts.push(`项目：${candidate.projectKey}`)
+  const taskId = taskIdValue(candidate.taskId)
+  if (taskId) parts.push(`任务：${taskId}`)
+  return parts.join(' · ')
+}
+
+async function settle(read) {
+  try {
+    return { ok: true, value: await read() }
+  } catch (failure) {
+    return { ok: false, failure }
+  }
+}
+
+/**
+ * Read the memory board source and the candidate review source independently.
+ * A failed read stays a typed failure; it never becomes an empty result.
+ */
+export async function readMemorySurface({ readBoard, readSummary, scope } = {}) {
+  if (typeof readBoard !== 'function') throw new TypeError('readMemorySurface requires readBoard')
+  if (typeof readSummary !== 'function') throw new TypeError('readMemorySurface requires readSummary')
+  const [board, summary] = await Promise.all([
+    settle(() => readBoard(scope)),
+    settle(() => readSummary({ namespace: 'project', limit: 20 })),
+  ])
+  return { board, summary }
+}
+
+export function memoryBoardSection(boardIndex) {
+  const boards = Array.isArray(boardIndex?.boards) ? boardIndex.boards : []
+  return boards.find((section) => section.board === 'memory') ?? null
+}
+
+/**
+ * Render the memory-agent session area from the product board read. The board
+ * has no declared memory session reader yet, so the normal result is an
+ * explicit source-unavailable failure, not three empty lanes.
+ */
+export function renderMemorySessions(host, boardRead, options = {}) {
+  const make = makeFactory(options)
+  const openDetail = openDetailFactory(options)
+  const section = boardRead?.ok === true ? memoryBoardSection(boardRead.value) : null
+  const items = section === null
+    ? []
+    : [...(section.live ?? []), ...(section.history ?? []), ...(section.unknown ?? [])]
+
+  if (section !== null && items.length > 0) {
+    const root = renderProductBoardSection(null, section, {
+      element: make,
+      ...(typeof options.onSelect === 'function' ? { onSelect: options.onSelect } : {}),
+    })
+    root.dataset.memorySection = 'sessions'
+    root.setAttribute('data-memory-section', 'sessions')
+    if (host !== undefined && host !== null) host.append(root)
+    return root
   }
 
-  const analysis = element('section', undefined, 'section')
-  analysis.dataset.memorySection = 'analysis'
-  analysis.append(element('h2', '整理状态'))
-  const panel = element('div', undefined, 'panel')
-  const chip = element('span', view.analysis.state, 'state-chip')
-  chip.dataset.tone = stateTone(view.analysis.state)
+  const root = make('section', undefined, 'section')
+  root.dataset.memorySection = 'sessions'
+  root.setAttribute('data-memory-section', 'sessions')
+  root.append(make('h2', MEMORY_SESSION_TITLE))
+
+  if (boardRead?.ok !== true) {
+    root.append(make('p', MEMORY_SESSION_SOURCE_UNAVAILABLE, 'panel muted'))
+    appendReadFailure(root, boardRead?.failure, make, openDetail, 'session 来源详情')
+    if (host !== undefined && host !== null) host.append(root)
+    return root
+  }
+
+  const failures = Array.isArray(section?.failures) && section.failures.length > 0
+    ? section.failures
+    : [{
+        code: 'memory.session-source-unavailable',
+        ownerId: 'humanagent.app.ui-runtime.product-session-read',
+        message: 'board 没有提供记忆 session 事实；记忆候选不是 session。',
+        nextAction: '确认记忆 session 读取 owner 后重新读取记忆板块。',
+      }]
+
+  root.append(make('p', MEMORY_SESSION_SOURCE_UNAVAILABLE, 'panel muted'))
+  for (const failure of failures) {
+    const copy = failureCopy(failure)
+    root.append(
+      make('p', copy.message, 'muted'),
+      make('p', `恢复：${copy.nextAction}`, 'muted'),
+    )
+  }
+  root.append(detailButton(make, 'session 来源详情', {
+    title: '记忆 session 来源详情',
+    eyebrow: '只读证据',
+    entries: failures.flatMap((failure, index) => failureEntries(failure, `failures[${index}]`)),
+  }, openDetail))
+
+  if (host !== undefined && host !== null) host.append(root)
+  return root
+}
+
+function candidateCard(candidate, make, options) {
+  const openDetail = openDetailFactory(options)
+  const card = make('article', undefined, 'panel')
+  card.setAttribute('data-memory-candidate', candidate.candidateId ?? 'unknown')
+  card.setAttribute('data-memory-candidate-kind', 'candidate')
+  card.append(
+    make('h3', candidate.proposedRule || '未命名候选'),
+    make('p', `状态：${candidateStateText(candidate.state)}`),
+    make('p', candidateScopeText(candidate)),
+  )
+
+  if (candidate.state === 'candidate' && typeof options.review === 'function') {
+    const actions = make('div', undefined, 'actions')
+    for (const [decision, label] of [['approve', '接受'], ['reject', '拒绝'], ['defer', '延期']]) {
+      const button = make('button', label, `button${decision === 'approve' ? ' button--primary' : ''}`)
+      button.type = 'button'
+      bindMemoryReviewAction({
+        button,
+        candidateId: candidate.candidateId,
+        decision,
+        readReason: options.readReason ?? (() => ''),
+        review: options.review,
+        refresh: options.refresh ?? (async () => {}),
+        showError: options.showError ?? (() => {}),
+      })
+      actions.append(button)
+    }
+    card.append(actions)
+  }
+
+  const sourceRefs = Array.isArray(candidate.sourceRefs) ? candidate.sourceRefs : []
+  const sourceDigests = Array.isArray(candidate.sourceDigests) ? candidate.sourceDigests : []
+  card.append(detailButton(make, '候选技术详情', {
+    title: '候选技术详情',
+    eyebrow: '只读证据',
+    entries: [
+      ['candidateId', candidate.candidateId],
+      ['state', candidate.state],
+      ['namespace', candidate.namespace],
+      ['projectKey', candidate.projectKey],
+      ['taskId', taskIdValue(candidate.taskId) ?? ''],
+      ...sourceRefs.map((sourceRef, index) => [
+        `sourceRefs[${index}]`,
+        sourceRef,
+        'data-memory-source-ref',
+      ]),
+      ...sourceDigests.map((digest, index) => [
+        `sourceDigests[${index}]`,
+        digest,
+        'data-memory-source-digest',
+      ]),
+    ],
+  }, openDetail))
+  return card
+}
+
+/**
+ * Render the review candidates as their own layer. They carry review state,
+ * namespace, reason and failure, but no product target or session lane.
+ */
+export function renderMemoryCandidates(host, summaryRead, options = {}) {
+  const make = makeFactory(options)
+  const openDetail = openDetailFactory(options)
+  const root = make('section', undefined, 'section')
+  root.dataset.memorySection = 'candidates'
+  root.setAttribute('data-memory-section', 'candidates')
+  root.append(make('h2', MEMORY_CANDIDATES_TITLE))
+
+  if (summaryRead?.ok !== true) {
+    appendReadFailure(root, summaryRead?.failure, make, openDetail)
+    if (host !== undefined && host !== null) host.append(root)
+    return root
+  }
+
+  const candidates = Array.isArray(summaryRead.value?.skillCandidates)
+    ? summaryRead.value.skillCandidates
+    : []
+  if (candidates.length === 0) {
+    root.append(make('p', '当前没有待审核候选。', 'panel empty'))
+  }
+  for (const candidate of candidates) root.append(candidateCard(candidate, make, options))
+
+  if (host !== undefined && host !== null) host.append(root)
+  return root
+}
+
+/**
+ * The compact curation status. Mode, update switch and refs stay in the
+ * on-demand detail; the main layer keeps one state and one human sentence.
+ */
+export function renderMemoryAnalysis(host, summaryRead, options = {}) {
+  const make = makeFactory(options)
+  const openDetail = openDetailFactory(options)
+  const root = make('section', undefined, 'section')
+  root.dataset.memorySection = 'analysis'
+  root.setAttribute('data-memory-section', 'analysis')
+  root.append(make('h2', '整理状态'))
+
+  if (summaryRead?.ok !== true) {
+    appendReadFailure(root, summaryRead?.failure, make, openDetail)
+    if (host !== undefined && host !== null) host.append(root)
+    return root
+  }
+
+  const view = summaryRead.value ?? {}
+  const analysis = view.analysis ?? { mode: 'unknown', state: 'unknown' }
+  const panel = make('div', undefined, 'panel')
+  const chip = make('span', analysis.state ?? 'unknown', 'state-chip')
+  chip.dataset.tone = stateTone(analysis.state)
   panel.append(
     chip,
-    element('p', `模式：${view.analysis.mode} · 自动写入：${view.autoUpdate ? '开启' : '关闭'}`),
-    element('p', view.analysis.failureRef
-      ? '整理过程有失败记录，可打开技术详情核对。'
-      : view.analysis.operationRef
+    make('p', analysis.failureRef
+      ? '上次整理有失败记录，可打开技术详情核对。'
+      : analysis.operationRef
         ? '已有记忆整理操作记录，可打开技术详情核对。'
         : '尚无记忆整理 operation。', 'muted'),
-    memoryTechnicalDetail('技术详情', () => ({
+    detailButton(make, '整理技术详情', {
       title: '记忆整理技术详情',
       eyebrow: '只读证据',
       entries: [
-        ['analysis.state', view.analysis.state],
-        ['analysis.mode', view.analysis.mode],
+        ['analysis.state', analysis.state],
+        ['analysis.mode', analysis.mode],
         ['autoUpdate', String(view.autoUpdate)],
-        ['analysis.operationRef', view.analysis.operationRef ?? ''],
-        ['analysis.failureRef', view.analysis.failureRef ?? ''],
+        ['analysis.operationRef', analysis.operationRef ?? ''],
+        ['analysis.failureRef', analysis.failureRef ?? ''],
       ],
-    })),
+    }, openDetail),
   )
-  analysis.append(panel)
-  primary.append(analysis)
-
-  const candidates = element('section', undefined, 'section')
-  candidates.dataset.memorySection = 'candidates'
-  candidates.append(element('h2', '待审核候选'))
-  if (view.skillCandidates.length === 0) {
-    candidates.append(element('p', '当前没有待审核候选。', 'panel empty'))
-  }
-  for (const candidate of view.skillCandidates) {
-    const card = element('article', undefined, 'panel')
-    card.append(
-      element('h3', candidate.proposedRule),
-      element('p', `状态：${candidate.state} · 作用域：${candidate.namespace}/${candidate.projectKey}${candidate.taskId ? `/${candidate.taskId}` : ''}`),
-      element('p', `来源：${candidate.sourceRefs.length} 条 · digest：${candidate.sourceDigests.length} 条`, 'muted'),
-      memoryTechnicalDetail('技术详情', () => ({
-        title: '候选技术详情',
-        eyebrow: '只读证据',
-        entries: [
-          ['candidateId', candidate.candidateId],
-          ['state', candidate.state],
-          ['namespace', candidate.namespace],
-          ['projectKey', candidate.projectKey],
-          ['taskId', candidate.taskId ?? ''],
-          ...candidate.sourceRefs.map((sourceRef, index) => [
-            `sourceRefs[${index}]`,
-            sourceRef,
-            'data-memory-source-ref',
-          ]),
-          ...candidate.sourceDigests.map((digest, index) => [
-            `sourceDigests[${index}]`,
-            digest,
-            'data-memory-source-digest',
-          ]),
-        ],
-      })),
-    )
-    if (candidate.state === 'candidate') {
-      const actions = element('div', undefined, 'actions')
-      for (const [decision, label] of [['approve', '接受'], ['reject', '拒绝'], ['defer', '延期']]) {
-        const button = element('button', label, `button${decision === 'approve' ? ' button--primary' : ''}`)
-        button.type = 'button'
-        bindMemoryReviewAction({
-          button,
-          candidateId: candidate.candidateId,
-          decision,
-          readReason: readReviewReason,
-          review: api.reviewMemoryCandidate,
-          refresh: refreshAfterReview,
-          showError: showReviewError,
-        })
-        actions.append(button)
-      }
-      card.append(actions)
-    }
-    candidates.append(card)
-  }
-  primary.append(candidates)
+  root.append(panel)
+  if (host !== undefined && host !== null) host.append(root)
+  return root
 }
 
-async function refresh() {
-  try {
-    const [{ status: runtimeStatus, error }, view] = await Promise.all([
-      loadRuntimeStatus(),
-      api.memorySummary({ namespace: 'project', limit: 20 }),
-    ])
-    renderRuntimeStatus(status, runtimeStatus, error)
-    render(view)
-  } catch (error) {
+/**
+ * The reason field stays mandatory for every formal review. It is created once
+ * and re-attached on refresh, so an in-progress reason is not lost.
+ */
+export function createMemoryReviewReason(host, options = {}) {
+  const make = makeFactory(options)
+  const field = make('label', '审核理由')
+  const input = make('textarea')
+  input.dataset.memoryReviewReason = ''
+  input.placeholder = '写明审核理由'
+  input.setAttribute('aria-label', '审核理由')
+  field.append(input)
+  const section = make('section', undefined, 'section')
+  section.dataset.memorySupport = 'review-reason'
+  section.append(
+    make('h2', '审核理由'),
+    make('p', '接受、拒绝或延期前，请写明理由。理由会随这次决定提交。', 'muted'),
+    field,
+  )
+
+  function readReason() {
+    const reason = String(input.value ?? '').trim()
+    if (!reason && typeof input.focus === 'function') input.focus()
+    return reason
+  }
+
+  if (host !== undefined && host !== null) host.append(section)
+  return { section, input, readReason }
+}
+
+function defaultProjectKeyFromSystemRead(systemRead) {
+  const keys = []
+  const liveKeys = []
+  for (const project of Array.isArray(systemRead?.projects) ? systemRead.projects : []) {
+    const key = textValue(project?.scope?.projectKey)
+    if (!key) continue
+    if (!keys.includes(key)) keys.push(key)
+    const hasLiveRuntime = Array.isArray(project?.tasks)
+      && project.tasks.some((row) => row?.basis === 'live-runtime')
+    if (hasLiveRuntime && !liveKeys.includes(key)) liveKeys.push(key)
+  }
+  if (liveKeys.length === 1) return liveKeys[0]
+  return keys.length === 1 ? keys[0] : ''
+}
+
+/**
+ * Bind the memory board read to the same project/mode pair the dashboard uses.
+ * URL selection wins; otherwise the runtime status supplies the mode and the
+ * system read supplies the one unambiguous project. An absent or ambiguous
+ * project stays unresolved instead of inventing a system scope.
+ */
+export async function resolveMemoryReadScope({
+  search = '',
+  statusReader = loadRuntimeStatus,
+  systemReader = api.systemDashboard,
+} = {}) {
+  const params = search instanceof URLSearchParams
+    ? search
+    : new URLSearchParams(typeof search === 'string' ? search : '')
+  let projectKey = textValue(params.get('projectKey'))
+  let mode = readMode(params.get('mode'))
+  if (projectKey && mode !== undefined) return { kind: 'project', projectKey, mode }
+
+  if (mode === undefined) {
+    let runtime
+    try {
+      runtime = await statusReader()
+    } catch (error) {
+      throw typedFailure(error, memoryScopeFailure())
+    }
+    if (runtime?.error) throw typedFailure(runtime.error, memoryScopeFailure())
+    mode = readMode(runtime?.status?.mode)
+  }
+
+  if (!projectKey) {
+    let systemRead
+    try {
+      systemRead = await systemReader()
+    } catch (error) {
+      throw typedFailure(error, memoryScopeFailure())
+    }
+    projectKey = defaultProjectKeyFromSystemRead(systemRead)
+    if (mode === undefined) mode = readMode(systemRead?.runtime?.mode)
+  }
+
+  if (!projectKey || mode === undefined) throw memoryScopeFailure()
+  return { kind: 'project', projectKey, mode }
+}
+
+function memoryBoardReadScope(scope) {
+  const projectKey = textValue(scope?.projectKey)
+  const mode = readMode(scope?.mode)
+  if ((scope?.kind !== 'project' && scope?.kind !== 'task') || !projectKey || mode === undefined) {
+    throw memoryScopeFailure()
+  }
+  if (scope.kind === 'task') {
+    const taskId = taskIdValue(scope.taskId)
+    if (typeof taskId !== 'string' || taskId === '') throw memoryScopeFailure()
+    return { projectKey, mode, taskId }
+  }
+  return { projectKey, mode }
+}
+
+/**
+ * Read the product board through the formal runtime API. The memory page never
+ * composes its own transport parameters or falls back to a system scope.
+ */
+export async function readProductBoard(scope, { readBoard = api.readProductBoard } = {}) {
+  return readBoard(memoryBoardReadScope(scope))
+}
+
+function mountMemoryPage(root) {
+  const template = mountPageTemplate(root, {
+    layout: 'collection',
+    active: 'Memory',
+    eyebrow: 'Memory Agent',
+    title: '记忆与候选审核',
+    lede: '查看记忆 agent session 与候选审核；接受、拒绝或延期都由你明确决定。',
+  })
+  const { primary, support, status } = template.hosts
+  const reason = createMemoryReviewReason()
+  let scope
+  let scopeFailure = null
+  let disposed = false
+
+  function showReviewError(error) {
     status.dataset.tone = 'danger'
     clearNode(status)
     status.append(
-      element('strong', error.code || 'memory.request.failed'),
-      element('span', ` · ${error.message} · owner=${error.ownerId} · next=${error.nextAction}`),
+      defaultElement('strong', error.code),
+      defaultElement('span', ` · ${error.message} · owner=${error.ownerId} · next=${error.nextAction}`),
     )
     appendPairingEntry(status, error)
   }
+
+  async function refresh() {
+    const [runtime, surface] = await Promise.all([
+      loadRuntimeStatus(),
+      readMemorySurface({
+        readBoard: () => (scope
+          ? readProductBoard(scope)
+          : Promise.reject(scopeFailure ?? memoryScopeFailure())),
+        readSummary: api.memorySummary,
+        scope,
+      }),
+    ])
+    if (disposed) return
+
+    renderRuntimeStatus(status, runtime.status, runtime.error)
+    clearNode(primary)
+    clearNode(support)
+
+    renderMemorySessions(primary, surface.board, { openDetail: template.detail.open })
+    renderMemoryAnalysis(primary, surface.summary, { openDetail: template.detail.open })
+    renderMemoryCandidates(primary, surface.summary, {
+      openDetail: template.detail.open,
+      readReason: reason.readReason,
+      review: api.reviewMemoryCandidate,
+      refresh: refreshAfterReview,
+      showError: showReviewError,
+    })
+
+    const candidates = surface.summary.ok && Array.isArray(surface.summary.value?.skillCandidates)
+      ? surface.summary.value.skillCandidates
+      : []
+    if (candidates.some((candidate) => candidate.state === 'candidate')) {
+      support.append(reason.section)
+    }
+  }
+
+  async function refreshAfterReview() {
+    await refresh()
+    reason.input.value = ''
+  }
+
+  window.addEventListener('pagehide', (event) => {
+    if (event?.persisted) return
+    disposed = true
+    template.dispose()
+  })
+
+  async function start() {
+    try {
+      scope = await resolveMemoryReadScope({ search: window.location.search })
+    } catch (failure) {
+      scopeFailure = failure
+    }
+    if (disposed) return
+    await refresh()
+  }
+
+  void start()
 }
 
-async function refreshAfterReview() {
-  await refresh()
-  reasonInput.value = ''
+if (typeof document !== 'undefined') {
+  const root = document.getElementById('page-root')
+  if (root) mountMemoryPage(root)
 }
-
-window.addEventListener('pagehide', (event) => {
-  if (event?.persisted) return
-  template.dispose()
-})
-
-void refresh()

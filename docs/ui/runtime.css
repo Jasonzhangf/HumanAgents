@@ -1621,3 +1621,179 @@ pre {
 .agent-activity-reference dt {
   font-weight: 600;
 }
+
+/* Product shell: five-board rail, center workspace, closable relation rail,
+   lightweight edge configuration and one shared mobile drawer. Every selector
+   is scoped to the product frame so the existing page templates keep their
+   current rules. */
+.product-frame {
+  display: flex;
+  flex-direction: column;
+  min-height: 100svh;
+  background: var(--surface-soft);
+}
+
+.product-topbar {
+  position: relative;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.product-topbar-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.product-topbar-button {
+  min-height: 44px;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+.product-workspace {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+.product-frame[data-relation="open"] .product-workspace {
+  grid-template-columns: 260px minmax(0, 1fr) 320px;
+}
+
+.product-board-layer,
+.product-relation-layer {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.product-board-layer {
+  border-right: 1px solid var(--line);
+}
+
+.product-relation-layer {
+  border-left: 1px solid var(--line);
+}
+
+.product-relation-layer[hidden] {
+  display: none;
+}
+
+.product-layer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.product-layer-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 680;
+}
+
+.product-board-body,
+.product-relation-body {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  padding: 10px;
+  overflow-y: auto;
+}
+
+.product-frame .page {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 18px 20px calc(84px + env(safe-area-inset-bottom));
+  min-width: 0;
+}
+
+.product-drawer-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 8px 20px 0;
+}
+
+.product-drawer-tab {
+  min-height: 38px;
+  padding: 5px 10px;
+}
+
+.product-drawer-tab[aria-selected="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.product-drawer-body {
+  padding-top: 12px;
+}
+
+.product-drawer-body > .product-board-body,
+.product-drawer-body > .product-relation-body {
+  padding: 0;
+  overflow: visible;
+}
+
+.product-edge-config .shell-corner {
+  min-height: 44px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  opacity: 0.78;
+}
+
+.product-edge-config .shell-corner:hover,
+.product-edge-config .shell-corner:focus-visible {
+  color: var(--ink);
+  opacity: 1;
+}
+
+@media (min-width: 901px) {
+  .product-board-toggle {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .product-topbar {
+    padding: 4px 12px;
+  }
+
+  .product-workspace,
+  .product-frame[data-relation="open"] .product-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .product-board-layer,
+  .product-relation-layer {
+    display: none;
+  }
+
+  .product-frame .page {
+    padding: 10px 12px calc(84px + env(safe-area-inset-bottom));
+  }
+
+  .product-drawer {
+    width: 100%;
+    max-width: 100%;
+  }
+}

@@ -25,6 +25,7 @@ import {
   type ExecutionRuntimePort,
   type EvidenceRef,
   validateCodeSearchReport,
+  validateProductPendingDecision,
   type Checkpoint,
   type Occurrence,
   type OccurrenceTaskBinding,
@@ -271,6 +272,8 @@ import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/
 import type {
   AgentRoleDisplay,
   LifecycleState,
+  ProductBoardIndex,
+  ProductPendingDecision,
   PublicOutputBinding,
   PublicOutputJournalPort,
   PublicOutputPublication,
@@ -296,6 +299,27 @@ import {
 import { createJsonlI2JournalPort } from '../i2-journal.js';
 import { readTaskAgentActivity, type DecodedTaskAgentActivitySelectionQuery,
   type AssembleTaskAgentActivityRemainingSourcesOptions } from './agent-activity-read.js';
+import {
+  composeProductBoardIndex,
+  composeProductSessionRead,
+  composeProductSessionMessages,
+  inspectionDisplayFactFromProjection,
+  productSelectionScope,
+  type ProductBoardScope,
+  type ProductInteractionFact,
+  type ProductInspectionDisplayFact,
+  type ProductMessageFact,
+  type ProductMemoryReadFacts,
+  type ProductReadSelection,
+  type ProductSessionRead,
+  type ProductTaskEventFact,
+} from './product-session-read.js';
+import { productResultText, selectProductOutput, type ProductOutputView } from './product-output-read.js';
+import {
+  composeProductRelations,
+  type ProductRelationsRead,
+  type ProductTaskRelationFact,
+} from './product-relations.js';
 import type {
   ConfiguredProjectCatalog,
   ConfiguredProjectReadSource,
@@ -492,6 +516,15 @@ export interface ExplicitProviderSettlementReadInput {
 export interface ExplicitProviderSettlementReadPort {
   read(input: ExplicitProviderSettlementReadInput): Promise<InteractionParentCommittedFact<InteractionProviderSettlementReceipt>>;
 }
+
+export interface ProductSessionReadScope {
+  readonly projectKey: string;
+  readonly mode: 'fake' | 'rcc';
+  readonly taskId?: string;
+  readonly sessionId?: string;
+}
+
+export type ProductReadRequestScope = ProductBoardScope | ProductSessionReadScope;
 
 export interface UiRuntimeTaskControlTarget {
   readonly projectKey: string;
@@ -1554,6 +1587,38 @@ function interactionClosurePersistenceError(error: unknown): UiRuntimeApiError {
  */
 function subscriptionIdForRequirement(requirementId: string): string {
   return `subscription:${requirementId}`;
+}
+
+/**
+ * Owner evidence for one task's committed identity and execution-lineage
+ * facts. The locators name the committed control Journal records, not the
+ * live task list. The relation projection accepts these exact refs only when
+ * the fact itself is present; absence of a fact never becomes an edge.
+ */
+function relationEvidenceForTask(organId: OrganId, snapshot: RuntimeTaskSnapshotInput): readonly EvidenceRef[] {
+  const scope: ScopeRef = { organId, taskId: snapshot.taskId };
+  const identity = snapshot.identitySource;
+  const lineage = snapshot.executionLineage;
+  const evidence: EvidenceRef[] = [];
+  if (identity !== undefined) {
+    evidence.push({
+      evidenceId: id('evidence', `identity-${snapshot.taskId.value}`),
+      kind: 'operation',
+      source: 'humanagent.app.task-identity',
+      locator: `journal://task-control/${snapshot.taskId.value}/identity/${identity.confirmationRef}`,
+      scope,
+    });
+  }
+  if (lineage !== undefined) {
+    evidence.push({
+      evidenceId: id('evidence', `lineage-${snapshot.taskId.value}`),
+      kind: 'operation',
+      source: 'humanagent.runtime.subscriptions',
+      locator: `journal://subscriptions/${lineage.subscriptionId}/occurrences/${lineage.occurrenceId}`,
+      scope,
+    });
+  }
+  return evidence;
 }
 
 /**
@@ -3452,20 +3517,390 @@ export class UiRuntimeService {
   }
 
   private dashboardFromSnapshots(tasks: readonly RuntimeTaskSnapshotInput[]): RuntimeDashboardProjection {
+    const interactions = this.explicitIntake.exportState().interactions;
+    const taskTitles = new Map(tasks.map((task) => [task.taskId.value, task.title]));
+    // Recent inputs are the persisted explicit interactions, not task rows.
+    // The interaction owner records `occurredAt` and the verified principal
+    // actor when the real HTTP entry decoded them. Absence stays absent: an
+    // interaction with no event time is not shown with a fake task time, and an
+    // interaction with no human actor is never relabeled human.
+    const recentInputs = interactions
+      .filter((interaction) => interaction.occurredAt !== undefined)
+      .sort((left, right) => (right.occurredAt ?? '').localeCompare(left.occurredAt ?? ''))
+      .slice(0, 5)
+      .map((interaction) => {
+        const taskRef = this.explicitInteractionTaskRef(interaction);
+        return {
+          text: interaction.rawInput,
+          receivedAt: interaction.occurredAt!,
+          ...(taskRef === undefined ? {} : { taskId: taskRef }),
+          ...(taskRef === undefined ? {} : { taskTitle: taskTitles.get(taskRef.value) ?? taskRef.value }),
+          source: interaction.actor?.kind === 'human' ? 'human' as const : 'task' as const,
+        };
+      });
     return projectRuntimeDashboard({
       mode: this.mode,
       tasks,
-      recentInputs: tasks
-        .filter((task) => task.input.trim().length > 0)
-        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-        .map((task) => ({
-          text: task.input,
-          receivedAt: task.updatedAt,
-          taskId: task.taskId,
-          taskTitle: task.title,
-          source: 'human',
-        })),
+      recentInputs,
     });
+  }
+
+  private explicitInteractionTaskRef(
+    interaction: ExplicitIntakeState['interactions'][number],
+  ): TaskId | undefined {
+    return interaction.confirmation?.taskRef
+      ?? (interaction.draft === undefined ? undefined : this.dispatchLedger.get(interaction.draft.draftId)?.taskId)
+      ?? (interaction.revision === undefined ? undefined : this.dispatchLedger.get(interaction.revision.draftId)?.taskId);
+  }
+
+  private explicitInteractionFacts(
+    selection: ProductReadSelection,
+  ): readonly ProductInteractionFact[] {
+    return this.explicitIntake.exportState().interactions.map((interaction) => {
+      const taskRef = this.explicitInteractionTaskRef(interaction);
+      return {
+        interactionId: interaction.interactionId,
+        state: interaction.state,
+        rawInput: interaction.rawInput,
+        ...(interaction.occurredAt === undefined ? {} : { occurredAt: interaction.occurredAt }),
+        ...(taskRef === undefined ? {} : { taskRef }),
+      };
+    }).filter((fact) => selection.taskId === undefined
+      || fact.taskRef?.value === selection.taskId.value);
+  }
+
+  private explicitInteractionMessages(
+    selection: ProductReadSelection,
+    organId: OrganId,
+  ): readonly ProductMessageFact[] {
+    const scope = productSelectionScope(selection);
+    return this.explicitIntake.exportState().interactions.flatMap((interaction) => {
+      const recordedTaskRef = this.explicitInteractionTaskRef(interaction);
+      // A task session only carries interactions the owner actually bound to
+      // that task. An unbound draft, clarification or status query stays in the
+      // project overview; the selected task id is never a fallback owner.
+      if (selection.taskId !== undefined
+        && recordedTaskRef?.value !== selection.taskId.value) {
+        return [];
+      }
+      const taskId = recordedTaskRef;
+      const targetRef: ProductMessageFact['targetRef'] = recordedTaskRef !== undefined
+        ? {
+            kind: 'interaction',
+            taskRef: recordedTaskRef,
+            scope: { kind: 'task', projectKey: selection.projectKey, mode: selection.mode, taskId: recordedTaskRef },
+          }
+        : {
+            kind: 'session',
+            sessionRef: { sourceKind: 'explicit-intake', sourceRef: interaction.interactionId },
+            scope,
+          };
+      return [{
+        ref: {
+          eventId: interaction.interactionId,
+          sourceId: 'explicit-intake',
+          scope: { organId, ...(taskId === undefined ? {} : { taskId }) },
+        },
+        targetRef,
+        actor: interaction.actor ?? {
+          kind: 'unknown',
+          sourceKind: 'explicit-intake',
+          sourceRef: interaction.interactionId,
+        },
+        ...(interaction.occurredAt === undefined
+          ? { occurredAtUnavailableReason: 'the explicit intake owner did not persist an event time' }
+          : { occurredAt: interaction.occurredAt }),
+        text: interaction.rawInput,
+        evidenceRefs: [],
+      }];
+    });
+  }
+
+  private productSelectionFor(scope: ProductBoardScope): ProductReadSelection {
+    if (scope.kind === 'task') {
+      if (scope.mode !== this.mode) {
+        throw new UiRuntimeApiError(
+          'product-read.mode-mismatch',
+          APP_OWNER,
+          `task scope mode ${scope.mode} is not the serve-bound mode ${this.mode}`,
+          'read the product board with the bound project mode',
+          409,
+        );
+      }
+      return { projectKey: scope.projectKey, mode: scope.mode, taskId: scope.taskId };
+    }
+    return { projectKey: scope.projectKey, mode: this.mode };
+  }
+
+  private productSelectionForRequest(scope: ProductReadRequestScope): ProductReadSelection {
+    if ('kind' in scope) return this.productSelectionFor(scope);
+    if (scope.mode !== this.mode) {
+      throw new UiRuntimeApiError(
+        'product-read.mode-mismatch',
+        APP_OWNER,
+        `read scope mode ${scope.mode} is not the serve-bound mode ${this.mode}`,
+        'read the product board with the bound project mode',
+        409,
+      );
+    }
+    return {
+      projectKey: scope.projectKey,
+      mode: scope.mode,
+      ...(scope.taskId === undefined ? {} : { taskId: id('task', scope.taskId) }),
+    };
+  }
+
+  private async productMemoryRead(): Promise<RuntimeReadResult<ProductMemoryReadFacts>> {
+    const reviewState = this.memory.reviewState;
+    if (reviewState === undefined) {
+      return { ok: false, failure: {
+        code: 'memory.review-state-unavailable',
+        ownerId: APP_OWNER,
+        message: 'the bound memory composition has no review-state reader',
+        nextAction: 'bind the memory review-state reader before enumerating the memory board',
+      } };
+    }
+    try {
+      const review = await reviewState();
+      return { ok: true, value: {
+        analysisState: review.analysis.state,
+        candidateCount: review.candidates.length,
+      } };
+    } catch (error) {
+      return { ok: false, failure: {
+        code: 'memory.review-state-failed',
+        ownerId: APP_OWNER,
+        message: `memory review-state read failed: ${error instanceof Error ? error.message : String(error)}`,
+        nextAction: 'restore the memory review-state reader before enumerating the memory board',
+      } };
+    }
+  }
+
+  private async productInspectionFacts(
+    selected: readonly RuntimeTaskSnapshotInput[],
+  ): Promise<RuntimeReadResult<readonly ProductInspectionDisplayFact[]>> {
+    const i2 = this.i2Reader;
+    if (i2 === undefined) {
+      return {
+        ok: false,
+        failure: {
+          code: 'inspection.i2-history-unavailable',
+          ownerId: APP_OWNER,
+          message: 'the serve-bound runtime has no I2 history reader bound',
+          nextAction: 'bind the canonical I2 history reader before enumerating inspection history',
+        },
+      };
+    }
+    try {
+      const histories = await Promise.all(selected.map((snapshot) => i2.listInspectionOccurrences({
+        taskScope: { organId: this.options.organId, taskId: snapshot.taskId },
+        limit: 10000,
+      })));
+      return {
+        ok: true,
+        value: histories.flatMap((history) => history.entries.map((occurrence) =>
+          inspectionDisplayFactFromProjection(occurrence, history.taskScope.taskId))),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        failure: {
+          code: 'inspection.i2-history-read-failed',
+          ownerId: APP_OWNER,
+          message: `inspection occurrence read failed: ${error instanceof Error ? error.message : String(error)}`,
+          nextAction: 'restore the canonical I2 history read before enumerating inspection history',
+        },
+      };
+    }
+  }
+
+  private async productBoardReadFacts(
+    selection: ProductReadSelection,
+    relationRead?: {
+      readonly snapshots: readonly RuntimeTaskSnapshotInput[];
+      readonly preserveExecutionRows: true;
+    },
+  ): Promise<{
+    readonly input: Parameters<typeof composeProductBoardIndex>[0];
+    readonly snapshots: readonly RuntimeTaskSnapshotInput[];
+  }> {
+    const observedAt = this.now().toISOString();
+    const snapshots = relationRead?.snapshots ?? await this.snapshotsWithIdentitySource();
+    const source = this.boundProjectSource();
+    const selectedTaskId = selection.taskId;
+    // The list projection folds a child execution into its parent's display
+    // row. Relation endpoints still need one exact interaction ref per Task,
+    // so the relation read keeps every committed row while the UI keeps its
+    // grouped presentation.
+    const taskListTasks = relationRead === undefined
+      ? snapshots
+      : snapshots.map((snapshot) => {
+        const flat = { ...snapshot };
+        delete flat.executionLineage;
+        return flat;
+      });
+    const taskList: RuntimeReadResult<RuntimeTaskListProjection> = {
+      ok: true,
+      value: projectRuntimeTaskList({ mode: this.mode, tasks: taskListTasks }),
+    };
+    const selected = selectedTaskId === undefined
+      ? snapshots
+      : snapshots.filter((snapshot) => snapshot.taskId.value === selectedTaskId.value);
+    const agentActivity = await Promise.all(selected.map((snapshot) =>
+      this.taskAgentActivityFor(source, this.mode, snapshot.taskId)));
+    return {
+      snapshots,
+      input: {
+        selection,
+        observedAt,
+        taskList,
+        agentActivity,
+        interactions: { ok: true, value: this.explicitInteractionFacts(selection) },
+        inspections: await this.productInspectionFacts(selected),
+        memory: await this.productMemoryRead(),
+      },
+    };
+  }
+
+  /**
+   * Public product board read. It only composes the A1 board module from the
+   * existing task-list, per-task agent activity, explicit interaction,
+   * inspection-occurrence history and memory readers. An absent reader stays
+   * an explicit source-unavailable failure instead of pretending the board is
+   * empty.
+   */
+  async productBoardIndex(scope: ProductBoardScope): Promise<ProductBoardIndex> {
+    return composeProductBoardIndex((await this.productBoardReadFacts(this.productSelectionFor(scope))).input);
+  }
+
+  /**
+   * Public product session read for one exact project/task scope. The board is
+   * composed once from the same facts; interaction messages carry the
+   * owner-decoded actor/time from explicit intake, never a task input or update
+   * time.
+   */
+  async productSessionRead(scope: ProductReadRequestScope): Promise<ProductSessionRead> {
+    const selection = this.productSelectionForRequest(scope);
+    const facts = await this.productBoardReadFacts(selection);
+    const boardIndex = composeProductBoardIndex(facts.input);
+    const selectedTaskId = selection.taskId;
+    const taskEvents: readonly ProductTaskEventFact[] = selectedTaskId === undefined
+      ? []
+      : facts.snapshots
+          .filter((snapshot) => snapshot.taskId.value === selectedTaskId.value)
+          .map((snapshot) => ({ taskId: snapshot.taskId, events: snapshot.recentEvents }));
+    const messages = composeProductSessionMessages({
+      selection,
+      organId: this.options.organId,
+      messages: this.explicitInteractionMessages(selection, this.options.organId),
+      taskEvents,
+    });
+    const sessionId = 'kind' in scope ? undefined : scope.sessionId;
+    return {
+      boardIndex,
+      messages: sessionId === undefined
+        ? messages
+        : messages.filter((message) =>
+          (message.targetRef.kind === 'session'
+            && message.targetRef.sessionRef.sourceRef === sessionId)
+          || (message.ref.sourceId === 'explicit-intake' && message.ref.eventId === sessionId)),
+    };
+  }
+
+  async productPendingDecision(scope: ProductReadRequestScope): Promise<ProductPendingDecision | null> {
+    const selection = this.productSelectionForRequest(scope);
+    const port = this.options.taskGrantPort;
+    // Without the durable grant readback no task can be proven grant-blocked.
+    if (port === undefined) return null;
+    for (const task of this.coordinator.taskSnapshots()) {
+      if (selection.taskId !== undefined && task.taskId.value !== selection.taskId.value) continue;
+      // A retained prepared operation is the real admission wait. A waiting
+      // row without that custody, or with any recorded grant fact, is not a
+      // pending grant decision.
+      if (task.state !== 'waiting' || task.executionRelease !== 'prepared') continue;
+      const readback = await port.readTaskGrant(task.taskId);
+      if (readback.grant !== null) continue;
+      const target = {
+        kind: 'interaction' as const,
+        taskRef: task.taskId,
+        scope: {
+          kind: 'task' as const,
+          projectKey: selection.projectKey,
+          mode: selection.mode,
+          taskId: task.taskId,
+        },
+      };
+      const decision: ProductPendingDecision = {
+        kind: 'task-grant',
+        target,
+        question: '是否批准继续执行这个任务？',
+        actions: ['grant'],
+        state: 'waiting',
+        readback: { grant: readback.grant, commit: readback.commit },
+        recoveryOwner: 'humanagent.app.ui-runtime.task-control',
+      };
+      validateProductPendingDecision(decision);
+      return decision;
+    }
+    return null;
+  }
+
+  /**
+   * Public product relation read for one exact project/task scope. It derives
+   * exact requirement/occurrence targets from the board, combines the typed
+   * identity source and committed execution lineage of each task, and projects
+   * only evidence-backed edges through the R module.
+   */
+  async productRelations(scope: ProductBoardScope): Promise<ProductRelationsRead> {
+    const selection = this.productSelectionFor(scope);
+    const focused = selection.taskId;
+    const snapshots = await this.snapshotsWithIdentitySource();
+    const facts = await this.productBoardReadFacts({
+      projectKey: selection.projectKey,
+      mode: selection.mode,
+    }, {
+      snapshots,
+      preserveExecutionRows: true,
+    });
+    const read = composeProductSessionRead({ ...facts.input, organId: this.options.organId });
+    // A task focus keeps the focus task, the children whose committed lineage
+    // points at it and the upstream parent it was executed under. Unrelated
+    // tasks stay out of the focused read.
+    const focusedTaskIds = new Set<string>();
+    if (focused !== undefined) {
+      focusedTaskIds.add(focused.value);
+      const focusSnapshot = snapshots.find((snapshot) => snapshot.taskId.value === focused.value);
+      const parentTaskId = focusSnapshot?.executionLineage?.parentTaskId;
+      if (parentTaskId !== undefined) focusedTaskIds.add(parentTaskId.value);
+      for (const snapshot of snapshots) {
+        if (snapshot.executionLineage?.parentTaskId.value === focused.value) {
+          focusedTaskIds.add(snapshot.taskId.value);
+        }
+      }
+    }
+    const targeted = focused === undefined
+      ? snapshots
+      : snapshots.filter((snapshot) => focusedTaskIds.has(snapshot.taskId.value));
+    const tasks: ProductTaskRelationFact[] = targeted.map((snapshot) => ({
+      taskId: snapshot.taskId,
+      ...(snapshot.identitySource === undefined ? {} : { identitySource: snapshot.identitySource }),
+      ...(snapshot.executionLineage === undefined ? {} : { executionLineage: snapshot.executionLineage }),
+      evidenceRefs: relationEvidenceForTask(this.options.organId, snapshot),
+    }));
+    return composeProductRelations({
+      read,
+      tasks,
+      ...(focused === undefined ? {} : { focusTaskId: focused }),
+    });
+  }
+
+  /**
+   * Public committed result for one task. It is selected from the existing
+   * authoritative publication reader, so task.output, provider text and
+   * checkpoints never enter the public body.
+   */
+  async productPublicOutput(taskId: TaskId): Promise<ProductOutputView> {
+    return selectProductOutput(await this.authoritativePublicOutputForTask(taskId));
   }
 
   taskDashboard(taskId: TaskId, authoritativePublication?: PublicOutputPublicationProjection): RuntimeTaskDashboardView {
@@ -3803,23 +4238,28 @@ export class UiRuntimeService {
         },
         currentState: task.currentState,
         priorInput: task.input,
-        investigation: task.output ? [task.output] : [],
+        // `investigation` and `output` keep the legacy TaskDetail surface for
+        // existing consumers. They are not committed public results: the real
+        // unified public result is `productPublicOutput`. `task.output` is the
+        // runtime's internal execution value and must never be rendered as the
+        // public body.
+        investigation: [],
         proposal: task.nextStep,
         nextAction: task.nextStep,
         requiredDecisions: [],
         customInputAllowed: false,
-        output: task.output
-          ? {
+        output: task.publicOutput === undefined || task.publicOutput.commits.length === 0
+          ? undefined
+          : {
             taskId: task.taskId,
             state: task.state === 'succeeded' || task.state === 'failed' || task.state === 'waiting'
               ? task.state
               : 'partial',
-            summary: task.output,
+            summary: productResultText(selectProductOutput(toPublicOutputProjection(task.publicOutput))),
             result: {},
             artifactRefs: [],
             evidenceRefs: task.events.flatMap((event) => event.evidenceRefs),
-          }
-          : undefined,
+          },
         observationRef: `task://${task.taskId.value}/observation`,
       });
     } catch (error) {

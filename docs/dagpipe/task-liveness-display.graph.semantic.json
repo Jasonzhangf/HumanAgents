@@ -9,5 +9,11 @@
     "hold_transport_fact": "由持有该流的页面本地判定传输事实（四值：已连接/已收拢/实时连接已断开/未提供）",
     "forward_to_work_card": "把 lineage、结果、blocker、实际 actions 与实时性转发进工作卡",
     "render_work_card_truth": "渲染真实状态、结果与可达入口，不机械拼接下一步"
+  },
+  "contracts": {
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "sessionBoard": "read_task_dashboard 与 forward_to_work_card 保留精确 task/session/instance refs 与 projectKey/mode；board 只作展示分类，不提供身份、权限或 Live 判断。Live 分类来自权威状态，不来自 updatedAt、role 或页面流连接。",
+    "waitingFacts": "project_liveness_state 必须区分等待 task grant、真实 decision（有 question/options）、系统/资源 blocker 与终态结果；不得合并成 waiting-for-answer。",
+    "resultFacts": "forward_to_work_card 与 render_work_card_truth 只使用同 binding 的公开提交 publication；pending/unknown 保留已确认 commits，无提交不画结果块。"
   }
 }

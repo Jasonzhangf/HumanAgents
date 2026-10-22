@@ -133,6 +133,77 @@ export function taskControlScopeQuery({ projectKey, mode } = {}) {
   return `?${new URLSearchParams({ projectKey, mode })}`
 }
 
+// Formal intervention requires an exact target. The legacy reads keep the
+// optional scope, but an approve/reject/stop request cannot fall back to an
+// unscoped route.
+function exactTaskControlScopeQuery(scope) {
+  const query = taskControlScopeQuery(scope)
+  if (!query) throw new TypeError('formal task control requires projectKey and mode')
+  return query
+}
+
+// Product reads carry one exact read scope. Only projectKey, mode and the
+// optional taskId cross this boundary; principal, owner and authority fields
+// in the caller's object are dropped instead of forwarded.
+function productReadScopeQuery(scope, { includeSession = false } = {}) {
+  if (scope === null || typeof scope !== 'object'
+    || typeof scope.projectKey !== 'string' || scope.projectKey.trim() === ''
+    || (scope.mode !== 'fake' && scope.mode !== 'rcc')) {
+    throw new TypeError('product read scope requires projectKey and mode=fake|rcc')
+  }
+  const query = new URLSearchParams({ projectKey: scope.projectKey, mode: scope.mode })
+  if (scope.taskId !== undefined) {
+    if (typeof scope.taskId !== 'string' || scope.taskId.trim() === '') {
+      throw new TypeError('product read taskId must be a non-empty string')
+    }
+    query.set('taskId', scope.taskId)
+  }
+  if (includeSession && scope.sessionId !== undefined) {
+    if (typeof scope.sessionId !== 'string' || scope.sessionId.trim() === '') {
+      throw new TypeError('product read sessionId must be a non-empty string')
+    }
+    query.set('sessionId', scope.sessionId)
+  }
+  return `?${query}`
+}
+
+function productOutputQuery(taskId) {
+  if (typeof taskId !== 'string' || taskId.trim() === '') {
+    throw new TypeError('product output requires a non-empty taskId')
+  }
+  return `?${new URLSearchParams({ taskId })}`
+}
+
+// The session is the only principal source. Only the formal request fields
+// cross this boundary, so a page cannot smuggle owner, confirmedBy or
+// authority into a control write.
+function formalTaskControlBody(input = {}, { capability = true } = {}) {
+  if (input === null || typeof input !== 'object') {
+    throw new TypeError('formal task control input must be an object')
+  }
+  if (typeof input.requestId !== 'string' || input.requestId === ''
+    || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) {
+    throw new TypeError('formal task control requires a requestId and a non-negative expectedRevision')
+  }
+  const body = {}
+  if (input.requestId !== undefined) body.requestId = input.requestId
+  if (input.expectedRevision !== undefined) body.expectedRevision = input.expectedRevision
+  if (capability && input.capability !== undefined) {
+    if (typeof input.capability !== 'object' || input.capability === null
+      || typeof input.capability.actionId !== 'string' || input.capability.actionId === ''
+      || !Array.isArray(input.capability.capabilities)
+      || input.capability.capabilities.length === 0
+      || input.capability.capabilities.some((entry) => typeof entry !== 'string' || entry === '')) {
+      throw new TypeError('formal task control capability must declare an actionId and non-empty capabilities')
+    }
+    body.capability = {
+      actionId: input.capability.actionId,
+      capabilities: input.capability.capabilities,
+    }
+  }
+  return body
+}
+
 function appendI2TaskScope(query, scope) {
   const readScope = scope === null || scope === undefined ? undefined : scope
   for (const [key, value] of new URLSearchParams(taskControlScopeQuery(readScope))) query.set(key, value)
@@ -198,6 +269,11 @@ export function createRuntimeApi(options = {}) {
     }),
     resetDisplayPreference: () => request('/api/ui/display-preference', { method: 'DELETE' }),
     dashboard: () => request('/api/dashboard'),
+    readProductBoard: (scope) => request(`/api/product/board${productReadScopeQuery(scope)}`),
+    readProductSession: (scope) => request(`/api/product/session${productReadScopeQuery(scope, { includeSession: true })}`),
+    readProductDecision: (scope) => request(`/api/product/decision${productReadScopeQuery(scope)}`),
+    readProductRelations: (scope) => request(`/api/product/relations${productReadScopeQuery(scope)}`),
+    readProductOutput: (taskId) => request(`/api/product/output${productOutputQuery(taskId)}`),
     listTasks: () => request('/api/tasks'),
     updateTask: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}`, {
       method: 'PATCH',
@@ -224,6 +300,31 @@ export function createRuntimeApi(options = {}) {
         body: JSON.stringify(input),
       },
     ),
+    // Formal intervention surface. The UI labels these actions 批准/拒绝, but
+    // only the existing grant/revoke/stop routes exist; no approve/reject
+    // server action is invented. The exact scope is mandatory.
+    readTaskDecision: (taskId, scope) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/control/grant${exactTaskControlScopeQuery(scope)}`,
+    ),
+    interveneTask: (taskId, input = {}, scope) => {
+      const query = exactTaskControlScopeQuery(scope)
+      if (input.action === 'grant') {
+        return request(`/api/tasks/${encodeURIComponent(taskId)}/control/grant${query}`, {
+          method: 'POST',
+          body: JSON.stringify(formalTaskControlBody(input)),
+        })
+      }
+      if (input.action === 'revoke') {
+        return request(`/api/tasks/${encodeURIComponent(taskId)}/control/revoke${query}`, {
+          method: 'POST',
+          body: JSON.stringify(formalTaskControlBody(input, { capability: false })),
+        })
+      }
+      if (input.action === 'stop') {
+        return request(`/api/tasks/${encodeURIComponent(taskId)}/stop${query}`, { method: 'POST' })
+      }
+      return Promise.reject(new TypeError(`unsupported task intervention action: ${String(input.action)}`))
+    },
     submitTaskContextCorrection: (taskId, body, taskScope) => request(
       `/api/tasks/${encodeURIComponent(taskId)}/control/context-correction${taskControlScopeQuery(taskScope)}`, {
         method: 'POST',

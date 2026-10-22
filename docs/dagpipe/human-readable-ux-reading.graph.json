@@ -1,6 +1,6 @@
 {
   "id": "humanagent-human-readable-ux-reading",
-  "version": "2",
+  "version": "3",
   "meta": {
     "requirements_version": 19,
     "requirements": [
@@ -28,7 +28,39 @@
     "actionNecessityContract": "只有具有实际 typed authority 和可用入口的动作才能出现。不得把机械 nextStep 当 action，也不得在 succeeded 后显示不存在的 stop；详情入口是主要下一层路径，不要求把全部控制搬到列表。",
     "actualExecutionGraphContract": "truth 读取同一任务范围已由 owner 解码的 native allocation、active-turn、resumed-segment、child invocation+delivery、review 与 planner records，并经 Runtime 纯选择器进入 contracts source；该候选快照通过现有 agentActivity 成功值的 actualExecutionGraph 到达 semantic 与 purpose。guidance、既有当前计划和已记录实际实例分开呈现；necessary 明确保留 unavailable/not-recorded、缺失关系与未归类事实；present 不把固定角色流程、时间、成员、技术实例 ID 或 commit ref 宣称为执行依赖或默认标签。",
     "readOnlyBoundary": "本图只有读取、解释与呈现。不得在此图消费需求、创建 Manager、提交 graph fact、acquire、execute、rebind 或执行 steer。已知读取范围 project/mode 必须在子项导航后保持；controlTarget 只授权控制，不授权读取范围。",
-    "p0Status": "本版冻结最小必要性、最小充分信息、lineage/result 与 action 可达性契约。P3/P4 负责投影和现有 shared controls 接线；当前实现仍为 UNVERIFIED。"
+    "p0Status": "本版冻结最小必要性、最小充分信息、lineage/result 与 action 可达性契约。P3/P4 负责投影和现有 shared controls 接线；当前实现仍为 UNVERIFIED。",
+    "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
+    "productReadContract": "五板块、精确 session、人读消息、有据关系、公开结果、待决定事项、主动介入和位置选择共用本图 truth→semantic→purpose→necessary→present 读取链。board 只作展示分类，不提供身份、权限或 Live 判断；Live/历史/未知按权威状态分类。",
+    "sourceContract": "truth 只接收既有 owner 已解码事实：task inventory、agent activity、turn history、typed lineage、TaskGrant/Attention/InputRequest、公开提交 publication。缺失或不可用时显式 unknown/unavailable；不用 task.input 推断 human，不用 task.updatedAt 代替事件时间，不从 title、邻近时间或角色顺序补关系。",
+    "sessionScopeContract": "每个 focus 至少携带精确 task 关联与 projectKey/mode 读取范围；session 或 execution instance 使用 TaskExecutionInstanceIdentity 等既有判别身份，不与 taskId 合成单一字符串。位置可以保存 ref 与 scope，不保存授权。",
+    "publicationContract": "公开结果只复用同一 binding 的 PublicOutputPublicationProjection：state、commits({commitId,journalSeq,recordDigest,text}) 与 publicCommitWatermark。pending/unknown 保留已确认 commits；无提交不画空结果块。不用 task.output、provider 文本或最新任意 checkpoint 代替。",
+    "nodeContracts": {
+      "truth": {
+        "input": "view_request { board?, scope {projectKey, mode}, focus exact ref?, lane live|history }",
+        "output": "truth_result { exact refs, session membership, owner-decoded actor/source/time, typed relations, publicOutput, pending decisions, missing/unknown reasons }",
+        "forbidden": "不从 task.input、updatedAt、role label、页面连接状态或 raw 日志生成业务事实"
+      },
+      "semantic": {
+        "input": "truth_result",
+        "output": "semantic_result { board items, messages, relations, public result, decision candidates, exact refs }",
+        "forbidden": "不把 role 当实例身份，不把 blocked 当等待人，不把关系缺边补成标题/时间边"
+      },
+      "purpose": {
+        "input": "semantic_result",
+        "output": "purpose_result { live/history/unknown collections, focus, minimal next-layer entry }",
+        "forbidden": "不用 updatedAt 或流连接判 Live；未知不计入 Live"
+      },
+      "necessary": {
+        "input": "purpose_result",
+        "output": "necessary_result { semantic title, real state/result/blocker, exact target actions, pending decision only with question/options, no empty result block }",
+        "forbidden": "不显示无 authority 的动作，不为无 question/options 的对象伪造审批"
+      },
+      "present": {
+        "input": "necessary_result",
+        "output": "present_result { rendered board/session/relations with exact refs and read scope }",
+        "forbidden": "不隐藏真实失败/unknown/恢复责任，不显示正常连接或完整性说明"
+      }
+    }
   },
   "inputs": [
     {
