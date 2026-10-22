@@ -21,15 +21,72 @@ const target = {
   scope: taskScope,
 }
 
-function productUrl(focus = target) {
+function productUrl(focus = target, { task = 'task-1', projectKey = 'project-1', mode = 'rcc' } = {}) {
   const location = {
     board: 'interaction',
     lane: 'live',
     focus,
-    scope: taskScope,
+    scope: focus.scope,
   }
-  return `http://127.0.0.1:49000/task-dashboard.html?task=task-1&projectKey=project-1&mode=rcc#${encodeURIComponent('')}`
-    .replace(/#$/, `#/boards/interaction/live?scope=${encodeURIComponent(JSON.stringify(location.scope))}&focus=${encodeURIComponent(JSON.stringify(location.focus))}`)
+  return `http://127.0.0.1:49000/task-dashboard.html?task=${task}&projectKey=${projectKey}&mode=${mode}`
+    + `#/boards/interaction/live?scope=${encodeURIComponent(JSON.stringify(location.scope))}`
+    + `&focus=${encodeURIComponent(JSON.stringify(location.focus))}`
+}
+
+function message(eventId, text, messageTarget = target) {
+  return {
+    ref: { eventId },
+    text,
+    targetRef: messageTarget,
+    actor: { kind: 'agent' },
+  }
+}
+
+function sessionBody({
+  scope = taskScope,
+  messages = [message('evt-1', '当前 target 正文')],
+} = {}) {
+  return { boardIndex: { scope }, messages }
+}
+
+function sessionReceipt({
+  status = 200,
+  body = sessionBody(),
+  search = { projectKey: 'project-1', mode: 'rcc', taskId: 'task-1' },
+} = {}) {
+  return {
+    method: 'GET',
+    path: '/api/product/session',
+    search,
+    status,
+    ok: Number.isInteger(status) && status >= 200 && status < 300,
+    settled: true,
+    body,
+  }
+}
+
+function focusSurface({
+  focusScope = 'task:project-1:rcc:task-1',
+  centerReady = true,
+  sessionHostCount = 1,
+  messageCount = 1,
+  messageEventIds = ['evt-1'],
+  messageTexts = ['当前 target 正文'],
+  emptyCount = 0,
+  unavailableCount = 0,
+  unavailableCode = '',
+} = {}) {
+  return {
+    centerReady,
+    focusScope,
+    sessionHostCount,
+    messageCount,
+    messageEventIds,
+    messageTexts,
+    emptyCount,
+    unavailableCount,
+    unavailableCode,
+  }
 }
 
 test('receipt evaluation refuses an empty run and a green check without evidence', () => {
@@ -90,43 +147,254 @@ test('execution progress must leave waiting and expose a real execution or resul
   }).ok, true)
 })
 
-test('navigation evaluation checks URL, hash focus, scope and the real session response', () => {
+test('navigation evaluation binds the fixed target to request, body and visible messages', () => {
   const url = productUrl()
   const good = evaluateNavigationState({
     actualUrl: url,
     expectedTarget: target,
     expectedScope: taskScope,
-    sessionStatus: 200,
-    sessionBodyText: '真实执行正文',
+    receipts: [sessionReceipt()],
+    surface: focusSurface(),
   })
   assert.equal(good.ok, true)
+  assert.equal(good.bodyState, 'messages')
 
-  const wrongTask = {
+  const empty = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [sessionReceipt({ body: sessionBody({ messages: [] }) })],
+    surface: focusSurface({
+      messageCount: 0,
+      messageEventIds: [],
+      messageTexts: [],
+      emptyCount: 1,
+    }),
+  })
+  assert.equal(empty.ok, true)
+  assert.equal(empty.bodyState, 'empty')
+
+  const unavailable = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [],
+    contractUnavailable: true,
+    surface: focusSurface({
+      messageCount: 0,
+      messageEventIds: [],
+      messageTexts: [],
+      emptyCount: 0,
+      unavailableCount: 1,
+      unavailableCode: 'product-session.read.unavailable-target',
+    }),
+  })
+  assert.equal(unavailable.ok, true)
+  assert.equal(unavailable.bodyState, 'unavailable')
+})
+
+test('navigation evaluation rejects stale or foreign visible bodies', () => {
+  const url = productUrl()
+
+  // The response body belongs to the new target, but the page still shows the
+  // previous target's message.
+  const staleVisible = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [sessionReceipt()],
+    surface: focusSurface({
+      messageEventIds: ['evt-old'],
+      messageTexts: ['上一个 target 的旧正文'],
+    }),
+  })
+  assert.equal(staleVisible.ok, false)
+  assert.equal(staleVisible.bodyState, 'stale')
+
+  // An explicit empty response must render an empty state, never the old body.
+  const oldBodyAfterEmpty = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [sessionReceipt({ body: sessionBody({ messages: [] }) })],
+    surface: focusSurface({
+      messageCount: 1,
+      messageEventIds: ['evt-old'],
+      messageTexts: ['上一个 target 的旧正文'],
+    }),
+  })
+  assert.equal(oldBodyAfterEmpty.ok, false)
+  assert.equal(oldBodyAfterEmpty.bodyState, 'stale')
+
+  // A contract-unavailable target must also refuse a retained old body.
+  const unavailableStale = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [],
+    contractUnavailable: true,
+    surface: focusSurface({
+      messageCount: 1,
+      messageEventIds: ['evt-old'],
+      messageTexts: ['上一个 target 的旧正文'],
+      unavailableCount: 1,
+      unavailableCode: 'product-session.read.unavailable-target',
+    }),
+  })
+  assert.equal(unavailableStale.ok, false)
+  assert.equal(unavailableStale.bodyState, 'stale')
+})
+
+test('navigation evaluation rejects wrong scope, non-2xx, missing messages and wrong requests', () => {
+  const url = productUrl()
+  const otherScope = {
+    ...taskScope,
+    taskId: { scope: 'task', value: 'task-2' },
+  }
+  const otherTarget = {
     ...target,
     taskRef: { scope: 'task', value: 'task-2' },
-    scope: { ...taskScope, taskId: { scope: 'task', value: 'task-2' } },
+    scope: otherScope,
   }
-  assert.equal(evaluateNavigationState({
-    actualUrl: url,
-    expectedTarget: wrongTask,
-    expectedScope: taskScope,
-    sessionStatus: 200,
-    sessionBodyText: '真实执行正文',
-  }).ok, false)
 
-  assert.equal(evaluateNavigationState({
+  // The response body describes another task scope.
+  const wrongScope = evaluateNavigationState({
     actualUrl: url,
     expectedTarget: target,
     expectedScope: taskScope,
-    sessionStatus: 500,
-    sessionBodyText: '真实执行正文',
-  }).ok, false)
+    receipts: [sessionReceipt({
+      body: sessionBody({
+        scope: otherScope,
+        messages: [message('evt-2', '另一个 target 正文', otherTarget)],
+      }),
+    })],
+    surface: focusSurface(),
+  })
+  assert.equal(wrongScope.ok, false)
+  assert.equal(wrongScope.bodyState, 'scope')
 
-  assert.equal(evaluateNavigationState({
+  // A 500 response is a failed read even when a body and visible text exist.
+  const failed500 = evaluateNavigationState({
     actualUrl: url,
     expectedTarget: target,
     expectedScope: taskScope,
-    sessionStatus: 200,
-    sessionBodyText: '   ',
-  }).ok, false)
+    receipts: [sessionReceipt({ status: 500 })],
+    surface: focusSurface(),
+  })
+  assert.equal(failed500.ok, false)
+  assert.equal(failed500.bodyState, 'failed')
+
+  // A 2xx body without a messages array is not a valid session body.
+  const missingMessages = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [sessionReceipt({ body: { boardIndex: { scope: taskScope } } })],
+    surface: focusSurface(),
+  })
+  assert.equal(missingMessages.ok, false)
+  assert.equal(missingMessages.bodyState, 'failed')
+
+  // The response body's message targetRef must name the fixed target.
+  const wrongBodyTarget = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [sessionReceipt({
+      body: sessionBody({ messages: [message('evt-2', '另一个 target 正文', otherTarget)] }),
+    })],
+    surface: focusSurface({
+      messageEventIds: ['evt-2'],
+      messageTexts: ['另一个 target 正文'],
+    }),
+  })
+  assert.equal(wrongBodyTarget.ok, false)
+  assert.equal(wrongBodyTarget.bodyState, 'target')
+
+  // The request query must name the same task as the fixed target.
+  const wrongRequest = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [sessionReceipt({
+      search: { projectKey: 'project-1', mode: 'rcc', taskId: 'task-2' },
+    })],
+    surface: focusSurface(),
+  })
+  assert.equal(wrongRequest.ok, false)
+  assert.equal(wrongRequest.state, 'request')
+
+  // The visible URL query must also describe the fixed target.
+  const wrongUrlQuery = evaluateNavigationState({
+    actualUrl: productUrl(target, { task: 'task-2' }),
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [sessionReceipt()],
+    surface: focusSurface(),
+  })
+  assert.equal(wrongUrlQuery.ok, false)
+  assert.equal(wrongUrlQuery.state, 'url')
+
+  // A URL focus from another target cannot stand in for the fixed target.
+  const wrongFocus = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: otherTarget,
+    expectedScope: otherScope,
+    receipts: [sessionReceipt()],
+    surface: focusSurface(),
+  })
+  assert.equal(wrongFocus.ok, false)
+  assert.equal(wrongFocus.state, 'url')
+
+  // A missing receipt is not a successful body read.
+  const noReceipt = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: target,
+    expectedScope: taskScope,
+    receipts: [],
+    surface: focusSurface(),
+  })
+  assert.equal(noReceipt.ok, false)
+  assert.equal(noReceipt.state, 'request')
+})
+
+test('navigation evaluation rejects a session request without the fixed focus parameters', () => {
+  const sessionTarget = {
+    kind: 'session',
+    sessionRef: { sourceKind: 'explicit-intake', sourceRef: 'intake-1' },
+    taskRef: { scope: 'task', value: 'task-1' },
+    scope: taskScope,
+  }
+  const url = productUrl(sessionTarget)
+  const body = sessionBody({
+    messages: [message('evt-1', '当前会话正文', sessionTarget)],
+  })
+  const missingSessionId = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: sessionTarget,
+    expectedScope: taskScope,
+    receipts: [sessionReceipt({ body })],
+    surface: focusSurface(),
+  })
+  assert.equal(missingSessionId.ok, false)
+  assert.equal(missingSessionId.state, 'request')
+
+  const wrongSessionKind = evaluateNavigationState({
+    actualUrl: url,
+    expectedTarget: sessionTarget,
+    expectedScope: taskScope,
+    receipts: [sessionReceipt({
+      body,
+      search: {
+        projectKey: 'project-1',
+        mode: 'rcc',
+        taskId: 'task-1',
+        sessionKind: 'inspection-occurrence',
+        sessionId: 'intake-1',
+      },
+    })],
+    surface: focusSurface(),
+  })
+  assert.equal(wrongSessionKind.ok, false)
+  assert.equal(wrongSessionKind.state, 'request')
 })
