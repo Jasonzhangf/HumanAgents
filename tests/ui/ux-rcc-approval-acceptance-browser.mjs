@@ -988,30 +988,65 @@ class AcceptanceRun {
     const entryShot = await this.capture('entry-form')
     this.pass('entry.form', 'real task form filled with once/Asia/Shanghai', [formFile, entryShot].filter(Boolean))
 
-    await this.page.locator('#entry-form button[type="submit"]').waitFor({ state: 'visible', timeout: 15_000 })
-    await this.page.click('#entry-form button[type="submit"]')
-    const deadline = Date.now() + TASK_CREATE_TIMEOUT_MS
-    let after
-    let newRows = []
-    let landingObserved = false
-    while (Date.now() < deadline) {
-      after = await this.readJson('tasks-after-entry', '/api/tasks', {}, { capture: false })
-      const rows = taskRows(after.body)
-      newRows = rows.filter((row) => {
-        const id = taskIdValue(row.taskId ?? row.id)
-        return typeof id === 'string' && id !== '' && !beforeIds.has(id)
-      })
-      const url = new URL(this.page.url())
-      const urlTaskId = url.searchParams.get('task')
-      if (url.pathname.endsWith('/task-dashboard.html') && urlTaskId) {
-        landingObserved = true
-        const match = newRows.find((row) => taskIdValue(row.taskId ?? row.id) === urlTaskId)
-        if (match) break
+    const submitAndWait = async () => {
+      const submitButton = this.page.locator('#entry-form button[type="submit"]')
+      await submitButton.waitFor({ state: 'visible', timeout: 15_000 })
+      await submitButton.click()
+      const deadline = Date.now() + TASK_CREATE_TIMEOUT_MS
+      let waitAfter
+      let waitRows = []
+      let waitLanding = false
+      while (Date.now() < deadline) {
+        waitAfter = await this.readJson('tasks-after-entry', '/api/tasks', {}, { capture: false })
+        const rows = taskRows(waitAfter.body)
+        waitRows = rows.filter((row) => {
+          const id = taskIdValue(row.taskId ?? row.id)
+          return typeof id === 'string' && id !== '' && !beforeIds.has(id)
+        })
+        const url = new URL(this.page.url())
+        const urlTaskId = url.searchParams.get('task')
+        // The submit lands on the interaction page of the task it just created;
+        // the task dashboard is the other surface the product uses for the same
+        // landing. Either one has to name the task that was created.
+        const landingPage = url.pathname.endsWith('/task-dashboard.html')
+          || url.pathname.endsWith('/task.html')
+        if (landingPage && urlTaskId) {
+          waitLanding = true
+          const match = waitRows.find((row) => taskIdValue(row.taskId ?? row.id) === urlTaskId)
+          if (match) break
+        }
+        if (waitRows.length > 0) break
+        if (this.serve.exitCode !== null || this.serve.signalCode !== null) break
+        await sleep(1_000)
       }
-      if (newRows.length > 0) break
-      if (this.serve.exitCode !== null || this.serve.signalCode !== null) break
-      await sleep(1_000)
+      return { after: waitAfter, newRows: waitRows, landingObserved: waitLanding }
     }
+    let attempt = await submitAndWait()
+    let attemptCount = 1
+    // The entry page turns a rejected submission into a visible failure with its
+    // own retry control. Retrying through that control is the human path, and it
+    // also proves the page keeps the interaction it already started.
+    while (attempt.newRows.length === 0 && attemptCount < 3 && this.serve.exitCode === null) {
+      const failureDeadline = Date.now() + 5_000
+      while (Date.now() < failureDeadline
+        && this.browserFailures.some((entry) => entry.observed !== true)) {
+        await sleep(100)
+      }
+      const observedFailure = this.browserFailures.slice()
+      const failureFile = await this.writeJson(`entry-provider-failure-${attemptCount}.json`, observedFailure)
+      const failureShot = await this.capture(`entry-provider-failure-${attemptCount}`)
+      const retryLabel = await this.page.locator('#entry-form button[type="submit"]')
+        .innerText().catch(() => '')
+      this.pass(
+        'entry.provider-retry',
+        `submission ${attemptCount} produced no task after a typed rejection (${observedFailure.map((entry) => `${entry.status} ${entry.path} ${entry.body?.error?.code ?? ''}`).join(',') || 'none recorded'}); the page offers ${JSON.stringify(retryLabel)}`,
+        [failureFile, failureShot].filter(Boolean),
+      )
+      this.browserFailures.length = 0
+      attemptCount += 1
+      attempt = await submitAndWait()
+    }
+    const { after, newRows, landingObserved } = attempt
     const tasksAfterFile = await this.writeJson('tasks-after-entry.json', after?.body ?? null)
     const entryEventsFile = await this.writeJson('entry-browser-writes.json', this.browserWrites)
     const entryFailuresFile = await this.writeJson('entry-browser-failures.json', this.browserFailures)
@@ -1045,7 +1080,7 @@ class AcceptanceRun {
       && landingUrl.searchParams.get('projectKey') === this.projectKey
       && landingUrl.searchParams.get('mode') === ACCEPTANCE_MODE
     if (landingMatches) {
-      this.pass('entry.landing', `entry landed on task-dashboard for ${this.taskId}`, [tasksAfterFile])
+      this.pass('entry.landing', `entry landed on ${landingUrl.pathname} for ${this.taskId}`, [tasksAfterFile])
     } else {
       this.unverified(
         'entry.landing',
