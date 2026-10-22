@@ -4,7 +4,7 @@ import {
   createScopedReadPublication,
   element,
   loadRuntimeStatus,
-  mountPageTemplate,
+  mountProductShell,
   mountSemanticObservationPanel,
   observationHref,
   queryParam,
@@ -53,7 +53,6 @@ import {
   renderTaskActualExecutionGraphSection,
   renderTaskPlanCurrentSection,
   renderTaskPlanSemanticView,
-  renderTaskPublicOutputPanel,
   renderTaskDescriptionContent,
   unavailableModeFailure,
 } from './task-display.js'
@@ -65,6 +64,27 @@ import {
   renderAgentActivityDetail,
 } from './agent-activity.js'
 import { createSubmissionIdentity } from './requirement-submission.js'
+import {
+  encodeProductLocation,
+  hierarchyReturn,
+  locationFromHash,
+  locationFromPopState,
+  productLocationHistoryState,
+} from './product-location.js'
+import { renderProductSessionView } from './product-session-view.js'
+import {
+  focusFromRelation,
+  productRelationRefKey,
+  relationDirection,
+  renderProductRelationChain,
+} from './product-relation-view.js'
+import {
+  isExactControllableTarget,
+  openDecisionModal,
+  readbackState,
+  renderInterventionEntry,
+  renderPendingDecision,
+} from './product-control-view.js'
 
 const taskId = taskIdFromQuery(false)
 const readScope = taskReadScopeFromQuery()
@@ -259,7 +279,518 @@ function evidenceTrigger(ref, { onOpenDetail = openPlanDetail } = {}) {
   return button
 }
 
-const template = mountPageTemplate(document.getElementById('page-root'), {
+const TASK_DASHBOARD_TEST_MODE = globalThis.__HUMANAGENT_TASK_DASHBOARD_TEST__ === true
+
+function productFailure(error, fallbackCode = 'product-read.failed') {
+  return {
+    code: typeof error?.code === 'string' && error.code ? error.code : fallbackCode,
+    ownerId: typeof error?.ownerId === 'string' && error.ownerId
+      ? error.ownerId
+      : 'humanagent.ui.task-dashboard',
+    message: typeof error?.message === 'string' && error.message
+      ? error.message
+      : '这次读取没有返回可用内容。',
+    nextAction: typeof error?.nextAction === 'string' && error.nextAction
+      ? error.nextAction
+      : '重试同一读取；如果仍然失败，打开技术详情核对来源。',
+  }
+}
+
+function productReadLocationFailure(message, nextAction = '从任务列表重新打开这个任务') {
+  return {
+    code: 'product-location.unknown',
+    ownerId: 'humanagent.ui.product-location',
+    message,
+    nextAction,
+  }
+}
+
+function productControllerHost(host, label) {
+  if (!host || typeof host.replaceChildren !== 'function' || typeof host.append !== 'function') {
+    throw new TypeError(`${label} must be a DOM element`)
+  }
+  return host
+}
+
+/**
+ * Consume the owner's ProductOutputView. Only an existing publication with at
+ * least one confirmed commit can reach the renderer; an empty selection never
+ * becomes an empty result block.
+ */
+export function selectProductOutputPublication(view) {
+  if (!view || typeof view !== 'object' || Array.isArray(view)) return undefined
+  const publication = view.publication
+  if (publication && typeof publication === 'object' && Array.isArray(publication.commits)
+    && publication.commits.length > 0) {
+    return publication
+  }
+  if (Array.isArray(view.commits) && view.commits.length > 0) {
+    return {
+      state: typeof view.state === 'string' ? view.state : 'unknown',
+      commits: view.commits,
+    }
+  }
+  return undefined
+}
+
+/** Exact edge identity. Display labels, titles and times never participate. */
+export function dedupeProductRelations(relations) {
+  if (!Array.isArray(relations)) return []
+  const seen = new Set()
+  const unique = []
+  for (const relation of relations) {
+    if (!relation || typeof relation !== 'object' || Array.isArray(relation)) continue
+    const key = [
+      productRelationRefKey(relation.source),
+      productRelationRefKey(relation.target),
+      relation.kind,
+    ].join('|')
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(relation)
+  }
+  return unique
+}
+
+function groundedProductRelations(relations) {
+  return dedupeProductRelations(relations).filter((relation) => (
+    typeof relation.sourceOwner === 'string'
+    && relation.sourceOwner.trim().length > 0
+    && Array.isArray(relation.evidenceRefs)
+    && relation.evidenceRefs.length > 0
+  ))
+}
+
+function productScopeKey(scope) {
+  if (scope?.kind === 'system') return 'system'
+  if (scope?.kind === 'project') return `project:${scope.projectKey}`
+  if (scope?.kind === 'task') {
+    return `task:${scope.projectKey}:${scope.mode}:${scope.taskId?.value ?? ''}`
+  }
+  return 'invalid-scope'
+}
+
+function defaultProductFocus(scope) {
+  if (scope?.kind !== 'task') return undefined
+  return { kind: 'interaction', taskRef: scope.taskId, scope }
+}
+
+function productScopeForFocus(focus, fallback) {
+  return focus?.scope?.kind === 'task' ? focus.scope : fallback
+}
+
+function normalizeProductLocationRead(value) {
+  if (value === undefined || value === null) {
+    return {
+      failure: productReadLocationFailure(
+        '当前页面没有可用的产品读取位置。',
+        '从板块或任务列表重新打开这个任务。',
+      ),
+    }
+  }
+  if (value.kind === 'valid' && value.location) return { location: value.location }
+  if (value.kind === 'unknown') {
+    return { failure: value.failure ?? productReadLocationFailure('产品读取位置无效。') }
+  }
+  if (value.board && value.scope) return { location: value }
+  return { failure: productReadLocationFailure('产品读取位置无效。') }
+}
+
+function renderProductFocusFailure(host, make, title, failure) {
+  host.replaceChildren()
+  const node = make('div', undefined, 'product-focus-failure')
+  node.setAttribute('data-product-role', 'focus-failure')
+  node.setAttribute('role', 'alert')
+  node.append(
+    make('strong', title),
+    make('p', `${failure.code} · ${failure.message}`, 'product-focus-failure-message'),
+    make('p', failure.nextAction, 'product-focus-failure-next'),
+  )
+  host.append(node)
+  return node
+}
+
+function renderProductRelationUnavailable(host, make, title, failure) {
+  host.replaceChildren()
+  const node = make('div', undefined, 'product-relation-unavailable')
+  node.setAttribute('data-product-role', 'relation-unavailable')
+  node.setAttribute('role', 'alert')
+  node.append(
+    make('strong', title),
+    make('p', `${failure.code} · ${failure.message}`, 'product-relation-unavailable-message'),
+    make('p', failure.nextAction, 'product-relation-unavailable-next'),
+  )
+  host.append(node)
+  return node
+}
+
+/**
+ * The task focus controller.
+ *
+ * It owns only focus-bound read sequencing and the two rendered hosts. The
+ * exact scope, URL codec, relation identity, session projection and formal
+ * control transport stay with their declared owners. A focus change invalidates
+ * every in-flight request; closing the relation layer only closes presentation.
+ */
+export function createTaskFocusController({
+  centerHost,
+  relationHost,
+  transport,
+  element: make = element,
+  readLocation = () => undefined,
+  writeLocation = () => undefined,
+  closeRelationLayer = () => undefined,
+  onSessionRendered,
+} = {}) {
+  productControllerHost(centerHost, 'product focus center host')
+  if (relationHost) productControllerHost(relationHost, 'product focus relation host')
+  if (typeof transport !== 'object' || transport === null) {
+    throw new TypeError('product focus controller requires a read transport')
+  }
+  if (typeof make !== 'function') throw new TypeError('product focus controller requires an element factory')
+
+  let disposed = false
+  let serial = 0
+  let activity = Promise.resolve()
+  let currentLocation
+  let controlWrites = 0
+  const state = {
+    focus: undefined,
+    scope: undefined,
+    location: undefined,
+    relations: [],
+    gaps: [],
+    sessionRead: 'idle',
+    outputRead: 'idle',
+    relationRead: 'idle',
+    controlWrites: 0,
+  }
+
+  const controlTransport = {
+    readTaskGrant: typeof transport.readTaskGrant === 'function'
+      ? transport.readTaskGrant.bind(transport)
+      : undefined,
+    grantTaskControl: typeof transport.grantTaskControl === 'function'
+      ? (...args) => {
+        controlWrites += 1
+        state.controlWrites = controlWrites
+        return transport.grantTaskControl(...args)
+      }
+      : undefined,
+    revokeTaskGrant: typeof transport.revokeTaskGrant === 'function'
+      ? (...args) => {
+        controlWrites += 1
+        state.controlWrites = controlWrites
+        return transport.revokeTaskGrant(...args)
+      }
+      : undefined,
+    stop: typeof transport.stop === 'function'
+      ? (...args) => {
+        controlWrites += 1
+        state.controlWrites = controlWrites
+        return transport.stop(...args)
+      }
+      : undefined,
+  }
+
+  function track(promise) {
+    const tracked = Promise.resolve(promise).catch(() => undefined)
+    activity = tracked
+    return promise
+  }
+
+  function renderPending() {
+    centerHost.replaceChildren()
+    const section = make('section', undefined, 'product-focus-center')
+    section.setAttribute('data-product-focus-state', 'pending')
+    section.append(make('h2', '当前会话'), make('p', '正在读取当前会话…', 'muted'))
+    centerHost.append(section)
+    if (relationHost) {
+      relationHost.replaceChildren()
+      relationHost.append(make('p', '正在读取关联…', 'muted'))
+    }
+  }
+
+  function renderCenter(sessionResult, outputResult, focus, scope) {
+    centerHost.replaceChildren()
+    const section = make('section', undefined, 'product-focus-center')
+    section.setAttribute('data-product-focus-state', 'ready')
+    section.setAttribute('data-product-focus-scope', productScopeKey(scope))
+    section.append(make('h2', '当前会话'))
+
+    const sessionBody = make('div', undefined, 'product-focus-session')
+    if (sessionResult.status === 'rejected') {
+      const failure = productFailure(sessionResult.reason, 'product-session.read.failed')
+      renderProductFocusFailure(sessionBody, make, '当前会话读取失败', failure)
+    } else {
+      const value = sessionResult.value
+      const messages = Array.isArray(value?.messages) ? value.messages : undefined
+      const publication = outputResult.status === 'fulfilled'
+        ? selectProductOutputPublication(outputResult.value)
+        : undefined
+      renderProductSessionView(sessionBody, {
+        ...(messages === undefined ? {} : { messages }),
+        ...(publication === undefined ? {} : { publicOutput: publication }),
+      }, { element: make })
+      if (outputResult.status === 'rejected') {
+        const failure = productFailure(outputResult.reason, 'product-output.read.failed')
+        const node = make('div', undefined, 'product-focus-output-failure')
+        node.setAttribute('data-product-role', 'output-failure')
+        node.setAttribute('role', 'alert')
+        node.append(
+          make('strong', '已提交结果读取失败'),
+          make('p', `${failure.code} · ${failure.message}`),
+          make('p', failure.nextAction, 'muted'),
+        )
+        sessionBody.append(node)
+      }
+    }
+    section.append(sessionBody)
+    centerHost.append(section)
+    if (typeof onSessionRendered === 'function') {
+      onSessionRendered(section, {
+        focus,
+        scope,
+        relations: state.relations,
+        output: outputResult.status === 'fulfilled' ? outputResult.value : undefined,
+      })
+    }
+  }
+
+  function renderRelationGaps(gaps) {
+    if (!relationHost || !Array.isArray(gaps) || gaps.length === 0) return
+    const section = make('section', undefined, 'product-relation-gaps')
+    section.setAttribute('data-product-role', 'relation-gaps')
+    section.append(make('h3', '未完成的关联'))
+    for (const gap of gaps) {
+      const stateLabel = gap?.state === 'absent' ? '事实不存在' : '事实存在但引用未记录'
+      section.append(make(
+        'p',
+        `${stateLabel}：${gap?.message ?? '未提供原因。'}`,
+        'product-relation-gap',
+      ))
+    }
+    relationHost.append(section)
+  }
+
+  function renderRelations(relationResult, focus) {
+    if (!relationHost) return
+    if (relationResult.status === 'rejected') {
+      const failure = productFailure(relationResult.reason, 'product-relations.read.failed')
+      state.relationRead = 'failed'
+      renderProductRelationUnavailable(relationHost, make, '关联读取不可用', failure)
+      return
+    }
+    const read = relationResult.value
+    const relations = Array.isArray(read?.relations) ? read.relations : []
+    const grounded = groundedProductRelations(relations)
+    state.relations = grounded
+    state.gaps = Array.isArray(read?.gaps) ? read.gaps : []
+    state.relationRead = 'ready'
+
+    relationHost.replaceChildren()
+    renderProductRelationChain(relationHost, grounded, {
+      element: make,
+      ...(focus === undefined ? {} : { focus }),
+      onSelect: (ref, direction) => {
+        void focusTo(ref, direction)
+      },
+    })
+    renderRelationGaps(state.gaps)
+  }
+
+  function focusSelectionTarget(ref, direction) {
+    if (direction !== 'upstream' && direction !== 'downstream') return undefined
+    const wanted = productRelationRefKey(ref)
+    const match = state.relations.find((relation) => {
+      if (relationDirection(relation, state.focus) !== direction) return false
+      const endpoint = direction === 'upstream' ? relation.source : relation.target
+      return productRelationRefKey(endpoint) === wanted
+    })
+    if (!match) return undefined
+    return focusFromRelation(match, state.focus, direction)
+  }
+
+  async function load({ location: supplied } = {}) {
+    if (disposed) return { ok: false, disposed: true }
+    const read = supplied === undefined
+      ? normalizeProductLocationRead(readLocation())
+      : normalizeProductLocationRead({ kind: 'valid', location: supplied })
+    if (read.failure) {
+      serial += 1
+      centerHost.replaceChildren()
+      renderProductFocusFailure(centerHost, make, '读取位置无效', read.failure)
+      if (relationHost) {
+        renderProductRelationUnavailable(relationHost, make, '关联读取不可用', read.failure)
+      }
+      return { ok: false, failure: read.failure }
+    }
+
+    const requestSerial = ++serial
+    const locationValue = read.location
+    currentLocation = locationValue
+    const focus = locationValue.focus ?? defaultProductFocus(locationValue.scope)
+    const scope = productScopeForFocus(focus, locationValue.scope)
+    state.location = locationValue
+    state.focus = focus
+    state.scope = scope
+    state.sessionRead = 'pending'
+    state.relationRead = 'pending'
+    state.outputRead = 'pending'
+    renderPending()
+
+    const sessionPromise = typeof transport.readProductSession === 'function'
+      ? Promise.resolve().then(() => transport.readProductSession(scope))
+      : Promise.reject(productFailure(
+        { code: 'product-session.read.unavailable', message: '当前页面没有会话读取入口。', ownerId: 'humanagent.ui.task-dashboard' },
+        'product-session.read.unavailable',
+      ))
+    const relationsPromise = typeof transport.readProductRelations === 'function'
+      ? Promise.resolve().then(() => transport.readProductRelations(scope))
+      : Promise.reject(productFailure(
+        { code: 'product.relations.unavailable', message: '关联读取未提供来源。', ownerId: 'humanagent.ui.task-dashboard' },
+        'product.relations.unavailable',
+      ))
+    const outputPromise = scope?.kind === 'task' && typeof transport.readProductOutput === 'function'
+      ? Promise.resolve().then(() => transport.readProductOutput(scope.taskId))
+      : Promise.resolve(undefined)
+
+    const [sessionResult, relationResult, outputResult] = await Promise.allSettled([
+      sessionPromise,
+      relationsPromise,
+      outputPromise,
+    ])
+    if (disposed || requestSerial !== serial) {
+      return { ok: false, superseded: true, focus, scope }
+    }
+
+    state.sessionRead = sessionResult.status === 'fulfilled' ? 'ready' : 'failed'
+    state.outputRead = outputResult.status === 'fulfilled'
+      ? (selectProductOutputPublication(outputResult.value) === undefined ? 'empty' : 'ready')
+      : 'failed'
+    renderCenter(sessionResult, outputResult, focus, scope)
+    renderRelations(relationResult, focus)
+    return { ok: true, focus, scope }
+  }
+
+  function reload() {
+    return track(load())
+  }
+
+  function applyLocation(locationValue) {
+    return track(load({ location: locationValue }))
+  }
+
+  async function focusTo(ref, direction) {
+    if (disposed || !ref || typeof ref !== 'object') return { ok: false, invalid: true }
+    const target = direction === undefined ? ref : focusSelectionTarget(ref, direction)
+    if (!target) return { ok: false, directionMissed: true }
+    const base = currentLocation
+    if (!base) return { ok: false, missingLocation: true }
+    const scope = productScopeForFocus(target, base.scope)
+    const next = {
+      board: base.board,
+      lane: base.lane,
+      focus: target,
+      scope,
+    }
+    try {
+      encodeProductLocation(next)
+    } catch {
+      return { ok: false, invalid: true }
+    }
+    serial += 1
+    state.focus = target
+    state.scope = scope
+    writeLocation(next)
+    return track(load({ location: next }))
+  }
+
+  async function returnToParent() {
+    if (disposed || !currentLocation) return { ok: false }
+    const parent = hierarchyReturn(currentLocation)
+    if (!parent) return { ok: false, atBoard: true }
+    writeLocation(parent.location)
+    return track(load({ location: parent.location }))
+  }
+
+  function closeRelation() {
+    closeRelationLayer()
+    return { ok: true, controlWrites }
+  }
+
+  async function settled() {
+    for (let index = 0; index < 4; index += 1) {
+      const current = activity
+      await current
+      await Promise.resolve()
+      if (current === activity) break
+    }
+  }
+
+  function dispose() {
+    disposed = true
+    serial += 1
+  }
+
+  return {
+    centerHost,
+    relationHost,
+    transport: controlTransport,
+    load: reload,
+    reload,
+    applyLocation,
+    focusTo,
+    returnToParent,
+    closeRelation,
+    settled,
+    dispose,
+    state: () => ({ ...state }),
+  }
+}
+
+function createTaskDashboardTestTemplate() {
+  const host = () => document.createElement('div')
+  return {
+    hosts: {
+      page: host(),
+      heading: host(),
+      status: host(),
+      primary: host(),
+      support: host(),
+      composer: host(),
+      board: null,
+      center: host(),
+      relation: host(),
+      drawer: null,
+      config: null,
+    },
+    shell: {
+      host: null,
+      initializeDisplayPreference() {},
+      applyDisplayMode() { return Promise.resolve({ ok: true }) },
+      dispose() {},
+    },
+    detail: {
+      open() { return {} },
+      close() {},
+      dispose() {},
+    },
+    setBreadcrumbs() {},
+    openBoard() {},
+    openRelation() {},
+    closeRelation() {},
+    toggleRelation() {},
+    openDrawer() {},
+    setDrawerTab() {},
+    closeDrawer() {},
+    dispose() {},
+  }
+}
+
+const template = TASK_DASHBOARD_TEST_MODE
+  ? createTaskDashboardTestTemplate()
+  : mountProductShell(document.getElementById('page-root'), {
   layout: 'work',
   active: 'Task List',
   eyebrow: 'Task Dashboard',
@@ -290,6 +821,213 @@ const template = mountPageTemplate(document.getElementById('page-root'), {
 })
 const { hosts, shell, detail } = template
 const { primary, support, status, heading } = hosts
+
+let productFocusController = null
+let productCenterHost = null
+let productRelationHost = null
+
+function productTaskScope() {
+  if (!explicitScope) return undefined
+  const value = typeof explicitScope.taskId === 'object'
+    ? explicitScope.taskId.value
+    : explicitScope.taskId
+  if (typeof value !== 'string' || value === '') return undefined
+  return {
+    kind: 'task',
+    projectKey: explicitScope.projectKey,
+    mode: explicitScope.mode,
+    taskId: { scope: 'task', value },
+  }
+}
+
+function productLocationMatchesTask(value) {
+  const scope = productTaskScope()
+  if (!scope || !value) return false
+  if (value.scope?.kind === 'task') {
+    return value.scope.projectKey === scope.projectKey
+      && value.scope.mode === scope.mode
+      && value.scope.taskId?.value === scope.taskId.value
+  }
+  if (value.scope?.kind === 'project') {
+    return value.scope.projectKey === scope.projectKey
+  }
+  return false
+}
+
+function readPageProductLocation() {
+  if (location.hash && location.hash.startsWith('#/boards/')) {
+    const decoded = locationFromHash(location.hash)
+    if (decoded.kind !== 'valid') return decoded
+    if (!productLocationMatchesTask(decoded.location)) {
+      return {
+        kind: 'unknown',
+        failure: productReadLocationFailure(
+          'URL 的产品读取范围与当前任务不一致。',
+          '返回当前任务后重新选择会话或关联节点。',
+        ),
+      }
+    }
+    return decoded
+  }
+  const scope = productTaskScope()
+  if (!scope) {
+    return {
+      kind: 'unknown',
+      failure: productReadLocationFailure(
+        '当前 URL 没有精确的 task、projectKey 和 mode。',
+        '从项目任务行重新打开任务看板。',
+      ),
+    }
+  }
+  return {
+    kind: 'valid',
+    location: {
+      board: 'interaction',
+      lane: 'live',
+      focus: { kind: 'interaction', taskRef: scope.taskId, scope },
+      scope,
+    },
+  }
+}
+
+function writePageProductLocation(next) {
+  const hash = encodeProductLocation(next)
+  const url = new URL(location.href)
+  window.history.pushState(productLocationHistoryState(next), '', `${url.pathname}${url.search}${hash}`)
+}
+
+function productScopeQuery(scope) {
+  const params = new URLSearchParams()
+  if (scope?.kind === 'task') {
+    params.set('projectKey', scope.projectKey)
+    params.set('mode', scope.mode)
+    params.set('taskId', scope.taskId?.value ?? '')
+  } else if (scope?.kind === 'project') {
+    params.set('projectKey', scope.projectKey)
+    if (explicitScope) params.set('mode', explicitScope.mode)
+  } else if (explicitScope) {
+    params.set('projectKey', explicitScope.projectKey)
+    params.set('mode', explicitScope.mode)
+  }
+  return params
+}
+
+async function fetchProductRead(path, params) {
+  const response = await globalThis.fetch(`${path}?${params}`)
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const failure = productFailure(
+      { ...(body?.error ?? body), status: response.status },
+      'product-read.http',
+    )
+    const error = new Error(failure.message)
+    Object.assign(error, failure, { status: response.status })
+    throw error
+  }
+  return body
+}
+
+function pageProductTransport() {
+  return {
+    readProductSession: (scope) => fetchProductRead('/api/product/session', productScopeQuery(scope)),
+    readProductRelations: (scope) => fetchProductRead('/api/product/relations', productScopeQuery(scope)),
+    readProductOutput: (taskIdValue) => {
+      const params = new URLSearchParams()
+      params.set('taskId', String(taskIdValue?.value ?? taskIdValue))
+      if (explicitScope) {
+        params.set('projectKey', explicitScope.projectKey)
+        params.set('mode', explicitScope.mode)
+      }
+      return fetchProductRead('/api/product/output', params)
+    },
+    readTaskGrant: (...args) => api.readTaskGrant(...args),
+    grantTaskControl: (...args) => api.grantTaskControl(...args),
+    revokeTaskGrant: (...args) => api.revokeTaskGrant(...args),
+    stop: (...args) => api.stop(...args),
+  }
+}
+
+function productDashboardIsLive() {
+  return Boolean(dashboard && ['created', 'admitted', 'running', 'settling', 'waiting'].includes(dashboard.state))
+}
+
+function productPendingDecision(focus) {
+  if (!taskGrantIntent || taskGrantReadState !== 'ready' || !taskGrantRead) return undefined
+  if (!isExactControllableTarget(focus)) return undefined
+  const scope = productTaskScope()
+  if (!scope) return undefined
+  const readback = readbackState(taskGrantRead.readback)
+  if (readback.kind === 'unknown') return undefined
+  return {
+    kind: 'task-grant',
+    target: { kind: 'interaction', taskRef: scope.taskId, scope },
+    question: '是否批准继续执行这个任务？',
+    actions: readback.kind === 'granted' ? ['revoke'] : ['grant'],
+    state: 'waiting',
+    ...(Number.isSafeInteger(readback.revision) ? { revision: readback.revision } : {}),
+    readback: {
+      grant: readback.grant,
+      commit: readback.commit,
+    },
+    recoveryOwner: 'humanagent.app.ui-runtime.task-control',
+  }
+}
+
+// The product center stays in the main layer. Formal controls are mounted under
+// it only when the focus is exact and the runtime reports a live state; a
+// permission question appears only when the grant readback is a real fact.
+function renderProductSessionExtras(host, { focus }) {
+  if (!focus || !isExactControllableTarget(focus)) return
+  if (productDashboardIsLive()) {
+    const interventionHost = element('div', undefined, 'product-focus-intervention')
+    interventionHost.dataset.productFocusControl = 'intervention'
+    renderInterventionEntry(interventionHost, focus, productFocusController?.transport ?? api, {
+      element,
+      modalHost: host,
+    })
+    host.append(interventionHost)
+  }
+  const decision = productPendingDecision(focus)
+  if (decision === undefined) return
+  const decisionHost = element('div', undefined, 'product-focus-decision')
+  decisionHost.dataset.productFocusControl = 'decision'
+  renderPendingDecision(decisionHost, decision, {
+    element,
+    onIntent: () => {
+      openDecisionModal({
+        decision,
+        transport: productFocusController?.transport ?? api,
+        element,
+        host: decisionHost,
+        title: '审批执行授权',
+      })
+    },
+  })
+  host.append(decisionHost)
+}
+
+function ensureProductFocus() {
+  if (TASK_DASHBOARD_TEST_MODE || !explicitScope) return null
+  if (productFocusController) return productFocusController
+  productCenterHost = element('div', undefined, 'product-focus-center-host')
+  productCenterHost.dataset.productFocusHost = 'center'
+  if (hosts.relation) {
+    productRelationHost = element('div', undefined, 'product-focus-relation-host')
+    productRelationHost.dataset.productFocusHost = 'relation'
+    hosts.relation.append(productRelationHost)
+  }
+  productFocusController = createTaskFocusController({
+    centerHost: productCenterHost,
+    ...(productRelationHost ? { relationHost: productRelationHost } : {}),
+    transport: pageProductTransport(),
+    element,
+    readLocation: readPageProductLocation,
+    writeLocation: writePageProductLocation,
+    closeRelationLayer: () => template.closeRelation?.(),
+    onSessionRendered: renderProductSessionExtras,
+  })
+  return productFocusController
+}
 
 function applyDisplayMode(mode) {
   return shell.applyDisplayMode(mode)
@@ -2302,6 +3040,9 @@ function renderDashboard() {
   currentSection.append(currentCopy)
   primary.append(currentSection)
 
+  const productFocus = ensureProductFocus()
+  if (productFocus) primary.append(productFocus.centerHost)
+
   const waitingStatus = dashboard.statusSections.waiting
   const waitingStatusAbsent = !waitingStatus || waitingStatus === ABSENT_WAITING_STATUS
   const absentPlan = absentPlanFailure(planHistoryState)
@@ -2344,18 +3085,6 @@ function renderDashboard() {
     }
     currentSection.append(currentFacts)
     primary.append(currentSection)
-  }
-
-  const outputPresent = (dashboard.output !== undefined && dashboard.output !== null && dashboard.output !== '')
-    || (dashboard.publicOutput !== undefined && dashboard.publicOutput !== null)
-  if (dashboard.state === 'succeeded' || outputPresent) {
-    const outputSection = element('section', undefined, 'section business-output')
-    outputSection.append(element('h2', '交付结果'))
-    outputSection.append(renderTaskPublicOutputPanel({
-      output: dashboard.output,
-      publication: dashboard.publicOutput,
-    }))
-    primary.append(outputSection)
   }
 
   const statuses = element('dl', undefined, 'detail-grid status-layers')
@@ -2519,6 +3248,7 @@ function renderDashboard() {
     '执行轨迹与只读观测',
     diagnosticsDetails,
   ))
+  if (productFocus) void productFocus.reload().catch(() => undefined)
 }
 
 /**
@@ -2884,9 +3614,15 @@ async function load() {
 // Back and forward re-read the exact target the URL now names. Only the open
 // checkpoint level reacts; leaving the level or closing the drawer clears it, so
 // a late popstate cannot publish into a departed host.
-function handlePopState() {
+function handlePopState(event) {
   if (historyView === 'checkpoints' && historyHost?.isConnected) {
     void renderCheckpointHistoryView(historyHost, true)
+  }
+  if (productFocusController && !TASK_DASHBOARD_TEST_MODE) {
+    const decoded = locationFromPopState(event)
+    if (decoded.kind === 'valid' && productLocationMatchesTask(decoded.location)) {
+      void productFocusController.applyLocation(decoded.location).catch(() => undefined)
+    }
   }
 }
 
@@ -2902,6 +3638,8 @@ function disposePage(event) {
   closeStream()
   closeAgentDetail()
   closeCheckpointDetail()
+  productFocusController?.dispose()
+  productFocusController = null
   semanticObservationPanel?.dispose()
   semanticObservationPanel = null
   semanticObservationHost = null
@@ -2914,6 +3652,8 @@ function disposePage(event) {
   template.dispose()
 }
 
-window.addEventListener('popstate', handlePopState)
-window.addEventListener('pagehide', disposePage)
-void load().then(() => shell.initializeDisplayPreference())
+if (!TASK_DASHBOARD_TEST_MODE) {
+  window.addEventListener('popstate', handlePopState)
+  window.addEventListener('pagehide', disposePage)
+  void load().then(() => shell.initializeDisplayPreference())
+}
