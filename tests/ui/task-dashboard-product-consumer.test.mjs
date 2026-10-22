@@ -348,6 +348,7 @@ function harness({
       throw new Error('the consumer must not stop from a read or close')
     }),
   }
+  const replaces = []
   const controller = createTaskFocusController({
     centerHost,
     relationHost,
@@ -355,6 +356,7 @@ function harness({
     element: createElement,
     readLocation,
     writeLocation: writeLocation ?? ((next) => writes.push(next)),
+    replaceLocation: (next) => replaces.push(next),
     closeRelationLayer: closeRelationLayer ?? (() => closes.push('closed')),
     ...(onSessionRendered === undefined ? {} : { onSessionRendered }),
   })
@@ -364,11 +366,33 @@ function harness({
     relationHost,
     transport,
     writes,
+    replaces,
     closes,
     sessionReads,
     decisionReads,
   }
 }
+
+test('a page opened without a product route canonicalizes its location without pushing history', async () => {
+  // A task page opened from a task list carries only the task query, so the
+  // first selection pushes a history entry while the entry before it has no
+  // product route. Back then returns a URL the page cannot read, and the focus
+  // stays on the node the human selected. The first read must therefore rewrite
+  // the current entry in place, so Back has a real location to restore.
+  const { controller, writes, replaces } = harness({
+    readLocation: () => ({ kind: 'valid', location: location(), canonicalize: true }),
+  })
+  await controller.load()
+  assert.equal(replaces.length, 1, 'the page rewrites its own history entry once')
+  assert.deepEqual(replaces[0].focus, interactionRef)
+  assert.deepEqual(replaces[0].scope, taskScope)
+  assert.equal(writes.length, 0, 'canonicalizing the current entry pushes no history')
+
+  // A page that already carries the route must not be rewritten.
+  const routed = harness()
+  await routed.controller.load()
+  assert.equal(routed.replaces.length, 0)
+})
 
 test('the focus location carries the exact scope and focus through the URL codec', async () => {
   const submissions = []

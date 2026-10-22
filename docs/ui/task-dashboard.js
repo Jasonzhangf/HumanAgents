@@ -684,7 +684,11 @@ function normalizeProductLocationRead(value) {
       ),
     }
   }
-  if (value.kind === 'valid' && value.location) return { location: value.location }
+  if (value.kind === 'valid' && value.location) {
+    return value.canonicalize === true
+      ? { location: value.location, canonicalize: true }
+      : { location: value.location }
+  }
   if (value.kind === 'unknown') {
     return { failure: value.failure ?? productReadLocationFailure('产品读取位置无效。') }
   }
@@ -771,6 +775,7 @@ export function createTaskFocusController({
   element: make = element,
   readLocation = () => undefined,
   writeLocation = () => undefined,
+  replaceLocation,
   closeRelationLayer = () => undefined,
   onSessionRendered,
 } = {}) {
@@ -994,6 +999,15 @@ export function createTaskFocusController({
 
     const requestSerial = ++serial
     const locationValue = read.location
+    if (read.canonicalize === true && supplied === undefined && typeof replaceLocation === 'function') {
+      // The page owns this rewrite: the URL gains the route the read already
+      // resolved, so Back and refresh restore the same focus.
+      try {
+        replaceLocation(locationValue)
+      } catch {
+        // A refused history write must not stop the read the page already owns.
+      }
+    }
     currentLocation = locationValue
     const focus = locationValue.focus ?? defaultProductFocus(locationValue.scope)
     const scope = productScopeForFocus(focus, locationValue.scope)
@@ -1270,6 +1284,9 @@ function readPageProductLocation() {
     }
     return decoded
   }
+  // No product route: this page was opened from a task list or a submit landing.
+  // The task scope below is the exact read position, and the caller canonicalizes
+  // it into the current history entry so Back has a location to restore.
   const scope = productTaskScope()
   if (!scope) {
     return {
@@ -1288,6 +1305,7 @@ function readPageProductLocation() {
       focus: { kind: 'interaction', taskRef: scope.taskId, scope },
       scope,
     },
+    canonicalize: true,
   }
 }
 
@@ -1305,16 +1323,31 @@ function productPageQuery(scope) {
   return params
 }
 
-export function writePageProductLocation(next) {
+function pageProductLocationUrl(next) {
   const hash = encodeProductLocation(next)
   const url = new URL(location.href)
   const query = productPageQuery(next?.scope).toString()
   // The query and hash always describe the same focus scope. Retaining the
   // old task query made refresh and Back/Forward reject the new focus.
+  return `${url.pathname}${query ? `?${query}` : ''}${hash}`
+}
+
+export function writePageProductLocation(next) {
   window.history.pushState(
     productLocationHistoryState(next),
     '',
-    `${url.pathname}${query ? `?${query}` : ''}${hash}`,
+    pageProductLocationUrl(next),
+  )
+}
+
+// A page opened from a task list carries only the task query, so its first
+// history entry has no product route and Back cannot restore it. Rewriting that
+// entry in place gives Back a location to return to without adding an entry.
+export function replacePageProductLocation(next) {
+  window.history.replaceState(
+    productLocationHistoryState(next),
+    '',
+    pageProductLocationUrl(next),
   )
 }
 
@@ -1430,6 +1463,7 @@ function ensureProductFocus() {
     element,
     readLocation: readPageProductLocation,
     writeLocation: writePageProductLocation,
+    replaceLocation: replacePageProductLocation,
     closeRelationLayer: () => template.closeRelation?.(),
     onSessionRendered: renderProductSessionExtras,
   })

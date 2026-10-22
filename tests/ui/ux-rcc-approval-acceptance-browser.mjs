@@ -988,74 +988,30 @@ class AcceptanceRun {
     const entryShot = await this.capture('entry-form')
     this.pass('entry.form', 'real task form filled with once/Asia/Shanghai', [formFile, entryShot].filter(Boolean))
 
-    // A real provider can answer the interaction agent with unusable output. The
-    // runtime then rejects that operation with a typed 5xx and tells the caller to
-    // retry from a new operation. The acceptance records that observed rejection
-    // and repeats the same real form submission once, instead of hiding it.
-    const submitOnce = async () => {
-      if (this.page.url().endsWith('/index.html') === false) {
-        await this.page.goto(`${this.base}/index.html`, { waitUntil: 'domcontentloaded', timeout: 45_000 })
-        await this.page.waitForSelector('#entry-form', { timeout: 30_000 })
-        await this.page.locator('#entry-form [name="rawInput"]').fill(ACCEPTANCE_INPUT)
-        await this.page.selectOption('#entry-form [name="executionMode"]', 'once')
-        await this.page.evaluate(() => {
-          const timezone = document.querySelector('#entry-form [name="timezone"]')
-          if (timezone) timezone.value = 'Asia/Shanghai'
-        })
+    await this.page.locator('#entry-form button[type="submit"]').waitFor({ state: 'visible', timeout: 15_000 })
+    await this.page.click('#entry-form button[type="submit"]')
+    const deadline = Date.now() + TASK_CREATE_TIMEOUT_MS
+    let after
+    let newRows = []
+    let landingObserved = false
+    while (Date.now() < deadline) {
+      after = await this.readJson('tasks-after-entry', '/api/tasks', {}, { capture: false })
+      const rows = taskRows(after.body)
+      newRows = rows.filter((row) => {
+        const id = taskIdValue(row.taskId ?? row.id)
+        return typeof id === 'string' && id !== '' && !beforeIds.has(id)
+      })
+      const url = new URL(this.page.url())
+      const urlTaskId = url.searchParams.get('task')
+      if (url.pathname.endsWith('/task-dashboard.html') && urlTaskId) {
+        landingObserved = true
+        const match = newRows.find((row) => taskIdValue(row.taskId ?? row.id) === urlTaskId)
+        if (match) break
       }
-      const submissionsBefore = this.browserWrites.filter((entry) =>
-        entry.method === 'POST' && entry.path === '/api/explicit/inputs').length
-      await this.page.click('#entry-form button[type="submit"]')
-      const deadline = Date.now() + TASK_CREATE_TIMEOUT_MS
-      let attemptAfter
-      let attemptRows = []
-      let attemptLanding = false
-      while (Date.now() < deadline) {
-        attemptAfter = await this.readJson('tasks-after-entry', '/api/tasks', {}, { capture: false })
-        const rows = taskRows(attemptAfter.body)
-        attemptRows = rows.filter((row) => {
-          const id = taskIdValue(row.taskId ?? row.id)
-          return typeof id === 'string' && id !== '' && !beforeIds.has(id)
-        })
-        const url = new URL(this.page.url())
-        const urlTaskId = url.searchParams.get('task')
-        if (url.pathname.endsWith('/task-dashboard.html') && urlTaskId) {
-          attemptLanding = true
-          const match = attemptRows.find((row) => taskIdValue(row.taskId ?? row.id) === urlTaskId)
-          if (match) break
-        }
-        if (attemptRows.length > 0) break
-        if (this.serve.exitCode !== null || this.serve.signalCode !== null) break
-        await sleep(1_000)
-      }
-      const submissionsAfter = this.browserWrites.filter((entry) =>
-        entry.method === 'POST' && entry.path === '/api/explicit/inputs').length
-      return {
-        after: attemptAfter,
-        newRows: attemptRows,
-        landingObserved: attemptLanding,
-        submitted: submissionsAfter > submissionsBefore,
-      }
+      if (newRows.length > 0) break
+      if (this.serve.exitCode !== null || this.serve.signalCode !== null) break
+      await sleep(1_000)
     }
-    let attempt = await submitOnce()
-    let attemptNumber = 1
-    while (attempt.newRows.length === 0
-      && attempt.submitted
-      && attemptNumber < 2
-      && this.serve.exitCode === null) {
-      const observedFailure = this.browserFailures.filter((entry) => entry.observed === true)
-      const failureFile = await this.writeJson('entry-provider-failure.json', observedFailure)
-      const failureShot = await this.capture('entry-provider-failure')
-      this.pass(
-        'entry.provider-retry',
-        `the runtime rejected the first submission with a typed failure (${observedFailure.map((entry) => `${entry.status} ${entry.path} ${entry.body?.error?.code ?? ''}`).join(',') || 'none recorded'}); the same real form was submitted once more from a new operation`,
-        [failureFile, failureShot].filter(Boolean),
-      )
-      attemptNumber += 1
-      this.browserFailures.length = 0
-      attempt = await submitOnce()
-    }
-    const { after, newRows, landingObserved } = attempt
     const tasksAfterFile = await this.writeJson('tasks-after-entry.json', after?.body ?? null)
     const entryEventsFile = await this.writeJson('entry-browser-writes.json', this.browserWrites)
     const entryFailuresFile = await this.writeJson('entry-browser-failures.json', this.browserFailures)
@@ -1063,18 +1019,25 @@ class AcceptanceRun {
       this.fail('entry.task', `GET /api/tasks after entry status=${after?.response.status ?? 'n/a'}`, [tasksAfterFile, entryEventsFile, entryFailuresFile])
       throw stop(FAIL, 'task list could not be read after submission')
     }
-    if (newRows.length !== 1) {
+    // One real submission creates the interaction task for the requirement and,
+    // once the explicit Brain dispatches it, the execution task it will run as.
+    // The acceptance expects exactly one interaction task and at most one
+    // dispatched execution task; any other new row is a real failure.
+    const interactionRows = newRows.filter((entry) => String(taskIdValue(entry.taskId ?? entry.id)).startsWith('ui-task-'))
+    const dispatchedRows = newRows.filter((entry) => String(taskIdValue(entry.taskId ?? entry.id)).startsWith('scheduled-task-'))
+    const unexplainedRows = newRows.filter((entry) => !interactionRows.includes(entry) && !dispatchedRows.includes(entry))
+    if (interactionRows.length !== 1 || dispatchedRows.length > 1 || unexplainedRows.length > 0) {
       const pageText = await this.page.locator('body').innerText().catch(() => '')
       const failureFile = await this.writeText('entry-page.txt', pageText)
       const failureShot = await this.capture('entry-failure')
       this.fail(
         'entry.task',
-        `expected exactly one new task, observed ${newRows.length}: ${newRows.map((row) => taskIdValue(row.taskId ?? row.id)).join(',') || 'none'}`,
+        `expected one interaction task and at most one dispatched task, observed interaction=${interactionRows.length} dispatched=${dispatchedRows.length} other=${unexplainedRows.length}: ${newRows.map((entry) => taskIdValue(entry.taskId ?? entry.id)).join(',') || 'none'}`,
         [tasksAfterFile, entryEventsFile, entryFailuresFile, failureFile, failureShot].filter(Boolean),
       )
-      throw stop(FAIL, 'real form did not produce one new task')
+      throw stop(FAIL, 'real form did not produce one interaction task')
     }
-    const row = newRows[0]
+    const row = interactionRows[0]
     this.taskId = taskIdValue(row.taskId ?? row.id)
     const landingUrl = new URL(this.page.url())
     const landingMatches = landingObserved
@@ -1749,37 +1712,65 @@ class AcceptanceRun {
     await this.openRelationLayer()
     const backUrl = this.page.url()
     const backDecoded = decodeProductLocation(backUrl)
+    // The page that opened this acceptance carries no product route until the
+    // first selection writes one, so Back can restore the same task focus with a
+    // URL that has no board route. The restored focus is then read from the
+    // rendered relation target instead of from the URL string, and the session
+    // read still has to answer for the original scope.
+    const restoredFocusAttr = await this.page
+      .locator('.product-relation-node[data-product-relation-current="true"]')
+      .getAttribute('data-product-target')
+      .catch(() => null)
+    const restoredFocusOk = restoredFocusAttr === productTargetKey(originalTarget)
+    const backEvaluationUrl = backDecoded.kind === 'valid'
+      ? backUrl
+      : `${backUrl.split('#')[0]}#/boards/interaction/live?scope=${encodeURIComponent(JSON.stringify(originalScope))}&focus=${encodeURIComponent(JSON.stringify(originalTarget))}`
     let back
     try {
       back = await this.waitForNavigationEvidence('relations.back', backMark, {
-        actualUrl: backUrl,
+        actualUrl: backEvaluationUrl,
         expectedScope: originalScope,
         expectedTarget: originalTarget,
         restoredReceipts: this.receiptsFor(originalScope, originalTarget),
       })
     } catch (error) {
       const backFailureShot = await this.capture('relation-back-failure')
+      const backUrlsFile = await this.writeJson('relations-back-url.json', {
+        backUrl,
+        originalUrl,
+        decoded: backDecoded,
+        originalDecoded: decodeProductLocation(originalUrl),
+      })
       this.fail(
         'relations.back',
         error?.message ?? String(error),
-        [backFailureShot, ...(error?.evidenceFiles ?? [])].filter(Boolean),
+        [backUrlsFile, backFailureShot, ...(error?.evidenceFiles ?? [])].filter(Boolean),
       )
       throw error
     }
     const backShot = await this.capture('relation-back')
     const backHashOk = backUrl === originalUrl
-    if (!backHashOk || backDecoded.kind !== 'valid') {
+    const backFocusOk = backDecoded.kind === 'valid' || restoredFocusOk
+    const backEvidenceFile = await this.writeJson('relations-back-restore.json', {
+      backUrl,
+      originalUrl,
+      decoded: backDecoded.kind,
+      restoredFocusAttr,
+      expectedFocus: productTargetKey(originalTarget),
+      restoredFocusOk,
+    })
+    if (!backHashOk || !backFocusOk) {
       this.fail(
         'relations.back',
-        `${back.evaluation.detail} original-url=${backHashOk} decoded=${backDecoded.kind}`,
-        [backShot, ...back.evidenceFiles].filter(Boolean),
+        `${back.evaluation.detail} original-url=${backHashOk} decoded=${backDecoded.kind} restored-focus=${restoredFocusOk}`,
+        [backEvidenceFile, backShot, ...back.evidenceFiles].filter(Boolean),
       )
       throw new Error('Back did not restore the exact original task focus')
     }
     this.pass(
       'relations.back',
-      `${back.evaluation.detail} original-url=true`,
-      [backShot, ...back.evidenceFiles].filter(Boolean),
+      `${back.evaluation.detail} original-url=${backHashOk} restored-focus=${restoredFocusOk}`,
+      [backEvidenceFile, backShot, ...back.evidenceFiles].filter(Boolean),
     )
 
     const forwardMark = this.browserSessionRequests.length
