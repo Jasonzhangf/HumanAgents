@@ -170,6 +170,14 @@ export interface RuntimeStatusProjection {
   readonly detail?: string;
   readonly modes: readonly RuntimeModeStatus[];
   readonly implicitScheduling?: RuntimeImplicitSchedulingProjection;
+  /**
+   * The Config-declared projectKey this runtime instance is bound to. The
+   * product shell resolves its own read scope from this value, so an entry URL
+   * without a project parameter never has to guess between the configured
+   * projects of the control root. It is absent only when the runtime has no
+   * Config-owned project binding at all.
+   */
+  readonly projectKey?: string;
 }
 
 export interface RuntimeImplicitSchedulingProjection {

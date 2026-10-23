@@ -332,21 +332,25 @@ function defaultProjectKeyFromSystemRead(systemRead) {
 
 /**
  * Resolve the complete board read scope. URL selection wins over page config.
- * A missing mode comes from the live runtime status. A missing project comes
- * from the configured-project read: the one project with live-runtime rows wins,
- * otherwise a sole configured project. An ambiguous catalog stays unresolved
+ * A missing mode and the runtime's own bound project key come from the live
+ * runtime status: the serve instance declares the one project it is bound to,
+ * so an unparameterised entry URL never guesses between configured projects.
+ * A missing project only falls back to the configured-project read (the one
+ * project with live-runtime rows, otherwise a sole configured project) when the
+ * runtime itself has no project binding. An ambiguous catalog stays unresolved
  * instead of guessing.
  */
-async function resolveBoardReadDefaults({ search, pageConfig = {} } = {}) {
+export async function resolveBoardReadDefaults({ search, pageConfig = {}, loadStatus = loadRuntimeStatus } = {}) {
   const params = searchParams(search)
   let projectKey = textValue(params.get('projectKey')) || configuredProjectKey(pageConfig)
   let mode = readMode(params.get('mode')) || configuredMode(pageConfig)
   if (projectKey && mode !== undefined) return { projectKey, mode }
 
-  if (mode === undefined) {
-    const runtime = await loadRuntimeStatus()
+  if (!projectKey || mode === undefined) {
+    const runtime = await loadStatus()
     if (runtime.error) return { projectKey, mode, failure: runtime.error }
-    mode = readMode(runtime.status?.mode)
+    if (!projectKey) projectKey = textValue(runtime.status?.projectKey)
+    if (mode === undefined) mode = readMode(runtime.status?.mode)
   }
 
   if (!projectKey) {

@@ -252,8 +252,11 @@ export function projectTasksHref(projectKey) {
   return `./tasks.html?projectKey=${encodeURIComponent(projectKey)}`
 }
 
+// The bare Task List URL defaults to the serve-bound project scope, so the
+// system ("全部项目") entry must carry the explicit system selection instead of
+// relying on the absence of a projectKey.
 export function systemTasksHref() {
-  return './tasks.html'
+  return './tasks.html?scope=system'
 }
 
 export function observationHref(taskId, scope) {

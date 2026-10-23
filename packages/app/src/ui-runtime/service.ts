@@ -3255,6 +3255,7 @@ export class UiRuntimeService {
         { mode: 'dsh', enabled: false, state: 'disabled', detail: 'DSH 接入完成后开放' },
       ],
       implicitScheduling: this.implicitSchedulingProjection() ?? this.queuedRequirementProjection(),
+      ...(this.options.projectKey === undefined ? {} : { projectKey: this.options.projectKey }),
     });
   }
 
@@ -7461,8 +7462,25 @@ export class UiRuntimeService {
     if (subscription.replay.some((event) => event.kind === 'execution.terminal' && event.terminalPhase === 'final')) finish();
   }
 
+  /**
+   * A retirement is the current scheduling terminal only while it is still the
+   * latest FIFO event. nextFifoSeq advances on every append, so an outcome at
+   * fifoSeq is current exactly when fifoSeq + 1 === nextFifoSeq and no newer
+   * head is pending. Once a newer requirement has been enqueued, the earlier
+   * outcome is journal history, not the current head state, and must no longer
+   * project blocked/explicit-brain.requirement-retired.
+   */
+  private isCurrentFifoTerminal(state: RequirementInboxState): boolean {
+    const terminal = state.terminalOutcomes?.at(-1);
+    return terminal !== undefined
+      && state.pendingDraftIds.length === 0
+      && terminal.fifoSeq + 1 === state.nextFifoSeq;
+  }
+
   private implicitSchedulingProjection(): import('../../../ui/contracts/runtime.js').RuntimeStatusProjection['implicitScheduling'] {
-    const terminalOutcomeAtHead = this.requirementInbox.exportState().terminalOutcomes?.at(-1);
+    const inboxState = this.requirementInbox.exportState();
+    const terminalIsCurrent = this.isCurrentFifoTerminal(inboxState);
+    const terminalOutcomeAtHead = terminalIsCurrent ? inboxState.terminalOutcomes?.at(-1) : undefined;
     const headIssue = this.implicitConsumerIssue ?? this.implicitTerminalIssue;
     // Requirements behind a blocked, waiting, or retired FIFO head are still
     // confirmed and undelivered; project that backlog instead of only the head.
@@ -7502,7 +7520,7 @@ export class UiRuntimeService {
         fifoSeq: requirement.fifoSeq,
       };
     }
-    if (this.implicitTerminalIssue && this.implicitTerminalRequirement) {
+    if (terminalIsCurrent && this.implicitTerminalIssue && this.implicitTerminalRequirement) {
       return {
         state: 'blocked',
         code: this.implicitTerminalIssue.code,

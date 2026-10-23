@@ -26,6 +26,7 @@ export const ADVERTISED_STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
     'For available file read/list/search, write/edit/present, bash, todo/goal, and web search results, state the actual target or query, observed result, evidence scope, and any truncation, failure, or unresolved boundary. A successful action or command exit is not verification of its effect.',
     'If this role has child adoption tools and a child has returned, require an explicit child.adopt or child.not_select decision before this close. Returned is not adopted, and not_select is not child failure.',
     'Put bounded facts and only exact accepted [HumanAgent evidence refs] into goal, actions, result, and expectedNextStep. After this four-part close, the Planner decides continue, complete, or failed; the Task can remain unfinished.',
+    'Delivery is separate from the summary: put the delivered material in deliveryText, and cite only a committed file write or an inspection result in deliveryRefs. Goal, todo, bash, and edit results prove what happened but never carry delivery material, so never cite them as delivery. A text-only delivery leaves deliveryRefs empty.',
     'If an inspection execution occurred, include the optional inspectionOutcome judgment for the executed scope; checks not executed remain missing.',
   ].join(' '),
   inputSchema: {
@@ -46,8 +47,8 @@ export const ADVERTISED_STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
         required: ['goal', 'actions', 'result', 'expectedNextStep'],
         additionalProperties: false,
       },
-      deliveryText: { type: 'string' },
-      deliveryRefs: { type: 'array', items: { type: 'string' } },
+      deliveryText: { type: 'string', description: 'Human-readable delivery material for this turn. For a text-only delivery put the material here and leave deliveryRefs empty.' },
+      deliveryRefs: { type: 'array', items: { type: 'string' }, description: 'Scoped references to delivery artifacts that can actually be committed to the turn: a file.write output or an inspection result. Never cite goal/todo/bash/edit results here; they carry no delivery material. A text-only delivery leaves this array empty.' },
     },
     required: ['summary', 'deliveryRefs'], additionalProperties: false,
   },

@@ -15,10 +15,14 @@ import {
 import { ContractError } from '../../packages/contracts/src/errors.js';
 import {
   createStandardTurnEndExecutor,
+  STANDARD_TURN_END_TOOL,
   StandardTurnEndError,
   type StandardTurnEndOwnerPort,
 } from '../../packages/app/src/ui-runtime/standard-turn-control.js';
-import { createStandardTurnEndWireExecutor } from '../../packages/app/src/ui-runtime/standard-turn-composition.js';
+import {
+  ADVERTISED_STANDARD_TURN_END_TOOL,
+  createStandardTurnEndWireExecutor,
+} from '../../packages/app/src/ui-runtime/standard-turn-composition.js';
 import type { ProviderToolExecutionPort } from '../../packages/adapters/provider/src/agent-driver.js';
 
 const organId = id('organ', 'organ-a');
@@ -315,4 +319,81 @@ test('wire executor rejects malformed inspection outcomes through the shared con
     assert.equal(result.error?.code, 'standard-turn-end.arguments');
   }
   assert.equal(routed, 0);
+});
+
+test('top-level delivery refs are resolved as delivery material, summary citations are not', async () => {
+  const resolutionKinds: Array<boolean | undefined> = [];
+  const owner = fakeOwner({
+    async resolveDelivery({ deliveryRefs, requireDeliveryMaterial }) {
+      resolutionKinds.push(requireDeliveryMaterial);
+      return deliveryRefs.map((reference) => {
+        if (reference !== KNOWN_REF) {
+          throw new StandardTurnEndError('standard-turn-end.delivery-unresolved', `unresolved ${reference}`);
+        }
+        return deliveryEvidence;
+      });
+    },
+  });
+  let routed = 0;
+  const wire = createStandardTurnEndWireExecutor(owner, createStandardTurnEndExecutor({
+    owner,
+    route: () => { routed += 1; },
+  }));
+  const result = await wire.execute({
+    execution,
+    scope,
+    call: call({
+      summary: {
+        goal: { text: 'goal text', evidenceRefs: [KNOWN_REF] },
+        actions: { text: 'actions text', evidenceRefs: [KNOWN_REF] },
+        result: { text: 'result text', evidenceRefs: [KNOWN_REF] },
+        expectedNextStep: { text: 'next step text', evidenceRefs: [KNOWN_REF] },
+      },
+      deliveryRefs: [KNOWN_REF],
+    }),
+    signal,
+  });
+  assert.equal(result.status, 'succeeded');
+  assert.equal(routed, 1);
+  assert.equal(resolutionKinds.length, 5);
+  assert.deepEqual(resolutionKinds.slice(0, 4), [undefined, undefined, undefined, undefined]);
+  assert.equal(resolutionKinds[4], true);
+});
+
+test('the advertised tools describe delivery refs as committed file writes or inspection results only', () => {
+  const schema: { properties?: Record<string, unknown> } = STANDARD_TURN_END_TOOL.inputSchema;
+  const advertisedSchema: { properties?: Record<string, unknown> } = ADVERTISED_STANDARD_TURN_END_TOOL.inputSchema;
+  for (const candidate of [schema, advertisedSchema]) {
+    const deliveryRefs = candidate.properties?.deliveryRefs as { description: string } | undefined;
+    if (deliveryRefs === undefined) throw new Error('the tool schema must declare deliveryRefs');
+    assert.match(deliveryRefs.description, /never cite goal/i);
+    const deliveryText = candidate.properties?.deliveryText as { description: string } | undefined;
+    if (deliveryText === undefined) throw new Error('the tool schema must declare deliveryText');
+    assert.match(deliveryText.description, /deliveryRefs empty/i);
+  }
+});
+
+test('delivery material is limited to committed file writes and inspection results', async () => {
+  const { carriesDeliveryMaterial, canCiteDeliveryMaterial } = await import('../../packages/app/src/provider-tool-execution.js');
+  assert.equal(carriesDeliveryMaterial('file.write'), true);
+  assert.equal(carriesDeliveryMaterial('file.read'), true);
+  assert.equal(carriesDeliveryMaterial('get_goal'), true);
+  for (const toolId of ['file.edit', 'bash', 'todo_write', 'create_goal', 'update_goal']) {
+    assert.equal(carriesDeliveryMaterial(toolId), false, `${toolId} must never carry delivery material`);
+  }
+  // Tools outside the advertised provider set register no completion at all,
+  // so a delivery reference to them could only fail unrecoverably at
+  // settlement with neither a file.write lookup nor an inspect completion.
+  for (const toolId of ['child.call', 'child.adopt', 'child.not_select', 'humanagent_turn_end']) {
+    assert.equal(carriesDeliveryMaterial(toolId), false,
+      `${toolId} must not carry delivery material because it records no settlement completion`);
+  }
+  // A reference that resolves to no succeeded tool result at all - the turn
+  // admission evidence or a failed call - has no completion either, so the
+  // boundary must refuse it instead of letting settlement fail unrecoverably.
+  assert.equal(canCiteDeliveryMaterial(undefined), false,
+    'turn admission evidence and failed calls must never cite as delivery material');
+  assert.equal(canCiteDeliveryMaterial('file.write'), true);
+  assert.equal(canCiteDeliveryMaterial('file.read'), true);
+  assert.equal(canCiteDeliveryMaterial('bash'), false);
 });

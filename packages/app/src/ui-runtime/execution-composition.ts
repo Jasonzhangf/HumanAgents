@@ -45,7 +45,7 @@ import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/a
 import type { AcceptedRawFact, AdmittedTurnIdentity, CompletionReadInput, EvidenceRef,
   ProviderToolDefinition, RawAsset, ScopeRef, WorkAssignment } from '../../../contracts/src/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
-import { createResponsesFileToolExecutor } from '../provider-tool-execution.js';
+import { canCiteDeliveryMaterial, createResponsesFileToolExecutor } from '../provider-tool-execution.js';
 import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
 import type { SemanticHistoryExactLookupV1 } from '../../../runtime/src/context/semantic-history.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
@@ -822,24 +822,38 @@ export function createDefaultExecutionComposition(input: {
           return acceptedEndCall?.kind === 'accepted-fact'
             ? { source: segmentSource!, request: record.record, acceptedEndCall: acceptedEndCall.entry } : null;
         } }),
-        async resolveDelivery({ deliveryRefs }) {
+        async resolveDelivery({ deliveryRefs, requireDeliveryMaterial }) {
           // Delivery references are the model's claims; they only count when they
           // resolve to real evidence scoped to this admitted turn. The admission
           // evidence and every accepted tool-result evidence are the actual
           // candidates; a foreign or missing reference rejects.
           const candidates: EvidenceRef[] = [admitted.evidence(allocation, binding.admissionCommitRef.commitId)];
+          const carryingTool = new Map<string, string>();
           const entries = await currentEntries();
           for (const entry of entries) {
             if (!('envelope' in entry)) continue;
             const fact = entry.envelope.fact;
             if (fact.kind !== 'tool-result') continue;
-            for (const ref of fact.result.evidenceRefs) candidates.push(ref);
+            // Only a succeeded result can ever carry committed delivery material;
+            // a failed call has no completion to read back.
+            const materialTool = fact.result.status === 'succeeded' ? fact.result.toolId : undefined;
+            for (const ref of fact.result.evidenceRefs) {
+              candidates.push(ref);
+              if (materialTool !== undefined) {
+                carryingTool.set(ref.evidenceId.value, materialTool);
+                carryingTool.set(ref.locator, materialTool);
+              }
+            }
             // The accepted raw-output citation is parent-scoped by construction.
             // It is admitted only when its accepted scope is exactly this admitted
             // turn's scope; no task equality or path alias stands in for scope.
             if (canonicalJsonStringify(fact.rawOutput.ref.scope) === canonicalJsonStringify(entry.envelope.scope)
               && canonicalJsonStringify(fact.rawOutput.ref.scope) === canonicalJsonStringify(allocation.scope)) {
               candidates.push(fact.rawOutput.ref);
+              if (materialTool !== undefined) {
+                carryingTool.set(fact.rawOutput.ref.evidenceId.value, materialTool);
+                carryingTool.set(fact.rawOutput.ref.locator, materialTool);
+              }
             }
           }
           const byReference = new Map<string, EvidenceRef>();
@@ -855,6 +869,25 @@ export function createDefaultExecutionComposition(input: {
                 'standard-turn-end.delivery-unresolved',
                 `delivery reference ${reference} does not resolve to evidence scoped to this admitted turn`,
               );
+            }
+            // The top-level delivery material must be evidence the settlement
+            // readback can actually commit: a succeeded tool result that carries
+            // a completion (a committed file write or an inspection result).
+            // Turn-admission evidence, a failed call, and every apply-kind result
+            // other than a committed file write have no completion, so citing one
+            // would only fail later at settlement with no recovery. Refuse it
+            // here, where the model can still retry with a text-only delivery.
+            if (requireDeliveryMaterial === true) {
+              const toolId = carryingTool.get(reference);
+              if (!canCiteDeliveryMaterial(toolId)) {
+                throw new StandardTurnEndError(
+                  'standard-turn-end.delivery-unresolved',
+                  `delivery reference ${reference} ${toolId === undefined
+                    ? 'does not resolve to a succeeded tool result'
+                    : `resolves to a ${toolId} result`} that cannot carry delivery material; `
+                  + 'deliveryRefs may cite only a committed file write or an inspection result',
+                );
+              }
             }
             resolved.push(match);
           }

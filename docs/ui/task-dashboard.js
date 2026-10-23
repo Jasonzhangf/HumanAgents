@@ -20,6 +20,7 @@ import {
   renderTaskRecords,
   sameStoredRecordRef,
   stateTone,
+  systemTasksHref,
   taskDetailHref,
   taskControlHref,
   taskIdFromQuery,
@@ -3457,7 +3458,7 @@ function renderDashboard() {
     const breadcrumbs = element('nav', undefined, 'breadcrumbs')
     breadcrumbs.setAttribute('aria-label', '范围面包屑')
     const system = element('a', '全部项目')
-    system.href = './tasks.html'
+    system.href = systemTasksHref()
     const project = element('a', '所属项目')
     project.href = `./tasks.html?projectKey=${encodeURIComponent(explicitScope.projectKey)}`
     breadcrumbs.append(system, project, element('span', '当前任务'))
