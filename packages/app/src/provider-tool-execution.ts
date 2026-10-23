@@ -631,11 +631,26 @@ function mutates(toolId: string): boolean {
  * material. Only `file.write` commits a durable completion; inspect-kind tools
  * report side-effect-free output the Gateway records as an inspect completion.
  * Every other apply action (`file.edit`, `bash`, `todo_write`, `create_goal`,
- * `update_goal`) changes state without a delivery completion, so its result can
- * never be delivered and must never be cited as a delivery reference.
+ * `update_goal`) changes state without a delivery completion, and every tool
+ * outside the advertised provider set (a backend harness tool, another control
+ * tool such as the turn end itself) records no completion at all, so their
+ * results can never be delivered and must never be cited as delivery references.
  */
 export function carriesDeliveryMaterial(toolId: string): boolean {
-  return toolId === 'file.write' || !mutates(toolId);
+  return toolId === 'file.write'
+    || (ADVERTISED_TOOL_IDS.includes(toolId) && !mutates(toolId));
+}
+
+/**
+ * Whether one resolved delivery reference may be cited as top-level delivery
+ * material. `toolId` is `undefined` when the reference did not resolve to a
+ * succeeded tool result of this turn: the turn admission evidence and any
+ * failed call record no completion, so neither can be delivered. This is the
+ * single rule the standard turn end boundary applies, kept separate from the
+ * settlement readback so the two cannot drift.
+ */
+export function canCiteDeliveryMaterial(toolId: string | undefined): boolean {
+  return toolId !== undefined && carriesDeliveryMaterial(toolId);
 }
 
 function providerToolRegistrations(): ToolRegistration[] {

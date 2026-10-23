@@ -374,11 +374,26 @@ test('the advertised tools describe delivery refs as committed file writes or in
 });
 
 test('delivery material is limited to committed file writes and inspection results', async () => {
-  const { carriesDeliveryMaterial } = await import('../../packages/app/src/provider-tool-execution.js');
+  const { carriesDeliveryMaterial, canCiteDeliveryMaterial } = await import('../../packages/app/src/provider-tool-execution.js');
   assert.equal(carriesDeliveryMaterial('file.write'), true);
   assert.equal(carriesDeliveryMaterial('file.read'), true);
   assert.equal(carriesDeliveryMaterial('get_goal'), true);
   for (const toolId of ['file.edit', 'bash', 'todo_write', 'create_goal', 'update_goal']) {
     assert.equal(carriesDeliveryMaterial(toolId), false, `${toolId} must never carry delivery material`);
   }
+  // Tools outside the advertised provider set register no completion at all,
+  // so a delivery reference to them could only fail unrecoverably at
+  // settlement with neither a file.write lookup nor an inspect completion.
+  for (const toolId of ['child.call', 'child.adopt', 'child.not_select', 'humanagent_turn_end']) {
+    assert.equal(carriesDeliveryMaterial(toolId), false,
+      `${toolId} must not carry delivery material because it records no settlement completion`);
+  }
+  // A reference that resolves to no succeeded tool result at all - the turn
+  // admission evidence or a failed call - has no completion either, so the
+  // boundary must refuse it instead of letting settlement fail unrecoverably.
+  assert.equal(canCiteDeliveryMaterial(undefined), false,
+    'turn admission evidence and failed calls must never cite as delivery material');
+  assert.equal(canCiteDeliveryMaterial('file.write'), true);
+  assert.equal(canCiteDeliveryMaterial('file.read'), true);
+  assert.equal(canCiteDeliveryMaterial('bash'), false);
 });
