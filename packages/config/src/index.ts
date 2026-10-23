@@ -1196,6 +1196,15 @@ function rewriteProjectWorkspace(contents: string, workspaceCwd: string): string
   const lines = contents.split(/\r?\n/);
   const headerIndex = lines.findIndex((line) => stripComment(line).trim() === '[project]');
   if (headerIndex === -1) {
+    // A root-level dotted assignment (`project.workspace = "..."`) is valid TOML
+    // and the parser accepts it as the project table, so rewrite that key in
+    // place instead of adding a competing `[project]` block.
+    const dottedIndex = lines.findIndex((line) => /^project\.workspace\s*=/u.test(stripComment(line).trim()));
+    if (dottedIndex !== -1) {
+      const next = [...lines];
+      next[dottedIndex] = `project.workspace = ${JSON.stringify(workspaceCwd)}`;
+      return next.join('\n');
+    }
     return `${contents.replace(/\s+$/u, '')}\n\n[project]\n${assignment}\n`;
   }
   let sectionEnd = lines.length;

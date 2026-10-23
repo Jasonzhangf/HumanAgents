@@ -2167,6 +2167,40 @@ test('CLI project use rewrites a commented or indented [project] table without d
   }
 });
 
+test('CLI project use rewrites a root-level project.workspace assignment in place', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-project-use-dotted-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  await mkdir(controlRoot, { recursive: true });
+  const configPath = join(controlRoot, 'config.toml');
+  // A root-level dotted assignment parses into the project table, so appending
+  // a `[project]` block would declare the same table twice and the next load
+  // would fail on a duplicate key.
+  await writeFile(configPath, [
+    'schemaVersion = 1',
+    'project.workspace = "/previous/workspace"',
+    '',
+    '[execution]',
+    'maxConcurrentTasks = 3',
+    '',
+  ].join('\n'), 'utf8');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const output = execFileSync(process.execPath, [
+    cli, 'project', 'use', '--workspace', workspace, '--control-root', controlRoot,
+  ], { encoding: 'utf8', stdio: 'pipe' });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  assert.equal((JSON.parse(output) as { readonly workspaceCwd: string }).workspaceCwd, paths.workspaceCwd);
+  const configText = await readFile(configPath, 'utf8');
+  assert.equal(configText.split(/\r?\n/u).filter((line) => line.replace(/#.*$/u, '').trim() === '[project]').length, 0);
+  assert.ok(configText.includes(`project.workspace = ${JSON.stringify(paths.workspaceCwd)}`));
+  assert.ok(configText.includes('maxConcurrentTasks = 3'));
+  // The rewritten config stays loadable and declares the selected workspace.
+  const declared = await resolveRuntimePaths({ controlRoot });
+  assert.equal(declared.workspaceCwd, paths.workspaceCwd);
+  assert.equal(declared.projectKey, paths.projectKey);
+});
+
 test('CLI host failures remain structured', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-host-error-'));
   const workspace = join(root, 'workspace');
