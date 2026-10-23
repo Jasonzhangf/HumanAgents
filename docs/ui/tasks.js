@@ -96,6 +96,35 @@ export function legacyTaskFocusHref(href) {
   return deep.kind === 'task' ? deep.href : null
 }
 
+/**
+ * Resolve the Task List read scope the same way the Dashboard resolves its
+ * board scope: an explicit URL scope always wins, and a bare URL falls back to
+ * the live serve binding (runtime status projectKey plus mode). The explicit
+ * `scope=system` selection keeps the system ("全部项目") list reachable even
+ * when the serve is bound to a project. A failed runtime status read never
+ * invents a scope; with no binding the page stays on the system scope.
+ */
+export function resolveTasksReadScope(search, runtime = { status: null, error: null }) {
+  const params = search instanceof URLSearchParams ? search : new URLSearchParams(search ?? '')
+  const explicitSystem = params.get('scope') === 'system'
+    && !params.get('projectKey') && !params.get('mode') && !params.get('task')
+  if (explicitSystem) return { kind: 'system' }
+
+  const deep = legacyTasksDeepLink(search)
+  if (deep.kind === 'project' || deep.kind === 'task') return deep.scope
+  if (deep.kind === 'invalid' || deep.kind === 'legacy') return deep
+
+  const status = runtime?.status
+  if (runtime?.error || !status || typeof status !== 'object') {
+    return { kind: 'system' }
+  }
+  const projectKey = typeof status.projectKey === 'string' ? status.projectKey.trim() : ''
+  if (projectKey === '') return { kind: 'system' }
+  const result = { kind: 'project', projectKey }
+  const mode = READ_MODES.has(status.mode) ? status.mode : undefined
+  return mode === undefined ? result : { ...result, mode }
+}
+
 function projectBreadcrumbs(label) {
   return [
     { label: '系统', href: './dashboard.html' },
@@ -104,7 +133,7 @@ function projectBreadcrumbs(label) {
   ]
 }
 
-function mountTasksPage() {
+async function mountTasksPage() {
   const deepLink = legacyTasksDeepLink(location.search)
 
   // An old task-scoped link enters the focus page directly. It is a one-shot
@@ -114,8 +143,16 @@ function mountTasksPage() {
     return
   }
 
-  const readScope = deepLink.kind === 'project' ? deepLink.scope : { kind: 'system' }
+  // An explicit URL scope never needs the serve binding. Only the bare default
+  // reads runtime status, the same way the Dashboard resolves its board scope.
+  const runtimeStatus = deepLink.kind === 'system'
+    ? await loadRuntimeStatus()
+    : null
+  const readScope = resolveTasksReadScope(location.search, runtimeStatus)
   const projectView = readScope.kind === 'project'
+  // An invalid or legacy link never reads. It keeps the system-shaped page
+  // frame while the explicit failure below names the real problem.
+  const pageScope = projectView || readScope.kind === 'system' ? readScope : { kind: 'system' }
 
   const template = mountPageTemplate(document.getElementById('page-root'), {
     layout: 'collection',
@@ -125,7 +162,7 @@ function mountTasksPage() {
     lede: projectView
       ? '这里列出这个项目本次读取返回的任务，并标明读取是否完整。'
       : '这里列出系统本次读取返回的项目，并标明读取范围是否已确认。',
-    scope: readScope,
+    scope: pageScope,
     breadcrumbs: projectView
       ? projectBreadcrumbs('当前项目')
       : [
@@ -198,11 +235,13 @@ function mountTasksPage() {
     setBreadcrumbs(projectBreadcrumbs(label))
   }
 
-  async function load() {
+  // The initial status result already decided the default scope, so the first
+  // render reuses it; a manual refresh reads the status again.
+  async function load(runtimeResult = null) {
     try {
       const [read, runtime] = await Promise.all([
         readPublication.refresh(readScope),
-        loadRuntimeStatus(),
+        runtimeResult ?? loadRuntimeStatus(),
       ])
       if (!read.published) return
       renderRuntimeStatus(status, runtime.status, runtime.error)
@@ -223,9 +262,9 @@ function mountTasksPage() {
     template.dispose()
   })
 
-  void load()
+  void load(runtimeStatus)
 }
 
 if (typeof document !== 'undefined' && typeof window !== 'undefined' && typeof location !== 'undefined') {
-  mountTasksPage()
+  void mountTasksPage()
 }

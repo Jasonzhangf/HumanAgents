@@ -4591,16 +4591,15 @@ test('implicit consumer retires a confirmed append whose taskRef is absent and c
   assert.equal(queuedDraftRow(pendingList, 'draft-2').requirementAdmission, 'queued');
 
   service.startImplicitConsumer();
-  await waitFor(() => {
-    const state = service.status().implicitScheduling;
-    assert.equal(state?.code, 'explicit-brain.requirement-retired');
-    assert.equal(state?.state, 'blocked');
-    assert.equal(state?.requirementId, 'requirement:draft-1:1');
-  });
+  // The retirement stays recorded as FIFO evidence, but the newer confirmed
+  // requirement is the current head state: the status projection must not keep
+  // the historical retirement blocked while later work proceeds.
+  await waitFor(() => assert.equal(service.implicitSchedulingIssue()?.code, 'explicit-brain.requirement-retired'));
+  assert.ok(service.status().implicitScheduling?.code !== 'explicit-brain.requirement-retired');
   await waitFor(() => assert.equal(service.listTasks().counts.total, 1));
   await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
   assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'dispatched');
-  assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
+  assert.equal(service.status().implicitScheduling, undefined);
   assert.equal(service.listTasks().counts.total, 1);
 });
 
@@ -4658,6 +4657,75 @@ test('public explicit dispatch reports a retired FIFO head without inventing a t
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 });
 
+test('a later confirmed requirement clears a retired FIFO head from the current scheduling status', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-retired-then-new-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const missingTaskId = id('task', 'missing-task');
+  const laterTask = service.createTask({ title: 'later task', directive: 'later task' });
+  const confirmAppend = async (suffix: string, taskRef: TaskId): Promise<string> => {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: `ui:${suffix}`,
+      rawInput: `append to task ${suffix}`,
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput: `append to task ${suffix}`,
+      matchedTasks: [{ taskId: taskRef, relation: 'current', status: 'running' }],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'append',
+      proposal: `append to task ${suffix}`,
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: `confirmation:${suffix}`,
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-23T00:00:00.000Z',
+      payloadRef: `asset://requirements/${suffix}`,
+    });
+    return interactionId;
+  };
+
+  const retiredInteraction = await confirmAppend('retired-head', missingTaskId);
+  await assert.rejects(
+    () => service.dispatchNextExplicitRequirement(),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'explicit-brain.requirement-retired'
+      && error.nextAction.includes('requirement:draft-1:1')
+      && error.httpStatus === 409,
+  );
+  // The FIFO has not advanced past the retirement, so it is still the current
+  // scheduling state.
+  assert.deepEqual(service.status().implicitScheduling, {
+    state: 'blocked',
+    code: 'explicit-brain.requirement-retired',
+    ownerId: 'humanagent.runtime',
+    message: `confirmed append target is not in the local task store: ${missingTaskId.value}`,
+    nextAction: 'inspect the retired requirement and resubmit against a current task',
+    requirementId: 'requirement:draft-1:1',
+    draftId: 'draft-1',
+    fifoSeq: 1,
+  });
+  assert.equal((await service.inspectExplicitInteraction(retiredInteraction)).state, 'confirmed');
+
+  // A newer requirement advances nextFifoSeq. The historical retirement stays
+  // recorded but must no longer project as the current scheduling state; the
+  // status falls through to undefined rather than the stale blocked retirement.
+  const laterInteraction = await confirmAppend('later-after-retired', laterTask.taskId);
+  const dispatched = await service.dispatchNextExplicitRequirement();
+  assert.equal(dispatched.requirement.requirementId, 'requirement:draft-2:1');
+  await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
+  assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'dispatched');
+  assert.equal(service.implicitSchedulingIssue()?.code, 'explicit-brain.requirement-retired');
+  assert.equal(service.status().implicitScheduling, undefined);
+  assert.equal(service.listTasks().counts.total, 1);
+});
+
 test('public explicit dispatch preserves retired evidence when a later requirement dispatches', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-retired-later-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
@@ -4708,7 +4776,9 @@ test('public explicit dispatch preserves retired evidence when a later requireme
   const dispatched = await service.dispatchNextExplicitRequirement();
   assert.equal(dispatched.requirement.requirementId, 'requirement:draft-2:1');
   assert.equal(service.implicitSchedulingIssue()?.code, 'explicit-brain.requirement-retired');
-  assert.equal(service.status().implicitScheduling?.requirementId, 'requirement:draft-1:1');
+  // The later requirement advanced the FIFO, so the historical retirement is no
+  // longer the current scheduling state even though its evidence is retained.
+  assert.equal(service.status().implicitScheduling, undefined);
   await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
   assert.equal((await service.inspectExplicitInteraction(retiredInteraction)).state, 'confirmed');
   assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'dispatched');
@@ -4774,7 +4844,9 @@ test('active implicit admission state takes precedence over historical retiremen
 
   releaseOccupying();
   await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
-  assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
+  // The FIFO advanced past the historical retirement, so the status projection
+  // must stop reporting it as the current scheduling state.
+  assert.equal(service.status().implicitScheduling, undefined);
 });
 
 test('confirmed append against a running task queues an input revision instead of failing with task.busy', async () => {

@@ -137,6 +137,7 @@ export interface RuntimeStatusInput {
   readonly detail?: string;
   readonly modes: readonly RuntimeModeStatus[];
   readonly implicitScheduling?: RuntimeStatusProjection['implicitScheduling'];
+  readonly projectKey?: string;
 }
 
 export interface RuntimeTaskSnapshotInput {
@@ -403,6 +404,7 @@ export function projectRuntimeStatus(input: RuntimeStatusInput): RuntimeStatusPr
     detail: input.detail,
     modes: input.modes,
     implicitScheduling: input.implicitScheduling,
+    ...(input.projectKey === undefined ? {} : { projectKey: input.projectKey }),
   };
 }
 

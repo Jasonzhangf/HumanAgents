@@ -176,6 +176,70 @@ test('role-only selection rejects a single unconfigured member', () => {
   );
 });
 
+test('role-only selection with a single unconfigured member falls back to the legacy provider and keeps the instance identity', () => {
+  const legacy = config('legacy-entry', 'legacy-model');
+  const roster = [effective('worker-unconfigured', 'execution')];
+  let receivedBinding: ProviderBinding | undefined;
+  let receivedProvider: ProviderConfig | undefined;
+  const overrides = {
+    endpointRef: 'rcc-v3:serve-bound',
+    configDigest: 'sha256:serve-bound-config',
+    capabilityDigest: 'sha256:serve-bound-capability',
+  } as const;
+  const composition = selectAgentProvider({
+    roleId: 'execution',
+    agentProviderBindings: roster,
+    legacyProvider: legacy,
+    legacyBindingOverrides: overrides,
+    createPort: (input) => {
+      receivedBinding = input.binding;
+      receivedProvider = input.provider;
+      return new RecordingPort(input.binding, input.binding);
+    },
+  });
+  assert.equal(composition.configuredAgentId, 'worker-unconfigured');
+  assert.equal(composition.roleId, 'execution');
+  assert.equal(composition.provider, legacy);
+  assert.equal(composition.source, 'rcc');
+  assert.equal(composition.binding.bindingId, 'legacy-entry');
+  assert.equal(composition.binding.endpointRef, overrides.endpointRef);
+  assert.equal(composition.binding.configDigest, overrides.configDigest);
+  assert.equal(composition.binding.capabilityDigest, overrides.capabilityDigest);
+  assert.equal(receivedBinding, composition.binding);
+  assert.equal(receivedProvider, legacy);
+});
+
+test('exact agentId with an unconfigured member falls back to the legacy provider and keeps the instance identity', () => {
+  const legacy = config('legacy-entry', 'legacy-model');
+  const roster = [effective('worker-unconfigured', 'execution')];
+  const composition = selectAgentProvider({
+    roleId: 'execution',
+    agentId: 'worker-unconfigured',
+    agentProviderBindings: roster,
+    legacyProvider: legacy,
+    createPort: (input) => new RecordingPort(input.binding, input.binding),
+  });
+  assert.equal(composition.configuredAgentId, 'worker-unconfigured');
+  assert.equal(composition.roleId, 'execution');
+  assert.equal(composition.provider, legacy);
+  assert.equal(composition.source, 'rcc');
+  assert.equal(composition.binding.bindingId, 'legacy-entry');
+});
+
+test('exact agentId with an unconfigured member and no legacy provider still rejects', () => {
+  assert.throws(
+    () => selectAgentProvider({
+      roleId: 'execution',
+      agentId: 'worker-unconfigured',
+      agentProviderBindings: [effective('worker-unconfigured', 'execution')],
+      createPort: () => {
+        throw new Error('createPort must not run');
+      },
+    }),
+    fail('agent-provider-binding.unconfigured'),
+  );
+});
+
 test('role without roster members uses legacy provider with a fresh port', () => {
   const legacy = config('legacy-entry', 'legacy-model');
   let receivedBinding: ProviderBinding | undefined;

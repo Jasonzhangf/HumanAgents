@@ -262,6 +262,8 @@ interface ResolvedAgentProviderSelection {
   readonly configuredAgentId?: string;
   readonly roleId: AgentRole;
   readonly provider: ProviderConfig;
+  /** True only when the resolved provider is the serve-level legacy provider. */
+  readonly fromLegacyFallback?: true;
 }
 
 function resolveSelectedInstance<
@@ -286,12 +288,20 @@ function resolveSelectedInstance<
       );
     }
     if (match.provider === undefined) {
-      throw new AppLifecycleError(
-        'agent-provider-binding.unconfigured',
-        `selected agent ${input.agentId} has no effective provider`,
-        'configure a provider block for the selected agent or its shared top-level provider',
-        AGENT_PROVIDER_OWNER,
-      );
+      if (input.legacyProvider === undefined) {
+        throw new AppLifecycleError(
+          'agent-provider-binding.unconfigured',
+          `selected agent ${input.agentId} has no effective provider`,
+          'configure a provider block for the selected agent or its shared top-level provider',
+          AGENT_PROVIDER_OWNER,
+        );
+      }
+      return {
+        configuredAgentId: match.agentId,
+        roleId: match.roleId,
+        provider: input.legacyProvider,
+        fromLegacyFallback: true,
+      };
     }
     return { configuredAgentId: match.agentId, roleId: match.roleId, provider: match.provider };
   }
@@ -308,6 +318,7 @@ function resolveSelectedInstance<
     return {
       roleId: input.roleId,
       provider: input.legacyProvider,
+      fromLegacyFallback: true,
     };
   }
   if (matches.length > 1) {
@@ -320,12 +331,20 @@ function resolveSelectedInstance<
   }
   const selected = matches[0]!;
   if (selected.provider === undefined) {
-    throw new AppLifecycleError(
-      'agent-provider-binding.unconfigured',
-      `agent ${selected.agentId} for role ${input.roleId} has no effective provider`,
-      'configure a provider block for the selected agent or its shared top-level provider',
-      AGENT_PROVIDER_OWNER,
-    );
+    if (input.legacyProvider === undefined) {
+      throw new AppLifecycleError(
+        'agent-provider-binding.unconfigured',
+        `agent ${selected.agentId} for role ${input.roleId} has no effective provider`,
+        'configure a provider block for the selected agent or its shared top-level provider',
+        AGENT_PROVIDER_OWNER,
+      );
+    }
+    return {
+      configuredAgentId: selected.agentId,
+      roleId: selected.roleId,
+      provider: input.legacyProvider,
+      fromLegacyFallback: true,
+    };
   }
   return { configuredAgentId: selected.agentId, roleId: selected.roleId, provider: selected.provider };
 }
@@ -334,6 +353,11 @@ function resolveSelectedInstance<
  * Selects one effective provider composition for a configured agent instance.
  * Exact agentId is the only explicit instance selector; a role-only selection
  * must be unique across the full roster, including unconfigured members.
+ *
+ * A resolved instance without its own effective provider falls back to the
+ * serve-level legacy provider. The legacy fallback keeps the resolved instance
+ * identity, so the roster's configured agent still owns the execution, and the
+ * legacy binding overrides align the port with the serve-selected provider.
  * Every rejection happens before any provider port is constructed.
  */
 export function selectAgentProvider<
@@ -343,7 +367,7 @@ export function selectAgentProvider<
   const provider = selected.provider;
   const binding = {
     ...providerBindingFromConfig(provider),
-    ...(selected.configuredAgentId === undefined ? input.legacyBindingOverrides : {}),
+    ...(selected.fromLegacyFallback === true ? input.legacyBindingOverrides : {}),
   };
   return {
     configuredAgentId: selected.configuredAgentId,
