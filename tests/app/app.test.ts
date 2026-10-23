@@ -2121,6 +2121,52 @@ test('CLI project use rejects a missing workspace directory', async () => {
   });
 });
 
+test('CLI project use rewrites a commented or indented [project] table without duplicating it', async () => {
+  for (const header of ['[project] # 选定项目', '  [project]']) {
+    const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-project-use-existing-'));
+    const controlRoot = join(root, 'control');
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
+    await mkdir(controlRoot, { recursive: true });
+    const configPath = join(controlRoot, 'config.toml');
+    // An existing valid config whose project header takes a form the parser
+    // accepts (it strips comments and trims lines) but a column-zero regex does
+    // not. A regression would append a second [project] table and break loading.
+    await writeFile(configPath, [
+      'schemaVersion = 1',
+      '',
+      header,
+      'workspace = "/previous/workspace"',
+      'reviewRequired = true',
+      '',
+      '[execution]',
+      'maxConcurrentTasks = 3',
+      '',
+    ].join('\n'), 'utf8');
+    const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+    const output = execFileSync(process.execPath, [
+      cli, 'project', 'use', '--workspace', workspace, '--control-root', controlRoot,
+    ], { encoding: 'utf8', stdio: 'pipe' });
+    const parsed = JSON.parse(output) as { readonly workspaceCwd: string; readonly projectKey: string };
+    const paths = await resolveRuntimePaths({ controlRoot, workspace });
+    assert.equal(parsed.workspaceCwd, paths.workspaceCwd);
+    const configText = await readFile(configPath, 'utf8');
+    // The parser strips comments and trims lines, so a header may be indented or
+    // trailed by a comment; count the project tables accordingly.
+    const projectHeaders = configText
+      .split(/\r?\n/u)
+      .filter((line) => line.replace(/#.*$/u, '').trim() === '[project]');
+    assert.equal(projectHeaders.length, 1);
+    assert.ok(configText.includes(`workspace = ${JSON.stringify(paths.workspaceCwd)}`));
+    assert.ok(configText.includes('reviewRequired = true'));
+    assert.ok(configText.includes('maxConcurrentTasks = 3'));
+    // The rewritten config stays loadable and declares the selected workspace.
+    const declared = await resolveRuntimePaths({ controlRoot });
+    assert.equal(declared.workspaceCwd, paths.workspaceCwd);
+    assert.equal(declared.projectKey, paths.projectKey);
+  }
+});
+
 test('CLI host failures remain structured', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-host-error-'));
   const workspace = join(root, 'workspace');

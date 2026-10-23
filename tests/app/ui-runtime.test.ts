@@ -3791,6 +3791,97 @@ test('explicit input without a workspace keeps the serve-bound default without r
   }
 });
 
+test('explicit input rejects a relative workspace independently of the serve cwd', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-workspace-relative-'));
+  const controlRoot = join(root, 'control');
+  const workspaceDir = join(root, 'workspace-relative');
+  await mkdir(workspaceDir, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace: workspaceDir });
+  await ensureControlLayout(paths);
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: paths.projectKey,
+    workspaceRoot: paths.workspaceCwd,
+    runtimePaths: paths,
+    memory: testMemory(paths.projectKey),
+  });
+  try {
+    // A relative workspace would otherwise resolve against the serve process
+    // cwd and silently record a different project depending on where serve
+    // started, so it is rejected as invalid input.
+    for (const workspace of ['.', '..', 'relative/project']) {
+      const response = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sourceRef: `ui:workspace-relative:${workspace}`,
+          rawInput: '相对 workspace 的输入',
+          channel: 'business',
+          workspace,
+        }),
+      });
+      assert.equal(response.status, 400);
+      const body = await response.json() as { readonly error: { readonly code: string; readonly nextAction: string } };
+      assert.equal(body.error.code, 'workspace-selection-invalid');
+      assert.equal(typeof body.error.nextAction, 'string');
+    }
+    assert.equal(runtime.service.listTasks().counts.total, 0);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('explicit input rejects a nonexistent workspace with a typed client error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-workspace-missing-'));
+  const controlRoot = join(root, 'control');
+  const workspaceDir = join(root, 'workspace-missing-bound');
+  await mkdir(workspaceDir, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace: workspaceDir });
+  await ensureControlLayout(paths);
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: paths.projectKey,
+    workspaceRoot: paths.workspaceCwd,
+    runtimePaths: paths,
+    memory: testMemory(paths.projectKey),
+  });
+  try {
+    // A rejected input workspace must keep the config owner's code and recovery
+    // instruction instead of collapsing into a generic 500.
+    const response = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:workspace-missing',
+        rawInput: '不存在的 workspace 目录',
+        channel: 'business',
+        workspace: join(root, 'does-not-exist'),
+      }),
+    });
+    assert.equal(response.status, 400);
+    const body = await response.json() as { readonly error: { readonly code: string; readonly ownerId: string; readonly nextAction: string } };
+    assert.equal(body.error.code, 'workspace-selection-invalid');
+    assert.equal(body.error.ownerId, 'config-loader');
+    assert.equal(typeof body.error.nextAction, 'string');
+    assert.ok(body.error.nextAction !== 'inspect the runtime error and retry from a new operation');
+    assert.equal(runtime.service.listTasks().counts.total, 0);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
 test('observation projects implicit classification and queue admission for confirmed requirements after restart', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-observation-admission-'));
   const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));

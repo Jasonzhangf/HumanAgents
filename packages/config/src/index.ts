@@ -1154,10 +1154,20 @@ export interface ProjectInputSelection {
  * changing the selected product. Canonicalization and `projectKey` derivation
  * stay identical to `--workspace`, so the same directory always maps to the
  * same `sessions/<projectKey>` storage.
+ *
+ * An explicit input workspace must be absolute: unlike a launch flag it names a
+ * project, not a directory relative to whatever cwd the caller happened to use.
  */
 export async function resolveProjectInput(
   options: { readonly workspace?: string; readonly controlRoot?: string },
 ): Promise<ProjectInputSelection> {
+  if (options.workspace !== undefined && !isAbsolute(options.workspace)) {
+    fail(
+      'workspace-selection-invalid',
+      `input workspace must be an absolute path: ${options.workspace}`,
+      '传入一个绝对项目目录作为 workspace',
+    );
+  }
   const paths = await resolveRuntimePaths(options);
   return {
     controlRoot: paths.controlRoot,
@@ -1165,6 +1175,44 @@ export async function resolveProjectInput(
     projectKey: paths.projectKey,
     projectRoot: paths.projectRoot,
   };
+}
+
+/** One `key = value` / header / blank line of a TOML document, with its own text kept verbatim. */
+function tomlLineIsTableHeader(line: string): boolean {
+  return /^\[[^\]]*\]\s*$/u.test(stripComment(line).trim());
+}
+
+/**
+ * Rewrite the `[project].workspace` assignment through the same lexical rules
+ * the config parser uses: comments are stripped before the header and key are
+ * read, so an indented header or a commented header is still the project table.
+ *
+ * The composed document is parsed before it replaces config.toml, so a shortcut
+ * can never leave a config the loader would reject (for example a second
+ * `[project]` table).
+ */
+function rewriteProjectWorkspace(contents: string, workspaceCwd: string): string {
+  const assignment = `workspace = ${JSON.stringify(workspaceCwd)}`;
+  const lines = contents.split(/\r?\n/);
+  const headerIndex = lines.findIndex((line) => stripComment(line).trim() === '[project]');
+  if (headerIndex === -1) {
+    return `${contents.replace(/\s+$/u, '')}\n\n[project]\n${assignment}\n`;
+  }
+  let sectionEnd = lines.length;
+  for (let index = headerIndex + 1; index < lines.length; index += 1) {
+    if (tomlLineIsTableHeader(lines[index]!)) {
+      sectionEnd = index;
+      break;
+    }
+  }
+  const section = lines.slice(headerIndex + 1, sectionEnd);
+  const workspaceIndex = section.findIndex((line) => /^workspace\s*=/u.test(stripComment(line).trim()));
+  if (workspaceIndex !== -1) {
+    section[workspaceIndex] = assignment;
+  } else {
+    section.unshift(assignment);
+  }
+  return [...lines.slice(0, headerIndex + 1), ...section, ...lines.slice(sectionEnd)].join('\n');
 }
 
 /**
@@ -1181,31 +1229,24 @@ export async function declareProjectWorkspace(
   rejectManagedFile(configPath);
   await mkdir(controlRoot, { recursive: true });
   const contents = await readRequired(configPath, defaultUserToml());
-  const assignment = `workspace = ${JSON.stringify(workspaceCwd)}`;
-  const header = contents.match(/^\[project\]\s*$/m);
-  let next: string;
-  if (header === null) {
-    next = `${contents.replace(/\s+$/, '')}\n\n[project]\n${assignment}\n`;
-  } else {
-    // Rewrite only the `[project]` section: replace an existing workspace
-    // assignment, otherwise insert one right after the header.
-    const lines = contents.split(/\r?\n/);
-    const headerIndex = header.index !== undefined
-      ? contents.slice(0, header.index).split(/\r?\n/).length - 1
-      : 0;
-    let sectionEnd = lines.length;
-    for (let index = headerIndex + 1; index < lines.length; index += 1) {
-      if (/^\s*\[/.test(lines[index]!)) {
-        sectionEnd = index;
-        break;
-      }
-    }
-    const section = lines.slice(headerIndex, sectionEnd);
-    const replaced = section.map((line) => (/^\s*workspace\s*=/.test(line) ? assignment : line));
-    if (replaced.find((line) => /^\s*workspace\s*=/.test(line)) === undefined) {
-      replaced.splice(1, 0, assignment);
-    }
-    next = [...lines.slice(0, headerIndex), ...replaced, ...lines.slice(sectionEnd)].join('\n');
+  const next = rewriteProjectWorkspace(contents, workspaceCwd);
+  let declaredProject: unknown;
+  try {
+    declaredProject = parseToml(next).project;
+  } catch (error) {
+    fail(
+      'workspace-declaration-invalid',
+      `rewritten config.toml no longer parses: ${error instanceof Error ? error.message : String(error)}`,
+      '修复 config.toml 后重试 project use',
+    );
+  }
+  const declared = asRecord(declaredProject, 'project').workspace;
+  if (declared !== workspaceCwd) {
+    fail(
+      'workspace-declaration-invalid',
+      `rewritten config.toml declares ${String(declared)} instead of ${workspaceCwd}`,
+      '修复 config.toml 的 [project] 表后重试 project use',
+    );
   }
   const tempPath = join(controlRoot, `.config.toml.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
   const handle = await openFile(tempPath, 'wx');

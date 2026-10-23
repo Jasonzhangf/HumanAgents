@@ -322,6 +322,7 @@ import {
   type ProductTaskRelationFact,
 } from './product-relations.js';
 import {
+  ConfigurationError,
   resolveProjectInput,
   type ConfiguredProjectCatalog,
   type ConfiguredProjectReadSource,
@@ -1530,6 +1531,12 @@ function apiError(error: unknown): UiRuntimeApiError {
       undefined,
       error.cause,
     );
+  }
+  if (error instanceof ConfigurationError) {
+    // A rejected workspace input is a client error, not a runtime fault: keep
+    // the config owner's code and recovery instruction instead of collapsing
+    // them into a generic 500.
+    return new UiRuntimeApiError(error.code, error.ownerId, error.message, error.nextAction, 400);
   }
   if (error instanceof MemoryCoordinatorError) {
     const bindingMissing = error.message.startsWith('memory-binding-missing')
