@@ -1452,6 +1452,7 @@ async function handleRequest(
         },
         occurredAt,
         ...(requestKind === undefined ? {} : { requestKind }),
+        ...(body.workspace === undefined ? {} : { workspaceRequest: requireString(body, 'workspace') }),
       }, inputRevision);
       writeJson(response, 201, { interactionId });
       return;

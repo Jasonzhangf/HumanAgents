@@ -2,6 +2,7 @@
 import {
   ConfigurationError,
   declareDefaultProduct,
+  declareProjectWorkspace,
   ensureControlLayout,
   formatPairingCommand,
   listConfiguredProjects,
@@ -851,6 +852,7 @@ function helpText(): string {
     '  humanagent restart       使用原 serve owner 的启动声明完成一次代码交接',
     '  humanagent stop          正式停止当前 serve owner，不启动替代进程',
     '  humanagent product use --control-root <path>  声明后续裸命令使用的默认产品',
+    '  humanagent project use --workspace <dir>  选定项目目录，作为后续对话默认带入的 workspace',
     '  --help                   显示帮助',
     '  --json                   以机器可读 JSON 输出错误',
     '',
@@ -1249,6 +1251,37 @@ export async function main(args: readonly string[]): Promise<void> {
     : requestedCommand;
   const workspace = option(args, '--workspace');
   const controlRoot = option(args, '--control-root');
+  if (command === 'project') {
+    if (args[1] !== 'use') {
+      throw new AppLifecycleError(
+        'cli.command.invalid',
+        `unknown project action: ${args[1] ?? '(missing)'}`,
+        'run humanagent project use --workspace <absolute-directory>',
+        'humanagent.cli',
+      );
+    }
+    const requestedWorkspace = workspace;
+    if (requestedWorkspace === undefined || !requestedWorkspace.trim()) {
+      throw new AppLifecycleError(
+        'cli.project.workspace-required',
+        'project use requires an explicit --workspace <absolute-directory>',
+        'run humanagent project use --workspace <absolute-directory>',
+        'humanagent.cli',
+      );
+    }
+    // Resolving through the config owner validates the directory and derives
+    // the same canonical projectKey the serve entry uses for sessions/<key>.
+    const paths = await resolveRuntimePaths({ workspace: requestedWorkspace, controlRoot });
+    await ensureControlLayout(paths);
+    const declaration = await declareProjectWorkspace(paths.controlRoot, paths.workspaceCwd);
+    console.log(JSON.stringify({
+      command: 'project use',
+      workspaceCwd: paths.workspaceCwd,
+      projectKey: paths.projectKey,
+      declarationPath: declaration.declarationPath,
+    }, null, 2));
+    return;
+  }
   if (command === 'product') {
     if (args[1] !== 'use') {
       throw new AppLifecycleError(

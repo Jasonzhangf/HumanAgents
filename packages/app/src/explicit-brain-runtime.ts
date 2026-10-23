@@ -130,6 +130,14 @@ export interface ExplicitBrainInterpretationInput {
     readonly answer?: string;
   }[];
   readonly taskCandidates: readonly ExplicitBrainTaskCandidate[];
+  /**
+   * Conversation project target carried by the input. When present the explicit
+   * brain treats this absolute project directory as the project context of the
+   * prompt; when absent the conversation targets the serve-bound default
+   * workspace, which is the existing behavior.
+   */
+  readonly workspaceCwd?: string;
+  readonly projectKey?: string;
 }
 
 export type ExplicitBrainInterpretation =
@@ -207,8 +215,12 @@ function structuredProposalContract(inputRevision: number): string {
 }
 
 function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegments: readonly string[]): string {
+  const projectContext = input.workspaceCwd === undefined || input.projectKey === undefined
+    ? []
+    : [`# Conversation project directory\nThe conversation targets the project directory ${input.workspaceCwd} (projectKey ${input.projectKey}). Treat that directory as the project context of this input.`];
   return [
     ...promptSegments,
+    ...projectContext,
     '# Explicit intake decision output',
     'Return one final JSON object only. You may dispatch_helper for bounded independent work and accept_helper to explicitly adopt a returned result. Do not claim task execution.',
     'dispatch_helper takes selection (roleId and optional configuredAgentId), assignmentFields, inputs, and evidenceRefs. Helpers must return JSON with agentId, producedArtifactRefs, status, summary, outputRefs, evidenceRefs, nextAction, and optional conditionRef/failureRef. Returned does not mean accepted.',

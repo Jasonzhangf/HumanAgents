@@ -1142,6 +1142,133 @@ export async function declareDefaultProduct(controlRoot: string): Promise<Defaul
   return { schemaVersion: 1, controlRoot: canonicalRoot };
 }
 
+export interface ProjectInputSelection {
+  readonly controlRoot: string;
+  readonly workspaceCwd: string;
+  readonly projectKey: string;
+  readonly projectRoot: string;
+}
+
+/**
+ * Resolve the project identity of an explicitly named input workspace without
+ * changing the selected product. Canonicalization and `projectKey` derivation
+ * stay identical to `--workspace`, so the same directory always maps to the
+ * same `sessions/<projectKey>` storage.
+ *
+ * An explicit input workspace must be absolute: unlike a launch flag it names a
+ * project, not a directory relative to whatever cwd the caller happened to use.
+ */
+export async function resolveProjectInput(
+  options: { readonly workspace?: string; readonly controlRoot?: string },
+): Promise<ProjectInputSelection> {
+  if (options.workspace !== undefined && !isAbsolute(options.workspace)) {
+    fail(
+      'workspace-selection-invalid',
+      `input workspace must be an absolute path: ${options.workspace}`,
+      '传入一个绝对项目目录作为 workspace',
+    );
+  }
+  const paths = await resolveRuntimePaths(options);
+  return {
+    controlRoot: paths.controlRoot,
+    workspaceCwd: paths.workspaceCwd,
+    projectKey: paths.projectKey,
+    projectRoot: paths.projectRoot,
+  };
+}
+
+/** One `key = value` / header / blank line of a TOML document, with its own text kept verbatim. */
+function tomlLineIsTableHeader(line: string): boolean {
+  return /^\[[^\]]*\]\s*$/u.test(stripComment(line).trim());
+}
+
+/**
+ * Rewrite the `[project].workspace` assignment through the same lexical rules
+ * the config parser uses: comments are stripped before the header and key are
+ * read, so an indented header or a commented header is still the project table.
+ *
+ * The composed document is parsed before it replaces config.toml, so a shortcut
+ * can never leave a config the loader would reject (for example a second
+ * `[project]` table).
+ */
+function rewriteProjectWorkspace(contents: string, workspaceCwd: string): string {
+  const assignment = `workspace = ${JSON.stringify(workspaceCwd)}`;
+  const lines = contents.split(/\r?\n/);
+  const headerIndex = lines.findIndex((line) => stripComment(line).trim() === '[project]');
+  if (headerIndex === -1) {
+    // A root-level dotted assignment (`project.workspace = "..."`) is valid TOML
+    // and the parser accepts it as the project table, so rewrite that key in
+    // place instead of adding a competing `[project]` block.
+    const dottedIndex = lines.findIndex((line) => /^project\.workspace\s*=/u.test(stripComment(line).trim()));
+    if (dottedIndex !== -1) {
+      const next = [...lines];
+      next[dottedIndex] = `project.workspace = ${JSON.stringify(workspaceCwd)}`;
+      return next.join('\n');
+    }
+    return `${contents.replace(/\s+$/u, '')}\n\n[project]\n${assignment}\n`;
+  }
+  let sectionEnd = lines.length;
+  for (let index = headerIndex + 1; index < lines.length; index += 1) {
+    if (tomlLineIsTableHeader(lines[index]!)) {
+      sectionEnd = index;
+      break;
+    }
+  }
+  const section = lines.slice(headerIndex + 1, sectionEnd);
+  const workspaceIndex = section.findIndex((line) => /^workspace\s*=/u.test(stripComment(line).trim()));
+  if (workspaceIndex !== -1) {
+    section[workspaceIndex] = assignment;
+  } else {
+    section.unshift(assignment);
+  }
+  return [...lines.slice(0, headerIndex + 1), ...section, ...lines.slice(sectionEnd)].join('\n');
+}
+
+/**
+ * Declare the product's project workspace through the existing
+ * `[project].workspace` selection mechanism. The shortcut preserves all other
+ * config.toml content; only the workspace assignment under `[project]` is
+ * written, atomically.
+ */
+export async function declareProjectWorkspace(
+  controlRoot: string,
+  workspaceCwd: string,
+): Promise<{ readonly declarationPath: string }> {
+  const configPath = join(controlRoot, 'config.toml');
+  rejectManagedFile(configPath);
+  await mkdir(controlRoot, { recursive: true });
+  const contents = await readRequired(configPath, defaultUserToml());
+  const next = rewriteProjectWorkspace(contents, workspaceCwd);
+  let declaredProject: unknown;
+  try {
+    declaredProject = parseToml(next).project;
+  } catch (error) {
+    fail(
+      'workspace-declaration-invalid',
+      `rewritten config.toml no longer parses: ${error instanceof Error ? error.message : String(error)}`,
+      '修复 config.toml 后重试 project use',
+    );
+  }
+  const declared = asRecord(declaredProject, 'project').workspace;
+  if (declared !== workspaceCwd) {
+    fail(
+      'workspace-declaration-invalid',
+      `rewritten config.toml declares ${String(declared)} instead of ${workspaceCwd}`,
+      '修复 config.toml 的 [project] 表后重试 project use',
+    );
+  }
+  const tempPath = join(controlRoot, `.config.toml.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+  const handle = await openFile(tempPath, 'wx');
+  try {
+    await handle.writeFile(next, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(tempPath, configPath);
+  return { declarationPath: configPath };
+}
+
 export async function resolveProductPaths(options: { readonly controlRoot?: string }): Promise<ProductPaths> {
   const environmentHome = (globalThis as { process?: { env?: { HUMANAGENT_HOME?: string } } }).process?.env?.HUMANAGENT_HOME;
   const explicitRoot = options.controlRoot ?? environmentHome;

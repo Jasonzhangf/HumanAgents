@@ -2055,6 +2055,152 @@ test('CLI accepts memory auto update configuration before composing memory', asy
   assert.equal(parsed.projectKey, paths.projectKey);
 });
 
+test('CLI project use declares the project workspace and registers its storage', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-project-use-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const output = execFileSync(process.execPath, [
+    cli,
+    'project',
+    'use',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+  ], { encoding: 'utf8', stdio: 'pipe' });
+  const parsed = JSON.parse(output) as {
+    readonly command: string;
+    readonly workspaceCwd: string;
+    readonly projectKey: string;
+    readonly declarationPath: string;
+  };
+  assert.equal(parsed.command, 'project use');
+  assert.equal(parsed.workspaceCwd, paths.workspaceCwd);
+  assert.equal(parsed.projectKey, paths.projectKey);
+  // The config owner canonicalizes the control root (symlink-free realpath), so
+  // the declaration lands under the canonical root; /var and /private/var on
+  // macOS address the same file.
+  assert.equal(parsed.declarationPath, join(paths.controlRoot, 'config.toml'));
+  const configText = await readFile(join(paths.controlRoot, 'config.toml'), 'utf8');
+  assert.ok(configText.includes(`workspace = ${JSON.stringify(paths.workspaceCwd)}`));
+  const manifest = JSON.parse(await readFile(paths.projectManifest, 'utf8')) as {
+    readonly projectKey: string;
+    readonly workspaceCwd: string;
+  };
+  assert.equal(manifest.projectKey, paths.projectKey);
+  assert.equal(manifest.workspaceCwd, paths.workspaceCwd);
+  // The declaration is functional: the config owner resolves the same project
+  // again without an explicit --workspace, which is the shortcut's purpose.
+  const declared = await resolveRuntimePaths({ controlRoot: paths.controlRoot });
+  assert.equal(declared.workspaceCwd, paths.workspaceCwd);
+  assert.equal(declared.projectKey, paths.projectKey);
+});
+
+test('CLI project use rejects a missing workspace directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-project-use-missing-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'missing-workspace');
+  assert.throws(() => execFileSync(process.execPath, [
+    join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
+    'project',
+    'use',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+    '--json',
+  ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
+    const parsed = JSON.parse(error.stderr);
+    assert.equal(parsed.error.code, 'workspace-selection-invalid');
+    assert.equal(typeof parsed.error.nextAction, 'string');
+    return true;
+  });
+});
+
+test('CLI project use rewrites a commented or indented [project] table without duplicating it', async () => {
+  for (const header of ['[project] # 选定项目', '  [project]']) {
+    const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-project-use-existing-'));
+    const controlRoot = join(root, 'control');
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
+    await mkdir(controlRoot, { recursive: true });
+    const configPath = join(controlRoot, 'config.toml');
+    // An existing valid config whose project header takes a form the parser
+    // accepts (it strips comments and trims lines) but a column-zero regex does
+    // not. A regression would append a second [project] table and break loading.
+    await writeFile(configPath, [
+      'schemaVersion = 1',
+      '',
+      header,
+      'workspace = "/previous/workspace"',
+      'reviewRequired = true',
+      '',
+      '[execution]',
+      'maxConcurrentTasks = 3',
+      '',
+    ].join('\n'), 'utf8');
+    const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+    const output = execFileSync(process.execPath, [
+      cli, 'project', 'use', '--workspace', workspace, '--control-root', controlRoot,
+    ], { encoding: 'utf8', stdio: 'pipe' });
+    const parsed = JSON.parse(output) as { readonly workspaceCwd: string; readonly projectKey: string };
+    const paths = await resolveRuntimePaths({ controlRoot, workspace });
+    assert.equal(parsed.workspaceCwd, paths.workspaceCwd);
+    const configText = await readFile(configPath, 'utf8');
+    // The parser strips comments and trims lines, so a header may be indented or
+    // trailed by a comment; count the project tables accordingly.
+    const projectHeaders = configText
+      .split(/\r?\n/u)
+      .filter((line) => line.replace(/#.*$/u, '').trim() === '[project]');
+    assert.equal(projectHeaders.length, 1);
+    assert.ok(configText.includes(`workspace = ${JSON.stringify(paths.workspaceCwd)}`));
+    assert.ok(configText.includes('reviewRequired = true'));
+    assert.ok(configText.includes('maxConcurrentTasks = 3'));
+    // The rewritten config stays loadable and declares the selected workspace.
+    const declared = await resolveRuntimePaths({ controlRoot });
+    assert.equal(declared.workspaceCwd, paths.workspaceCwd);
+    assert.equal(declared.projectKey, paths.projectKey);
+  }
+});
+
+test('CLI project use rewrites a root-level project.workspace assignment in place', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-project-use-dotted-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  await mkdir(controlRoot, { recursive: true });
+  const configPath = join(controlRoot, 'config.toml');
+  // A root-level dotted assignment parses into the project table, so appending
+  // a `[project]` block would declare the same table twice and the next load
+  // would fail on a duplicate key.
+  await writeFile(configPath, [
+    'schemaVersion = 1',
+    'project.workspace = "/previous/workspace"',
+    '',
+    '[execution]',
+    'maxConcurrentTasks = 3',
+    '',
+  ].join('\n'), 'utf8');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const output = execFileSync(process.execPath, [
+    cli, 'project', 'use', '--workspace', workspace, '--control-root', controlRoot,
+  ], { encoding: 'utf8', stdio: 'pipe' });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  assert.equal((JSON.parse(output) as { readonly workspaceCwd: string }).workspaceCwd, paths.workspaceCwd);
+  const configText = await readFile(configPath, 'utf8');
+  assert.equal(configText.split(/\r?\n/u).filter((line) => line.replace(/#.*$/u, '').trim() === '[project]').length, 0);
+  assert.ok(configText.includes(`project.workspace = ${JSON.stringify(paths.workspaceCwd)}`));
+  assert.ok(configText.includes('maxConcurrentTasks = 3'));
+  // The rewritten config stays loadable and declares the selected workspace.
+  const declared = await resolveRuntimePaths({ controlRoot });
+  assert.equal(declared.workspaceCwd, paths.workspaceCwd);
+  assert.equal(declared.projectKey, paths.projectKey);
+});
+
 test('CLI host failures remain structured', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-host-error-'));
   const workspace = join(root, 'workspace');

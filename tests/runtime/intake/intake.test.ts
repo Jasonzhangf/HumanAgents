@@ -202,6 +202,39 @@ test('status queries and control commands never enter the business inbox', async
   assert.equal(inbox.size, 0);
 });
 
+test('explicit input workspace target is recorded, persisted and validated', async () => {
+  const workspace = {
+    workspaceCwd: '/tmp/humanagent-intake-workspace-a',
+    projectKey: '-tmp-humanagent-intake-workspace-a',
+  } as const;
+  const intake = new ExplicitIntake();
+  const interactionId = await intake.receive({ ...input(), workspace });
+  assert.deepEqual((await intake.inspect(interactionId)).workspace, workspace);
+
+  // The target survives exportState/restoreState (the journal round-trip the
+  // app persists) and a legacy record without the field stays valid.
+  const restored = new ExplicitIntake();
+  restored.restoreState(intake.exportState());
+  assert.deepEqual((await restored.inspect(interactionId)).workspace, workspace);
+  const legacyState = intake.exportState();
+  const legacyRecord = legacyState.interactions[0]!;
+  delete (legacyRecord as { workspace?: unknown }).workspace;
+  const legacy = new ExplicitIntake();
+  legacy.restoreState(legacyState);
+  assert.equal((await legacy.inspect(interactionId)).workspace, undefined);
+
+  for (const invalid of [
+    { workspaceCwd: 'relative/path', projectKey: 'project-key' },
+    { workspaceCwd: '/tmp/humanagent-intake-workspace-a', projectKey: '  ' },
+  ]) {
+    await assert.rejects(
+      () => intake.receive({ ...input(), workspace: invalid }),
+      (error: unknown) => error instanceof ExplicitIntakeError && error.code === 'workspace-invalid',
+    );
+  }
+  assert.equal(intake.exportState().interactions.length, 1);
+});
+
 test('explicit confirmation rejects a stale input revision', async () => {
   const intake = new ExplicitIntake();
   const interactionId = await intake.receive(input(), 2);

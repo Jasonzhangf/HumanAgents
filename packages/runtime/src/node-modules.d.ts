@@ -4,3 +4,7 @@ declare module 'node:crypto' {
   };
   export function randomUUID(): string;
 }
+
+declare module 'node:path' {
+  export function isAbsolute(path: string): boolean;
+}
