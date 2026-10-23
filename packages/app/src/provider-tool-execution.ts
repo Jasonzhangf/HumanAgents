@@ -626,6 +626,18 @@ function mutates(toolId: string): boolean {
   return ['file.write', 'file.edit', 'bash', 'todo_write', 'create_goal', 'update_goal'].includes(toolId);
 }
 
+/**
+ * Whether an accepted tool result of this tool can ever carry committed delivery
+ * material. Only `file.write` commits a durable completion; inspect-kind tools
+ * report side-effect-free output the Gateway records as an inspect completion.
+ * Every other apply action (`file.edit`, `bash`, `todo_write`, `create_goal`,
+ * `update_goal`) changes state without a delivery completion, so its result can
+ * never be delivered and must never be cited as a delivery reference.
+ */
+export function carriesDeliveryMaterial(toolId: string): boolean {
+  return toolId === 'file.write' || !mutates(toolId);
+}
+
 function providerToolRegistrations(): ToolRegistration[] {
   return ADVERTISED_TOOL_IDS.map((toolId) => ({
     toolName: toolId,

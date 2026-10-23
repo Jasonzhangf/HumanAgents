@@ -81,8 +81,8 @@ export const STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
         required: ['goal', 'actions', 'result', 'expectedNextStep'],
         additionalProperties: false,
       },
-      deliveryText: { type: 'string' },
-      deliveryRefs: { type: 'array', items: { type: 'string' } },
+      deliveryText: { type: 'string', description: 'Human-readable delivery material for this turn. For a text-only delivery put the material here and leave deliveryRefs empty.' },
+      deliveryRefs: { type: 'array', items: { type: 'string' }, description: 'Scoped references to delivery artifacts that can actually be committed to the turn: a file.write output or an inspection result. Never cite goal/todo/bash/edit results here; they carry no delivery material. A text-only delivery leaves this array empty.' },
     },
     required: ['summary', 'deliveryRefs'],
     additionalProperties: false,
@@ -116,10 +116,18 @@ export interface StandardTurnEndOwnerPort {
     readonly execution: ProviderExecutionIdentityRef;
     readonly requestId?: string;
   }): Promise<AdmittedTurnIdentity | null>;
-  /** Resolve delivery references to real evidence; foreign or missing refs reject. */
+  /** Resolve delivery references to real evidence; foreign or missing refs reject.
+   *  Summary section references only prove "what happened" and may cite any
+   *  accepted tool result. Top-level `deliveryRefs` are the turn's delivery
+   *  material, so they must resolve to evidence that can actually carry a
+   *  committed delivery: a `file.write` completion or an inspect-kind result.
+   *  An apply-kind result that never commits a completion (goal, todo, bash,
+   *  edit) cannot be delivered and is refused at this boundary. */
   resolveDelivery(input: {
     readonly identity: AdmittedTurnIdentity;
     readonly deliveryRefs: readonly string[];
+    /** True only for the top-level delivery material, never for summary citations. */
+    readonly requireDeliveryMaterial?: boolean;
   }): Promise<readonly EvidenceRef[]>;
 }
 
@@ -305,7 +313,7 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
       let resolvedEvidenceRefs: readonly EvidenceRef[];
       try {
         resolvedEvidenceRefs = parsed.deliveryRefs.length === 0 ? []
-          : await input.owner.resolveDelivery({ identity, deliveryRefs: parsed.deliveryRefs });
+          : await input.owner.resolveDelivery({ identity, deliveryRefs: parsed.deliveryRefs, requireDeliveryMaterial: true });
       } catch (error) {
         const refusal = standardTurnEndModelInputRefusal(error);
         if (refusal) return createRefusedStandardTurnEndResult(identity, refusal);
