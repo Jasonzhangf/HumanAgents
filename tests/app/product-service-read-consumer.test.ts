@@ -54,7 +54,7 @@ function makeService(): UiRuntimeService {
   });
 }
 
-function receive(service: UiRuntimeService, input: Omit<ExplicitInput, 'channel'> & {
+function receive(service: UiRuntimeService, input: Omit<ExplicitInput, 'channel' | 'workspace'> & {
   readonly channel: 'business' | 'control';
 }) {
   return service.receiveExplicitInput(input);

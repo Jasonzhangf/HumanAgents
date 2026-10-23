@@ -86,6 +86,7 @@ import {
   type ConfirmRequirementDraft,
   type ConfirmedRequirementDraft,
   type ExplicitInput,
+  type ExplicitInputWorkspace,
   type ExplicitIntakeState,
   type ExplicitInteractionSnapshot,
   type MatchResult,
@@ -320,10 +321,11 @@ import {
   type ProductRelationsRead,
   type ProductTaskRelationFact,
 } from './product-relations.js';
-import type {
-  ConfiguredProjectCatalog,
-  ConfiguredProjectReadSource,
-  RuntimePaths,
+import {
+  resolveProjectInput,
+  type ConfiguredProjectCatalog,
+  type ConfiguredProjectReadSource,
+  type RuntimePaths,
 } from '../../../config/src/index.js';
 import { type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
@@ -666,6 +668,22 @@ export interface ExplicitBrainReceipt {
  * or refines the exact revision, confirms it, and submits it once. Without an
  * execution policy the legacy confirmation path is unchanged.
  */
+export interface ExplicitInputSubmission extends Omit<ExplicitInput, 'workspace'> {
+  /**
+   * Requested project target carried by the input. A raw absolute directory is
+   * resolved through the config owner into the recorded `ExplicitInputWorkspace`
+   * target (canonical directory plus projectKey); an already-resolved target is
+   * passed through. Absent keeps the serve-bound default workspace.
+   */
+  readonly workspace?: string | ExplicitInputWorkspace;
+  /**
+   * Requested project directory carried by the HTTP transport before config
+   * resolution. The server passes the raw string here; in-process callers may
+   * pass the resolved target on `workspace` instead.
+   */
+  readonly workspaceRequest?: string;
+}
+
 export interface ConfirmExplicitRequirementInput extends ConfirmRequirementDraft {
   readonly requestKind?: 'new-task-create' | 'existing-task-change';
   readonly taskRef?: TaskId;
@@ -5889,14 +5907,58 @@ export class UiRuntimeService {
     return this.implicitConsumerIssue ?? this.implicitTerminalIssue;
   }
 
-  async receiveExplicitInput(input: ExplicitInput, inputRevision = 1): Promise<string> {
+  async receiveExplicitInput(input: ExplicitInputSubmission, inputRevision = 1): Promise<string> {
     try {
-      const interactionId = await this.explicitIntake.receive(input, inputRevision);
+      const resolved = await this.resolveExplicitInputWorkspace(input);
+      const interactionId = await this.explicitIntake.receive(resolved, inputRevision);
       this.persistExplicitBrainState();
       return interactionId;
     } catch (error) {
       throw apiError(error);
     }
+  }
+
+  /**
+   * Resolve an input's requested workspace through the config owner and keep
+   * the conversation inside the serve-bound project scope. Absent workspace
+   * keeps the existing default (the serve-bound workspace). A workspace whose
+   * projectKey differs from the serve-bound project is a typed rejection: one
+   * serve executes one project, so the input would otherwise be recorded for a
+   * project this runtime does not own.
+   */
+  private async resolveExplicitInputWorkspace(input: ExplicitInputSubmission): Promise<ExplicitInput> {
+    const requested = input.workspaceRequest === undefined ? input.workspace : input.workspaceRequest;
+    const { workspace: _workspace, workspaceRequest: _workspaceRequest, ...plain } = input;
+    if (requested === undefined) return plain;
+    const target = typeof requested === 'string'
+      ? await this.resolveRequestedWorkspace(requested)
+      : requested;
+    const boundKey = this.options.projectKey;
+    if (boundKey !== undefined && target.projectKey !== boundKey) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.workspace-outside-serve-scope',
+        APP_OWNER,
+        `input workspace ${target.workspaceCwd} (projectKey ${target.projectKey}) is outside the serve-bound project ${boundKey}`,
+        `start humanagent serve for that workspace, or send the input without a workspace to target the serve-bound project`,
+        409,
+      );
+    }
+    return { ...plain, workspace: target };
+  }
+
+  private async resolveRequestedWorkspace(workspace: string): Promise<ExplicitInputWorkspace> {
+    const controlRoot = this.options.runtimePaths?.controlRoot;
+    if (controlRoot === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.workspace-unavailable',
+        APP_OWNER,
+        'this runtime has no control-root binding to resolve an input workspace',
+        'start the runtime through the serve entry before sending a workspace-carrying input',
+        503,
+      );
+    }
+    const target = await resolveProjectInput({ controlRoot, workspace });
+    return { workspaceCwd: target.workspaceCwd, projectKey: target.projectKey };
   }
 
   async inspectExplicitInteraction(interactionId: string): Promise<ExplicitInteractionSnapshot> {
@@ -5957,6 +6019,10 @@ export class UiRuntimeService {
         rawInput: snapshot.rawInput,
         clarifications: snapshot.clarifications ?? [],
         taskCandidates,
+        ...(snapshot.workspace === undefined ? {} : {
+          workspaceCwd: snapshot.workspace.workspaceCwd,
+          projectKey: snapshot.workspace.projectKey,
+        }),
       });
       if (interpreted.kind === 'clarification') {
         await this.explicitIntake.requestClarification(snapshot.interactionId, interpreted.question);
@@ -6176,6 +6242,10 @@ export class UiRuntimeService {
           : `${snapshot.rawInput}\n\nUser correction: ${correction}`,
         clarifications: snapshot.clarifications ?? [],
         taskCandidates,
+        ...(snapshot.workspace === undefined ? {} : {
+          workspaceCwd: snapshot.workspace.workspaceCwd,
+          projectKey: snapshot.workspace.projectKey,
+        }),
       });
       if (interpreted.kind !== 'requirement') {
         throw new UiRuntimeApiError(

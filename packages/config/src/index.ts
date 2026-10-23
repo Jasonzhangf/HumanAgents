@@ -1142,6 +1142,83 @@ export async function declareDefaultProduct(controlRoot: string): Promise<Defaul
   return { schemaVersion: 1, controlRoot: canonicalRoot };
 }
 
+export interface ProjectInputSelection {
+  readonly controlRoot: string;
+  readonly workspaceCwd: string;
+  readonly projectKey: string;
+  readonly projectRoot: string;
+}
+
+/**
+ * Resolve the project identity of an explicitly named input workspace without
+ * changing the selected product. Canonicalization and `projectKey` derivation
+ * stay identical to `--workspace`, so the same directory always maps to the
+ * same `sessions/<projectKey>` storage.
+ */
+export async function resolveProjectInput(
+  options: { readonly workspace?: string; readonly controlRoot?: string },
+): Promise<ProjectInputSelection> {
+  const paths = await resolveRuntimePaths(options);
+  return {
+    controlRoot: paths.controlRoot,
+    workspaceCwd: paths.workspaceCwd,
+    projectKey: paths.projectKey,
+    projectRoot: paths.projectRoot,
+  };
+}
+
+/**
+ * Declare the product's project workspace through the existing
+ * `[project].workspace` selection mechanism. The shortcut preserves all other
+ * config.toml content; only the workspace assignment under `[project]` is
+ * written, atomically.
+ */
+export async function declareProjectWorkspace(
+  controlRoot: string,
+  workspaceCwd: string,
+): Promise<{ readonly declarationPath: string }> {
+  const configPath = join(controlRoot, 'config.toml');
+  rejectManagedFile(configPath);
+  await mkdir(controlRoot, { recursive: true });
+  const contents = await readRequired(configPath, defaultUserToml());
+  const assignment = `workspace = ${JSON.stringify(workspaceCwd)}`;
+  const header = contents.match(/^\[project\]\s*$/m);
+  let next: string;
+  if (header === null) {
+    next = `${contents.replace(/\s+$/, '')}\n\n[project]\n${assignment}\n`;
+  } else {
+    // Rewrite only the `[project]` section: replace an existing workspace
+    // assignment, otherwise insert one right after the header.
+    const lines = contents.split(/\r?\n/);
+    const headerIndex = header.index !== undefined
+      ? contents.slice(0, header.index).split(/\r?\n/).length - 1
+      : 0;
+    let sectionEnd = lines.length;
+    for (let index = headerIndex + 1; index < lines.length; index += 1) {
+      if (/^\s*\[/.test(lines[index]!)) {
+        sectionEnd = index;
+        break;
+      }
+    }
+    const section = lines.slice(headerIndex, sectionEnd);
+    const replaced = section.map((line) => (/^\s*workspace\s*=/.test(line) ? assignment : line));
+    if (replaced.find((line) => /^\s*workspace\s*=/.test(line)) === undefined) {
+      replaced.splice(1, 0, assignment);
+    }
+    next = [...lines.slice(0, headerIndex), ...replaced, ...lines.slice(sectionEnd)].join('\n');
+  }
+  const tempPath = join(controlRoot, `.config.toml.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+  const handle = await openFile(tempPath, 'wx');
+  try {
+    await handle.writeFile(next, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(tempPath, configPath);
+  return { declarationPath: configPath };
+}
+
 export async function resolveProductPaths(options: { readonly controlRoot?: string }): Promise<ProductPaths> {
   const environmentHome = (globalThis as { process?: { env?: { HUMANAGENT_HOME?: string } } }).process?.env?.HUMANAGENT_HOME;
   const explicitRoot = options.controlRoot ?? environmentHome;

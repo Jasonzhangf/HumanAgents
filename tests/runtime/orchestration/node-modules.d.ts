@@ -24,6 +24,7 @@ declare module 'node:os' {
 }
 
 declare module 'node:path' {
+  function isAbsolute(path: string): boolean;
   function join(...paths: string[]): string;
 }
 

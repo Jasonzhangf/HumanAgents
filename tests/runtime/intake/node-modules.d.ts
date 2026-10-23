@@ -32,5 +32,6 @@ declare module 'node:os' {
 }
 
 declare module 'node:path' {
+  export function isAbsolute(path: string): boolean;
   export function join(...paths: string[]): string;
 }

@@ -6,7 +6,11 @@ import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { formatPairingCommand } from '../../packages/config/src/index.js';
+import {
+  ensureControlLayout,
+  formatPairingCommand,
+  resolveRuntimePaths,
+} from '../../packages/config/src/index.js';
 import {
   PIPELINE_NODE_IDS,
   PIPELINE_ROWS,
@@ -134,7 +138,16 @@ import {
 import {
   createProviderExplicitBrainInterpreter,
   type ExplicitBrainInputInterpreter,
+  type ExplicitBrainInterpretationInput,
 } from '../../packages/app/src/explicit-brain-runtime.js';
+import type { ExplicitInteractionSnapshot } from '../../packages/runtime/src/intake/explicit-intake.js';
+
+// The real entry does not yet expose `workspace` on the interaction snapshot
+// until the config-owned workspace resolution is wired; the intersection keeps
+// the red test compiling so its assertion can fail behaviorally first.
+type WorkspaceCarryingInteractionSnapshot = ExplicitInteractionSnapshot & {
+  readonly workspace?: { readonly workspaceCwd: string; readonly projectKey: string };
+};
 
 const organId = id('organ', 'organ-ui-test');
 const rawFetch = globalThis.fetch.bind(globalThis);
@@ -3598,6 +3611,181 @@ test('confirmed requirement is HTTP-observable as queued before the implicit con
     assert.equal(detail.taskId.value, queuedRow.taskId.value);
 
     await waitFor(() => assert.equal(runtime.service.status().implicitScheduling, undefined));
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('explicit input with a matching workspace records the resolved project and interprets with the project directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-workspace-match-'));
+  const controlRoot = join(root, 'control');
+  const workspaceDir = join(root, 'workspace-project');
+  await mkdir(workspaceDir, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace: workspaceDir });
+  await ensureControlLayout(paths);
+  const interpreted: Array<ExplicitBrainInterpretationInput & { readonly workspaceCwd?: string; readonly projectKey?: string }> = [];
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: paths.projectKey,
+    workspaceRoot: paths.workspaceCwd,
+    runtimePaths: paths,
+    explicitBrainInterpreter: {
+      async interpret(input) {
+        interpreted.push(input);
+        return {
+          kind: 'requirement',
+          normalizedInput: input.rawInput,
+          knownFacts: [],
+          intent: 'create',
+          proposal: `create:${input.rawInput}`,
+          structuredProposal: {
+            revision: input.inputRevision,
+            intent: 'create',
+            title: input.rawInput,
+            objective: input.rawInput,
+            deliverable: `create:${input.rawInput}`,
+            deliveryConditions: [],
+            evidenceRefs: [],
+            blockingGaps: [],
+          },
+          decisionRefs: ['decision:workspace-match'],
+        };
+      },
+    },
+    memory: testMemory(paths.projectKey),
+  });
+  try {
+    const response = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:workspace-match',
+        rawInput: '在项目目录里整理状态',
+        channel: 'business',
+        workspace: paths.workspaceCwd,
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { interactionId } = await response.json() as { readonly interactionId: string };
+    const snapshot = await runtime.service.inspectExplicitInteraction(interactionId) as WorkspaceCarryingInteractionSnapshot;
+    assert.deepEqual(snapshot.workspace, { workspaceCwd: paths.workspaceCwd, projectKey: paths.projectKey });
+    // The interaction stays inside the serve-bound project scope.
+    assert.equal(snapshot.workspace?.projectKey, paths.projectKey);
+    await runtime.service.interpretExplicitInput({ interactionId });
+    assert.equal(interpreted.length, 1);
+    assert.equal(interpreted[0]?.workspaceCwd, paths.workspaceCwd);
+    assert.equal(interpreted[0]?.projectKey, paths.projectKey);
+    // The requirement is proposed inside the serve-bound runtime; execution
+    // keeps using the serve-bound project rather than the input workspace.
+    const proposed = await runtime.service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    assert.equal(proposed.state, 'awaiting-confirmation');
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('explicit input with a workspace outside the serve-bound project is a typed rejection', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-workspace-outside-'));
+  const controlRoot = join(root, 'control');
+  const serveWorkspace = join(root, 'workspace-serve');
+  await mkdir(serveWorkspace, { recursive: true });
+  const otherWorkspace = join(root, 'workspace-other');
+  await mkdir(otherWorkspace, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace: serveWorkspace });
+  await ensureControlLayout(paths);
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: paths.projectKey,
+    workspaceRoot: paths.workspaceCwd,
+    runtimePaths: paths,
+    memory: testMemory(paths.projectKey),
+  });
+  try {
+    const response = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:workspace-outside',
+        rawInput: '整理另一个项目的状态',
+        channel: 'business',
+        workspace: otherWorkspace,
+      }),
+    });
+    assert.equal(response.status, 409);
+    const body = await response.json() as { readonly error: { readonly code: string; readonly message: string; readonly nextAction: string } };
+    assert.equal(body.error.code, 'explicit-brain.workspace-outside-serve-scope');
+    assert.match(body.error.message, new RegExp(otherWorkspace));
+    assert.match(body.error.nextAction, /serve/);
+    assert.equal(await runtime.service.inspectExplicitInteraction('interaction-does-not-exist').catch(() => undefined), undefined);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('explicit input without a workspace keeps the serve-bound default without regression', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-workspace-default-'));
+  const controlRoot = join(root, 'control');
+  const workspaceDir = join(root, 'workspace-default');
+  await mkdir(workspaceDir, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace: workspaceDir });
+  await ensureControlLayout(paths);
+  const interpreted: Array<ExplicitBrainInterpretationInput & { readonly workspaceCwd?: string; readonly projectKey?: string }> = [];
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: paths.projectKey,
+    workspaceRoot: paths.workspaceCwd,
+    runtimePaths: paths,
+    explicitBrainInterpreter: {
+      async interpret(input) {
+        interpreted.push(input);
+        return {
+          kind: 'answer',
+          normalizedInput: input.rawInput,
+          knownFacts: [],
+          answer: 'default workspace behavior stays intact',
+          decisionRefs: ['decision:workspace-default'],
+        };
+      },
+    },
+    memory: testMemory(paths.projectKey),
+  });
+  try {
+    const response = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:workspace-default',
+        rawInput: '不带 workspace 的默认对话',
+        channel: 'business',
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { interactionId } = await response.json() as { readonly interactionId: string };
+    const snapshot = await runtime.service.inspectExplicitInteraction(interactionId) as WorkspaceCarryingInteractionSnapshot;
+    assert.equal(snapshot.workspace, undefined);
+    await runtime.service.interpretExplicitInput({ interactionId });
+    assert.equal(interpreted.length, 1);
+    assert.equal(interpreted[0]?.workspaceCwd, undefined);
+    assert.equal(interpreted[0]?.projectKey, undefined);
   } finally {
     await runtime.server.close();
   }

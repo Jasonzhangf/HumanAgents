@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isAbsolute } from 'node:path';
 import type {
   DraftConfirmation,
   DraftPreviewReceipt,
@@ -77,6 +78,17 @@ const TERMINAL_INTERACTION_STATES: ReadonlySet<ExplicitInteractionState> = new S
   'rejected',
 ]);
 
+/**
+ * The resolved conversation project target carried by an explicit input. The
+ * app's input entry resolves the requested workspace through the config owner,
+ * so the intake only stores the canonical identity and never re-derives paths.
+ * Absence means the conversation targets the serve-bound default workspace.
+ */
+export interface ExplicitInputWorkspace {
+  readonly workspaceCwd: string;
+  readonly projectKey: string;
+}
+
 export interface ExplicitInput {
   readonly sourceRef: string;
   readonly rawInput: string;
@@ -89,6 +101,12 @@ export interface ExplicitInput {
    */
   readonly requestKind?: InteractionRequestKind;
   readonly occurredAt?: string;
+  /**
+   * Resolved project target for this conversation. When present the explicit
+   * brain treats this project directory as the project context of the input;
+   * when absent the conversation targets the serve-bound default workspace.
+   */
+  readonly workspace?: ExplicitInputWorkspace;
   /**
    * Owner-decoded actor for this input. The real HTTP entry derives a human
    * actor from the verified product principal and never accepts it from the
@@ -137,6 +155,7 @@ export interface ExplicitInteractionSnapshot {
   readonly requestKind?: InteractionRequestKind;
   readonly occurredAt?: string;
   readonly actor?: ProductMessageActor;
+  readonly workspace?: ExplicitInputWorkspace;
   readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   readonly nextAction: string;
   readonly condition?: string;
@@ -207,6 +226,7 @@ interface ExplicitInteractionRecordState {
   readonly requestKind?: InteractionRequestKind;
   readonly occurredAt?: string;
   readonly actor?: ProductMessageActor;
+  readonly workspace?: ExplicitInputWorkspace;
   readonly state: ExplicitInteractionState;
   readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   readonly nextAction: string;
@@ -232,6 +252,7 @@ interface InteractionRecord {
   readonly requestKind?: InteractionRequestKind;
   readonly occurredAt?: string;
   readonly actor?: ProductMessageActor;
+  readonly workspace?: ExplicitInputWorkspace;
   state: ExplicitInteractionState;
   owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   nextAction: string;
@@ -383,6 +404,20 @@ export class ExplicitIntake {
         },
       );
     }
+    if (input.workspace !== undefined) {
+      if (!isAbsolute(input.workspace.workspaceCwd) || !input.workspace.workspaceCwd.trim()
+        || !input.workspace.projectKey || !input.workspace.projectKey.trim()) {
+        throw new ExplicitIntakeError(
+          'workspace-invalid',
+          'explicit input workspace must carry an absolute workspace and a non-empty project key',
+          {
+            owner: 'explicit-intake',
+            nextAction: 'provide-a-resolved-workspace-target',
+            condition: 'resolved-workspace-with-project-key',
+          },
+        );
+      }
+    }
     if (input.actor !== undefined) {
       try {
         validateProductMessageActor(input.actor);
@@ -411,6 +446,7 @@ export class ExplicitIntake {
         rawInput: input.rawInput,
         ...(input.requestKind === undefined ? {} : { requestKind: input.requestKind }),
         occurredAt,
+        ...(input.workspace === undefined ? {} : { workspace: structuredClone(input.workspace) }),
         ...(input.actor === undefined ? {} : { actor: structuredClone(input.actor) }),
         state: 'received',
         owner: 'explicit-intake',
@@ -432,6 +468,7 @@ export class ExplicitIntake {
       requestKind: interaction.requestKind,
       occurredAt: interaction.occurredAt,
       actor: interaction.actor,
+      workspace: interaction.workspace,
       owner: interaction.owner,
       nextAction: interaction.nextAction,
       condition: interaction.condition,

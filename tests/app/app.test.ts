@@ -2055,6 +2055,72 @@ test('CLI accepts memory auto update configuration before composing memory', asy
   assert.equal(parsed.projectKey, paths.projectKey);
 });
 
+test('CLI project use declares the project workspace and registers its storage', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-project-use-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const output = execFileSync(process.execPath, [
+    cli,
+    'project',
+    'use',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+  ], { encoding: 'utf8', stdio: 'pipe' });
+  const parsed = JSON.parse(output) as {
+    readonly command: string;
+    readonly workspaceCwd: string;
+    readonly projectKey: string;
+    readonly declarationPath: string;
+  };
+  assert.equal(parsed.command, 'project use');
+  assert.equal(parsed.workspaceCwd, paths.workspaceCwd);
+  assert.equal(parsed.projectKey, paths.projectKey);
+  // The config owner canonicalizes the control root (symlink-free realpath), so
+  // the declaration lands under the canonical root; /var and /private/var on
+  // macOS address the same file.
+  assert.equal(parsed.declarationPath, join(paths.controlRoot, 'config.toml'));
+  const configText = await readFile(join(paths.controlRoot, 'config.toml'), 'utf8');
+  assert.ok(configText.includes(`workspace = ${JSON.stringify(paths.workspaceCwd)}`));
+  const manifest = JSON.parse(await readFile(paths.projectManifest, 'utf8')) as {
+    readonly projectKey: string;
+    readonly workspaceCwd: string;
+  };
+  assert.equal(manifest.projectKey, paths.projectKey);
+  assert.equal(manifest.workspaceCwd, paths.workspaceCwd);
+  // The declaration is functional: the config owner resolves the same project
+  // again without an explicit --workspace, which is the shortcut's purpose.
+  const declared = await resolveRuntimePaths({ controlRoot: paths.controlRoot });
+  assert.equal(declared.workspaceCwd, paths.workspaceCwd);
+  assert.equal(declared.projectKey, paths.projectKey);
+});
+
+test('CLI project use rejects a missing workspace directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-project-use-missing-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'missing-workspace');
+  assert.throws(() => execFileSync(process.execPath, [
+    join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
+    'project',
+    'use',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+    '--json',
+  ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
+    const parsed = JSON.parse(error.stderr);
+    assert.equal(parsed.error.code, 'workspace-selection-invalid');
+    assert.equal(typeof parsed.error.nextAction, 'string');
+    return true;
+  });
+});
+
 test('CLI host failures remain structured', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-host-error-'));
   const workspace = join(root, 'workspace');
