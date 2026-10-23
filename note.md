@@ -382,3 +382,15 @@ M1 水位修复已合 main `1f731d76`：两个既有语义 builder 透传当前 
 一个既有问题必须说清：`pnpm run test:compiled:services` 在本次候选和 origin/main 上都失败同样 13 项（303/309/324/360/377/378/379/380/381/389/390/397/399），与本轮改动无关，因此 `pnpm build:release` 的全量门禁现在过不去。产物改用同一条 release 流水线的其余阶段生成并全部通过：typecheck、build:raw、release 测试 14/14、package:candidate、package:smoke（含浏览器配对、显式输入 201、任务列表 200）。
 
 自有资源已收口：三棵本轮 worktree 全部关闭并 prune，12 个保留的隔离 attempt 目录先核对无存活 listener 再删除，清单与去向记录在证据目录的 `resource-inventory.json` 与 `lead-rcc-RESOURCE-CLOSURE.md`。历史存量 worktree `navigation-authorization-20261019` 不属于本轮任务域，未改动。完整证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-repair-exec-20261021/`。
+
+## 2026-10-22 显式输入 workspace 与项目快捷方式交付
+
+本轮把「显式大脑输入可选携带 workspace」与「project use 项目快捷方式」落地并合入 main `dc43d7e6`（含两次 release 版本递增，安装 0.1.0034），推送到 origin/main。语义按已裁决的 A 方案：serve 仍一次执行一个项目，输入携带的 workspace 由 config owner 解析为规范 workspaceCwd + projectKey，记录在交互快照，显式大脑把该项目目录作为提示词上下文；解析出的 projectKey 与 serve 绑定不一致时返回 typed `explicit-brain.workspace-outside-serve-scope`(409) 并给 nextAction；不带 workspace 保持原默认。CLI 新增 `humanagent project use --workspace <dir>`，校验目录、确保 `sessions/<projectKey>/project.json`、通过 config owner 原子写 config.toml `[project].workspace`。
+
+独立复核通过：首轮报告 3 个 P1（[project] 表头只认列首无注释、resolveProjectInput 接受相对路径依赖 serve cwd、ConfigurationError 未映射成 typed 错误而是 500），修复后复核 PASS；复核又指出根级点号赋值 `project.workspace = "..."` 这一合法形态会追加重复表，一并修复并再次复核 PASS（findings 0）。
+
+黑盒证据：真实 serve 上 matching workspace 201 且快照含 `{workspaceCwd,projectKey}`、outside workspace 409 typed 含 nextAction、相对 workspace 400 typed、不存在 workspace 400 typed 且不再崩成 generic 500、无 workspace 201 无回归；CLI `project use` 在带注释/缩进/点号赋值三种既有形态下都只改一处且配置仍可加载解析，同 workspace 幂等（diff 为空）。安装后正式 `humanagent restart` 交接完成，`/api/liveness` 200、`/api/tasks` 200。
+
+`pnpm run test:compiled:services` 仍失败 13 项（native run/checkpoint/memory 路径，与 origin/main 基线同数同项，非本轮引入，原因同上一条记录），故 `pnpm build:release` 全量门禁继续过不去；产物沿用同一条流水线其余阶段生成：typecheck、build:raw、release 测试 14/14、package:candidate、package:smoke（浏览器配对 passed、显式输入 201、任务列表 200、任意 cwd UI passed）。
+
+本轮 worktree `ux-workspace-input-20261022` 已关闭并 prune，分支已删除；受保护 worktree `navigation-authorization-20261019` 未改动。证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-workspace-input-20261022/`。
