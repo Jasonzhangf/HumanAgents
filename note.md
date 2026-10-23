@@ -1,5 +1,19 @@
 # HumanAgent 项目状态汇总（2026-10-19）
 
+## 2026-10-23 UX 真实可用性修复与结算边界交付
+
+本轮按用户连续反馈处理「任务无法 CRUD、Dashboard 进不去、任务无法执行」三类真实可用性故障，已合入 main 并推送 origin/main（`e748d881..b626df2c`），安装 0.1.0036，正式 restart 将实例更新到 0.1.0036，旧实例 clean 收拢。
+
+四项修复（`e709a91c`）：Dashboard 板读默认范围改读 `runtime.status.projectKey`，任务列表 scope=system 保留全量；Provider 选择在选中实例无有效 provider 时保留 `configuredAgentId` 并只在该回退分支应用 override；已退役 FIFO head 不再把当前调度状态卡在旧终态。结算边界修复（`acfb52b4`、`338c16b8`）：`humanagent_turn_end` 顶层 deliveryRefs 只接受能真正提交的交付材料，即已成功的 `file.write` 或 inspect 类工具结果；admission evidence、失败调用以及 ADVERTISED 集合外的工具一律在边界内拒绝并返回可重试的结构化失败，不再等到结算时无恢复地失败。版本递增 `36eee6fd`（0.1.0035）与 `b626df2c`（0.1.0036）。
+
+黑盒验收在真实入口完成：任务 CRUD 创建/更新/删除均 200；任务列表与 Dashboard 200；Dashboard 正确显示任务 135 的 `succeeded`/「已完成」与实际输出；任务 135「1 加 1 等于几」走完整显式流程（匹配、草稿、确认、grant、dispatch）后由模型提交 turn end，checkpoint 判定 complete、公开输出 committed、任务 succeeded、输出「1 加 1 等于 2。」，端到端结算打通。结算边界修复后 focused 测试 26/26 通过，全量 test:app 与基线的失败项逐名对比只多一条 FIFO 新用例（套件内被父用例取消，隔离运行通过），无新增回归。
+
+独立 milestone Review 首轮 FAIL，报两条 P2：admission evidence 与非 succeeded 工具结果未被拒绝，以及 `carriesDeliveryMaterial` 用负向检查使 ADVERTISED 外工具通过。两条均已按原建议修复（正向白名单 + 仅 succeeded 结果登记为交付载体 + 单独的可测判定函数），复核 PASS、两条均关闭、无新 finding。复核同时确认 child 层 `resolveDelivery` 是独立 lenient 实现，不受该改动影响。
+
+一个既有问题必须说清：`pnpm run test:compiled:services` 在 main 与候选上仍失败 14 项（native run/checkpoint/memory 路径，与基线同数同项，非本轮引入），故 `pnpm build:release` 全量门禁继续过不去；产物沿用同一条流水线其余阶段生成并全部通过：typecheck、build:raw、release 测试 14/14、package:candidate、package:smoke（浏览器配对 passed、显式输入 201、任务列表 200、任意 cwd UI passed）。
+
+受阻任务不可重启是既定设计（`applySettledTaskProjection` 只保留 stop/retry-stop），本轮未改动；受保护 worktree `navigation-authorization-20261019` 未触碰。候选 worktree `ux-real-ui-verify-20261023` 已移除并 prune，证据与复核回执在 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-settlement-acceptance-20261023/`。
+
 ## 2026-10-21：剩余UX修复计划与执行交接
 
 本轮按用户要求仅制定计划与提示词，不启动产品实施。计划为 docs/goals/ux-product-repair-plan-2026-10-21.md，执行提示词唯一正文为 docs/goals/ux-product-repair-execution-prompt-2026-10-21.md。独立Planner已核对当前共享模板交付与适用需求、DAG、来源/审批/结果的剩余语义差距；AGY Gemini4本次实际配额失败后，新建OAuth GPT-6.1 medium只读Planner完成正文，回执在 /Volumes/Intel/playground/humanagent/.worker-runs/ux-repair-plan-20261021/。
