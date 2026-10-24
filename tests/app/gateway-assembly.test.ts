@@ -633,6 +633,49 @@ test('Responses built-in tools execute write, edit, bash, todo, goal, and presen
   }
 });
 
+test('a built-in file.list with an empty path returns a typed validation failure instead of throwing', async () => {
+  // A model-correctable argument error must be a typed tool result, not an
+  // exception: the agent driver hands this back to the model so it can fix its
+  // own call. Throwing here previously made one bad argument an unrecoverable
+  // execution failure.
+  const root = await mkdtemp(join(process.cwd(), 'tmp-provider-builtin-tools-invalid-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  const admission = await createProviderToolAdmission({
+    journalPath: join(root, 'operation-control.jsonl'),
+    runtimeId: 'runtime-builtin-tools',
+    executionEpoch: 1,
+    parentOperationId: operation,
+    parentScope: providerExecutionScope,
+    inputRef: 'artifact://input/app-gateway',
+  });
+  const { executor } = createResponsesFileToolExecutor({
+    workspaceRoot,
+    projectKey: 'builtin-tools-invalid-project',
+    artifactRoot: join(root, 'artifacts'),
+    admission,
+  });
+  try {
+    const result = await executor.execute({
+      execution: { runtimeId: 'runtime-builtin-tools', taskId: task, operationId: operation, executionEpoch: 1 },
+      scope: providerExecutionScope,
+      requestId: 'request-call-list-invalid',
+      call: { callId: 'call-list-invalid', toolId: 'file.list', arguments: { path: '' }, continuationRef: 'response-builtin' },
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.category, 'validation');
+    assert.equal(result.error?.code, 'tool.argument.invalid');
+    assert.equal(result.error?.message, 'file.list requires a non-empty path');
+    assert.equal(result.error?.retryable, 'retryable');
+    assert.equal(result.error?.nextAction.kind, 'continue');
+    // The rejection must stay an explicit failure, never a faked success.
+    assert.equal(JSON.parse(result.output).status, 'failed');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('app assembly exposes Hand as a thin semantic-intent boundary', async () => {
   const hand = createHandOperationRuntime({
     permissions: {

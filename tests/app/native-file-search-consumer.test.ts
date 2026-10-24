@@ -13,6 +13,7 @@ import {
   type InteractionTraceEntry,
   type OperationId,
   type ProviderBinding,
+  type ProviderToolDefinition,
   type TaskId,
   type ToolExecutionFact,
 } from '../../packages/contracts/src/index.js';
@@ -29,6 +30,7 @@ import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/inde
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
   createResponsesFileToolExecutor,
+  RESPONSES_FILE_LIST_TOOL,
   RESPONSES_FILE_SEARCH_TOOL,
   type ProviderToolAdmissionInput,
 } from '../../packages/app/src/provider-tool-execution.js';
@@ -374,6 +376,7 @@ function service(input: {
   toolOutputs: ReturnType<typeof createResponsesFileToolExecutor>['toolOutputs'];
   workspaceRoot: string;
   projectKey: string;
+  providerTools?: readonly ProviderToolDefinition[];
   runtimeComposition?: { readonly admitExecution: (allocation: RuntimeExecutionAllocation) => Promise<void> };
 }): UiRuntimeService {
   return new UiRuntimeService({
@@ -391,7 +394,7 @@ function service(input: {
     closurePort: input.journal,
     workspaceRoot: input.workspaceRoot,
     projectKey: input.projectKey,
-    providerTools: [RESPONSES_FILE_SEARCH_TOOL],
+    providerTools: [...(input.providerTools ?? [RESPONSES_FILE_SEARCH_TOOL])],
     providerToolExecutor: input.executor,
     toolOutputStore: input.toolOutputs,
     providerToolRoundLimit: 4,
@@ -1203,3 +1206,143 @@ test('truncated successful search reports remain distinct after persistence', as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('a real local file.list with an empty path reports a validation failure instead of throwing', async () => {
+  // Reproduction target (task-4): the model wrote file.list path "" and the
+  // executor threw `file.list requires a non-empty path`, which the agent driver
+  // then turned into an unrecoverable blocked terminal. The argument error is
+  // correctable by the model, so the executor must return a typed `failed`
+  // result with a validation category, not reject the call.
+  const taskDataRoot = '/private/tmp/humanagent-native-file-list-runs';
+  await mkdir(taskDataRoot, { recursive: true });
+  const root = await mkdtemp(join(taskDataRoot, 'native-file-list-empty-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  const projectKey = 'native-file-list-empty-project';
+  const admission = await directToolAdmission({
+    root,
+    execution: {
+      runtimeId: 'runtime-file-list-empty',
+      taskId: id('task', 'task-file-list-empty'),
+      operationId: id('operation', 'operation-file-list-empty'),
+      executionEpoch: 1,
+    },
+    scope: {
+      organId,
+      taskId: id('task', 'task-file-list-empty'),
+      cycleId: id('cycle', 'cycle-file-list-empty'),
+      operationId: id('operation', 'operation-file-list-empty'),
+    },
+  });
+  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot: join(root, 'evidence'), admission });
+  try {
+    const result = await executor.executor.execute({
+      execution: {
+        runtimeId: 'runtime-file-list-empty',
+        taskId: id('task', 'task-file-list-empty'),
+        operationId: id('operation', 'operation-file-list-empty'),
+        executionEpoch: 1,
+      },
+      scope: {
+        organId,
+        taskId: id('task', 'task-file-list-empty'),
+        cycleId: id('cycle', 'cycle-file-list-empty'),
+        operationId: id('operation', 'operation-file-list-empty'),
+      },
+      call: { callId: 'call-file-list-empty', toolId: 'file.list', arguments: { path: '' }, continuationRef: 'response-file-list-empty' },
+      requestId: 'request-file-list-empty',
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.category, 'validation');
+    assert.equal(result.error?.code, 'tool.argument.invalid');
+    assert.equal(result.error?.message, 'file.list requires a non-empty path');
+    assert.equal(result.error?.retryable, 'retryable');
+    assert.equal(result.error?.nextAction.kind, 'continue');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a real execution that begins with an empty-path file.list recovers and succeeds instead of blocking', async () => {
+  // End-to-end reproduction (task-4): a scripted provider asks for file.list
+  // with path "" first, then (after the typed validation failure comes back)
+  // corrects the path and ends. The task must reach `succeeded`, never `blocked`.
+  const taskDataRoot = '/private/tmp/humanagent-native-file-list-runs';
+  await mkdir(taskDataRoot, { recursive: true });
+  const root = await mkdtemp(join(taskDataRoot, 'native-file-list-recover-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  const projectKey = 'native-file-list-recover-project';
+  const journal = new UiRuntimeJournal(join(root, 'projection', 'ui-runtime-journal.jsonl'));
+  const admission = nativeConsumerAdmission({ root, preparedJournal: journal, now: () => new Date() });
+  const executor = createResponsesFileToolExecutor({
+    workspaceRoot, projectKey, artifactRoot: join(root, 'evidence'), admission: admission.toolAdmission,
+  });
+  const adapter = fileListProviderAdapter(root);
+  const runtime = service({
+    root, adapter, journal, executor: executor.executor, toolOutputs: executor.toolOutputs,
+    workspaceRoot, projectKey, runtimeComposition: admission.runtimeComposition,
+    providerTools: [RESPONSES_FILE_LIST_TOOL],
+  });
+  try {
+    const task = runtime.createTask({ title: 'list the workspace root', directive: 'list the root with an empty path first' });
+    await runtime.startExecution(task.taskId, { prompt: 'list the workspace root' });
+    await waitForTerminal(runtime, task.taskId);
+    const dashboard = runtime.taskDashboard(task.taskId);
+    assert.equal(
+      dashboard.state,
+      'succeeded',
+      `empty-path file.list must recover, got ${dashboard.state}: ${dashboard.error?.code} ${dashboard.error?.message}`,
+    );
+    assert.equal(dashboard.error, undefined);
+    // The rejected call must be surfaced to the model as a typed failed result
+    // (so it can correct the argument) instead of ending the execution.
+    const events = dashboard.history.events;
+    const listResults = events.filter((event) => event.kind === 'provider.tool-result' && event.toolId === 'file.list');
+    assert.equal(listResults.length, 1, 'the empty-path file.list should be the only tool round');
+    assert.equal(listResults[0]?.status, 'failed');
+    assert.equal(listResults[0]?.error?.message, 'file.list requires a non-empty path');
+
+  } finally {
+    await runtime.quiesceImplicitConsumption().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function fileListProviderAdapter(root: string): ProviderAdapter {
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'provider-evidence')));
+  let responseCount = 0;
+  const fetch: V3ProviderFetch = async (url) => {
+    if (url.endsWith('/health')) return { status: 200, body: null, text: async () => '{"status":"ok","version":"fixture"}' };
+    if (url.endsWith('/v1/models')) return { status: 200, body: null, text: async () => '{"data":[{"id":"scripted-model"}]}' };
+    if (!url.endsWith('/v1/responses')) throw new Error(`unexpected scripted provider URL: ${url}`);
+    responseCount += 1;
+    if (responseCount === 1) {
+      // First turn: the model writes the path as "" (the exact production bug).
+      return sse([
+        { protocol: 'responses', type: 'response.created', response: { id: 'response-list-call' } },
+        {
+          protocol: 'responses', type: 'response.output_item.added', output_index: 0,
+          item: { type: 'function_call', call_id: 'call-list-empty', name: 'file_list', arguments: '' },
+        },
+        {
+          protocol: 'responses', type: 'response.output_item.done', output_index: 0,
+          item: { type: 'function_call', call_id: 'call-list-empty', name: 'file_list', arguments: JSON.stringify({ path: '' }) },
+        },
+        { protocol: 'responses', type: 'response.completed', response: { id: 'response-list-call' } },
+      ]);
+    }
+    if (responseCount === 2) {
+      // Second turn: the model received the typed validation failure and ends.
+      return sse([
+        { protocol: 'responses', type: 'response.created', response: { id: 'response-list-final' } },
+        { protocol: 'responses', type: 'response.output_text.done', item_id: 'message-final', text: 'Path was invalid; stopping.' },
+        { protocol: 'responses', type: 'response.completed', response: { id: 'response-list-final' } },
+      ]);
+    }
+    throw new Error(`unexpected extra scripted Responses request ${responseCount}`);
+  };
+  const transport = createV3ProviderHttpTransport({ binding, baseUrl: 'http://127.0.0.1:4444', evidence, fetch });
+  return new ProviderAdapter({ binding, routeRef: 'fixture-route', codec: new ResponsesProviderCodec(), transport, evidence });
+}

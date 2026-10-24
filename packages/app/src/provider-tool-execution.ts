@@ -206,7 +206,10 @@ export const RESPONSES_FILE_LIST_TOOL: ProviderToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      path: { type: 'string' },
+      path: {
+        type: 'string',
+        description: 'Workspace-relative directory path to list. Pass "." for the workspace root. An empty string is not a valid path.',
+      },
       maxFiles: { type: 'integer', minimum: 1, maximum: 500, default: 100 },
     },
     required: ['path'],
@@ -1092,7 +1095,13 @@ async function executeFileList(
   if (request.signal.aborted) throw Object.assign(new Error('file.list was stopped before admission'), { name: 'AbortError' });
   const args = request.call.arguments;
   const path = args.path;
-  if (typeof path !== 'string' || path.trim() === '') throw new Error('file.list requires a non-empty path');
+  // A bad `path` is the model's own correctable mistake, not a runtime fault.
+  // Return it as a typed validation failure so the agent driver hands the
+  // rejection back to the model; throwing here used to make one empty argument
+  // an unrecoverable execution failure.
+  if (typeof path !== 'string' || path.trim() === '') {
+    return invalidToolArguments(request, RESPONSES_FILE_LIST_TOOL.toolId, 'file.list requires a non-empty path');
+  }
   const maxFiles = typeof args.maxFiles === 'number' && Number.isInteger(args.maxFiles) && args.maxFiles >= 1
     ? Math.min(args.maxFiles, 500)
     : 100;
@@ -1510,4 +1519,33 @@ function webSearchErrorCategory(code: string | undefined): 'provider' | 'transpo
     case 'provider-failed': return 'provider';
     default: return 'runtime';
   }
+}
+
+/**
+ * A typed failure for a tool call the model wrote with invalid arguments. The
+ * call was rejected before any effect, so the error is the model's to correct:
+ * the driver routes it back through the tool history instead of ending the
+ * execution. This is the same category/phase shape the web.search executor
+ * already reports for invalid-request results.
+ */
+function invalidToolArguments(request: ToolExecRequest, toolId: string, message: string): ToolExecResult {
+  const evidenceRefs = [taskEvidence(request, `${toolId}-invalid-arguments`)];
+  return {
+    output: JSON.stringify({ status: 'failed', code: 'tool.argument.invalid', message, recoverable: true }),
+    outputRefs: [],
+    evidenceRefs,
+    status: 'failed',
+    error: {
+      errorId: `provider-tool-invalid-arguments-${request.call.callId}`,
+      code: 'tool.argument.invalid',
+      category: 'validation',
+      phase: 'tool',
+      message,
+      ownerId: OWNER,
+      retryable: 'retryable',
+      attention: 'foreground',
+      evidenceRefs,
+      nextAction: { kind: 'continue', ref: toolId },
+    },
+  };
 }
