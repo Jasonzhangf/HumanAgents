@@ -1030,6 +1030,7 @@ export class ProviderAgentDriver<
               && toolResult.result.error?.retryable === 'retryable'
               && toolResult.result.error.nextAction.kind === 'wait'
             )
+            || this.modelCorrectableFailure(toolResult.result)
           ) {
             toolHistory.push({ call: outcome.call, result: outcome.result });
             continue;
@@ -1411,11 +1412,28 @@ export class ProviderAgentDriver<
   }
 
   /**
+   * Whether a non-succeeded tool result is a model-correctable argument mistake
+   * rather than a runtime fault. The executor returns these as a typed
+   * `validation` failure with a `continue` next action: the rejected call never
+   * ran, so the only owner that can repair it is the model. Such results route
+   * back through the tool history exactly like a refused turn-end. Every other
+   * failed/cancelled/blocked/unknown result stays fatal via `toolResultFailure`.
+   */
+  private modelCorrectableFailure(result: ProviderToolResult<TIdentity>): boolean {
+    const error = result.error;
+    return error?.category === 'validation'
+      && error.retryable === 'retryable'
+      && error.nextAction.kind === 'continue';
+  }
+
+  /**
    * A failed tool result is fatal for the execution, and its provider error is
    * the real failure cause. Rethrow it as a ProviderAdapterError: the downstream
    * projections read `providerError`, so throwing the bare ProviderError object
    * would degrade the task terminal to String(plainObject) and lose the code,
-   * category, retryability and next action of the actual failure.
+   * category, retryability and next action of the actual failure. The only
+   * non-fatal failed results are a refused standard turn-end and a
+   * model-correctable `validation` argument mistake (see `modelCorrectableFailure`).
    */
   private toolResultFailure(toolResult: ProviderToolResult<TIdentity>): ProviderAdapterError {
     const failure = toolResult.error;

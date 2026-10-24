@@ -1984,6 +1984,120 @@ test('provider agent driver rethrows an executor-returned failure as a typed pro
   );
 });
 
+test('provider agent driver returns a validation tool failure to the model instead of ending the execution', async () => {
+  // Observed in production: the model wrote `file.list` path as "" and the
+  // runtime turned that single correctable argument error into an unrecoverable
+  // blocked terminal. A validation failure means the tool was rejected before it
+  // ran, so the only correct owner of the fix is the model: the typed failed
+  // result must reach the next request, exactly like a refused turn-end.
+  let round = 0;
+  const submissions: ProviderSubmitInput[] = [];
+  const executedCallIds: string[] = [];
+  const invalidArguments: ProviderError = {
+    errorId: 'provider-tool-argument-call-list-empty',
+    code: 'tool.argument.invalid',
+    category: 'validation',
+    phase: 'tool',
+    message: 'file.list requires a non-empty path',
+    ownerId: 'humanagent.app',
+    retryable: 'retryable',
+    attention: 'foreground',
+    evidenceRefs: [evidence],
+    nextAction: { kind: 'continue', ref: 'file.list' },
+  };
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      round += 1;
+      if (round <= 2) {
+        const corrected = round === 2;
+        yield {
+          ...identity,
+          eventId: corrected ? 'event-list-corrected' : 'event-list-empty',
+          kind: 'tool',
+          summary: 'file.list',
+          outputRefs: [`artifact://list-${round}`],
+          evidenceRefs: [evidence],
+          toolCall: {
+            callId: corrected ? 'call-list-corrected' : 'call-list-empty',
+            toolId: 'file.list',
+            arguments: { path: corrected ? '.' : '', maxFiles: 100 },
+            continuationRef: `response-round-${round}`,
+          },
+        };
+        yield {
+          ...identity,
+          eventId: `event-waiting-${round}`,
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      yield { ...identity, eventId: 'event-list-output', kind: 'output', summary: 'root listed', outputRefs: ['output-final'], evidenceRefs: [evidence] };
+      yield { ...identity, eventId: 'event-list-terminal', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.list', description: 'list workspace files', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute({ call }) {
+        executedCallIds.push(call.callId);
+        if (call.callId === 'call-list-empty') {
+          return {
+            output: JSON.stringify({ status: 'failed', message: 'file.list requires a non-empty path', recoverable: true }),
+            outputRefs: [],
+            evidenceRefs: [evidence],
+            status: 'failed',
+            error: invalidArguments,
+          };
+        }
+        return {
+          output: JSON.stringify({ path: '.', entries: ['README.md'] }),
+          outputRefs: ['asset://provider-tool/list-corrected'],
+          evidenceRefs: [evidence],
+          status: 'succeeded',
+        };
+      },
+    },
+  });
+
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'list the workspace root' } });
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+
+  // The invalid call must not end the execution: the model sees it, retries with
+  // a corrected path, and the turn completes on the second round.
+  assert.deepEqual(executedCallIds, ['call-list-empty', 'call-list-corrected']);
+  assert.equal(submissions.length, 2);
+  assert.deepEqual(submissions[0]?.toolContinuations?.map((continuation) => continuation.callId), ['call-list-empty']);
+  assert.deepEqual(
+    submissions[1]?.toolContinuations?.map((continuation) => continuation.callId),
+    ['call-list-empty', 'call-list-corrected'],
+  );
+  assert.deepEqual(events.flatMap((event) => event.providerEvent.toolResult === undefined
+    ? []
+    : [[event.providerEvent.toolResult.status, event.providerEvent.toolResult.callId]]), [
+    ['failed', 'call-list-empty'],
+    ['succeeded', 'call-list-corrected'],
+  ]);
+  assert.equal(events.at(-1)?.terminalState, 'succeeded');
+});
+
 test('provider agent driver honors the configured tool round limit', async () => {
   // The fixture always asks for another tool round up to a finite ninth round,
   // then emits an ordinary `succeeded` terminal with no tool call. Only an
