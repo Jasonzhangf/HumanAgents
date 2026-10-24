@@ -46,7 +46,7 @@ import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/inde
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import type { ConfiguredProjectCatalog, RuntimePaths } from '../../../config/src/index.js';
 import { resetUiDisplayPreference } from '../../../config/src/index.js';
-import { FileCheckpointStore, UiRuntimeJournal, uiRuntimeControlJournalPath } from './journal.js';
+import { FileCheckpointStore, openUiRuntimeOrganJournal, UiRuntimeJournal, uiRuntimeControlJournalPath } from './journal.js';
 import { UiRuntimeApiError } from './errors.js';
 import { bindUiDisplayPreferenceResource } from './display-preferences.js';
 import { createFakeExecutionPort } from '../fake-execution.js';
@@ -350,7 +350,10 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const modeRoot = join(options.checkpointRoot, options.mode);
   const canonicalJournalPath = uiRuntimeControlJournalPath(modeRoot);
   const taskControlJournalPath = uiRuntimeControlJournalPath(modeRoot);
-  const taskControlJournal = new JsonlOrganJournal(taskControlJournalPath);
+  // Every bound read (task identity, I2 history, planner duties, agent
+  // activity, grants) resolves this one physical control journal, so they open
+  // it through the shared reader instead of parsing tens of megabytes per task.
+  const taskControlJournal = openUiRuntimeOrganJournal(taskControlJournalPath);
   const canonicalCheckpoints = new FileCheckpointStore(canonicalJournalPath);
   const canonicalCurrentState = createJsonlRuntimeTaskCurrentStateJournal({
     journal: taskControlJournal,

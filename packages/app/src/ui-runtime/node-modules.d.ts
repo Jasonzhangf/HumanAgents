@@ -39,6 +39,13 @@ declare const Buffer: {
 declare function setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setInterval> & { unref?(): void };
 
 declare module 'node:fs/promises' {
+  // The shared Journal reader keys its verified snapshot by file identity.
+  export interface Stats {
+    readonly dev: number;
+    readonly ino: number;
+    readonly size: number;
+    readonly mtimeMs: number;
+  }
   export interface FileHandle {
     stat(): Promise<Stats>;
     writeFile(data: string | Uint8Array, encoding?: string): Promise<void>;

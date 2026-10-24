@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type {
@@ -31,7 +32,12 @@ import type {
   ActiveTurnJournalPort,
   ActiveTurnJournalRecord,
 } from '../../../runtime/src/context/active-turn-journal.js';
-import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import {
+  JournalIntegrityError,
+  JsonlOrganJournal,
+  type JournalRecord,
+  type JournalVerification,
+} from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
 import { createJsonlCheckpointJournal } from '../checkpoint-journal.js';
@@ -90,6 +96,98 @@ export function uiRuntimeTaskCheckpointPath(
   cycleId: CycleId,
 ): string {
   return join(uiRuntimeModeRoot(projectCheckpointsRoot, mode), `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
+}
+
+/**
+ * One canonical control journal reaches tens of megabytes, and one product
+ * board read asks several readers (task identity, agent activity, inspection
+ * history, planner duties) about every task. Each reader used to parse the same
+ * file again, so the read cost grew with the task count instead of staying one
+ * file read.
+ *
+ * This reader verifies the file once per file state and hands the same verified
+ * records to every reader that opens the same path. The cache key is the file
+ * identity (`device`, `inode`, `size`, `mtime`), and the Organ Journal is
+ * append-only, so any commit changes the key and the next read parses the new
+ * content. Nothing about a task, a decision or a control fact is derived or
+ * remembered here; only the already committed lines are shared.
+ */
+const SHARED_JOURNAL_CACHE_LIMIT = 2;
+
+interface SharedJournalEntry {
+  readonly key: string;
+  readonly pending: Promise<JournalVerification>;
+}
+
+const sharedJournals = new Map<string, SharedJournalEntry>();
+
+async function journalCacheKey(filePath: string): Promise<string> {
+  let handle;
+  try {
+    handle = await open(filePath, 'r');
+    const info = await handle.stat();
+    return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}`;
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return 'absent';
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+function rememberSharedJournal(filePath: string, entry: SharedJournalEntry): void {
+  // Re-insert so the map keeps the most recently used journal last.
+  sharedJournals.delete(filePath);
+  sharedJournals.set(filePath, entry);
+  while (sharedJournals.size > SHARED_JOURNAL_CACHE_LIMIT) {
+    const oldest = sharedJournals.keys().next();
+    if (oldest.done) return;
+    sharedJournals.delete(oldest.value);
+  }
+}
+
+class SharedVerifiedOrganJournal extends JsonlOrganJournal {
+  constructor(private readonly journalPath: string) {
+    super(journalPath);
+  }
+
+  private async load(): Promise<JournalVerification> {
+    const key = await journalCacheKey(this.journalPath);
+    const cached = sharedJournals.get(this.journalPath);
+    if (cached !== undefined && cached.key === key) {
+      rememberSharedJournal(this.journalPath, cached);
+      return cached.pending;
+    }
+    const pending = super.verify();
+    const entry: SharedJournalEntry = { key, pending };
+    rememberSharedJournal(this.journalPath, entry);
+    try {
+      return await pending;
+    } catch (error) {
+      if (sharedJournals.get(this.journalPath) === entry) sharedJournals.delete(this.journalPath);
+      throw error;
+    }
+  }
+
+  override async verify(): Promise<JournalVerification> {
+    return this.load();
+  }
+
+  override async replay(): Promise<readonly JournalRecord[]> {
+    const verification = await this.load();
+    if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
+    return verification.records;
+  }
+}
+
+/**
+ * Opens one canonical Organ Journal for reading. Every reader opened through
+ * this function sees the same verified records until the file changes on disk,
+ * and a concurrent burst is served by one parse instead of one per reader.
+ */
+export function openUiRuntimeOrganJournal(filePath: string): JsonlOrganJournal {
+  if (!filePath.trim()) throw new Error('Organ Journal path is required');
+  return new SharedVerifiedOrganJournal(filePath);
 }
 
 export interface DurableJournalReadFailure {
