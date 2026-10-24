@@ -36,7 +36,7 @@ import {
   type FileReadRequest,
   type WebSearchProviderBackendConfig,
 } from '../../adapters/operations/src/index.js';
-import { CodeSearchService, WebSearchService, type WebSearchProvider } from '../../runtime/src/hand/index.js';
+import { CodeSearchHarnessError, CodeSearchService, WebSearchService, type WebSearchProvider } from '../../runtime/src/hand/index.js';
 import type { ProviderToolExecutionPort } from '../../adapters/provider/src/index.js';
 import type {
   OperationChildAdmission,
@@ -1113,12 +1113,29 @@ async function executeFileList(
     cycleId,
     operationId,
   };
-  const discovered = await params.functions.findFiles({
-    workspaceRef: params.workspaceRef,
-    path,
-    maxFiles,
-    signal: request.signal,
-  });
+  let discovered: Awaited<ReturnType<typeof params.functions.findFiles>>;
+  try {
+    discovered = await params.functions.findFiles({
+      workspaceRef: params.workspaceRef,
+      path,
+      maxFiles,
+      signal: request.signal,
+    });
+  } catch (error) {
+    // A path the model chose that resolves outside the workspace, or to a
+    // location that does not exist, is the same correctable argument mistake as
+    // an empty path: the model can retry with a correct workspace-relative
+    // path. Reading outside the workspace is still refused; the refusal just
+    // goes back to the model instead of ending the whole execution. Only errors
+    // that name the requested path qualify, so a workspace-binding mismatch
+    // stays a real fault instead of being reported as the model's mistake.
+    if (error instanceof CodeSearchHarnessError
+      && error.path !== undefined
+      && (error.code === 'path-escape' || error.code === 'path-not-found')) {
+      return invalidToolArguments(request, RESPONSES_FILE_LIST_TOOL.toolId, error.message);
+    }
+    throw error;
+  }
   const entries = discovered.paths.map((entry) => ({ path: entry, kind: 'file' as const }));
   const report = {
     workspaceRef: params.workspaceRef,

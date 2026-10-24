@@ -1264,6 +1264,63 @@ test('a real local file.list with an empty path reports a validation failure ins
   }
 });
 
+test('a real local file.list with a path outside the workspace reports a validation failure instead of throwing', async () => {
+  // Same defect class as the empty path, found by driving the real entry with a
+  // real model: the model wrote an absolute path, `findFiles` threw
+  // `path-escape`, and the whole execution settled blocked. A path the model
+  // chose is its own correctable mistake, so the executor must return a typed
+  // `failed` result and let the model retry with a workspace-relative path.
+  const taskDataRoot = '/private/tmp/humanagent-native-file-list-runs';
+  await mkdir(taskDataRoot, { recursive: true });
+  const root = await mkdtemp(join(taskDataRoot, 'native-file-list-escape-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  const projectKey = 'native-file-list-escape-project';
+  const admission = await directToolAdmission({
+    root,
+    execution: {
+      runtimeId: 'runtime-file-list-escape',
+      taskId: id('task', 'task-file-list-escape'),
+      operationId: id('operation', 'operation-file-list-escape'),
+      executionEpoch: 1,
+    },
+    scope: {
+      organId,
+      taskId: id('task', 'task-file-list-escape'),
+      cycleId: id('cycle', 'cycle-file-list-escape'),
+      operationId: id('operation', 'operation-file-list-escape'),
+    },
+  });
+  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot: join(root, 'evidence'), admission });
+  try {
+    const result = await executor.executor.execute({
+      execution: {
+        runtimeId: 'runtime-file-list-escape',
+        taskId: id('task', 'task-file-list-escape'),
+        operationId: id('operation', 'operation-file-list-escape'),
+        executionEpoch: 1,
+      },
+      scope: {
+        organId,
+        taskId: id('task', 'task-file-list-escape'),
+        cycleId: id('cycle', 'cycle-file-list-escape'),
+        operationId: id('operation', 'operation-file-list-escape'),
+      },
+      call: { callId: 'call-file-list-escape', toolId: 'file.list', arguments: { path: '/etc' }, continuationRef: 'response-file-list-escape' },
+      requestId: 'request-file-list-escape',
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.category, 'validation');
+    assert.equal(result.error?.code, 'tool.argument.invalid');
+    assert.equal(result.error?.message, 'search path escapes the bound workspace');
+    assert.equal(result.error?.retryable, 'retryable');
+    assert.equal(result.error?.nextAction.kind, 'continue');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a real execution that begins with an empty-path file.list recovers and succeeds instead of blocking', async () => {
   // End-to-end reproduction (task-4): a scripted provider asks for file.list
   // with path "" first, then (after the typed validation failure comes back)
