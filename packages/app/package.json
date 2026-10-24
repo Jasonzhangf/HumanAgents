@@ -1,7 +1,7 @@
 {
   "name": "@humanagent/app",
-  "version": "0.1.36",
-  "releaseVersion": "0.1.0036",
+  "version": "0.1.37",
+  "releaseVersion": "0.1.0037",
   "private": true,
   "type": "module",
   "main": "./dist/app/src/index.js",
