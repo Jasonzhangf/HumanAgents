@@ -326,7 +326,7 @@ export async function prepareScopeSemanticHistory(input: {
   readonly activeTurn: InteractionTurnIdentity;
   readonly parentJournal: Pick<
     InteractionParentOpenedTurnScopeReadPort,
-    'readScopeOpenedTurns' | 'readScopeAbandonedTurns'
+    'readScopeOpenedTurns' | 'readScopeAbandonedTurns' | 'readScopeParseFailures'
   >;
   readonly checkpointJournal: Pick<
     InteractionSemanticCheckpointJournalPort,
@@ -341,7 +341,12 @@ export async function prepareScopeSemanticHistory(input: {
   const commits = await input.checkpointJournal.readScopeSemanticCheckpoints(scope);
   const openedTurns = await input.parentJournal.readScopeOpenedTurns(scope);
   const abandonedTurns = await input.parentJournal.readScopeAbandonedTurns(scope);
+  const parseFailures = await input.parentJournal.readScopeParseFailures(scope);
   const abandoned = new Set(abandonedTurns.map(({ fact }) => interactionTurnKey(fact.turn)));
+  // A turn closed as unparseable is durable history-free closure too: its
+  // terminal output exists but yielded no decision, so it neither blocks the
+  // next turn nor feeds it a claim it never made.
+  const unusable = new Set(parseFailures.map(({ fact }) => interactionTurnKey(fact.turn)));
   const committed = [...commits].sort((left, right) => left.commit.journalSeq - right.commit.journalSeq);
   const history: InteractionSemanticCheckpoint[] = [];
   for (const opened of openedTurns) {
@@ -354,6 +359,10 @@ export async function prepareScopeSemanticHistory(input: {
       // already closed by its own durable fact, so it neither blocks nor feeds
       // the next turn.
       if (abandoned.has(interactionTurnKey(opened.fact.turn))) continue;
+      // A turn whose real terminal output could not be parsed into any decision
+      // is closed by its own durable fact in the same way: it holds no claim, so
+      // it must not block the next turn.
+      if (unusable.has(interactionTurnKey(opened.fact.turn))) continue;
       throw new ContractError(
         `unclosed interaction parent turn ${opened.fact.turn.turnId} requires recovery or semantic closure before opening ${input.activeTurn.turnId}`,
       );

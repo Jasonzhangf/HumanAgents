@@ -145,6 +145,14 @@ export interface InteractionParentTurnSnapshot {
    * terminal output and no business side effect.
    */
   readonly abandonment: InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact> | null;
+  /**
+   * The single committed failure-closing fact, or null. It records only that the
+   * provider returned a real terminal output but the runtime could not parse it
+   * into any decision, so the turn is durably closed as unusable instead of
+   * being left pending forever. It is distinct from abandonment (no terminal
+   * output) and never claims a settled answer, route, close or settlement.
+   */
+  readonly parseFailure: InteractionParentCommittedFact<InteractionParentTurnParseFailureFact> | null;
 }
 
 /**
@@ -166,6 +174,29 @@ export interface InteractionParentTurnAbandonmentFact {
 }
 
 /**
+ * The durable fact that one interpreted turn committed its input and a real
+ * provider resource close, but the terminal output could not be parsed into any
+ * decision.
+ *
+ * The turn is therefore closed as unusable: it is distinct from abandonment (no
+ * terminal output) and never claims a settled answer, route, close or
+ * settlement. The exact offending request and epoch are recorded so a retry in
+ * the same interaction scope can recognize the committed failure and reuse it
+ * instead of re-bricking.
+ */
+export interface InteractionParentTurnParseFailureFact {
+  readonly turn: InteractionTurnIdentity;
+  readonly execution: InteractionParentProviderExecutionIdentityRef;
+  readonly providerBinding: ProviderBinding;
+  /** The terminal request whose output could not be parsed. */
+  readonly terminalRequestId: string;
+  /** The execution epoch that produced the unparseable output. */
+  readonly executionEpoch: number;
+  /** When the failure-closing fact was committed. */
+  readonly failedAt: string;
+}
+
+/**
  * The conservative decision of whether one interrupted parent turn may be
  * discharged. A held decision carries the exact durable reason so the caller
  * can keep failing with the original explicit boundary instead of guessing.
@@ -173,6 +204,16 @@ export interface InteractionParentTurnAbandonmentFact {
 export type InteractionParentTurnAbandonmentEligibility =
   | { readonly abandonable: true }
   | { readonly abandonable: false; readonly heldReason: string };
+
+/**
+ * The conservative decision of whether one interpreted turn may be closed as
+ * unusable. A held decision carries the exact durable reason, so a caller that
+ * meets a shape it must not close keeps its original explicit error instead of
+ * writing an unfounded fact.
+ */
+export type InteractionParentTurnParseFailureEligibility =
+  | { readonly closeable: true; readonly terminalRequestId: string; readonly executionEpoch: number }
+  | { readonly closeable: false; readonly heldReason: string };
 
 /** The single append a transactional turn plan may stage. */
 export type InteractionParentTurnAppend =
@@ -220,6 +261,17 @@ export type InteractionParentTurnAppend =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionParentTurnAbandonmentFact;
+    }
+  | {
+      /**
+       * The failure-closing of an interpreted epoch whose terminal output could
+       * not be parsed. It freezes the turn: no request, raw fact, close,
+       * settlement or abandonment may follow it.
+       */
+      readonly kind: 'turn-parse-failure';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentTurnParseFailureFact;
     };
 
 /**
@@ -258,6 +310,16 @@ export interface InteractionParentOpenedTurnScopeReadPort {
     readonly organId: OrganId;
     readonly interactionScopeId: string;
   }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>[]>;
+  /**
+   * The committed failure-closings of interpreted turns in one interaction
+   * scope. Scope-level readiness and the pending-turn read consume this beside
+   * the abandonment read: a turn closed as unusable stops blocking, and it
+   * never enters semantic history because it produced no decision.
+   */
+  readScopeParseFailures(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>[]>;
 }
 
 /**
@@ -384,6 +446,23 @@ export interface InteractionParentTurnRawOwner {
     readonly reason: InteractionParentTurnAbandonmentFact['reason'];
     readonly abandonedAt: string;
   }): Promise<InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>>;
+  /**
+   * Decide whether this interpreted turn can be closed as unusable. Only a turn
+   * that already holds a real terminal output (a settled terminal request with
+   * its completion and complete assistant text) qualifies: the output exists but
+   * no decision could be parsed from it.
+   */
+  readParseFailureEligibility(): Promise<InteractionParentTurnParseFailureEligibility>;
+  /**
+   * Durably close a turn whose terminal output cannot be parsed into any
+   * decision. It never claims an answer, a route, an abandonment, a close or a
+   * settlement; it only records that this exact terminal output is unusable, so
+   * the interaction scope stops blocking on an unrecoverable turn. It is
+   * idempotent: an exact repeat returns the first committed fact.
+   */
+  closeUnparseableTurn(input: {
+    readonly failedAt: string;
+  }): Promise<InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>>;
 }
 
 export interface InteractionParentTurnRawOwnerInput {
@@ -559,6 +638,7 @@ function snapshotCommitFingerprint(snapshot: InteractionParentTurnSnapshot): str
     providerSettlements: snapshot.providerSettlements.map((committed) => committed.commit),
     resourceClose: snapshot.resourceClose?.commit ?? null,
     abandonment: snapshot.abandonment?.commit ?? null,
+    parseFailure: snapshot.parseFailure?.commit ?? null,
   });
 }
 
@@ -1321,6 +1401,90 @@ export function createInteractionParentTurnRawOwner(
     return { fact: result.fact, commit: committed };
   }
 
+  /**
+   * Decide whether one interpreted turn can be closed as unusable.
+   *
+   * The decision is the mirror image of abandonment: this turn did reach a real
+   * terminal output (one settled terminal request, its `completed` completion
+   * and its assistant text), so the only remaining reason it produced no
+   * decision is that the output itself is unusable. Any shape without a real
+   * terminal output keeps its own recovery path instead of being closed here.
+   */
+  async function parseFailureEligibility(
+    snapshot: InteractionParentTurnSnapshot,
+  ): Promise<InteractionParentTurnParseFailureEligibility> {
+    const held = (heldReason: string): InteractionParentTurnParseFailureEligibility => ({
+      closeable: false,
+      heldReason,
+    });
+    if (snapshot.turnInput === null) return held('the committed turn input is missing');
+    const committedInput = snapshot.turnInput.fact;
+    if (committedInput.providerBinding === undefined) return held('the committed provider binding is missing');
+    if (snapshot.abandonment !== null) return held('the turn is already discharged as interrupted without terminal output');
+    if (snapshot.parseFailure !== null) return held('the turn is already closed as unparseable');
+    try {
+      // The same fold the two real output readers use, so a turn is only closed
+      // when a genuine terminal output exists but yielded no usable decision.
+      const output = await finalOutputFromSnapshot(snapshot, ignoredRequests(snapshot));
+      return {
+        closeable: true,
+        terminalRequestId: output.terminalRequest.request.requestId,
+        executionEpoch: activeExecutionState(snapshot).execution.executionEpoch,
+      };
+    } catch (error) {
+      return held(`it has no real terminal output to close: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function commitParseFailure(input: {
+    readonly failedAt: string;
+  }): Promise<InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>> {
+    if (typeof input.failedAt !== 'string' || input.failedAt.trim() === '') {
+      throw new ContractError('interaction parent turn parse failure requires a failedAt timestamp');
+    }
+    const planSnapshot = await journal.readTurnSnapshot(turn);
+    const existing = planSnapshot.parseFailure;
+    // An exact retry reuses the first committed closure, so a repeated interpret
+    // never writes a second fact and never conflicts with itself.
+    if (existing !== null) return existing;
+    const eligibility = await parseFailureEligibility(planSnapshot);
+    if (!eligibility.closeable) {
+      throw new ContractError(`interaction parent turn cannot be closed as unparseable: ${eligibility.heldReason}`);
+    }
+    const active = activeExecutionState(planSnapshot);
+    const fact: InteractionParentTurnParseFailureFact = {
+      turn: cloneTurnIdentity(turn),
+      execution: cloneExecution(active.execution),
+      providerBinding: cloneProviderBinding(planSnapshot.turnInput!.fact.providerBinding!),
+      terminalRequestId: eligibility.terminalRequestId,
+      executionEpoch: eligibility.executionEpoch,
+      failedAt: input.failedAt,
+    };
+    const fingerprint = snapshotCommitFingerprint(planSnapshot);
+    const { committed, result } = await journal.transactTurn<
+      | {
+          readonly kind: 'existing';
+          readonly committed: InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>;
+        }
+      | { readonly kind: 'new'; readonly fact: InteractionParentTurnParseFailureFact }
+    >(turn, (snapshot) => {
+      const raced = snapshot.parseFailure;
+      if (raced !== null) return { result: { kind: 'existing', committed: raced } };
+      if (snapshotCommitFingerprint(snapshot) !== fingerprint) {
+        throw new ContractError('interaction parent turn parse failure conflicts with a concurrent durable write');
+      }
+      return {
+        append: { kind: 'turn-parse-failure', turn, execution: fact.execution, fact },
+        result: { kind: 'new', fact },
+      };
+    });
+    if (result.kind === 'existing') return result.committed;
+    if (committed === undefined) {
+      throw new ContractError('interaction parent turn parse failure append did not commit');
+    }
+    return { fact: result.fact, commit: committed };
+  }
+
   return {
     turn: cloneTurnIdentity(turn),
     execution: cloneExecution(execution),
@@ -1738,6 +1902,16 @@ export function createInteractionParentTurnRawOwner(
       readonly abandonedAt: string;
     }): Promise<InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>> {
       return commitAbandonment(input);
+    },
+
+    async readParseFailureEligibility(): Promise<InteractionParentTurnParseFailureEligibility> {
+      return parseFailureEligibility(await journal.readTurnSnapshot(turn));
+    },
+
+    closeUnparseableTurn(input: {
+      readonly failedAt: string;
+    }): Promise<InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>> {
+      return commitParseFailure(input);
     },
   };
 }
