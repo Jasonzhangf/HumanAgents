@@ -55,11 +55,22 @@ export interface ProviderRequestContext {
 }
 
 /**
+ * How one request uses the tool surface it declares. `task-execution` is one
+ * turn of a task that ends with a plain-text final answer. `intake-decision` is
+ * one structured decision object; it must never be told it is executing a task,
+ * because that framing competes with the decision contract and the model can
+ * turn it into a second, invented decision.
+ */
+export type RequestToolSurfaceUse = 'task-execution' | 'intake-decision';
+
+/**
  * Transient request-scoped orientation. It enters exactly the current request
  * and is never part of the canonical context or the next request.
  */
 export interface RequestScopedInstructions {
   readonly text: string;
+  /** Defaults to `task-execution` when the caller does not declare its use. */
+  readonly toolSurface?: RequestToolSurfaceUse;
 }
 
 /** The Runtime materializer output consumed by one provider request. */
