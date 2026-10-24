@@ -283,6 +283,24 @@ export function createBoardController({
   return { refresh, select, setScope, getScope }
 }
 
+/**
+ * One refresh at a time. A board read can outlast the poll interval, so a tick
+ * that arrives while the previous refresh is still in flight must be dropped.
+ * Stacking a second read on the same server turns one slow board into a
+ * self-inflicted request storm. Concurrent callers share the in-flight promise
+ * instead of starting another read.
+ */
+export function createSingleFlightRefresh(refresh) {
+  if (typeof refresh !== 'function') throw new TypeError('createSingleFlightRefresh requires a refresh function')
+  let inFlight = null
+  return function run(...args) {
+    if (inFlight !== null) return inFlight
+    const started = (async () => refresh(...args))()
+    inFlight = started.finally(() => { inFlight = null })
+    return inFlight
+  }
+}
+
 // ── Browser page ──────────────────────────────────────────────────────────
 
 function mountBoardPage(scope = { kind: 'system' }) {
@@ -551,6 +569,10 @@ function bootstrapDashboardPage(pageConfig = {}) {
     ])
   }
 
+  // The 4s poll may fire while a slow board read is still in flight; the guard
+  // keeps the page at one board read at a time instead of stacking reads.
+  const refreshPageOnce = createSingleFlightRefresh(refreshPage)
+
   function disposePage(event) {
     if (event?.persisted) return
     if (pageDisposed) return
@@ -593,9 +615,9 @@ function bootstrapDashboardPage(pageConfig = {}) {
       renderFailure: renderBoardFailure,
       navigate: navigateSelection,
     })
-    await refreshPage()
+    await refreshPageOnce()
     if (pageDisposed) return
-    pollHandle = setInterval(() => void refreshPage(), REFRESH_MS)
+    pollHandle = setInterval(() => void refreshPageOnce(), REFRESH_MS)
   }
 
   void start().catch((error) => {
@@ -603,7 +625,7 @@ function bootstrapDashboardPage(pageConfig = {}) {
   })
   window.addEventListener('pagehide', disposePage)
   window.addEventListener('pageshow', (event) => {
-    if (event.persisted && controller !== null) void refreshPage()
+    if (event.persisted && controller !== null) void refreshPageOnce()
   })
 }
 

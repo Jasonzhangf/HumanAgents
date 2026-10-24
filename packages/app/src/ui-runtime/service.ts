@@ -285,6 +285,7 @@ import { readProducedArtifacts, RESPONSES_FILE_SEARCH_TOOL } from '../provider-t
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import {
   FileCheckpointStore,
+  openUiRuntimeOrganJournal,
   readUiRuntimeTaskJournal,
   uiRuntimeControlJournalPath,
   uiRuntimeModeRoot,
@@ -2261,7 +2262,7 @@ export class UiRuntimeService {
         503,
       );
     }
-    const identity = await this.canonicalTaskIdentityScope(new JsonlOrganJournal(
+    const identity = await this.canonicalTaskIdentityScope(openUiRuntimeOrganJournal(
       uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, target.mode)),
     ), taskId);
     if (!identity.ok) {
@@ -2510,7 +2511,7 @@ export class UiRuntimeService {
 
     let organId = entry.organId;
     if (organId === undefined) {
-      const identity = await this.canonicalTaskIdentityScope(new JsonlOrganJournal(
+      const identity = await this.canonicalTaskIdentityScope(openUiRuntimeOrganJournal(
         uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, resolved.mode)),
       ), taskId);
       if (!identity.ok) {
@@ -3974,7 +3975,7 @@ export class UiRuntimeService {
       nextAction: 'bind the canonical project runtime paths',
     } };
     const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode));
-    const controlJournal = new JsonlOrganJournal(filePath);
+    const controlJournal = openUiRuntimeOrganJournal(filePath);
     const bound = this.isBoundScope(source.projectKey, mode);
     const live: AssembleTaskAgentActivityRemainingSourcesOptions['live'] = bound ? {
       snapshot: this.coordinatorOrQueuedTaskSnapshot(taskId),
@@ -4023,7 +4024,7 @@ export class UiRuntimeService {
     taskId: TaskId,
   ): Promise<RuntimeReadResult<RuntimeTaskPlanHistoryProjection>> {
     const scope = { kind: 'task' as const, projectKey: source.projectKey, mode, taskId };
-    const journal = new JsonlOrganJournal(
+    const journal = openUiRuntimeOrganJournal(
       uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
     );
     let taskScope: TaskIdentityScope;
@@ -4388,7 +4389,7 @@ export class UiRuntimeService {
     mode: RuntimeMode,
   ): Promise<{ readonly byTaskId: ReadonlyMap<string, TaskIdentityRecord>; readonly failure?: RuntimeReadFailure }> {
     try {
-      const journal = new JsonlOrganJournal(
+      const journal = openUiRuntimeOrganJournal(
         uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
       );
       const identities = await new JsonlTaskIdentityJournal(journal).replay();
@@ -4512,7 +4513,7 @@ export class UiRuntimeService {
         uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
       ),
       currentStateFor: () => createJsonlRuntimeTaskCurrentStateJournal({
-        journal: new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode))),
+        journal: openUiRuntimeOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode))),
       }),
       inspectionStopFor: () => this.inspectionStopFor(source, mode),
     });
@@ -4529,7 +4530,7 @@ export class UiRuntimeService {
   ): RuntimeInspectionStopCompletionReadPort | undefined {
     if (mode !== 'fake' && mode !== 'rcc') return undefined;
     const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode));
-    const journal = new JsonlOrganJournal(filePath);
+    const journal = openUiRuntimeOrganJournal(filePath);
     const taskIdentity = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(journal));
     const plans = new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(journal));
     const checkpoints = createJsonlCheckpointJournal({ filePath, journal });
@@ -4722,7 +4723,7 @@ export class UiRuntimeService {
     // every task's checkpoints, public output, grants and identity records, so
     // ordinals are taken from that replay before filtering and only checkpoint
     // records whose real scope matches this task/operation/epoch are projected.
-    const controlJournal = await new JsonlOrganJournal(
+    const controlJournal = await openUiRuntimeOrganJournal(
       uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, mode)),
     ).replay();
     const taskOperations = new Map<string, { readonly scope: ScopeRef; readonly executionEpoch: number }>();
@@ -5070,7 +5071,7 @@ export class UiRuntimeService {
     const source = await this.findProjectSource(input.projectKey);
     if (source === undefined) return { ok: false, failure: unknownProjectFailure(input.projectKey) };
     const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, input.mode));
-    const journal = new JsonlOrganJournal(filePath);
+    const journal = openUiRuntimeOrganJournal(filePath);
     const identity = await this.canonicalTaskIdentityScope(journal, taskId);
     if (!identity.ok) return identity;
     try {
@@ -5103,7 +5104,7 @@ export class UiRuntimeService {
     const source = await this.findProjectSource(input.projectKey);
     if (source === undefined) return { ok: false, failure: unknownProjectFailure(input.projectKey) };
     const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, input.mode));
-    const journal = new JsonlOrganJournal(filePath);
+    const journal = openUiRuntimeOrganJournal(filePath);
     const identity = await this.canonicalTaskIdentityScope(journal, taskId);
     if (!identity.ok) return identity;
     const artifactsRoot = join(source.projectRoot, 'artifacts', 'ui-provider-evidence');
@@ -5282,7 +5283,7 @@ export class UiRuntimeService {
       if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
       const canonicalProjectKey = source.projectKey;
       const filePath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, rawMode));
-      const journal = new JsonlOrganJournal(filePath);
+      const journal = openUiRuntimeOrganJournal(filePath);
       const identity = await this.canonicalTaskIdentityScope(journal, taskId, 'i2-history');
       if (!identity.ok) return identity;
       const currentPosition = this.isBoundScope(canonicalProjectKey, rawMode)

@@ -14,7 +14,8 @@ import {
 } from '../../packages/runtime/src/events/index.js';
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import { id, type EvidenceRef, type ScopeRef } from '../../packages/contracts/src/index.js';
-import { UiRuntimeJournal } from '../../packages/app/src/ui-runtime/journal.js';
+import { openUiRuntimeOrganJournal, UiRuntimeJournal } from '../../packages/app/src/ui-runtime/journal.js';
+import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
 import type { RuntimeTaskEvent } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 
 const occurredAt = '2026-09-17T00:00:00.000Z';
@@ -813,6 +814,43 @@ test('UI runtime journal rejects malformed facets and refs atomically and treats
       record.kind === 'operation.event'
     )).at(-1);
     assert.deepEqual((persisted?.event as RuntimeTaskEventWithFacets | undefined)?.outputRefs, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/*
+ * A board read asks many readers about the same canonical control Journal. They
+ * share one verified read instead of parsing tens of megabytes per task, so the
+ * shared reader must still hand back exactly the committed records, must see a
+ * later commit, and must keep corruption explicit. A stale or validation-skipping
+ * cache would otherwise turn a slow board into a wrong board.
+ */
+test('the shared control Journal reader serves committed records and follows commits', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-shared-reader-'));
+  try {
+    const file = join(root, 'control.jsonl');
+    const writer = new JsonlOrganJournal(file);
+    await writer.append({ kind: 'event', scope, payload: { step: 1 } });
+
+    const shared = openUiRuntimeOrganJournal(file);
+    const first = await shared.replay();
+    assert.deepEqual(first, await new JsonlOrganJournal(file).replay(), 'a warm read must return the committed records');
+    assert.deepEqual(await shared.replay(), first, 'a repeated read must return the same committed records');
+    assert.deepEqual(await openUiRuntimeOrganJournal(file).replay(), first, 'a second reader must see the same records');
+
+    // The Journal is append-only: a commit must be visible to the next read
+    // instead of being served from the earlier file state.
+    await writer.append({ kind: 'event', scope, payload: { step: 2 } });
+    const second = await shared.replay();
+    assert.deepEqual(second, await new JsonlOrganJournal(file).replay(), 'a commit must be read back exactly');
+    assert.equal(second.length, first.length + 1, 'a commit must add exactly one record');
+
+    // Corruption stays an explicit failure; the cache must never turn a broken
+    // Journal into an empty read.
+    await appendFile(file, '{"broken": true}\n', 'utf8');
+    await assert.rejects(() => shared.replay(), /journal/);
+    await assert.rejects(() => openUiRuntimeOrganJournal(file).replay(), /journal/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

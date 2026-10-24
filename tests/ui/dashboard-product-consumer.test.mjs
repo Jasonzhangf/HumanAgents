@@ -16,6 +16,7 @@ import {
   boardScopeFromSearch,
   cardSelection,
   createBoardController,
+  createSingleFlightRefresh,
   initialBoardState,
   productBoardPath,
   readProductBoard,
@@ -468,4 +469,36 @@ test('the board read forwards the exact scope and rejects a body without a board
       return true
     },
   )
+})
+
+/*
+ * The board page polls every 4s. A board read that takes longer than the poll
+ * interval used to start another read on every tick, so one slow board became a
+ * request storm that killed the serve process. This covers the guard that keeps
+ * the page at one in-flight refresh: without it, the three overlapping ticks
+ * below would issue three board reads.
+ */
+test('dashboard refresh keeps one board read in flight when ticks overlap', async () => {
+  let reads = 0
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const refresh = createSingleFlightRefresh(async () => {
+    reads += 1
+    await gate
+    return reads
+  })
+
+  const first = refresh()
+  const second = refresh()
+  const third = refresh()
+  assert.equal(reads, 1, 'overlapping ticks must not start a second board read')
+  assert.equal(first, second)
+  assert.equal(second, third)
+
+  release()
+  assert.deepEqual(await Promise.all([first, second, third]), [1, 1, 1])
+
+  // Once the in-flight read settles, the next tick really reads again.
+  await refresh()
+  assert.equal(reads, 2)
 })
