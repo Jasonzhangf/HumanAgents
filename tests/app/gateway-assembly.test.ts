@@ -676,6 +676,48 @@ test('a built-in file.list with an empty path returns a typed validation failure
   }
 });
 
+test('a built-in file.list with a path outside the workspace returns a typed validation failure instead of throwing', async () => {
+  // Same defect class as the empty path, found by driving the real entry with a
+  // real model: an absolute path made the code-search owner throw `path-escape`
+  // and the execution settled blocked. The refusal must come back to the model
+  // as a typed validation failure so it can retry with a relative path.
+  const root = await mkdtemp(join(process.cwd(), 'tmp-provider-builtin-tools-escape-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  const admission = await createProviderToolAdmission({
+    journalPath: join(root, 'operation-control.jsonl'),
+    runtimeId: 'runtime-builtin-tools',
+    executionEpoch: 1,
+    parentOperationId: operation,
+    parentScope: providerExecutionScope,
+    inputRef: 'artifact://input/app-gateway',
+  });
+  const { executor } = createResponsesFileToolExecutor({
+    workspaceRoot,
+    projectKey: 'builtin-tools-escape-project',
+    artifactRoot: join(root, 'artifacts'),
+    admission,
+  });
+  try {
+    const result = await executor.execute({
+      execution: { runtimeId: 'runtime-builtin-tools', taskId: task, operationId: operation, executionEpoch: 1 },
+      scope: providerExecutionScope,
+      requestId: 'request-call-list-escape',
+      call: { callId: 'call-list-escape', toolId: 'file.list', arguments: { path: '/etc' }, continuationRef: 'response-builtin' },
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.category, 'validation');
+    assert.equal(result.error?.code, 'tool.argument.invalid');
+    assert.equal(result.error?.message, 'search path escapes the bound workspace');
+    assert.equal(result.error?.retryable, 'retryable');
+    assert.equal(result.error?.nextAction.kind, 'continue');
+    assert.equal(JSON.parse(result.output).status, 'failed');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('app assembly exposes Hand as a thin semantic-intent boundary', async () => {
   const hand = createHandOperationRuntime({
     permissions: {
