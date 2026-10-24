@@ -1240,6 +1240,23 @@ export function createInteractionParentTurnRawOwner(
         return held(`tool result ${fact.callId} has no committed call; its side effect is unknown`);
       }
     }
+    // A recorded tool result proves only that the result was recorded, never
+    // that the business side effect did not happen. Any committed tool activity
+    // keeps this turn in the recover/hold lane instead of terminal discharge.
+    const firstCall = toolCalls[0];
+    if (firstCall !== undefined) {
+      const fact = firstCall.fact.envelope.fact;
+      if (fact.kind === 'tool-call') {
+        return held(`tool call ${fact.call.callId} is committed; a recorded result does not prove the absence of a business side effect`);
+      }
+    }
+    const firstResult = toolResults[0];
+    if (firstResult !== undefined) {
+      const fact = firstResult.fact.envelope.fact;
+      if (fact.kind === 'tool-result') {
+        return held(`tool result ${fact.callId} is committed; a recorded result does not prove the absence of a business side effect`);
+      }
+    }
     return { abandonable: true };
   }
 

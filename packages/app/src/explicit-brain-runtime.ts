@@ -574,6 +574,12 @@ export function createProviderExplicitBrainInterpreter(input: {
             throw refuse(`it holds on unreturned helper ${entry.identity.helperCallId}`);
           }
         }
+        if (durableHelpers.length > 0) {
+          // A returned helper is not acceptance, and it never proves that no
+          // helper side effect happened. Only a turn that never dispatched one
+          // stays dischargeable.
+          throw refuse(`it dispatched helper ${durableHelpers[0]!.identity.helperCallId}; a dispatched helper side effect cannot be discharged`);
+        }
         const owner = createInteractionParentTurnRawOwner({
           turn: pendingTurn.fact.turn,
           execution: pendingTurn.fact.execution,
@@ -588,9 +594,39 @@ export function createProviderExplicitBrainInterpreter(input: {
         if (!eligibility.abandonable) {
           throw refuse(`it cannot be discharged: ${eligibility.heldReason}`);
         }
-        await owner.abandonInterruptedTurn({
+        const discharge = () => owner.abandonInterruptedTurn({
           reason: 'provider-interrupted-without-terminal-output',
           abandonedAt: input.clock.now(),
+        });
+        if (activeLease === undefined) {
+          // No supervisor lease authority is configured at all, so no owner can
+          // be authenticated: keep the embedded shape-only discharge.
+          await discharge();
+          return;
+        }
+        const committedOwner = pendingTurn.fact.executionOwner;
+        // Authenticate the old owner, decide, and commit inside one lease-guard
+        // critical section. Level 1 refuses a live owner; level 2 discharges only
+        // with the current lease record's durable termination receipt.
+        await activeLease.withCurrentLeaseOwner(async (authenticatedCaller) => {
+          // Read the freshest durable record inside the guard: the cached getter
+          // could predate a concurrent takeover write.
+          const current = await activeLease.refresh();
+          if (committedOwner !== undefined
+            && authenticatedCaller.daemonLeaseId === committedOwner.daemonLeaseId
+            && authenticatedCaller.daemonGeneration === committedOwner.daemonGeneration
+            && authenticatedCaller.processStartToken === committedOwner.processStartToken) {
+            throw refuse('the committed execution owner is still the current active lease owner; a live Provider stream is not an interrupted crash');
+          }
+          const takeover = current.takeover;
+          if (committedOwner === undefined
+            || takeover === undefined
+            || takeover.previousLeaseId !== committedOwner.daemonLeaseId
+            || takeover.previousGeneration !== committedOwner.daemonGeneration
+            || takeover.termination === undefined) {
+            throw refuse('the committed execution owner has no durable termination receipt; recovery responsibility is retained');
+          }
+          await discharge();
         });
       };
       let pending = await readPendingTurn();

@@ -74,6 +74,7 @@ async function seedInterruptedParentTurn(input: {
   readonly executionOwner?: OccurrenceExecutionOwner;
   readonly withProviderBinding?: boolean;
   readonly unpairedToolCall?: boolean;
+  readonly pairedToolCall?: boolean;
   readonly requestPhase?: 'dispatching' | 'waiting' | 'cancelled';
 }): Promise<{
   readonly turn: InteractionTurnIdentity;
@@ -140,7 +141,83 @@ async function seedInterruptedParentTurn(input: {
       },
     });
   }
+  if (input.pairedToolCall) {
+    // A fully paired file-modifying tool call: the result is durably recorded,
+    // so the old pairing rule considered the side effect recorded and unknown
+    // only when a call lacked its result. This shape must still hold.
+    await owner.acceptRawFact({
+      execution, scope: operationScope, request, producerSeq: 2,
+      fact: {
+        kind: 'tool-call', contentUnitId: 'call-1',
+        call: { callId: 'call-1', toolId: 'write_file', arguments: { path: 'side-effect.txt' }, continuationRef: 'continuation-1' },
+        rawArguments: { ref: await input.evidence.write({
+          scope: operationScope, kind: 'execution', type: 'tool-arguments', locator: 'call-1', content: '{"path":"side-effect.txt"}',
+        }), view: { kind: 'utf8-text' as const } },
+        complete: true,
+      },
+    });
+    await owner.acceptRawFact({
+      execution, scope: operationScope, request, producerSeq: 3,
+      fact: {
+        kind: 'tool-result', contentUnitId: 'result-1', callId: 'call-1', continuationRef: 'continuation-1',
+        result: {
+          ...execution, toolId: 'write_file', callId: 'call-1', status: 'succeeded',
+          outputRefs: [], evidenceRefs: [],
+        },
+        rawOutput: { ref: await input.evidence.write({
+          scope: operationScope, kind: 'execution', type: 'tool-output', locator: 'call-1-output', content: '{"written":true}',
+        }), view: { kind: 'utf8-text' as const } },
+        complete: true,
+      },
+    });
+  }
   return { turn, request };
+}
+
+/**
+ * Acquire a real supervisor lease whose takeover record proves the previous
+ * owner was terminated. A short-lived child process holds the previous
+ * generation and exits without releasing it, so the parent takeover sees a dead
+ * pid and records a real `already-dead` termination receipt. This is the durable
+ * evidence the Runtime is allowed to read before it discharges a crashed turn.
+ */
+async function acquireTerminatedOwnerLease(root: string): Promise<{
+  readonly lease: Awaited<ReturnType<typeof acquireDaemonLease>>;
+  readonly previousOwner: OccurrenceExecutionOwner;
+}> {
+  const moduleUrl = (path: string) => new URL(`../../packages/${path}`, import.meta.url).href;
+  const script = `
+    import { acquireDaemonLease } from ${JSON.stringify(moduleUrl('app/src/supervisor/index.js'))};
+    import { ensureControlLayout, resolveRuntimePaths } from ${JSON.stringify(moduleUrl('config/src/index.js'))};
+    import { join } from 'node:path';
+    const paths = await resolveRuntimePaths({controlRoot: join(${JSON.stringify(root)}, 'control'), workspace: process.cwd()});
+    await ensureControlLayout(paths);
+    const lease = await acquireDaemonLease(paths);
+    const owner = await lease.withCurrentLeaseOwner(async (authenticated) => authenticated);
+    console.log(JSON.stringify({pid: process.pid, owner, leaseId: lease.record.leaseId, generation: lease.record.generation}));
+    process.exit(0); // deliberate crash boundary: the old owner never releases
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {stdio: ['ignore', 'pipe', 'pipe']});
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+  child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+  const exit = await new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+  assert.equal(exit, 0, stderr);
+  const receipt = JSON.parse(stdout.trim());
+  const paths = await resolveRuntimePaths({controlRoot: join(root, 'control'), workspace: process.cwd()});
+  const lease = await acquireDaemonLease(paths, {takeover: {
+    reason: 'discharge proof test dead owner takeover', allowed: () => true,
+    stop: {gracefulTimeoutMs: 2_000, pollIntervalMs: 20},
+  }});
+  assert.equal(lease.record.generation, 2);
+  assert.equal(lease.record.takeover?.previousLeaseId, receipt.leaseId);
+  assert.equal(lease.record.takeover?.previousGeneration, receipt.generation);
+  assert.equal(lease.record.takeover?.termination, 'already-dead',
+    'the takeover must carry a durable termination receipt, not just a shape');
+  return {lease, previousOwner: receipt.owner};
 }
 
 // Exercise the real neutral adapter/raw codec. The old Task-only fake cannot
@@ -1949,6 +2026,306 @@ test('provider explicit brain interpreter serves a new input after discharging a
   assert.ok(await deps.helperJournal.readSemanticCheckpointExact(openedAgain[2]!.fact.turn));
   assert.equal((await deps.parentJournal.readScopeAbandonedTurns(scope)).length, 1,
     'a healthy turn has no reason to discharge anything');
+});
+
+// Failure basis: a live Provider stream whose turn is still owned by the current
+// active lease used to be discharged by the concurrent-new-input guard, because
+// the guard only asked whether a lease existed, never whether the turn's
+// execution owner was still alive. Impact: the running request is frozen mid
+// stream, its next raw append is rejected after the committed abandonment, and
+// the delivered answer is lost even though nothing crashed. Cost: one real
+// daemon lease, one durable seed and one recorded Provider request. Probability:
+// any scope whose user types again while the previous answer streams.
+test('provider explicit brain interpreter refuses to discharge a turn owned by the live lease owner', async () => {
+  const root = join(parentFixtureRoot, `live-owner-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-live-owner', providerId: 'provider-live-owner', protocol: 'responses',
+    endpointRef: 'recorded://live-owner', modelRef: 'model-live-owner',
+    configDigest: 'sha256:live-owner-config', capabilityDigest: 'sha256:live-owner-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:live-owner' };
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    await ensureControlLayout(paths);
+    lease = await acquireDaemonLease(paths);
+    assert.equal(lease.record.takeover, undefined, 'a live lease has no termination receipt to prove');
+    const ownerIdentity = await lease.withCurrentLeaseOwner(async (owner) => owner);
+    const liveInput = JSON.stringify({
+      interactionId: 'interaction-live-stream', inputRevision: 1, sourceRef: 'ui:live-stream',
+      rawInput: '正在进行中的请求', clarifications: [], taskCandidates: [],
+    });
+    const seeded = await seedInterruptedParentTurn({
+      parentJournal, evidence, rawContent, binding, scope,
+      interactionId: 'interaction-live-stream', turnId: 'explicit-interpret-live-stream',
+      initialInputText: liveInput, executionOwner: ownerIdentity,
+    });
+    const interpreter = createProviderExplicitBrainInterpreter({
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+      rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease, port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+        { kind: 'output', state: 'output', summary: JSON.stringify({
+          kind: 'requirement', normalizedInput: '同时到来的新输入', knownFacts: [],
+          proposal: { revision: 1, intent: 'create', title: '同时到来的新输入', objective: '同时到来的新输入',
+            deliverable: '结果', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+          decisionRefs: [],
+        }) },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ] }),
+    });
+    await assert.rejects(
+      () => interpreter.interpret({
+        interactionId: 'interaction-live-next', inputRevision: 1, sourceRef: 'ui:live-next',
+        rawInput: '同时到来的新输入', clarifications: [], taskCandidates: [],
+      }),
+      (error: unknown) => error instanceof Error
+        && error.message.includes('exact prior input')
+        && /still the current active lease owner/.test(error.message),
+    );
+    // The live turn is untouched: no abandonment, one opened turn, no fresh turn.
+    const abandoned = await parentJournal.readScopeAbandonedTurns(scope);
+    assert.deepEqual(abandoned, [], 'a live owner is never discharged');
+    const opened = await parentJournal.readScopeOpenedTurns(scope);
+    assert.equal(opened.length, 1);
+    assert.deepEqual(opened[0]!.fact.turn, seeded.turn);
+    const snapshot = await parentJournal.readTurnSnapshot(seeded.turn);
+    assert.equal(snapshot.abandonment, null);
+
+    // A: the original request can still legally finish on the same journal. If
+    // the turn had been discharged, this append would be rejected as
+    // post-abandonment raw history.
+    const execution = { runtimeId: seeded.turn.turnId, organId: scope.organId,
+      operationId: id('operation', `op-${seeded.turn.turnId}`), executionEpoch: 1, interactionTurn: seeded.turn };
+    const owner = createInteractionParentTurnRawOwner({
+      turn: seeded.turn, execution, scope: { organId: scope.organId, operationId: id('operation', `op-${seeded.turn.turnId}`) },
+      initialInput: { ref: await evidence.write({
+        scope: { organId: scope.organId, operationId: id('operation', `op-${seeded.turn.turnId}`) },
+        kind: 'execution', type: 'initial-input', locator: seeded.turn.turnId, content: liveInput,
+      }), view: { kind: 'utf8-text' as const } },
+      providerBinding: binding, executionOwner: ownerIdentity, journal: parentJournal, rawContent,
+    });
+    const answerText = JSON.stringify({ kind: 'answer', normalizedInput: '正在进行中的请求', knownFacts: [], answer: '实时请求仍然可以合法结束', decisionRefs: [] });
+    const answerScope = { organId: scope.organId, operationId: id('operation', `op-${seeded.turn.turnId}`) };
+    await owner.acceptRawFact({
+      execution, scope: answerScope, request: seeded.request, producerSeq: 2,
+      fact: { kind: 'content', channel: 'assistant-text', update: 'full', contentUnitId: 'live-text',
+        content: { ref: await evidence.write({ scope: answerScope, kind: 'execution', type: 'live-text', locator: 'live-text', content: answerText }), view: { kind: 'utf8-text' as const } },
+        complete: true },
+    });
+    await owner.acceptRawFact({
+      execution, scope: answerScope, request: seeded.request, producerSeq: 3,
+      fact: { kind: 'request-complete', terminal: 'completed' },
+    });
+    await owner.registerRequest({ execution, record: { request: seeded.request, scope: answerScope, phase: 'settled' } });
+    const finalSnapshot = await parentJournal.readTurnSnapshot(seeded.turn);
+    assert.equal(finalSnapshot.abandonment, null, 'the live request keeps its full history');
+    assert.ok(finalSnapshot.acceptedFacts.some(({ fact }) => fact.envelope.fact.kind === 'request-complete'));
+    assert.equal(finalSnapshot.acceptedFacts.some(({ fact }) =>
+      fact.envelope.fact.kind === 'content' && fact.envelope.fact.channel === 'assistant-text'), true);
+    assert.equal((await parentJournal.readScopeAbandonedTurns(scope)).length, 0);
+
+    // B: a turn whose owner differs from the live owner but has no durable
+    // termination receipt is equally unprovable. The live lease here carries no
+    // takeover record at all, so the decision must hold instead of guessing.
+    const unknownScope = { organId: scope.organId, interactionScopeId: 'runtime:live-unknown-owner' };
+    const unknownInput = JSON.stringify({
+      interactionId: 'interaction-live-unknown', inputRevision: 1, sourceRef: 'ui:live-unknown',
+      rawInput: '未知旧 owner 的纯推理中断', clarifications: [], taskCandidates: [],
+    });
+    const unknownOwner = { daemonLeaseId: 'lease-never-proven', daemonGeneration: 7, processStartToken: 'process-never-proven' };
+    await seedInterruptedParentTurn({
+      parentJournal, evidence, rawContent, binding, scope: unknownScope,
+      interactionId: 'interaction-live-unknown', turnId: 'explicit-interpret-live-unknown',
+      initialInputText: unknownInput, executionOwner: unknownOwner,
+    });
+    await assert.rejects(
+      () => createProviderExplicitBrainInterpreter({
+        organId: scope.organId, interactionScopeId: unknownScope.interactionScopeId,
+        parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+        rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
+        helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+        binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+        lease, port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [] }),
+      }).interpret({
+        interactionId: 'interaction-live-unknown-next', inputRevision: 1, sourceRef: 'ui:live-unknown-next',
+        rawInput: '未知旧 owner 的新输入', clarifications: [], taskCandidates: [],
+      }),
+      (error: unknown) => error instanceof Error
+        && error.message.includes('exact prior input')
+        && /has no durable termination receipt/.test(error.message),
+    );
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(unknownScope), [],
+      'an unprovable owner keeps recovery responsibility');
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: a tool-call, a tool-result or a dispatched helper proves the
+// turn reached the side-effect stage. The old rule treated a recorded tool
+// result as proof that no business side effect happened, so a turn that wrote a
+// file (or dispatched a helper that already returned) could be discharged and
+// its effect became unobservable. Impact: silent duplicate or lost writes after
+// a crash. Cost: one real terminated-owner takeover receipt, one paired tool
+// turn and one completed helper turn. Probability: any interrupted turn that
+// used a tool before its Provider stream broke.
+test('provider explicit brain interpreter holds an interrupted turn that dispatched a tool or helper', async () => {
+  const root = join(parentFixtureRoot, `side-effect-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-side-effect', providerId: 'provider-side-effect', protocol: 'responses',
+    endpointRef: 'recorded://side-effect', modelRef: 'model-side-effect',
+    configDigest: 'sha256:side-effect-config', capabilityDigest: 'sha256:side-effect-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    // A real takeover receipt proves the previous owner is dead, so the refusal
+    // below is provably caused by the side-effect shape and not by owner
+    // authentication.
+    const acquired = await acquireTerminatedOwnerLease(root);
+    lease = acquired.lease;
+    const crashedOwner = acquired.previousOwner;
+    const toolScope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:side-effect-tool' };
+    const toolInput = JSON.stringify({
+      interactionId: 'interaction-side-effect-tool', inputRevision: 1, sourceRef: 'ui:side-effect-tool',
+      rawInput: '写文件后崩溃', clarifications: [], taskCandidates: [],
+    });
+    await seedInterruptedParentTurn({
+      parentJournal, evidence, rawContent, binding, scope: toolScope,
+      interactionId: 'interaction-side-effect-tool', turnId: 'explicit-interpret-side-effect-tool',
+      initialInputText: toolInput, executionOwner: crashedOwner, pairedToolCall: true,
+    });
+    const interpreterOptions = {
+      parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+      rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease, port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+        { kind: 'output', state: 'output', summary: JSON.stringify({
+          kind: 'requirement', normalizedInput: '写文件后的新输入', knownFacts: [],
+          proposal: { revision: 1, intent: 'create', title: '写文件后的新输入', objective: '写文件后的新输入',
+            deliverable: '结果', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+          decisionRefs: [],
+        }) },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ] }),
+    };
+    await assert.rejects(
+      () => createProviderExplicitBrainInterpreter({ ...interpreterOptions,
+        organId: toolScope.organId, interactionScopeId: toolScope.interactionScopeId })
+        .interpret({ interactionId: 'interaction-side-effect-next', inputRevision: 1, sourceRef: 'ui:side-effect-next',
+          rawInput: '写文件后的新输入', clarifications: [], taskCandidates: [] }),
+      (error: unknown) => error instanceof Error
+        && error.message.includes('exact prior input')
+        && /tool call call-1/.test(error.message),
+    );
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(toolScope), [],
+      'a recorded tool result does not prove the absence of a business side effect');
+    const toolSnapshot = await parentJournal.readTurnSnapshot(
+      (await parentJournal.readScopeOpenedTurns(toolScope))[0]!.fact.turn);
+    assert.equal(toolSnapshot.abandonment, null);
+    assert.equal(toolSnapshot.acceptedFacts.filter(({ fact }) =>
+      fact.envelope.fact.kind === 'tool-result').length, 1);
+
+    // B: a helper that already returned is still a dispatched side effect. A
+    // returned helper is not owner acceptance and never proves no effect.
+    const helperScope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:side-effect-helper' };
+    const helperInput = JSON.stringify({
+      interactionId: 'interaction-side-effect-helper', inputRevision: 1, sourceRef: 'ui:side-effect-helper',
+      rawInput: '派发 helper 后崩溃', clarifications: [], taskCandidates: [],
+    });
+    const seededHelper = await seedInterruptedParentTurn({
+      parentJournal, evidence, rawContent, binding, scope: helperScope,
+      interactionId: 'interaction-side-effect-helper', turnId: 'explicit-interpret-side-effect-helper',
+      initialInputText: helperInput, executionOwner: crashedOwner,
+    });
+    const helperIdentity = { organId: seededHelper.turn.organId,
+      interactionScopeId: seededHelper.turn.interactionScopeId, interactionId: seededHelper.turn.interactionId,
+      inputRevision: 1, parentTurnId: seededHelper.turn.turnId,
+      assignmentId: 'helper-assignment-side-effect', helperCallId: 'helper-side-effect-call', attempt: 1 };
+    const assignment = { ...helperIdentity, objective: 'seeded returned helper', targetRefs: [],
+      expectedOutputRefs: [], expectedArtifactDigests: [], acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`,
+      successCriteria: ['complete'], failureCriteria: ['none'], incompleteCriteria: ['partial'],
+      requiredCapabilities: [], mergeGate: 'not-required' as const };
+    await helperJournal.appendDispatchAccepted({ kind: 'dispatch-accepted', assignment,
+      dispatchAcceptedAt: new Date().toISOString(), evidenceRefs: [] });
+    await helperJournal.appendReturned({ kind: 'returned',
+      result: { ...helperIdentity, agentId: 'seeded-helper', producedArtifactRefs: [], producedArtifactBodies: [],
+        status: 'incomplete', summary: 'seeded returned helper', outputRefs: [], evidenceRefs: [],
+        nextAction: 'wait', conditionRef: 'condition:side-effect' },
+      returnedAt: new Date().toISOString(), evidenceRefs: [] },
+    { description: 'dispatch seeded returned helper for objective "seeded returned helper"; success criteria: complete' });
+    await assert.rejects(
+      () => createProviderExplicitBrainInterpreter({ ...interpreterOptions,
+        organId: helperScope.organId, interactionScopeId: helperScope.interactionScopeId })
+        .interpret({ interactionId: 'interaction-side-effect-helper-next', inputRevision: 1, sourceRef: 'ui:side-effect-helper-next',
+          rawInput: 'helper 后的新输入', clarifications: [], taskCandidates: [] }),
+      (error: unknown) => error instanceof Error
+        && error.message.includes('exact prior input')
+        && /helper helper-side-effect-call/.test(error.message),
+    );
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(helperScope), [],
+      'a dispatched helper is a side effect even after it returned');
+    const helperSnapshot = await parentJournal.readTurnSnapshot(seededHelper.turn);
+    assert.equal(helperSnapshot.abandonment, null);
+
+    // C: a pure reasoning interruption is still dischargeable when the takeover
+    // receipt proves the owner is dead. The tightening must not brick the
+    // legitimate crash path the fix exists for.
+    const reasoningScope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:side-effect-reasoning' };
+    const reasoningInput = JSON.stringify({
+      interactionId: 'interaction-side-effect-reasoning', inputRevision: 1, sourceRef: 'ui:side-effect-reasoning',
+      rawInput: '纯推理崩溃', clarifications: [], taskCandidates: [],
+    });
+    const seededReasoning = await seedInterruptedParentTurn({
+      parentJournal, evidence, rawContent, binding, scope: reasoningScope,
+      interactionId: 'interaction-side-effect-reasoning', turnId: 'explicit-interpret-side-effect-reasoning',
+      initialInputText: reasoningInput, executionOwner: crashedOwner,
+    });
+    const reasoningInterpreter = createProviderExplicitBrainInterpreter({ ...interpreterOptions,
+      organId: reasoningScope.organId, interactionScopeId: reasoningScope.interactionScopeId,
+      port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+        { kind: 'output', state: 'output', summary: JSON.stringify({
+          kind: 'requirement', normalizedInput: '崩溃后仍可服务', knownFacts: [],
+          proposal: { revision: 1, intent: 'create', title: '崩溃后仍可服务', objective: '崩溃后仍可服务',
+            deliverable: '结果', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+          decisionRefs: [],
+        }) },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ] }) });
+    const served = await reasoningInterpreter.interpret({
+      interactionId: 'interaction-side-effect-reasoning-next', inputRevision: 1,
+      sourceRef: 'ui:side-effect-reasoning-next', rawInput: '崩溃后仍可服务',
+      clarifications: [], taskCandidates: [],
+    });
+    assert.equal(served.kind, 'requirement');
+    const reasoningAbandoned = await parentJournal.readScopeAbandonedTurns(reasoningScope);
+    assert.equal(reasoningAbandoned.length, 1);
+    assert.deepEqual(reasoningAbandoned[0]!.fact.turn, seededReasoning.turn);
+    assert.equal(reasoningAbandoned[0]!.fact.reason, 'provider-interrupted-without-terminal-output');
+    const reasoningSnapshot = await parentJournal.readTurnSnapshot(seededReasoning.turn);
+    assert.equal(reasoningSnapshot.resourceClose, null, 'the discharge still never fabricates a close');
+    assert.deepEqual(reasoningSnapshot.providerSettlements, []);
+    assert.deepEqual(reasoningSnapshot.ownerReconciliations, []);
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // Failure basis: the exact-input retry of an already closed parent turn used to
