@@ -27,6 +27,7 @@ import type {
   InteractionParentTurnAbandonmentFact,
   InteractionParentTurnAppend,
   InteractionParentTurnInputFact,
+  InteractionParentTurnParseFailureFact,
   InteractionParentTurnRawJournalPort,
   InteractionParentTurnSnapshot,
 } from '../../../runtime/src/explicit-brain/interaction-parent-turn-raw.js';
@@ -106,6 +107,13 @@ type ParentRawPayload =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionParentTurnAbandonmentFact;
+    }
+  | {
+      readonly kind: typeof INTERACTION_PARENT_RAW_RECORD_TYPE;
+      readonly discriminant: 'turn-parse-failure';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentTurnParseFailureFact;
     };
 
 function sameScopedId(
@@ -358,6 +366,37 @@ function assertAbandonmentFact(
   }
 }
 
+/**
+ * Validate one durable failure-closing of an interpreted turn.
+ *
+ * It says only that this exact terminal output exists and yielded no usable
+ * decision, so it may never carry a success, an answer, a close, a settlement or
+ * an abandonment claim.
+ */
+function assertParseFailureFact(
+  fact: InteractionParentTurnParseFailureFact,
+  turn: InteractionTurnIdentity,
+): void {
+  if (fact === null || typeof fact !== 'object') {
+    throw new JournalIntegrityError('interaction parent turn parse failure fact is invalid');
+  }
+  assertTurn(fact.turn);
+  if (!sameTurnIdentity(fact.turn, turn)) {
+    throw new JournalIntegrityError('interaction parent turn parse failure turn does not match its record turn');
+  }
+  assertInteractionParentExecution(fact.execution, fact.turn);
+  validateProviderBinding(fact.providerBinding);
+  if (typeof fact.terminalRequestId !== 'string' || fact.terminalRequestId.trim() === '') {
+    throw new JournalIntegrityError('interaction parent turn parse failure requires a terminal request id');
+  }
+  if (!Number.isInteger(fact.executionEpoch) || fact.executionEpoch < 1) {
+    throw new JournalIntegrityError('interaction parent turn parse failure requires a valid execution epoch');
+  }
+  if (typeof fact.failedAt !== 'string' || fact.failedAt.trim() === '') {
+    throw new JournalIntegrityError('interaction parent turn parse failure requires a failedAt timestamp');
+  }
+}
+
 function assertRequestRecord(
   record: RuntimeRequestRecord,
   turn: InteractionTurnIdentity,
@@ -464,6 +503,20 @@ function readParentRawPayload(record: JournalRecord): ParentRawPayload | null {
     }
     return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
   }
+  if (discriminant === 'turn-parse-failure') {
+    const turn = payload.turn as InteractionTurnIdentity;
+    const execution = payload.execution as InteractionParentProviderExecutionIdentityRef;
+    const fact = payload.fact as InteractionParentTurnParseFailureFact;
+    assertTurn(turn);
+    assertInteractionParentExecution(execution, turn);
+    assertParseFailureFact(fact, turn);
+    if (canonicalJsonStringify(fact.execution) !== canonicalJsonStringify(execution)) {
+      throw new JournalIntegrityError(
+        'interaction parent turn parse failure execution does not match its record execution',
+      );
+    }
+    return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
+  }
   throw new JournalIntegrityError('interaction parent raw record discriminant is invalid');
 }
 
@@ -495,6 +548,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
   >[] = [];
   let resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null = null;
   let abandonment: InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact> | null = null;
+  let parseFailure: InteractionParentCommittedFact<InteractionParentTurnParseFailureFact> | null = null;
 
   for (const record of records) {
     const payload = readParentRawPayload(record);
@@ -506,6 +560,11 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     // may append after the single abandonment fact.
     if (abandonment !== null) {
       throw new JournalIntegrityError('interaction parent raw append follows the committed turn abandonment');
+    }
+    // A turn closed as unparseable is terminal in the same way: its unusable
+    // terminal output is frozen, so nothing may append after the closure.
+    if (parseFailure !== null) {
+      throw new JournalIntegrityError('interaction parent raw append follows the committed turn parse failure');
     }
     const commit = commitRef(record);
     if (payload.discriminant === 'turn-input') {
@@ -653,6 +712,54 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       if (closed) resourceClose = null;
       continue;
     }
+    // The failure-closing of an unusable terminal output. Unlike every request
+    // or raw fact, it legitimately follows the committed resource close: the
+    // close happened first and the parse failed afterwards. It records only
+    // that this exact terminal output yielded no decision.
+    if (payload.discriminant === 'turn-parse-failure') {
+      if (turnInput === null) {
+        throw new JournalIntegrityError(
+          'interaction parent turn parse failure requires the committed turn input before it',
+        );
+      }
+      const committedBinding = turnInput.fact.providerBinding;
+      if (committedBinding === undefined) {
+        throw new JournalIntegrityError(
+          'interaction parent turn parse failure requires the original committed provider binding',
+        );
+      }
+      const activeEpoch = ownerReconciliations.at(-1)?.fact.effectiveExecutionEpoch
+        ?? turnInput.fact.execution.executionEpoch;
+      if (canonicalJsonStringify(committedBinding) !== canonicalJsonStringify(payload.fact.providerBinding)
+        || !sameParentExecutionBusinessIdentity(turnInput.fact.execution, payload.fact.execution)
+        || payload.fact.execution.executionEpoch !== activeEpoch
+        || payload.fact.executionEpoch !== activeEpoch) {
+        throw new JournalIntegrityError(
+          'interaction parent turn parse failure execution does not match the active execution',
+        );
+      }
+      // A closed turn only ever follows a real completed terminal request: that
+      // is exactly what distinguishes this fact from abandonment.
+      const terminal = requests.find((committed) =>
+        committed.fact.phase === 'settled'
+        && committed.fact.request.requestId === payload.fact.terminalRequestId);
+      if (terminal === undefined) {
+        throw new JournalIntegrityError(
+          'interaction parent turn parse failure requires a settled terminal request before it',
+        );
+      }
+      const completed = acceptedFacts.some((committed) =>
+        committed.fact.envelope.request.requestId === payload.fact.terminalRequestId
+        && committed.fact.envelope.fact.kind === 'request-complete'
+        && committed.fact.envelope.fact.terminal === 'completed');
+      if (!completed) {
+        throw new JournalIntegrityError(
+          'interaction parent turn parse failure requires a completed terminal request before it',
+        );
+      }
+      parseFailure = { fact: payload.fact, commit };
+      continue;
+    }
     // Every other discriminant appends request or raw history, so it can never
     // physically follow a committed resource close.
     if (resourceClose !== null) {
@@ -682,7 +789,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
 
   return {
     turnInput, requests, acceptedFacts, ownerReconciliations, providerSettlements,
-    resourceClose, abandonment,
+    resourceClose, abandonment, parseFailure,
   };
 }
 
@@ -784,6 +891,20 @@ function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput 
       },
     };
   }
+  if (append.kind === 'turn-parse-failure') {
+    return {
+      commitId: parentRawCommitId(append.turn, 'turn-parse-failure'),
+      kind: 'event',
+      scope: parentScope(append.turn, append.execution),
+      payload: {
+        kind: INTERACTION_PARENT_RAW_RECORD_TYPE,
+        discriminant: 'turn-parse-failure',
+        turn: append.turn,
+        execution: append.execution,
+        fact: append.fact,
+      },
+    };
+  }
   const entry = append.entry;
   return {
     commitId: parentRawCommitId(
@@ -823,6 +944,9 @@ export class JsonlInteractionParentTurnJournal
         // undecodable from a late write.
         if (planned.append !== undefined && snapshot.abandonment !== null) {
           throw new JournalIntegrityError('interaction parent raw append follows the committed turn abandonment');
+        }
+        if (planned.append !== undefined && snapshot.parseFailure !== null) {
+          throw new JournalIntegrityError('interaction parent raw append follows the committed turn parse failure');
         }
         return planned;
       },
@@ -883,5 +1007,28 @@ export class JsonlInteractionParentTurnJournal
       abandoned.push({ fact: payload.fact, commit: commitRef(record) });
     }
     return abandoned;
+  }
+
+  async readScopeParseFailures(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>[]> {
+    if (scope.organId === null || typeof scope.organId !== 'object'
+      || scope.organId.scope !== 'organ' || !scope.organId.value.trim()) {
+      throw new JournalIntegrityError('interaction parent scope read requires a valid organ id');
+    }
+    if (typeof scope.interactionScopeId !== 'string' || scope.interactionScopeId.trim() === '') {
+      throw new JournalIntegrityError('interaction parent scope read requires an interactionScopeId');
+    }
+    const closed: InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>[] = [];
+    for (const record of await this.journal.replay()) {
+      const payload = readParentRawPayload(record);
+      if (payload === null || payload.discriminant !== 'turn-parse-failure') continue;
+      if (!sameScopedId(payload.fact.turn.organId, scope.organId)) continue;
+      if (payload.fact.turn.interactionScopeId !== scope.interactionScopeId) continue;
+      assertRecordScope(record, payload.fact.turn, payload.execution);
+      closed.push({ fact: payload.fact, commit: commitRef(record) });
+    }
+    return closed;
   }
 }

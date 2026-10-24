@@ -456,6 +456,27 @@ export function createProviderExplicitBrainInterpreter(input: {
     });
     await input.publishProviderSettlement(committed.fact);
   };
+  /**
+   * A real terminal output exists but cannot be parsed into any decision.
+   * Re-reading the same durable text can never recover the turn, so it is
+   * closed by its own honest fact: it never claims an answer, a route, a
+   * settlement, a close or an abandonment. The closure is idempotent, so an
+   * exact retry reuses the first committed fact instead of re-bricking.
+   */
+  const closeUnparseableTurn = async (
+    target: InteractionParentTurnRawOwner,
+    parseError: unknown,
+  ): Promise<never> => {
+    try {
+      await target.closeUnparseableTurn({ failedAt: input.clock.now() });
+    } catch (closeError) {
+      throw new AggregateError(
+        [parseError, closeError],
+        'interaction terminal output is unusable and the turn could not be closed',
+      );
+    }
+    throw parseError;
+  };
   // Retain the actual live owners only. Scoped Journal reads select every retry.
   let retained: {
     readonly owner: InteractionParentTurnRawOwner;
@@ -494,7 +515,15 @@ export function createProviderExplicitBrainInterpreter(input: {
     const finalParentOutput = live.reconciled
       ? await live.owner.readReconciledTurnOutput()
       : await live.owner.readFinalTurnOutput();
-    const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+    let interpretation: ExplicitBrainInterpretation;
+    try {
+      interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+    } catch (parseError) {
+      // The provider close is already committed here, so the unusable terminal
+      // output can be closed by its own honest fact without leaving the turn
+      // pending forever.
+      return await closeUnparseableTurn(live.owner, parseError);
+    }
     if ((live.reconciled || live.publishOnRetry)
       && interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
       if (live.settlement === undefined) {
@@ -536,6 +565,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         const opened = await input.parentJournal.readScopeOpenedTurns(scopeKey);
         const closed = await input.checkpointJournal.readScopeSemanticCheckpoints(scopeKey);
         const abandoned = await input.parentJournal.readScopeAbandonedTurns(scopeKey);
+        const unusable = await input.parentJournal.readScopeParseFailures(scopeKey);
         return opened.find(({ fact }) => !closed.some(({ checkpoint }) =>
           checkpoint.organId.scope === fact.turn.organId.scope
           && checkpoint.organId.value === fact.turn.organId.value
@@ -543,7 +573,11 @@ export function createProviderExplicitBrainInterpreter(input: {
           && checkpoint.interactionId === fact.turn.interactionId
           && checkpoint.inputRevision === fact.turn.inputRevision
           && checkpoint.turnId === fact.turn.turnId)
-          && !abandoned.some(({ fact: abandonedFact }) => sameInteractionTurn(abandonedFact.turn, fact.turn)));
+          && !abandoned.some(({ fact: abandonedFact }) => sameInteractionTurn(abandonedFact.turn, fact.turn))
+          // A turn closed as unparseable is durably closed: its real terminal
+          // output exists but yielded no decision, so it is not pending and it
+          // must never block the next input.
+          && !unusable.some(({ fact: unusableFact }) => sameInteractionTurn(unusableFact.turn, fact.turn)));
       };
       /**
        * Discharge one interrupted parent turn that can provably never be
@@ -673,7 +707,14 @@ export function createProviderExplicitBrainInterpreter(input: {
           if (snapshot.resourceClose !== null
             && (await coldOwner.readReconciliationEligibility()).mode === 'terminal-output') {
             const finalParentOutput = await coldOwner.readClosedTurnOutput();
-            const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            let interpretation: ExplicitBrainInterpretation;
+            try {
+              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            } catch (parseError) {
+              // The closed turn's own durable terminal output is unusable.
+              // Re-reading it can never recover; close it so new input works.
+              return await closeUnparseableTurn(coldOwner, parseError);
+            }
             await requireColdAnswerSettlement(finalParentOutput, interpretation);
             await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
             return interpretation;
@@ -703,7 +744,12 @@ export function createProviderExplicitBrainInterpreter(input: {
           });
           if (reconciliation.fact.mode === 'terminal-output') {
             const finalParentOutput = await coldOwner.readReconciledTurnOutput();
-            const interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            let interpretation: ExplicitBrainInterpretation;
+            try {
+              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            } catch (parseError) {
+              return await closeUnparseableTurn(coldOwner, parseError);
+            }
             await requireColdAnswerSettlement(finalParentOutput, interpretation);
             await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
             return interpretation;
@@ -740,6 +786,12 @@ export function createProviderExplicitBrainInterpreter(input: {
       let committedInput = false;
       let submitted = false;
       let settleAttempted = false;
+      /**
+       * Set only when this exact batch produced a durable terminal output that
+       * no decision can be parsed from. Every other failure keeps its own
+       * explicit error and its own recovery lane.
+       */
+      let unparseableOutput = false;
       let interpretation: ExplicitBrainInterpretation;
       let live: NonNullable<typeof retained>;
       try {
@@ -894,7 +946,15 @@ export function createProviderExplicitBrainInterpreter(input: {
         }
         if (continuation === undefined) {
           const finalParentOutput = await createdOwner.readFinalTurnOutput();
-          interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+          try {
+            interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+          } catch (parseError) {
+            // The terminal output is durable and unusable. Mark the shape so the
+            // catch below can close the turn honestly after the provider close,
+            // instead of leaving it pending forever.
+            unparseableOutput = true;
+            throw parseError;
+          }
           // Only the simple-answer path carries the authoritative settlement receipt;
           // complex requirement routing keeps its existing behavior.
           if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
@@ -944,6 +1004,24 @@ export function createProviderExplicitBrainInterpreter(input: {
             }
           } catch (closeError) {
             throw new AggregateError([failure, closeError], 'interaction execution and provider close failed');
+          }
+        }
+        if (unparseableOutput) {
+          if (owner === undefined || !committedInput) {
+            throw new Error(
+              'interaction terminal output is unusable but the committed turn input is unavailable to close it',
+            );
+          }
+          // The real terminal output exists and no decision can be parsed from
+          // it. Close the turn durably so the next input is not blocked; the
+          // original explicit parse error stays the primary failure.
+          try {
+            await owner.closeUnparseableTurn({ failedAt: input.clock.now() });
+          } catch (closeError) {
+            throw new AggregateError(
+              [failure, closeError],
+              'interaction terminal output is unusable and the turn could not be closed',
+            );
           }
         }
         throw failure;

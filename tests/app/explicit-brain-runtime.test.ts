@@ -1751,6 +1751,7 @@ test('provider explicit brain interpreter loads the interaction template and val
       readTurnSnapshot: (turn) => selectedOptions.parentJournal.readTurnSnapshot(turn),
       readScopeOpenedTurns: (scope) => selectedOptions.parentJournal.readScopeOpenedTurns(scope),
       readScopeAbandonedTurns: (scope) => selectedOptions.parentJournal.readScopeAbandonedTurns(scope),
+      readScopeParseFailures: (scope) => selectedOptions.parentJournal.readScopeParseFailures(scope),
     },
   });
   await assert.rejects(() => commitBlocked.interpret({ interactionId: 'blocked-input', inputRevision: 1,
@@ -4239,6 +4240,243 @@ test('provider explicit brain interpreter resumes a failed closed epoch on the s
     assert.ok(afterReplay.length > beforeReplay.length);
     assert.deepEqual(afterReplay.slice(0, beforeReplay.length), beforeReplay);
     assert.equal(runtime.service.listTasks().counts.total, tasksBefore, 'a simple answer must not create a Task or FIFO entry');
+  } finally {
+    await runtime?.close();
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: real A0 interaction-115 / explicit-interpret-160f91f5-b333-482a-9567-45c84b41cbd9
+// committed one settled terminal request whose response carried TWO complete
+// assistant-text items (an answer item and a requirement item). The raw fold is
+// faithful and concatenates both, so JSON.parse fails at position 200. The
+// interpreter then rethrew after recording the provider close and committed no
+// semantic closure at all, so `readPendingTurn` kept reporting the turn forever
+// and every later input died on "unclosed interaction parent turn ... requires
+// recovery or semantic closure". Impact: one unparseable terminal output bricks
+// the whole interaction scope permanently. Cost: one seeded closed turn with the
+// exact two-item shape and two follow-up interprets.
+test('provider explicit brain interpreter closes an unparseable cold terminal output instead of bricking the scope', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-parse-failure', providerId: 'provider-parse-failure', protocol: 'responses',
+    endpointRef: 'recorded://parse-failure', modelRef: 'model-parse-failure',
+    configDigest: 'sha256:parse-failure-config', capabilityDigest: 'sha256:parse-failure-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const request = {
+    interactionId: 'interaction-parse-failure', inputRevision: 1, sourceRef: 'ui:parse-failure',
+    rawInput: '4 加 4 等于几？', clarifications: [], taskCandidates: [],
+  };
+  const operationScope = { organId: scope.organId, operationId: id('operation', 'op-parse-failure') };
+  const turn: InteractionTurnIdentity = {
+    organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+    interactionId: request.interactionId, inputRevision: 1, turnId: 'explicit-interpret-parse-failure',
+  };
+  const execution = { runtimeId: turn.turnId, ...operationScope, executionEpoch: 1, interactionTurn: turn };
+  const initialInput = {
+    ref: await deps.rawEvidence.write({
+      scope: operationScope, kind: 'execution', type: 'initial-input',
+      locator: turn.turnId, content: JSON.stringify(request),
+    }),
+    view: { kind: 'utf8-text' as const },
+  };
+  const owner = createInteractionParentTurnRawOwner({
+    turn, execution, scope: operationScope, initialInput, providerBinding: binding,
+    executionOwner: { daemonLeaseId: 'lease-parse-failure', daemonGeneration: 1, processStartToken: 'process-parse-failure' },
+    journal: deps.parentJournal, rawContent: deps.rawContent,
+  });
+  await owner.openTurnInput();
+  const terminalRequest = { turnId: turn.turnId, requestId: 'request-parse-failure' };
+  await owner.registerRequest({ execution, record: { request: terminalRequest, scope: operationScope, phase: 'dispatching' } });
+  await owner.registerRequest({ execution, record: { request: terminalRequest, scope: operationScope, phase: 'dispatched' } });
+  // Two complete assistant-text items in the same response, exactly like the
+  // production batch: a short answer decision and a long requirement decision.
+  const answerItem = JSON.stringify({
+    kind: 'answer', normalizedInput: request.rawInput, knownFacts: [], answer: '8', decisionRefs: [],
+  });
+  const requirementItem = JSON.stringify({
+    kind: 'requirement', normalizedInput: request.rawInput, knownFacts: [],
+    decisionRefs: [], intent: 'create', proposal: { revision: 1, intent: 'create', title: '标题', objective: '目标' },
+  });
+  for (const [index, text] of [answerItem, requirementItem].entries()) {
+    await owner.acceptRawFact({
+      execution, scope: operationScope, request: terminalRequest, producerSeq: index + 1,
+      fact: {
+        kind: 'content', channel: 'assistant-text', update: 'full', contentUnitId: `item-${index}`,
+        content: { ref: await deps.rawEvidence.write({
+          scope: operationScope, kind: 'execution', type: `item-${index}`, locator: `item-${index}`, content: text,
+        }), view: { kind: 'utf8-text' as const } },
+        complete: true,
+      },
+    });
+  }
+  await owner.acceptRawFact({
+    execution, scope: operationScope, request: terminalRequest, producerSeq: 3,
+    fact: { kind: 'request-complete', terminal: 'completed' },
+  });
+  await owner.registerRequest({ execution, record: { request: terminalRequest, scope: operationScope, phase: 'settled' } });
+  await owner.recordProviderClose({
+    providerBinding: binding,
+    result: {
+      bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol,
+      state: 'closed',
+      evidenceRefs: [await deps.rawEvidence.write({
+        scope: operationScope, kind: 'execution', type: 'close', locator: 'close', content: 'closed',
+      })],
+    },
+    closedAt: new Date().toISOString(),
+  });
+  // The seeded turn is the exact production shape: real close, real terminal
+  // output, no decision.
+  const seeded = await deps.parentJournal.readTurnSnapshot(turn);
+  assert.equal(seeded.resourceClose?.fact.result.state, 'closed');
+  assert.equal(seeded.abandonment, null);
+  assert.equal(seeded.parseFailure, null);
+
+  let providerStarts = 0;
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => {
+    providerStarts += 1;
+    return [{ type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
+      kind: 'answer', normalizedInput: '4 加 4 等于几？', knownFacts: [], answer: '8', decisionRefs: [],
+    }) }];
+  } });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+  });
+
+  // RED: the interpreter must fail honestly on the unusable output...
+  await assert.rejects(
+    () => interpreter.interpret(request),
+    (error: unknown) => error instanceof Error
+      && error.message.includes('interaction agent returned invalid JSON'),
+  );
+  // ...and the turn must be durably closed, not left pending. Abandonment is the
+  // wrong fact here: a real terminal output exists.
+  const closed = await deps.parentJournal.readTurnSnapshot(turn);
+  assert.equal(closed.abandonment, null, 'a turn with real terminal output is never abandoned');
+  assert.equal(closed.parseFailure?.fact.terminalRequestId, terminalRequest.requestId);
+  assert.equal(closed.parseFailure?.fact.executionEpoch, 1);
+  assert.deepEqual(await deps.parentJournal.readScopeAbandonedTurns(scope), []);
+  assert.equal((await deps.parentJournal.readScopeParseFailures(scope)).length, 1);
+  assert.equal(await deps.helperJournal.readSemanticCheckpointExact(turn), null,
+    'an unusable output makes no semantic claim');
+
+  // GREEN requirement: the exact retry reuses the committed fact, writes no
+  // duplicate and does not brick the scope. It re-interprets on a fresh turn.
+  const retried = await interpreter.interpret(request);
+  assert.equal(retried.kind, 'answer');
+  if (retried.kind !== 'answer') throw new Error('expected an answer');
+  assert.equal(retried.answer, '8');
+  assert.equal((await deps.parentJournal.readScopeParseFailures(scope)).length, 1,
+    'the closure is written once and reused');
+
+  // A new input in the same scope is usable after the failed turn and the retry.
+  const next = await interpreter.interpret({
+    interactionId: 'interaction-after-parse-failure', inputRevision: 1, sourceRef: 'ui:parse-failure-next',
+    rawInput: '4 加 4 等于几？', clarifications: [], taskCandidates: [],
+  });
+  assert.equal(next.kind, 'answer');
+  assert.equal(providerStarts, 2, 'only the two recoverable turns started a Provider');
+});
+
+// Failure basis: the same production shape, but the two complete assistant-text
+// items arrive inside one live Provider response instead of being re-read from a
+// closed turn. The catch path already records the real close, then rethrows with
+// no durable closure, so the whole scope stays bricked. Impact: every later
+// input on the interaction fails with the unclosed-turn error. Cost: one real UI
+// consumer run with a two-item Provider response and two follow-up inputs.
+test('provider explicit brain interpreter closes an unparseable live epoch and keeps the scope usable', async () => {
+  const root = join(parentFixtureRoot, `parse-failure-live-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-parse-live', providerId: 'provider-parse-live', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'model-parse-live',
+    configDigest: 'sha256:parse-live-config', capabilityDigest: 'sha256:parse-live-capability',
+  };
+  const rawInput = '4 加 4 等于几？';
+  const answerText = JSON.stringify({ kind: 'answer', normalizedInput: rawInput, knownFacts: [], answer: '8', decisionRefs: [] });
+  // The exact production batch: two complete assistant-text items, same request.
+  const requirementText = JSON.stringify({
+    kind: 'requirement', normalizedInput: rawInput, knownFacts: [], decisionRefs: [],
+    intent: 'create', proposal: { revision: 1, intent: 'create', title: '标题', objective: '目标' },
+  });
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  let providerRequests = 0;
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence, respond: async () => {
+    providerRequests += 1;
+    if (providerRequests === 1) return [
+      { type: 'response.output_text.done', item_id: 'item_0f6ad37e', text: answerText },
+      { type: 'response.output_text.done', item_id: 'item_212eb4', text: requirementText },
+    ];
+    return [{ type: 'response.output_text.done', item_id: 'final', text: answerText }];
+  } });
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    await ensureControlLayout(paths);
+    lease = await acquireDaemonLease(paths);
+    runtime = await startUiRuntime({
+      mode: 'rcc', organId: id('organ', 'explicit-test'), binding, port: port as any,
+      productRoot: root,
+      checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
+      uiRoot: join(process.cwd(), 'docs/ui'), portNumber: 0, lease,
+      accessControl: await AccessControlService.open({ credentialPath: join(root, 'security/web-access.json'), create: true }),
+      explicitBrainTemplateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+      memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'parse-live' },
+      runtimeComposition: {
+        prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+          provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+            model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef },
+          binding, port } as any),
+        prepareTaskAgentProvider: async () => { throw new Error('a simple answer must not prepare a Task'); },
+      },
+    });
+    const interactionId = await runtime.service.receiveExplicitInput({ sourceRef: 'ui:parse-live', rawInput, channel: 'business' });
+    const journalFile = uiRuntimeControlJournalPath(join(root, 'checkpoints/rcc'));
+    const parent = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile));
+    const helpers = new JsonlInteractionHelperJournal(new JsonlOrganJournal(journalFile));
+    const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+
+    // RED: the two-item terminal output cannot be parsed into a decision.
+    await assert.rejects(
+      () => runtime!.service.interpretExplicitInput({ interactionId }),
+      (error: unknown) => error instanceof Error
+        && error.message.includes('interaction agent returned invalid JSON'),
+    );
+    const opened = await parent.readScopeOpenedTurns(scope);
+    assert.equal(opened.length, 1);
+    const turn = opened[0]!.fact.turn;
+    const closed = await parent.readTurnSnapshot(turn);
+    // The real close is recorded, and the turn is closed by its own honest fact.
+    assert.equal(closed.resourceClose?.fact.result.state, 'closed');
+    assert.equal(closed.abandonment, null);
+    assert.equal(closed.parseFailure?.fact.terminalRequestId,
+      closed.requests.at(-1)!.fact.request.requestId);
+    assert.equal(await helpers.readSemanticCheckpointExact(turn), null);
+    assert.equal((await parent.readScopeParseFailures(scope)).length, 1);
+
+    // GREEN requirement: the same interaction retries without any brick.
+    const answered = await runtime.service.interpretExplicitInput({ interactionId });
+    assert.equal(answered.state, 'answered');
+    assert.equal(answered.reply, '8');
+    assert.equal(providerRequests, 2);
+    assert.equal((await parent.readScopeParseFailures(scope)).length, 1);
+
+    // A brand new input on the same scope is interpreted normally afterwards.
+    const otherId = await runtime.service.receiveExplicitInput({ sourceRef: 'ui:parse-live-next', rawInput, channel: 'business' });
+    const other = await runtime.service.interpretExplicitInput({ interactionId: otherId });
+    assert.equal(other.state, 'answered');
+    assert.equal(other.reply, '8');
+    assert.equal(providerRequests, 3);
+    // The durable turn that failed stays closed: one fact, no second write.
+    const stillClosed = await parent.readTurnSnapshot(turn);
+    assert.equal(stillClosed.parseFailure !== null, true);
+    assert.equal((await parent.readScopeParseFailures(scope)).length, 1);
   } finally {
     await runtime?.close();
     await lease?.release();
