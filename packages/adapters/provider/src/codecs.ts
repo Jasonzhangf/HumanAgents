@@ -25,6 +25,7 @@ import {
 import type {
   ProviderRequestContext,
   RequestScopedInstructions,
+  RequestToolSurfaceUse,
 } from '../../../contracts/src/provider-request-context.js';
 import { ProviderAdapterError } from './errors.js';
 import type { ProviderEvidenceSink } from './evidence.js';
@@ -61,19 +62,35 @@ const OWNER = SOURCE;
  *  not hand the model tools this Harness does not execute: a call to one is not
  *  executable and only burns the tool round budget. Declaring the exact tool
  *  surface keeps the model on the Harness-owned functions. Requests without
- *  tools keep the empty instructions they had before. */
+ *  tools keep the empty instructions they had before.
+ *
+ *  The task framing travels with the same statement. An intake decision is not
+ *  task execution: telling that request to execute a task and to finish with a
+ *  plain-text answer contradicts the decision contract it also receives. A real
+ *  Responses batch then echoed that framing back as a second, invented
+ *  `requirement` decision. So the framing follows the caller's declared use; only
+ *  the tool surface itself is unconditional. */
 function harnessToolSurfaceInstructions(
   tools: readonly { readonly toolId: string }[] | undefined,
+  use: RequestToolSurfaceUse = 'task-execution',
 ): string {
   if (tools === undefined || tools.length === 0) return '';
   const names = tools.map((tool) => responsesWireToolName(tool.toolId)).join(', ');
+  const framing = use === 'intake-decision'
+    ? [
+      'This request is one intake decision, not one turn of task execution: produce exactly one decision object for the current input and claim no task execution.',
+      'Dispatch a helper only when the decision itself needs one, and never restate the request instructions as a requirement.',
+    ]
+    : [
+      'You are executing one turn of a HumanAgent task.',
+      'When the requirement is satisfied, reply with your final answer as plain text and call no further tool: an external checker validates the result, so do not re-verify a completed deliverable by rewriting or re-reading it.',
+    ];
   return [
-    'You are executing one turn of a HumanAgent task.',
+    ...framing,
     'This Harness owns tool execution: the function tools declared in this request are the complete tool surface.',
     'A backend harness tool such as exec_command, a shell, or a server-side servertool is not available in this Harness and always fails.',
     `Only these function tools can be called: ${names}.`,
     'Every round re-sends the complete tool history of this execution, so earlier calls and their results are still available to you.',
-    'When the requirement is satisfied, reply with your final answer as plain text and call no further tool: an external checker validates the result, so do not re-verify a completed deliverable by rewriting or re-reading it.',
     'Call a tool only when it makes concrete progress; a tool call with missing or empty arguments is a failed round.',
   ].join(' ');
 }
@@ -88,7 +105,7 @@ function requestInstructions(
   tools: readonly { readonly toolId: string }[] | undefined,
   instructions: RequestScopedInstructions | undefined,
 ): string {
-  return [harnessToolSurfaceInstructions(tools), instructions?.text ?? '']
+  return [harnessToolSurfaceInstructions(tools, instructions?.toolSurface), instructions?.text ?? '']
     .filter((part) => part.length > 0)
     .join('\n\n');
 }
@@ -352,9 +369,33 @@ export interface DecodeContext<
   readonly responsesCurrentResponseId?: Map<string, string>;
   readonly responsesPendingToolCalls?: Set<string>;
   readonly responsesRequestStartEmitted: Map<string, boolean>;
+  /** How many model rounds this one response stream has opened so far. A
+   *  Responses request owns exactly one model round as its terminal output;
+   *  rounds RCC opens by itself come from instructions the client never sent. */
+  readonly responsesStreamRound: { count: number };
 }
 
 const REQUEST_START_SUMMARY = 'provider requested model work';
+const RESPONSES_ADDITIONAL_ROUND_SUMMARY = 'provider opened an additional response round in this request; that round is not this request terminal output';
+
+/** True once the stream has opened a second model round for the same request. */
+function responsesAdditionalRound<TIdentity extends AnyProviderExecutionIdentityRef>(
+  context: DecodeContext<TIdentity>,
+): boolean {
+  return context.responsesStreamRound.count > 1;
+}
+
+/** The turn facts one wire element contributes. A provider-initiated additional
+ *  round contributes its tool control and the request outcome, but not its
+ *  content: that text answers instructions this client never sent, so it must
+ *  stay out of the terminal output instead of being appended to the real
+ *  answer. Only the first round states what this request asked for. */
+function turnContentFacts<TIdentity extends AnyProviderExecutionIdentityRef>(
+  context: DecodeContext<TIdentity>,
+  facts: readonly ProviderRawFact<TIdentity>[],
+): readonly ProviderRawFact<TIdentity>[] {
+  return responsesAdditionalRound(context) ? facts.filter((fact) => fact.kind !== 'content') : facts;
+}
 
 export interface ProviderDecodedEvent<
   TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
@@ -997,7 +1038,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     context: DecodeContext<TIdentity>,
   ): Promise<ProviderDecodedEvent<TIdentity>> {
     const decoded = await this.decodeWire(raw, context);
-    return { events: decoded.events, rawFacts: decoded.rawFacts ?? [] };
+    return { events: decoded.events, rawFacts: turnContentFacts(context, decoded.rawFacts ?? []) };
   }
 
   private async decodeWire<TIdentity extends AnyProviderExecutionIdentityRef>(
@@ -1019,8 +1060,14 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'response.in_progress': {
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireStringOrGenerated(response, 'id', context.execution, raw.type, `rcc-response-${context.execution.executionEpoch}`);
+        if (raw.type === 'response.created') context.responsesStreamRound.count += 1;
         context.responsesCurrentResponseId?.set('current', responseId);
         const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`, response)];
+        if (responsesAdditionalRound(context)) {
+          return raw.type === 'response.created'
+            ? { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `response/${responseId}/round-${context.responsesStreamRound.count}`), evidenceRefs, RESPONSES_ADDITIONAL_ROUND_SUMMARY, responseId)] }
+            : { events: [] };
+        }
         const marked = context.responsesRequestStartEmitted.get(responseId);
         if (marked) return { events: [] };
         context.responsesRequestStartEmitted.set(responseId, true);

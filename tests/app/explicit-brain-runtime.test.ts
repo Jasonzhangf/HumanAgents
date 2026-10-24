@@ -4483,3 +4483,218 @@ test('provider explicit brain interpreter closes an unparseable live epoch and k
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// Failure basis: real production interaction-118 / explicit-interpret-eb888d16
+// committed one settled terminal request whose response carried TWO complete
+// assistant-text items: the real answer decision and a second, model-invented
+// requirement that restated the request instructions. The raw fold is faithful
+// and concatenates both items, so JSON.parse failed with "Unexpected
+// non-whitespace character after JSON at position 200", which names neither the
+// cause nor the items. Impact: the same simple input failed about 40% of the
+// time and nothing said why. Cost: one seeded terminal turn with the exact
+// two-item shape. This test pins the deterministic semantics: two complete
+// decisions are never concatenated, never silently truncated and never reduced
+// to one of the two by a guess.
+test('provider explicit brain interpreter names two complete decisions instead of concatenating them', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-two-decisions', providerId: 'provider-two-decisions', protocol: 'responses',
+    endpointRef: 'recorded://two-decisions', modelRef: 'model-two-decisions',
+    configDigest: 'sha256:two-decisions-config', capabilityDigest: 'sha256:two-decisions-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const rawInput = '7 加 7 等于几？';
+  const request = {
+    interactionId: 'interaction-two-decisions', inputRevision: 1, sourceRef: 'ui:two-decisions',
+    rawInput, clarifications: [], taskCandidates: [],
+  };
+  const operationScope = { organId: scope.organId, operationId: id('operation', 'op-two-decisions') };
+  const turn: InteractionTurnIdentity = {
+    organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+    interactionId: request.interactionId, inputRevision: 1, turnId: 'explicit-interpret-two-decisions',
+  };
+  const execution = { runtimeId: turn.turnId, ...operationScope, executionEpoch: 1, interactionTurn: turn };
+  const initialInput = {
+    ref: await deps.rawEvidence.write({
+      scope: operationScope, kind: 'execution', type: 'initial-input',
+      locator: turn.turnId, content: JSON.stringify(request),
+    }),
+    view: { kind: 'utf8-text' as const },
+  };
+  const owner = createInteractionParentTurnRawOwner({
+    turn, execution, scope: operationScope, initialInput, providerBinding: binding,
+    executionOwner: { daemonLeaseId: 'lease-two-decisions', daemonGeneration: 1, processStartToken: 'process-two-decisions' },
+    journal: deps.parentJournal, rawContent: deps.rawContent,
+  });
+  await owner.openTurnInput();
+  const terminalRequest = { turnId: turn.turnId, requestId: 'request-two-decisions' };
+  await owner.registerRequest({ execution, record: { request: terminalRequest, scope: operationScope, phase: 'dispatching' } });
+  await owner.registerRequest({ execution, record: { request: terminalRequest, scope: operationScope, phase: 'dispatched' } });
+  // The production batch item by item, both complete and both legal decisions.
+  const answerItem = JSON.stringify({
+    kind: 'answer', normalizedInput: rawInput, knownFacts: [], answer: '7 加 7 等于 14。', decisionRefs: [],
+  });
+  const requirementItem = JSON.stringify({
+    kind: 'requirement',
+    normalizedInput: '继续执行尚未完成的任务；需要工具时直接调用工具；如果任务已完成，请给出完成总结。',
+    knownFacts: [], decisionRefs: ['ui-task-implicit-draft-125'],
+    intent: 'create', proposal: { revision: 1, intent: 'create', title: '继续执行尚未完成的任务', objective: '继续执行尚未完成的任务' },
+  });
+  for (const [index, text] of [answerItem, requirementItem].entries()) {
+    await owner.acceptRawFact({
+      execution, scope: operationScope, request: terminalRequest, producerSeq: index + 1,
+      fact: {
+        kind: 'content', channel: 'assistant-text', update: 'full', contentUnitId: `item-${index}`,
+        content: { ref: await deps.rawEvidence.write({
+          scope: operationScope, kind: 'execution', type: `item-${index}`, locator: `item-${index}`, content: text,
+        }), view: { kind: 'utf8-text' as const } },
+        complete: true,
+      },
+    });
+  }
+  await owner.acceptRawFact({
+    execution, scope: operationScope, request: terminalRequest, producerSeq: 3,
+    fact: { kind: 'request-complete', terminal: 'completed' },
+  });
+  await owner.registerRequest({ execution, record: { request: terminalRequest, scope: operationScope, phase: 'settled' } });
+  // The exact production shape: a real close, a real terminal output, no decision.
+  await owner.recordProviderClose({
+    providerBinding: binding,
+    result: {
+      bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol,
+      state: 'closed',
+      evidenceRefs: [await deps.rawEvidence.write({
+        scope: operationScope, kind: 'execution', type: 'close', locator: 'close', content: 'closed',
+      })],
+    },
+    closedAt: new Date().toISOString(),
+  });
+  let providerStarts = 0;
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => {
+    providerStarts += 1;
+    return [{ type: 'response.output_text.done', item_id: 'final', text: answerItem }];
+  } });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+  });
+
+  // RED on the base: the same JSON position error the production entry raised,
+  // produced by concatenating two well-formed decisions into one string.
+  // GREEN: the terminal output is described by what it really held.
+  await assert.rejects(
+    () => interpreter.interpret(request),
+    (error: unknown) => {
+      if (!(error instanceof Error)) throw error;
+      const message = error.message;
+      assert.ok(message.includes('interaction agent returned invalid JSON'));
+      assert.equal(message.includes('Unexpected non-whitespace character'), false,
+        'the failure must name the cause, not a JSON parse offset');
+      assert.ok(message.includes('2 top-level JSON decision objects'),
+        `the failure must count the decisions it refused to merge: ${message}`);
+      assert.equal(message.includes('7 加 7 等于 14。'), false, 'no decision text is guessed into the error');
+      return true;
+    },
+  );
+  // No decision was invented and none of the two was taken: the honest closure
+  // is the only durable fact, so the scope is never bricked.
+  assert.equal(await deps.helperJournal.readSemanticCheckpointExact(turn), null,
+    'an ambiguous terminal output commits no semantic claim');
+  const closed = await deps.parentJournal.readTurnSnapshot(turn);
+  assert.equal(closed.parseFailure?.fact.terminalRequestId, terminalRequest.requestId);
+  assert.equal(providerStarts, 0, 'the seeded terminal output is read, not re-requested');
+  const retried = await interpreter.interpret(request);
+  assert.equal(retried.kind, 'answer');
+  if (retried.kind !== 'answer') throw new Error('expected an answer');
+  assert.equal(retried.answer, '7 加 7 等于 14。');
+  assert.equal(providerStarts, 1);
+});
+
+// Failure basis: the interpret wire opened with the task-execution framing
+// ("You are executing one turn of a HumanAgent task." ... "When the requirement
+// is satisfied, reply with your final answer as plain text and call no further
+// tool"), because the codec prepends that text to every request that declares
+// tools. Production interaction-118 answered that framing with a second,
+// invented requirement item ("继续执行尚未完成的任务；需要工具时直接调用工具；如果任务已完成，
+// 请给出完成总结。"), which is the preamble restated as a decision. Impact: the
+// request asks for two incompatible outputs and the model sometimes delivers
+// both. Cost: one ordinary answer request.
+test('provider explicit brain asks for one intake decision, not one turn of task execution', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-intake-framing', providerId: 'provider-intake-framing', protocol: 'responses',
+    endpointRef: 'recorded://intake-framing', modelRef: 'model-intake-framing',
+    configDigest: 'sha256:intake-framing-config', capabilityDigest: 'sha256:intake-framing-capability',
+  };
+  const sentPrompts: string[] = [];
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire: { readonly instructions?: string; readonly tools?: readonly { readonly name?: string }[] }) => {
+    sentPrompts.push(wire.instructions ?? '');
+    return [{ type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
+      kind: 'answer', normalizedInput: '7 加 7 等于几？', knownFacts: [], answer: '7 加 7 等于 14。', decisionRefs: [],
+    }) }];
+  } });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+  });
+  const answered = await interpreter.interpret({
+    interactionId: 'interaction-intake-framing', inputRevision: 1, sourceRef: 'ui:intake-framing',
+    rawInput: '7 加 7 等于几？', clarifications: [], taskCandidates: [],
+  });
+  assert.equal(answered.kind, 'answer');
+  assert.equal(sentPrompts.length, 1);
+  const sentPrompt = sentPrompts[0]!;
+  // RED on the base: both execution sentences were present in this exact request.
+  assert.equal(sentPrompt.includes('You are executing one turn of a HumanAgent task'), false,
+    'one intake decision is not one turn of task execution');
+  assert.equal(sentPrompt.includes('reply with your final answer as plain text'), false,
+    'a decision turn never ends with a plain-text final answer');
+  // GREEN: the request still owns its tool surface, stated as what it really is.
+  assert.ok(sentPrompt.includes('one intake decision, not one turn of task execution'));
+  assert.ok(sentPrompt.includes('Only these function tools can be called: dispatch_helper, accept_helper'));
+  assert.ok(sentPrompt.includes('never restate the request instructions as a requirement'));
+  assert.ok(sentPrompt.includes('# Explicit intake decision output'));
+});
+
+// Failure basis: real isolated-provider run roundfix12 interaction-9 (input
+// "10 加 10 等于几？" with eleven task candidates). The model echoed the request
+// envelope it was handed and then stated the answer, all inside ONE assistant
+// text item: `{"interactionId":...}{"kind":"answer",...}`. The envelope echo
+// carries no decision kind, so counting top-level objects rejected a response
+// that held exactly one decision. Impact: an ordinary arithmetic question fails
+// with a fabricated "2 top-level JSON decision objects" diagnostic. Cost: one
+// ordinary answer request whose recorded output is that exact two-object text.
+test('provider explicit brain reads the unique decision when the output echoes its input envelope', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-envelope-echo', providerId: 'provider-envelope-echo', protocol: 'responses',
+    endpointRef: 'recorded://envelope-echo', modelRef: 'model-envelope-echo',
+    configDigest: 'sha256:envelope-echo-config', capabilityDigest: 'sha256:envelope-echo-capability',
+  };
+  const request = {
+    interactionId: 'interaction-envelope-echo', inputRevision: 1, sourceRef: 'ui:envelope-echo',
+    rawInput: '10 加 10 等于几？', clarifications: [],
+    taskCandidates: [{ taskId: 'ui-task-echo-1', title: '历史任务 1', status: 'created', currentInput: '继续执行历史任务 1' }],
+  };
+  const decision = JSON.stringify({
+    kind: 'answer', normalizedInput: '10 加 10 等于几？', knownFacts: [], answer: '10 加 10 等于 20。', decisionRefs: [],
+  });
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => [
+    { type: 'response.output_text.done', item_id: 'final', text: `${JSON.stringify(request)}\n${decision}` },
+  ] });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+  });
+  const answered = await interpreter.interpret(request);
+  assert.equal(answered.kind, 'answer');
+  if (answered.kind !== 'answer') throw new Error('expected an answer');
+  assert.equal(answered.answer, '10 加 10 等于 20。');
+  // The echo is the input, not a second decision, so nothing was rejected and
+  // nothing was invented: the scope holds no parse failure.
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  assert.deepEqual(await deps.parentJournal.readScopeParseFailures(scope), []);
+});

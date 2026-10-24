@@ -215,7 +215,11 @@ function mergeRequestScopedInstructions(
   caller: RequestScopedInstructions,
 ): RequestScopedInstructions {
   if (hook === undefined) return caller;
-  return { text: `${hook.text}\n${caller.text}` };
+  const toolSurface = caller.toolSurface ?? hook.toolSurface;
+  return {
+    text: `${hook.text}\n${caller.text}`,
+    ...(toolSurface === undefined ? {} : { toolSurface }),
+  };
 }
 
 /**

@@ -252,6 +252,7 @@ function codecContext(overrides: Partial<DecodeContext> = {}) {
     responsesCurrentResponseId: new Map<string, string>(),
     responsesPendingToolCalls: new Set<string>(),
     responsesRequestStartEmitted: new Map<string, boolean>(),
+    responsesStreamRound: { count: 0 },
     nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
     ...overrides,
   };
@@ -459,6 +460,43 @@ test('responses codec maps terminal, tool, and error wire events', async () => {
   assert.equal(error.events[0].error?.code, 'wire.error');
 });
 
+test('responses codec keeps an extra provider model round out of the request terminal output', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const facts: ProviderRawFact[] = [];
+  const decode = async (raw: Record<string, unknown>) => {
+    const decoded = await codec.decodeEvent({ protocol: 'responses', ...raw } as never, context);
+    facts.push(...decoded.rawFacts);
+    return decoded;
+  };
+  // One RCC v3 request can open a second model round inside the same response
+  // stream: the second round answers an instruction the client never sent, so
+  // its text must stay out of the request terminal output instead of being
+  // appended to the answer of the round the request actually asked for.
+  await decode({ type: 'response.created', response: { id: 'round-1' } });
+  await decode({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'message', id: 'item-answer', role: 'assistant', content: [{ type: 'output_text', text: '{"kind":"answer","answer":"6"}' }] },
+  });
+  const secondRound = await decode({ type: 'response.created', response: { id: 'round-1' } });
+  assert.match(String(secondRound.events.at(-1)?.summary), /additional response round/);
+  const continuation = await decode({
+    type: 'response.output_item.done',
+    output_index: 1,
+    item: { type: 'message', id: 'item-continuation', role: 'assistant', content: [{ type: 'output_text', text: '{"kind":"answer","answer":"no work"}' }] },
+  });
+  const completed = await decode({ type: 'response.completed', response: { id: 'round-1' } });
+  assert.equal(completed.events.at(-1)?.terminalState, 'succeeded');
+  // The extra round is still recorded: its item stays readable as evidence and
+  // the output event still names it. Only the terminal output stays on round one.
+  assert.equal(continuation.events.length, 1);
+  assert.equal(continuation.events[0].evidenceRefs.length, 1);
+  assert.deepEqual(facts.filter((fact) => fact.kind === 'content').map((fact) => fact.contentUnitId), ['responses:assistant-text:item-answer']);
+  // The request outcome still lands on the terminal event of the extra round.
+  assert.equal(facts.some((fact) => fact.kind === 'request-complete'), true);
+});
+
 test('responses codec keeps tool control typed and encodes a call-bound continuation', () => {
   const codec = new ResponsesProviderCodec();
   const tools = [{ toolId: 'file.read', description: 'read one file', inputSchema: { type: 'object' } }];
@@ -515,19 +553,29 @@ test('responses codec marks request starts once per response id regardless of li
   const createdFirst = codecContext();
   const inProgressFirst = codecContext();
 
-  for (const responseId of ['request-start-1', 'request-start-2']) {
-    const first = await codec.decodeEvent(
-      { protocol: 'responses', type: 'response.created', response: { id: responseId } },
-      createdFirst,
-    );
-    const duplicate = await codec.decodeEvent(
-      { protocol: 'responses', type: 'response.in_progress', response: { id: responseId } },
-      createdFirst,
-    );
-    assert.deepEqual(first.events.map((event) => event.summary), ['provider requested model work']);
-    assert.deepEqual(duplicate.events, []);
-  }
+  const first = await codec.decodeEvent(
+    { protocol: 'responses', type: 'response.created', response: { id: 'request-start-1' } },
+    createdFirst,
+  );
+  const duplicateInProgress = await codec.decodeEvent(
+    { protocol: 'responses', type: 'response.in_progress', response: { id: 'request-start-1' } },
+    createdFirst,
+  );
+  assert.deepEqual(first.events.map((event) => event.summary), ['provider requested model work']);
+  assert.deepEqual(duplicateInProgress.events, []);
 
+  // A second `response.created` inside one stream opens another model round, so
+  // it is reported as such instead of being folded into the first round.
+  const secondRound = await codec.decodeEvent(
+    { protocol: 'responses', type: 'response.created', response: { id: 'request-start-2' } },
+    createdFirst,
+  );
+  assert.match(String(secondRound.events[0]?.summary), /additional response round/);
+  const laterRoundInProgress = await codec.decodeEvent(
+    { protocol: 'responses', type: 'response.in_progress', response: { id: 'request-start-2' } },
+    createdFirst,
+  );
+  assert.deepEqual(laterRoundInProgress.events, []);
   const inProgress = await codec.decodeEvent(
     { protocol: 'responses', type: 'response.in_progress', response: { id: 'request-start-3' } },
     inProgressFirst,

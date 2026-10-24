@@ -319,22 +319,93 @@ function renderBusinessProposal(proposal: StructuredRequirementProposal): string
   return lines.join('\n');
 }
 
+/**
+ * The complete top-level JSON objects of one terminal output, in order.
+ *
+ * A Responses batch can carry several complete `assistant-text` items and the
+ * raw fold is faithful, so their texts arrive concatenated while every item's
+ * own JSON object stays well formed. The intake contract asks for exactly one
+ * decision object, so the seam between items has to be found instead of being
+ * left to a slice: `{...}{...}` must never be merged, truncated or guessed.
+ */
+function topLevelJsonObjectSpans(text: string): readonly { readonly start: number; readonly end: number }[] {
+  const spans: { start: number; end: number }[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (char !== '}' || depth === 0) continue;
+    depth -= 1;
+    if (depth === 0 && start >= 0) {
+      spans.push({ start, end: index + 1 });
+      start = -1;
+    }
+  }
+  return spans;
+}
+
 function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretationInput): ExplicitBrainInterpretation {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(output)?.[1];
-  const candidate = fenced ?? output.slice(output.indexOf('{'), output.lastIndexOf('}') + 1);
-  let value: unknown;
-  try {
-    value = JSON.parse(candidate);
-  } catch (error) {
+  const scoped = fenced ?? output;
+  const spans = topLevelJsonObjectSpans(scoped);
+  const objects: Record<string, unknown>[] = [];
+  let parseError: string | undefined;
+  for (const span of spans) {
+    let value: unknown;
+    try {
+      value = JSON.parse(scoped.slice(span.start, span.end));
+    } catch (error) {
+      parseError ??= error instanceof Error ? error.message : String(error);
+      continue;
+    }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
+    objects.push(value as Record<string, unknown>);
+  }
+  let record: Record<string, unknown> | undefined;
+  if (objects.length === 1) {
+    // One top-level object is the decision candidate: whether it satisfies the
+    // intake contract is the contract check below, not a span count.
+    record = objects[0];
+  } else if (objects.length > 1) {
+    // A model may echo the request envelope it was handed (`interactionId`,
+    // `rawInput`, `taskCandidates`, ...) in front of its decision. That echo
+    // states no decision kind, so only the objects that state one are
+    // decisions, and two decision objects stay ambiguous.
+    const decisions = objects.filter((entry) => typeof entry.kind === 'string');
+    record = decisions.length === 1 ? decisions[0] : undefined;
+    if (record === undefined) {
+      throw new ExplicitBrainOperationalToolError(
+        'unsupported-tool',
+        decisions.length > 1
+          ? `interaction agent returned invalid JSON: the terminal output holds ${decisions.length} top-level JSON decision objects, and the intake contract requires exactly one`
+          : `interaction agent returned invalid JSON: the terminal output holds ${objects.length} top-level JSON objects and none of them is a decision object`,
+      );
+    }
+  } else {
     throw new ExplicitBrainOperationalToolError(
       'unsupported-tool',
-      `interaction agent returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      spans.length === 0
+        ? 'interaction agent returned invalid JSON: the terminal output holds no JSON decision object'
+        : `interaction agent returned invalid JSON: ${parseError ?? 'the terminal output holds no JSON decision object'}`,
     );
   }
-  if (!value || typeof value !== 'object') {
-    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent returned a non-object decision');
-  }
-  const record = value as Record<string, unknown>;
   const kind = record.kind;
   const normalizedInput = record.normalizedInput;
   const knownFacts = record.knownFacts;
@@ -812,7 +883,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             turn, execution, scope, initialInput, providerBinding: turnProviderBinding,
             ...(executionOwner === undefined ? {} : { executionOwner }),
             journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
-            instructions: async () => ({ text: interpreterPrompt(request, await loadPromptSegments()) }),
+            instructions: async () => ({ text: interpreterPrompt(request, await loadPromptSegments()), toolSurface: 'intake-decision' }),
           });
           owner = createdOwner;
           await createdOwner.openTurnInput();

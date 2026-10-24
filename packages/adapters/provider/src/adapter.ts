@@ -499,6 +499,7 @@ export class ProviderAdapter<
       responsesCurrentResponseId: new Map<string, string>(),
       responsesPendingToolCalls: new Set<string>(),
       responsesRequestStartEmitted: new Map<string, boolean>(),
+      responsesStreamRound: { count: 0 },
       nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
     };
     try {

@@ -126,6 +126,7 @@ function codecContext(sink = memoryEvidenceSink()) {
     sink,
     responsesOutputText: new Map<string, string>(),
     responsesRequestStartEmitted: new Map<string, boolean>(),
+    responsesStreamRound: { count: 0 },
     nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
   };
 }
