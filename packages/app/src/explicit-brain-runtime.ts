@@ -395,6 +395,20 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
   };
 }
 
+/**
+ * Exact neutral interaction-turn identity comparison. Both the scope history
+ * read and the pending-turn read use it so a discharged turn is recognized by
+ * the same durable identity the Journal recorded.
+ */
+function sameInteractionTurn(left: InteractionTurnIdentity, right: InteractionTurnIdentity): boolean {
+  return left.organId.scope === right.organId.scope
+    && left.organId.value === right.organId.value
+    && left.interactionScopeId === right.interactionScopeId
+    && left.interactionId === right.interactionId
+    && left.inputRevision === right.inputRevision
+    && left.turnId === right.turnId;
+}
+
 export function createProviderExplicitBrainInterpreter(input: {
   readonly lease?: SupervisorLease | (() => SupervisorLease | undefined);
   readonly port?: ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>;
@@ -518,20 +532,75 @@ export function createProviderExplicitBrainInterpreter(input: {
         readonly executionOwner: OccurrenceExecutionOwner;
       } | undefined;
       const scopeKey = { organId: input.organId, interactionScopeId: input.interactionScopeId };
-      const opened = await input.parentJournal.readScopeOpenedTurns(scopeKey);
-      const closed = await input.checkpointJournal.readScopeSemanticCheckpoints(scopeKey);
-      const pending = opened.find(({ fact }) => !closed.some(({ checkpoint }) =>
-        checkpoint.organId.scope === fact.turn.organId.scope
-        && checkpoint.organId.value === fact.turn.organId.value
-        && checkpoint.interactionScopeId === fact.turn.interactionScopeId
-        && checkpoint.interactionId === fact.turn.interactionId
-        && checkpoint.inputRevision === fact.turn.inputRevision
-        && checkpoint.turnId === fact.turn.turnId));
-      if (pending !== undefined) {
-        const original = await input.rawContent.read({ scope: pending.fact.scope, content: pending.fact.initialInput });
-        if (new TextDecoder('utf-8', { fatal: true }).decode(original) !== JSON.stringify(request)) {
-          throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} requires its exact prior input before new input`);
+      const readPendingTurn = async () => {
+        const opened = await input.parentJournal.readScopeOpenedTurns(scopeKey);
+        const closed = await input.checkpointJournal.readScopeSemanticCheckpoints(scopeKey);
+        const abandoned = await input.parentJournal.readScopeAbandonedTurns(scopeKey);
+        return opened.find(({ fact }) => !closed.some(({ checkpoint }) =>
+          checkpoint.organId.scope === fact.turn.organId.scope
+          && checkpoint.organId.value === fact.turn.organId.value
+          && checkpoint.interactionScopeId === fact.turn.interactionScopeId
+          && checkpoint.interactionId === fact.turn.interactionId
+          && checkpoint.inputRevision === fact.turn.inputRevision
+          && checkpoint.turnId === fact.turn.turnId)
+          && !abandoned.some(({ fact: abandonedFact }) => sameInteractionTurn(abandonedFact.turn, fact.turn)));
+      };
+      /**
+       * Discharge one interrupted parent turn that can provably never be
+       * recovered. The durable fact is honest: the Provider stream stopped
+       * before any terminal output and left no business side effect. Any shape
+       * with a possible output, close, settlement, replacement owner, terminal
+       * request or unknown tool side effect keeps the existing explicit error.
+       */
+      const abandonInterruptedTurn = async (
+        pendingTurn: NonNullable<Awaited<ReturnType<typeof readPendingTurn>>>,
+      ): Promise<void> => {
+        const refuse = (detail: string): Error => new Error(
+          `unclosed interaction parent turn ${pendingTurn.fact.turn.turnId} requires its exact prior input before new input; ${detail}`,
+        );
+        if (input.lease !== undefined && activeLease === undefined) {
+          throw new Error('interaction parent turn requires active supervisor lease authority');
         }
+        const providerBinding = pendingTurn.fact.providerBinding;
+        if (providerBinding === undefined) {
+          throw refuse('the original committed provider binding is missing');
+        }
+        if (input.turnHelperJournal === undefined) {
+          throw refuse('the durable helper turn read port is unavailable');
+        }
+        const durableHelpers = await input.turnHelperJournal.readTurnHelpers(pendingTurn.fact.turn);
+        for (const entry of durableHelpers) {
+          if (entry.readback.dispatchAccepted === null || entry.readback.returned === null) {
+            throw refuse(`it holds on unreturned helper ${entry.identity.helperCallId}`);
+          }
+        }
+        const owner = createInteractionParentTurnRawOwner({
+          turn: pendingTurn.fact.turn,
+          execution: pendingTurn.fact.execution,
+          scope: pendingTurn.fact.scope,
+          initialInput: pendingTurn.fact.initialInput,
+          providerBinding,
+          priorCheckpoints: pendingTurn.fact.priorCheckpoints,
+          journal: input.parentJournal,
+          rawContent: input.rawContent,
+        });
+        const eligibility = await owner.readAbandonmentEligibility();
+        if (!eligibility.abandonable) {
+          throw refuse(`it cannot be discharged: ${eligibility.heldReason}`);
+        }
+        await owner.abandonInterruptedTurn({
+          reason: 'provider-interrupted-without-terminal-output',
+          abandonedAt: input.clock.now(),
+        });
+      };
+      let pending = await readPendingTurn();
+      while (pending !== undefined) {
+        const original = await input.rawContent.read({ scope: pending.fact.scope, content: pending.fact.initialInput });
+        if (new TextDecoder('utf-8', { fatal: true }).decode(original) === JSON.stringify(request)) break;
+        await abandonInterruptedTurn(pending);
+        pending = await readPendingTurn();
+      }
+      if (pending !== undefined) {
         if (retained === undefined || retained.owner.turn.turnId !== pending.fact.turn.turnId) {
           if (pending.fact.providerBinding === undefined) {
             throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} cannot recover without the original committed provider binding`);

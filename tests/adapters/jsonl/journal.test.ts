@@ -1037,3 +1037,206 @@ test('interaction parent Journal decodes empty settlements and persists a post-c
   const fresh = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(file));
   assert.deepEqual((await fresh.readTurnSnapshot(turn)).providerSettlements[0]!.fact, receipt);
 });
+
+// Failure basis: the new turn-abandonment discriminant must decode on a fresh
+// reader, remain readable in scope reads, and keep the old journal readable
+// without the record. A write after the discharge would corrupt the frozen
+// turn, so it must be rejected inside the transaction. Impact: an undecodable
+// journal or a lost recovery boundary. Cost: one existing JSONL consumer.
+test('interaction parent Journal durably records a discharge and keeps old journals readable without it', async () => {
+  const { journal, file } = await fixture();
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const turn: InteractionTurnIdentity = {
+    organId: organ,
+    interactionScopeId: 'jsonl-abandonment-scope',
+    interactionId: 'jsonl-abandonment-interaction',
+    inputRevision: 1,
+    turnId: 'jsonl-abandonment-logical-turn',
+  };
+  const operation = id('operation', 'jsonl-abandonment-operation');
+  const scope: ScopeRef = { organId: organ, operationId: operation };
+  const execution: InteractionParentProviderExecutionIdentityRef = {
+    runtimeId: 'runtime-jsonl-abandonment',
+    organId: organ,
+    operationId: operation,
+    executionEpoch: 1,
+    interactionTurn: turn,
+  };
+  const binding: ProviderBinding = {
+    bindingId: 'binding-jsonl-abandonment',
+    providerId: 'provider-jsonl-abandonment',
+    protocol: 'responses',
+    endpointRef: 'endpoint://jsonl-abandonment',
+    modelRef: 'model-jsonl-abandonment',
+    configDigest: 'sha256:jsonl-abandonment-config',
+    capabilityDigest: 'sha256:jsonl-abandonment-capability',
+  };
+  const evidence: EvidenceRef = {
+    evidenceId: id('evidence', 'jsonl-abandonment-evidence'),
+    kind: 'operation',
+    source: 'jsonl-abandonment-test',
+    locator: 'initial-input',
+    scope,
+  };
+  const initialInput: RawAsset = { ref: evidence, view: { kind: 'utf8-text' } };
+  const owner = { daemonLeaseId: 'lease-jsonl-abandonment', daemonGeneration: 1, processStartToken: 'process-jsonl-abandonment' };
+  await parentJournal.transactTurn(turn, () => ({
+    append: {
+      kind: 'turn-input',
+      fact: { turn, execution, scope, initialInput, executionOwner: owner, providerBinding: binding, priorCheckpoints: [] },
+    },
+    result: undefined,
+  }));
+  await parentJournal.transactTurn(turn, () => ({
+    append: { kind: 'request', turn, execution, record: { request: { turnId: turn.turnId, requestId: 'req-jsonl-abandonment' }, scope, phase: 'dispatching' } },
+    result: undefined,
+  }));
+  await parentJournal.transactTurn(turn, () => ({
+    append: { kind: 'request', turn, execution, record: { request: { turnId: turn.turnId, requestId: 'req-jsonl-abandonment' }, scope, phase: 'waiting' } },
+    result: undefined,
+  }));
+  await parentJournal.transactTurn(turn, () => ({
+    append: {
+      kind: 'turn-abandonment',
+      turn,
+      execution,
+      fact: {
+        turn, execution, providerBinding: binding,
+        reason: 'provider-interrupted-without-terminal-output',
+        abandonedAt: '2026-10-23T00:00:00.000Z',
+      },
+    },
+    result: undefined,
+  }));
+
+  const snapshot = await parentJournal.readTurnSnapshot(turn);
+  assert.ok(snapshot.abandonment);
+  assert.equal(snapshot.abandonment?.fact.reason, 'provider-interrupted-without-terminal-output');
+  assert.deepEqual(snapshot.abandonment?.fact.providerBinding, binding);
+  assert.equal(snapshot.resourceClose, null);
+  assert.deepEqual(snapshot.providerSettlements, []);
+  const scopeRead = { organId: organ, interactionScopeId: 'jsonl-abandonment-scope' };
+  assert.equal((await parentJournal.readScopeAbandonedTurns(scopeRead)).length, 1);
+  assert.equal((await parentJournal.readScopeOpenedTurns(scopeRead)).length, 1);
+
+  // A discharged turn is frozen: no request or raw fact may follow it.
+  await assert.rejects(() => parentJournal.transactTurn(turn, () => ({
+    append: { kind: 'request', turn, execution, record: { request: { turnId: turn.turnId, requestId: 'req-after-abandonment' }, scope, phase: 'dispatching' } },
+    result: undefined,
+  })), JournalIntegrityError);
+
+  // A fresh reader decodes the same durable discharge from the file.
+  const fresh = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(file));
+  const reread = await fresh.readTurnSnapshot(turn);
+  assert.deepEqual(reread.abandonment?.fact, snapshot.abandonment?.fact);
+  assert.equal((await fresh.readScopeAbandonedTurns(scopeRead)).length, 1);
+
+  // A journal written before this record existed still replays cleanly.
+  const legacy = await fixture();
+  const legacyParent = new JsonlInteractionParentTurnJournal(legacy.journal);
+  assert.equal((await legacyParent.readTurnSnapshot(turn)).abandonment, null);
+  assert.deepEqual(await legacyParent.readScopeAbandonedTurns({
+    organId: organ,
+    interactionScopeId: 'jsonl-abandonment-scope',
+  }), []);
+  assert.equal(await legacyParent.readScopeOpenedTurns({
+    organId: organ,
+    interactionScopeId: 'jsonl-abandonment-scope',
+  }).then((opened) => opened.length), 0);
+});
+
+// Failure basis: the abandonment discriminant is new and could be forged or
+// misplaced. A dishonest reason, a missing timestamp, a discharged turn with a
+// different binding, or a discharge before the committed input must all fail at
+// decode instead of being silently accepted as closure. Impact: a fabricated
+// success or a released recovery boundary without proof. Cost: four raw appends.
+test('interaction parent Journal rejects dishonest or misplaced abandonment records', async () => {
+  const turn: InteractionTurnIdentity = {
+    organId: organ,
+    interactionScopeId: 'jsonl-abandonment-integrity-scope',
+    interactionId: 'jsonl-abandonment-integrity-interaction',
+    inputRevision: 1,
+    turnId: 'jsonl-abandonment-integrity-turn',
+  };
+  const operation = id('operation', 'jsonl-abandonment-integrity-operation');
+  const scope: ScopeRef = { organId: organ, operationId: operation };
+  const execution: InteractionParentProviderExecutionIdentityRef = {
+    runtimeId: 'runtime-jsonl-abandonment-integrity',
+    organId: organ,
+    operationId: operation,
+    executionEpoch: 1,
+    interactionTurn: turn,
+  };
+  const binding: ProviderBinding = {
+    bindingId: 'binding-jsonl-abandonment-integrity',
+    providerId: 'provider-jsonl-abandonment-integrity',
+    protocol: 'responses',
+    endpointRef: 'endpoint://jsonl-abandonment-integrity',
+    modelRef: 'model-jsonl-abandonment-integrity',
+    configDigest: 'sha256:jsonl-abandonment-integrity-config',
+    capabilityDigest: 'sha256:jsonl-abandonment-integrity-capability',
+  };
+  const evidence: EvidenceRef = {
+    evidenceId: id('evidence', 'jsonl-abandonment-integrity-evidence'),
+    kind: 'operation',
+    source: 'jsonl-abandonment-integrity-test',
+    locator: 'initial-input',
+    scope,
+  };
+  const owner = { daemonLeaseId: 'lease-jsonl-integrity', daemonGeneration: 1, processStartToken: 'process-jsonl-integrity' };
+  const validFact = {
+    turn, execution, providerBinding: binding,
+    reason: 'provider-interrupted-without-terminal-output' as const,
+    abandonedAt: '2026-10-23T00:00:00.000Z',
+  };
+  const seedInput = async (target: JsonlInteractionParentTurnJournal) => {
+    await target.transactTurn(turn, () => ({
+      append: {
+        kind: 'turn-input',
+        fact: { turn, execution, scope, initialInput: { ref: evidence, view: { kind: 'utf8-text' } }, executionOwner: owner, providerBinding: binding, priorCheckpoints: [] },
+      },
+      result: undefined,
+    }));
+  };
+  const appendRawAbandonment = async (target: JsonlOrganJournal, fact: Record<string, unknown>, commitId: string) =>
+    target.append({
+      commitId,
+      kind: 'event',
+      scope,
+      payload: { kind: 'interaction-parent.turn-raw.v1', discriminant: 'turn-abandonment', turn, execution, fact },
+    });
+
+  const badReason = await fixture();
+  const badReasonJournal = new JsonlInteractionParentTurnJournal(badReason.journal);
+  await seedInput(badReasonJournal);
+  await appendRawAbandonment(badReason.journal, { ...validFact, reason: 'provider-settled-successfully' }, 'raw-abandonment-bad-reason');
+  await assert.rejects(() => badReasonJournal.readTurnSnapshot(turn),
+    (error: unknown) => error instanceof JournalIntegrityError
+      && /abandonment reason is invalid/.test((error as Error).message));
+
+  const noTimestamp = await fixture();
+  const noTimestampJournal = new JsonlInteractionParentTurnJournal(noTimestamp.journal);
+  await seedInput(noTimestampJournal);
+  await appendRawAbandonment(noTimestamp.journal, { ...validFact, abandonedAt: '' }, 'raw-abandonment-no-timestamp');
+  await assert.rejects(() => noTimestampJournal.readTurnSnapshot(turn),
+    (error: unknown) => error instanceof JournalIntegrityError
+      && /requires an abandonedAt timestamp/.test((error as Error).message));
+
+  const wrongBinding = await fixture();
+  const wrongBindingJournal = new JsonlInteractionParentTurnJournal(wrongBinding.journal);
+  await seedInput(wrongBindingJournal);
+  await appendRawAbandonment(wrongBinding.journal, {
+    ...validFact,
+    providerBinding: { ...binding, modelRef: 'model-forged-abandonment' },
+  }, 'raw-abandonment-wrong-binding');
+  await assert.rejects(() => wrongBindingJournal.readTurnSnapshot(turn),
+    (error: unknown) => error instanceof JournalIntegrityError
+      && /execution does not match the committed turn input execution/.test((error as Error).message));
+
+  const beforeInput = await fixture();
+  const beforeInputJournal = new JsonlInteractionParentTurnJournal(beforeInput.journal);
+  await appendRawAbandonment(beforeInput.journal, validFact, 'raw-abandonment-before-input');
+  await assert.rejects(() => beforeInputJournal.readTurnSnapshot(turn),
+    (error: unknown) => error instanceof JournalIntegrityError
+      && /requires the committed turn input before it/.test((error as Error).message));
+});

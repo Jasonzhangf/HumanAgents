@@ -24,6 +24,7 @@ import type {
   InteractionParentOpenedTurnScopeReadPort,
   InteractionParentOwnerReconciliationFact,
   InteractionParentResourceCloseFact,
+  InteractionParentTurnAbandonmentFact,
   InteractionParentTurnAppend,
   InteractionParentTurnInputFact,
   InteractionParentTurnRawJournalPort,
@@ -98,6 +99,13 @@ type ParentRawPayload =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionProviderSettlementReceipt;
+    }
+  | {
+      readonly kind: typeof INTERACTION_PARENT_RAW_RECORD_TYPE;
+      readonly discriminant: 'turn-abandonment';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentTurnAbandonmentFact;
     };
 
 function sameScopedId(
@@ -324,6 +332,32 @@ function assertProviderSettlementFact(
   }
 }
 
+/**
+ * Validate one durable interrupted-turn discharge. It may only describe the
+ * crash-left interrupted shape: it never carries a success, a close or a
+ * settled output, and it can only follow the committed input and binding.
+ */
+function assertAbandonmentFact(
+  fact: InteractionParentTurnAbandonmentFact,
+  turn: InteractionTurnIdentity,
+): void {
+  if (fact === null || typeof fact !== 'object') {
+    throw new JournalIntegrityError('interaction parent turn abandonment fact is invalid');
+  }
+  assertTurn(fact.turn);
+  if (!sameTurnIdentity(fact.turn, turn)) {
+    throw new JournalIntegrityError('interaction parent turn abandonment turn does not match its record turn');
+  }
+  assertInteractionParentExecution(fact.execution, fact.turn);
+  validateProviderBinding(fact.providerBinding);
+  if (fact.reason !== 'provider-interrupted-without-terminal-output') {
+    throw new JournalIntegrityError('interaction parent turn abandonment reason is invalid');
+  }
+  if (typeof fact.abandonedAt !== 'string' || fact.abandonedAt.trim() === '') {
+    throw new JournalIntegrityError('interaction parent turn abandonment requires an abandonedAt timestamp');
+  }
+}
+
 function assertRequestRecord(
   record: RuntimeRequestRecord,
   turn: InteractionTurnIdentity,
@@ -416,6 +450,20 @@ function readParentRawPayload(record: JournalRecord): ParentRawPayload | null {
     assertProviderSettlementFact(fact, turn, execution);
     return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
   }
+  if (discriminant === 'turn-abandonment') {
+    const turn = payload.turn as InteractionTurnIdentity;
+    const execution = payload.execution as InteractionParentProviderExecutionIdentityRef;
+    const fact = payload.fact as InteractionParentTurnAbandonmentFact;
+    assertTurn(turn);
+    assertInteractionParentExecution(execution, turn);
+    assertAbandonmentFact(fact, turn);
+    if (canonicalJsonStringify(fact.execution) !== canonicalJsonStringify(execution)) {
+      throw new JournalIntegrityError(
+        'interaction parent turn abandonment execution does not match its record execution',
+      );
+    }
+    return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
+  }
   throw new JournalIntegrityError('interaction parent raw record discriminant is invalid');
 }
 
@@ -446,6 +494,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     InteractionProviderSettlementReceipt
   >[] = [];
   let resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null = null;
+  let abandonment: InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact> | null = null;
 
   for (const record of records) {
     const payload = readParentRawPayload(record);
@@ -453,6 +502,11 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     if (!sameTurnIdentity(payload.turn, turn)) continue;
     const execution = payload.discriminant === 'turn-input' ? payload.fact.execution : payload.execution;
     assertRecordScope(record, turn, execution);
+    // A discharged turn is terminal: no request, raw fact or control record
+    // may append after the single abandonment fact.
+    if (abandonment !== null) {
+      throw new JournalIntegrityError('interaction parent raw append follows the committed turn abandonment');
+    }
     const commit = commitRef(record);
     if (payload.discriminant === 'turn-input') {
       if (turnInput !== null) {
@@ -533,6 +587,43 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       providerSettlements.push({ fact: payload.fact, commit });
       continue;
     }
+    // A discharge freezes the turn and is otherwise the only record that may
+    // follow a committed close or reconciliation-free running epoch.
+    if (payload.discriminant === 'turn-abandonment') {
+      if (turnInput === null) {
+        throw new JournalIntegrityError(
+          'interaction parent turn abandonment requires the committed turn input before it',
+        );
+      }
+      if (resourceClose !== null || ownerReconciliations.length > 0) {
+        throw new JournalIntegrityError(
+          'interaction parent turn abandonment requires an interrupted turn without a committed close or reconciliation',
+        );
+      }
+      if (providerSettlements.length > 0 || turnInput.fact.executionOwner === undefined) {
+        throw new JournalIntegrityError(
+          'interaction parent turn abandonment requires the attested interrupted turn input',
+        );
+      }
+      const committedBinding = turnInput.fact.providerBinding;
+      if (committedBinding === undefined) {
+        throw new JournalIntegrityError(
+          'interaction parent turn abandonment requires the original committed provider binding',
+        );
+      }
+      if (canonicalJsonStringify(committedBinding) !== canonicalJsonStringify(payload.fact.providerBinding)
+        || !sameParentExecutionBusinessIdentity(turnInput.fact.execution, payload.fact.execution)
+        || payload.fact.execution.executionEpoch !== turnInput.fact.execution.executionEpoch) {
+        throw new JournalIntegrityError(
+          'interaction parent turn abandonment execution does not match the committed turn input execution',
+        );
+      }
+      if (abandonment !== null) {
+        throw new JournalIntegrityError('interaction parent turn repeats a committed abandonment');
+      }
+      abandonment = { fact: payload.fact, commit };
+      continue;
+    }
     // An owner reconciliation is otherwise the only record that may follow a
     // committed close. A post-close reconciliation must be a `continue` that
     // opens the next physical epoch.
@@ -589,7 +680,10 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     acceptedFacts.push({ fact: payload.entry, commit });
   }
 
-  return { turnInput, requests, acceptedFacts, ownerReconciliations, providerSettlements, resourceClose };
+  return {
+    turnInput, requests, acceptedFacts, ownerReconciliations, providerSettlements,
+    resourceClose, abandonment,
+  };
 }
 
 function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput {
@@ -676,6 +770,20 @@ function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput 
       },
     };
   }
+  if (append.kind === 'turn-abandonment') {
+    return {
+      commitId: parentRawCommitId(append.turn, 'turn-abandonment'),
+      kind: 'event',
+      scope: parentScope(append.turn, append.execution),
+      payload: {
+        kind: INTERACTION_PARENT_RAW_RECORD_TYPE,
+        discriminant: 'turn-abandonment',
+        turn: append.turn,
+        execution: append.execution,
+        fact: append.fact,
+      },
+    };
+  }
   const entry = append.entry;
   return {
     commitId: parentRawCommitId(
@@ -707,7 +815,17 @@ export class JsonlInteractionParentTurnJournal
   ): Promise<{ readonly committed?: JournalCommitRef; readonly result: TResult }> {
     validateInteractionTurnIdentity(turn);
     return this.journal.transaction(
-      ({ records }) => plan(decodeTurn(records, turn)),
+      ({ records }) => {
+        const snapshot = decodeTurn(records, turn);
+        const planned = plan(snapshot);
+        // A discharged turn is frozen. Reject the append inside the same
+        // transaction that planned it, so the durable turn never becomes
+        // undecodable from a late write.
+        if (planned.append !== undefined && snapshot.abandonment !== null) {
+          throw new JournalIntegrityError('interaction parent raw append follows the committed turn abandonment');
+        }
+        return planned;
+      },
       async (planned, append) => {
         if (planned.append === undefined) return { result: planned.result };
         const record = await append(toAppendInput(planned.append));
@@ -742,5 +860,28 @@ export class JsonlInteractionParentTurnJournal
       opened.push({ fact: payload.fact, commit: commitRef(record) });
     }
     return opened;
+  }
+
+  async readScopeAbandonedTurns(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>[]> {
+    if (scope.organId === null || typeof scope.organId !== 'object'
+      || scope.organId.scope !== 'organ' || !scope.organId.value.trim()) {
+      throw new JournalIntegrityError('interaction parent scope read requires a valid organ id');
+    }
+    if (typeof scope.interactionScopeId !== 'string' || scope.interactionScopeId.trim() === '') {
+      throw new JournalIntegrityError('interaction parent scope read requires an interactionScopeId');
+    }
+    const abandoned: InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>[] = [];
+    for (const record of await this.journal.replay()) {
+      const payload = readParentRawPayload(record);
+      if (payload === null || payload.discriminant !== 'turn-abandonment') continue;
+      if (!sameScopedId(payload.fact.turn.organId, scope.organId)) continue;
+      if (payload.fact.turn.interactionScopeId !== scope.interactionScopeId) continue;
+      assertRecordScope(record, payload.fact.turn, payload.execution);
+      abandoned.push({ fact: payload.fact, commit: commitRef(record) });
+    }
+    return abandoned;
   }
 }

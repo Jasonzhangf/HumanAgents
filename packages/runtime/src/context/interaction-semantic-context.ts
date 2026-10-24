@@ -315,14 +315,19 @@ function sameInteractionTurnIdentity(
  *
  * A turn that opened its durable raw history without a committed semantic
  * checkpoint still owns its recovery responsibility, so history selection fails
- * explicitly instead of silently dropping it. History may cross interactionId
- * and inputRevision inside the same organ and interactionScopeId; the current
- * turn itself is excluded, so a retry of the same identity does not read its own
- * partial history back.
+ * explicitly instead of silently dropping it. One exception is an interrupted
+ * turn that was explicitly discharged as unrecoverable: it can never produce
+ * history or output, so it neither blocks the next turn nor enters history.
+ * History may cross interactionId and inputRevision inside the same organ and
+ * interactionScopeId; the current turn itself is excluded, so a retry of the
+ * same identity does not read its own partial history back.
  */
 export async function prepareScopeSemanticHistory(input: {
   readonly activeTurn: InteractionTurnIdentity;
-  readonly parentJournal: Pick<InteractionParentOpenedTurnScopeReadPort, 'readScopeOpenedTurns'>;
+  readonly parentJournal: Pick<
+    InteractionParentOpenedTurnScopeReadPort,
+    'readScopeOpenedTurns' | 'readScopeAbandonedTurns'
+  >;
   readonly checkpointJournal: Pick<
     InteractionSemanticCheckpointJournalPort,
     'readScopeSemanticCheckpoints'
@@ -335,6 +340,8 @@ export async function prepareScopeSemanticHistory(input: {
   };
   const commits = await input.checkpointJournal.readScopeSemanticCheckpoints(scope);
   const openedTurns = await input.parentJournal.readScopeOpenedTurns(scope);
+  const abandonedTurns = await input.parentJournal.readScopeAbandonedTurns(scope);
+  const abandoned = new Set(abandonedTurns.map(({ fact }) => interactionTurnKey(fact.turn)));
   const committed = [...commits].sort((left, right) => left.commit.journalSeq - right.commit.journalSeq);
   const history: InteractionSemanticCheckpoint[] = [];
   for (const opened of openedTurns) {
@@ -343,6 +350,10 @@ export async function prepareScopeSemanticHistory(input: {
     const entry = committed.find((candidate) =>
       sameInteractionTurnIdentity(candidate.checkpoint, opened.fact.turn));
     if (entry === undefined) {
+      // A discharged interrupted turn left no output and no history. It is
+      // already closed by its own durable fact, so it neither blocks nor feeds
+      // the next turn.
+      if (abandoned.has(interactionTurnKey(opened.fact.turn))) continue;
       throw new ContractError(
         `unclosed interaction parent turn ${opened.fact.turn.turnId} requires recovery or semantic closure before opening ${input.activeTurn.turnId}`,
       );
@@ -350,4 +361,15 @@ export async function prepareScopeSemanticHistory(input: {
     history.push(entry.checkpoint);
   }
   return history;
+}
+
+function interactionTurnKey(turn: InteractionTurnIdentity): string {
+  return [
+    turn.organId.scope,
+    turn.organId.value,
+    turn.interactionScopeId,
+    turn.interactionId,
+    turn.inputRevision,
+    turn.turnId,
+  ].join('\u0000');
 }

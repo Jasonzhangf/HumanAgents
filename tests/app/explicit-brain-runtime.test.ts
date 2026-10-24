@@ -16,7 +16,7 @@ import {
 } from '../../packages/runtime/src/explicit-brain/index.js';
 import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
 import { createInteractionParentTurnRawOwner, type InteractionSemanticCheckpointJournalPort } from '../../packages/runtime/src/explicit-brain/index.js';
-import { id, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef } from '../../packages/contracts/src/index.js';
+import { id, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef, type InteractionTurnIdentity, type OrganId, type OccurrenceExecutionOwner } from '../../packages/contracts/src/index.js';
 import { ProviderAgentDriver, ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -53,6 +53,94 @@ function parentDependencies() {
     clock: { now: () => new Date().toISOString() },
     helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
   };
+}
+
+/**
+ * Seed the exact durable shape a crashed Provider stream leaves behind: one
+ * committed turn input with provider binding and execution owner, one request
+ * that accepted only incomplete reasoning-summary content, and no resource
+ * close, provider settlement, assistant text, request completion or semantic
+ * checkpoint. This is a genuine interrupted epoch, not a recoverable turn.
+ */
+async function seedInterruptedParentTurn(input: {
+  readonly parentJournal: JsonlInteractionParentTurnJournal;
+  readonly evidence: typeof parentEvidence;
+  readonly rawContent: ReturnType<typeof providerRawContentReader>;
+  readonly binding: ProviderBinding;
+  readonly scope: { readonly organId: OrganId; readonly interactionScopeId: string };
+  readonly interactionId: string;
+  readonly turnId: string;
+  readonly initialInputText: string;
+  readonly executionOwner?: OccurrenceExecutionOwner;
+  readonly withProviderBinding?: boolean;
+  readonly unpairedToolCall?: boolean;
+  readonly requestPhase?: 'dispatching' | 'waiting' | 'cancelled';
+}): Promise<{
+  readonly turn: InteractionTurnIdentity;
+  readonly request: { readonly turnId: string; readonly requestId: string };
+}> {
+  const operationScope = { organId: input.scope.organId, operationId: id('operation', `op-${input.turnId}`) };
+  const turn: InteractionTurnIdentity = {
+    organId: input.scope.organId,
+    interactionScopeId: input.scope.interactionScopeId,
+    interactionId: input.interactionId,
+    inputRevision: 1,
+    turnId: input.turnId,
+  };
+  const execution = { runtimeId: input.turnId, ...operationScope, executionEpoch: 1, interactionTurn: turn };
+  const initialInput = {
+    ref: await input.evidence.write({
+      scope: operationScope, kind: 'execution', type: 'initial-input',
+      locator: turn.turnId, content: input.initialInputText,
+    }),
+    view: { kind: 'utf8-text' as const },
+  };
+  if (input.withProviderBinding === false) {
+    // A legacy turn input committed before the binding was durable. Only the
+    // turn input exists, so the durable read has to hold instead of recovering.
+    await input.parentJournal.transactTurn(turn, () => ({
+      append: {
+        kind: 'turn-input',
+        fact: { turn, execution, scope: operationScope, initialInput, priorCheckpoints: [] },
+      },
+      result: undefined,
+    }));
+    return { turn, request: { turnId: turn.turnId, requestId: `${input.turnId}-request` } };
+  }
+  const owner = createInteractionParentTurnRawOwner({
+    turn, execution, scope: operationScope, initialInput, providerBinding: input.binding,
+    ...(input.executionOwner === undefined ? {} : { executionOwner: input.executionOwner }),
+    journal: input.parentJournal, rawContent: input.rawContent,
+  });
+  await owner.openTurnInput();
+  const request = { turnId: turn.turnId, requestId: `${input.turnId}-request` };
+  await owner.registerRequest({ execution, record: { request, scope: operationScope, phase: 'dispatching' } });
+  await owner.registerRequest({ execution, record: { request, scope: operationScope, phase: input.requestPhase ?? 'waiting' } });
+  const reasoning = {
+    ref: await input.evidence.write({
+      scope: operationScope, kind: 'execution', type: 'reasoning', locator: `${input.turnId}-reasoning`,
+      content: 'partial reasoning that never reached a final answer',
+    }),
+    view: { kind: 'utf8-text' as const },
+  };
+  await owner.acceptRawFact({
+    execution, scope: operationScope, request, producerSeq: 1,
+    fact: { kind: 'content', channel: 'reasoning-summary', update: 'full', contentUnitId: 'reasoning-1', content: reasoning, complete: false },
+  });
+  if (input.unpairedToolCall) {
+    await owner.acceptRawFact({
+      execution, scope: operationScope, request, producerSeq: 2,
+      fact: {
+        kind: 'tool-call', contentUnitId: 'call-1',
+        call: { callId: 'call-1', toolId: 'dispatch_helper', arguments: {}, continuationRef: 'continuation-1' },
+        rawArguments: { ref: await input.evidence.write({
+          scope: operationScope, kind: 'execution', type: 'tool-arguments', locator: 'call-1', content: '{}',
+        }), view: { kind: 'utf8-text' as const } },
+        complete: true,
+      },
+    });
+  }
+  return { turn, request };
 }
 
 // Exercise the real neutral adapter/raw codec. The old Task-only fake cannot
@@ -1585,6 +1673,7 @@ test('provider explicit brain interpreter loads the interaction template and val
       transactTurn: async () => { throw inputCommitError; },
       readTurnSnapshot: (turn) => selectedOptions.parentJournal.readTurnSnapshot(turn),
       readScopeOpenedTurns: (scope) => selectedOptions.parentJournal.readScopeOpenedTurns(scope),
+      readScopeAbandonedTurns: (scope) => selectedOptions.parentJournal.readScopeAbandonedTurns(scope),
     },
   });
   await assert.rejects(() => commitBlocked.interpret({ interactionId: 'blocked-input', inputRevision: 1,
@@ -1767,6 +1856,324 @@ test('provider explicit brain interpreter loads the interaction template and val
     }),
     /taskFlowKind.*one-shot.*inspection.*long-running/,
   );
+});
+
+// Failure basis: one crashed Provider stream leaves an opened parent turn with
+// incomplete reasoning-summary facts and no terminal output. The current
+// scope-level pending guard answers every later explicit input with "requires
+// its exact prior input", so the whole interaction scope stays permanently
+// bricked and every new user task fails. Impact: the product UI cannot submit
+// any new task in that scope. Cost: one durable seed and one recorded Provider
+// request. Probability: observed in production journal interaction-100.
+test('provider explicit brain interpreter serves a new input after discharging an interrupted parent turn', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-interrupted-turn', providerId: 'provider-interrupted-turn', protocol: 'responses',
+    endpointRef: 'recorded://interrupted-turn', modelRef: 'model-interrupted-turn',
+    configDigest: 'sha256:interrupted-turn-config', capabilityDigest: 'sha256:interrupted-turn-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const crashedInput = JSON.stringify({
+    interactionId: 'interaction-crashed', inputRevision: 1, sourceRef: 'ui:crashed',
+    rawInput: '请求在崩溃前没有完成的输入', clarifications: [], taskCandidates: [],
+  });
+  const seeded = await seedInterruptedParentTurn({
+    parentJournal: deps.parentJournal, evidence: deps.rawEvidence, rawContent: deps.rawContent,
+    binding, scope, interactionId: 'interaction-crashed', turnId: 'explicit-interpret-crashed-1',
+    initialInputText: crashedInput,
+    executionOwner: { daemonLeaseId: 'lease-crashed', daemonGeneration: 1, processStartToken: 'process-crashed' },
+  });
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
+    { kind: 'output', state: 'output', summary: JSON.stringify({
+      kind: 'requirement', normalizedInput: '整理新的启动步骤', knownFacts: [],
+      proposal: {
+        revision: 1, intent: 'create', title: '整理新的启动步骤', objective: '整理新的启动步骤',
+        deliverable: '新的启动步骤清单', deliveryConditions: [], evidenceRefs: [], blockingGaps: [],
+      },
+      decisionRefs: [],
+    }) },
+    { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+  ] });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+  });
+  const nextRequest = {
+    interactionId: 'interaction-next-task', inputRevision: 1, sourceRef: 'ui:new-task',
+    rawInput: '整理新的启动步骤', clarifications: [], taskCandidates: [],
+  };
+  const interpretation = await interpreter.interpret(nextRequest);
+  assert.equal(interpretation.kind, 'requirement');
+  const openedAfter = await deps.parentJournal.readScopeOpenedTurns(scope);
+  assert.equal(openedAfter.length, 2, 'the new input must open a fresh turn after the interrupted one is discharged');
+  assert.equal(openedAfter[0]!.fact.turn.turnId, seeded.turn.turnId);
+  const freshTurn = openedAfter[1]!.fact.turn;
+  assert.ok(freshTurn.turnId !== seeded.turn.turnId, 'a discharged turn identity is never reused');
+  assert.ok(freshTurn.interactionId !== seeded.turn.interactionId);
+  assert.deepEqual(openedAfter[1]!.fact.priorCheckpoints, [],
+    'a discharged turn never enters the next turn semantic history');
+  assert.ok(await deps.helperJournal.readSemanticCheckpointExact(freshTurn));
+  assert.equal(await deps.helperJournal.readSemanticCheckpointExact(seeded.turn), null);
+  // The discharge is durable, independently readable and honest: the stream was
+  // interrupted before any terminal output and no business side effect exists.
+  const abandoned = await deps.parentJournal.readScopeAbandonedTurns(scope);
+  assert.equal(abandoned.length, 1);
+  assert.deepEqual(abandoned[0]!.fact.turn, seeded.turn);
+  assert.equal(abandoned[0]!.fact.reason, 'provider-interrupted-without-terminal-output');
+  assert.deepEqual(abandoned[0]!.fact.providerBinding, binding);
+  const crashedSnapshot = await deps.parentJournal.readTurnSnapshot(seeded.turn);
+  assert.deepEqual(crashedSnapshot.abandonment?.fact, abandoned[0]!.fact);
+  assert.equal(crashedSnapshot.resourceClose, null, 'the discharge never fabricates a provider close');
+  assert.deepEqual(crashedSnapshot.providerSettlements, []);
+  assert.deepEqual(crashedSnapshot.ownerReconciliations, []);
+  assert.ok(crashedSnapshot.requests.length > 0);
+  assert.ok(crashedSnapshot.requests.every(({ fact }) =>
+    fact.phase === 'dispatching' || fact.phase === 'dispatched' || fact.phase === 'waiting'));
+  assert.equal(crashedSnapshot.acceptedFacts.some(({ fact }) =>
+    fact.envelope.fact.kind === 'request-complete'), false);
+  assert.equal(crashedSnapshot.acceptedFacts.some(({ fact }) =>
+    fact.envelope.fact.kind === 'content' && fact.envelope.fact.channel === 'assistant-text'), false);
+  assert.ok(crashedSnapshot.acceptedFacts.length > 0,
+    'the honest discharge still describes the partial interrupted facts');
+
+  // B: the same scope keeps serving new inputs afterwards. The discharged turn
+  // must be permanently closed, not bypassed exactly once.
+  const followUp = await interpreter.interpret({
+    interactionId: 'interaction-follow-up', inputRevision: 1, sourceRef: 'ui:follow-up',
+    rawInput: '再整理一次启动步骤', clarifications: [], taskCandidates: [],
+  });
+  assert.equal(followUp.kind, 'requirement');
+  const openedAgain = await deps.parentJournal.readScopeOpenedTurns(scope);
+  assert.equal(openedAgain.length, 3);
+  assert.ok(await deps.helperJournal.readSemanticCheckpointExact(openedAgain[2]!.fact.turn));
+  assert.equal((await deps.parentJournal.readScopeAbandonedTurns(scope)).length, 1,
+    'a healthy turn has no reason to discharge anything');
+});
+
+// Failure basis: the exact-input retry of an already closed parent turn used to
+// be the only recovery path. A fix that discharges every pending turn would
+// silently drop real terminal output. Impact: a duplicated Provider generation
+// and a lost delivered answer. Cost: one seeded closed turn and one cold read.
+test('provider explicit brain interpreter keeps exact-input cold recovery for a closed parent turn', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-exact-recovery', providerId: 'provider-exact-recovery', protocol: 'responses',
+    endpointRef: 'recorded://exact-recovery', modelRef: 'model-exact-recovery',
+    configDigest: 'sha256:exact-recovery-config', capabilityDigest: 'sha256:exact-recovery-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const exactRequest = {
+    interactionId: 'interaction-exact-recovery', inputRevision: 1, sourceRef: 'ui:exact-recovery',
+    rawInput: '只回答 4', clarifications: [], taskCandidates: [],
+  };
+  const operationScope = { organId: scope.organId, operationId: id('operation', 'op-exact-recovery') };
+  const turn: InteractionTurnIdentity = {
+    organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+    interactionId: exactRequest.interactionId, inputRevision: 1, turnId: 'explicit-interpret-exact-recovery',
+  };
+  const execution = { runtimeId: turn.turnId, ...operationScope, executionEpoch: 1, interactionTurn: turn };
+  const initialInput = {
+    ref: await deps.rawEvidence.write({
+      scope: operationScope, kind: 'execution', type: 'initial-input',
+      locator: turn.turnId, content: JSON.stringify(exactRequest),
+    }),
+    view: { kind: 'utf8-text' as const },
+  };
+  const owner = createInteractionParentTurnRawOwner({
+    turn, execution, scope: operationScope, initialInput, providerBinding: binding,
+    executionOwner: { daemonLeaseId: 'lease-exact-recovery', daemonGeneration: 1, processStartToken: 'process-exact-recovery' },
+    journal: deps.parentJournal, rawContent: deps.rawContent,
+  });
+  await owner.openTurnInput();
+  const request = { turnId: turn.turnId, requestId: 'exact-recovery-request' };
+  await owner.registerRequest({ execution, record: { request, scope: operationScope, phase: 'dispatching' } });
+  await owner.registerRequest({ execution, record: { request, scope: operationScope, phase: 'dispatched' } });
+  const answerText = JSON.stringify({
+    kind: 'answer', normalizedInput: exactRequest.rawInput, knownFacts: [], answer: '4', decisionRefs: [],
+  });
+  await owner.acceptRawFact({
+    execution, scope: operationScope, request, producerSeq: 1,
+    fact: {
+      kind: 'content', channel: 'assistant-text', update: 'full', contentUnitId: 'answer',
+      content: { ref: await deps.rawEvidence.write({
+        scope: operationScope, kind: 'execution', type: 'answer', locator: 'answer', content: answerText,
+      }), view: { kind: 'utf8-text' as const } },
+      complete: true,
+    },
+  });
+  await owner.acceptRawFact({
+    execution, scope: operationScope, request, producerSeq: 2,
+    fact: { kind: 'request-complete', terminal: 'completed' },
+  });
+  await owner.registerRequest({ execution, record: { request, scope: operationScope, phase: 'settled' } });
+  await owner.recordProviderClose({
+    providerBinding: binding,
+    result: {
+      bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol,
+      state: 'closed',
+      evidenceRefs: [await deps.rawEvidence.write({
+        scope: operationScope, kind: 'execution', type: 'close', locator: 'close', content: 'closed',
+      })],
+    },
+    closedAt: new Date().toISOString(),
+  });
+  assert.equal((await deps.parentJournal.readTurnSnapshot(turn)).abandonment, null);
+  let providerStarts = 0;
+  const deadPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [] });
+  deadPort.start = async () => { providerStarts += 1; throw new Error('unexpected provider start'); };
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port: deadPort,
+  });
+  // A closed turn with real terminal output is recoverable, not dischargeable.
+  await assert.rejects(
+    () => interpreter.interpret({ ...exactRequest, rawInput: 'different input' }),
+    (error: unknown) => error instanceof Error
+      && error.message.includes('exact prior input')
+      && error.message.includes('resource close is already committed'),
+  );
+  assert.deepEqual(await deps.parentJournal.readScopeAbandonedTurns(scope), []);
+  // The exact prior input keeps the existing cold terminal-output recovery.
+  const recovered = await interpreter.interpret(exactRequest);
+  assert.equal(recovered.kind, 'answer');
+  if (recovered.kind !== 'answer') throw new Error('expected recovered answer');
+  assert.equal(recovered.answer, '4');
+  assert.ok(await deps.helperJournal.readSemanticCheckpointExact(turn));
+  assert.equal(providerStarts, 0, 'cold terminal recovery never starts a Provider');
+  const recoveredSnapshot = await deps.parentJournal.readTurnSnapshot(turn);
+  assert.equal(recoveredSnapshot.abandonment, null);
+  assert.equal(recoveredSnapshot.resourceClose?.fact.result.state, 'closed');
+});
+
+// Failure basis: an unknown tool side effect must never be discharged. The
+// interrupted turn committed a tool call without its result, so its physical
+// effect is unknown and different input must keep the explicit boundary.
+// Impact: silently dropping a dispatched side effect. Cost: one seeded call.
+test('provider explicit brain interpreter refuses to discharge an interrupted turn with an unpaired tool call', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-unpaired-tool', providerId: 'provider-unpaired-tool', protocol: 'responses',
+    endpointRef: 'recorded://unpaired-tool', modelRef: 'model-unpaired-tool',
+    configDigest: 'sha256:unpaired-tool-config', capabilityDigest: 'sha256:unpaired-tool-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const seeded = await seedInterruptedParentTurn({
+    parentJournal: deps.parentJournal, evidence: deps.rawEvidence, rawContent: deps.rawContent,
+    binding, scope, interactionId: 'interaction-unpaired-tool', turnId: 'explicit-interpret-unpaired-tool',
+    initialInputText: JSON.stringify({ interactionId: 'interaction-unpaired-tool', inputRevision: 1, rawInput: 'old' }),
+    executionOwner: { daemonLeaseId: 'lease-unpaired', daemonGeneration: 1, processStartToken: 'process-unpaired' },
+    unpairedToolCall: true,
+  });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: new RecordedParentPort({ binding, stepDelayMs: 0, replay: [] }),
+  });
+  await assert.rejects(
+    () => interpreter.interpret({
+      interactionId: 'interaction-after-unpaired', inputRevision: 1, sourceRef: 'ui:after-unpaired',
+      rawInput: 'new input after unpaired tool call', clarifications: [], taskCandidates: [],
+    }),
+    (error: unknown) => error instanceof Error
+      && error.message.includes('exact prior input')
+      && error.message.includes('tool call call-1 has no committed result'),
+  );
+  assert.deepEqual(await deps.parentJournal.readScopeAbandonedTurns(scope), []);
+  assert.equal(await deps.parentJournal.readTurnSnapshot(seeded.turn).then((snapshot) => snapshot.abandonment), null);
+});
+
+// Failure basis: a turn without the committed provider binding or the
+// authenticated execution owner cannot prove it has no recoverable remote
+// state, so it must never be discharged. Impact: discarding a potentially
+// recoverable turn. Cost: two legacy-shaped seeds.
+test('provider explicit brain interpreter refuses to discharge a turn without binding or execution owner', async () => {
+  const binding: ProviderBinding = {
+    bindingId: 'binding-legacy-interrupted', providerId: 'provider-legacy-interrupted', protocol: 'responses',
+    endpointRef: 'recorded://legacy-interrupted', modelRef: 'model-legacy-interrupted',
+    configDigest: 'sha256:legacy-interrupted-config', capabilityDigest: 'sha256:legacy-interrupted-capability',
+  };
+  const seedWithoutBinding = async () => {
+    const deps = parentDependencies();
+    const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+    await seedInterruptedParentTurn({
+      parentJournal: deps.parentJournal, evidence: deps.rawEvidence, rawContent: deps.rawContent,
+      binding, scope, interactionId: 'interaction-no-binding', turnId: 'explicit-interpret-no-binding',
+      initialInputText: JSON.stringify({ interactionId: 'interaction-no-binding', inputRevision: 1, rawInput: 'old' }),
+      withProviderBinding: false,
+    });
+    return { deps, scope };
+  };
+  const seedWithoutOwner = async () => {
+    const deps = parentDependencies();
+    const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+    await seedInterruptedParentTurn({
+      parentJournal: deps.parentJournal, evidence: deps.rawEvidence, rawContent: deps.rawContent,
+      binding, scope, interactionId: 'interaction-no-owner', turnId: 'explicit-interpret-no-owner',
+      initialInputText: JSON.stringify({ interactionId: 'interaction-no-owner', inputRevision: 1, rawInput: 'old' }),
+    });
+    return { deps, scope };
+  };
+  for (const [seed, expected] of [
+    [seedWithoutBinding, 'the original committed provider binding is missing'],
+    [seedWithoutOwner, 'the authenticated execution owner is missing'],
+  ] as const) {
+    const { deps, scope } = await seed();
+    const interpreter = createProviderExplicitBrainInterpreter({
+      ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+      helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+      templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      port: new RecordedParentPort({ binding, stepDelayMs: 0, replay: [] }),
+    });
+    await assert.rejects(
+      () => interpreter.interpret({
+        interactionId: 'interaction-after-legacy', inputRevision: 1, sourceRef: 'ui:after-legacy',
+        rawInput: 'new input after legacy turn', clarifications: [], taskCandidates: [],
+      }),
+      (error: unknown) => error instanceof Error
+        && error.message.includes('exact prior input')
+        && error.message.includes(expected),
+    );
+    assert.deepEqual(await deps.parentJournal.readScopeAbandonedTurns(scope), []);
+  }
+});
+
+// Failure basis: a cancelled request is a terminal lifecycle state with known
+// unknown side effects, not an interrupted stream. Impact: discharging a turn
+// whose cancellation semantics still own recovery. Cost: one seeded phase.
+test('provider explicit brain interpreter refuses to discharge a cancelled request', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-cancelled-turn', providerId: 'provider-cancelled-turn', protocol: 'responses',
+    endpointRef: 'recorded://cancelled-turn', modelRef: 'model-cancelled-turn',
+    configDigest: 'sha256:cancelled-turn-config', capabilityDigest: 'sha256:cancelled-turn-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  await seedInterruptedParentTurn({
+    parentJournal: deps.parentJournal, evidence: deps.rawEvidence, rawContent: deps.rawContent,
+    binding, scope, interactionId: 'interaction-cancelled-turn', turnId: 'explicit-interpret-cancelled-turn',
+    initialInputText: JSON.stringify({ interactionId: 'interaction-cancelled-turn', inputRevision: 1, rawInput: 'old' }),
+    executionOwner: { daemonLeaseId: 'lease-cancelled', daemonGeneration: 1, processStartToken: 'process-cancelled' },
+    requestPhase: 'cancelled',
+  });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: new RecordedParentPort({ binding, stepDelayMs: 0, replay: [] }),
+  });
+  await assert.rejects(
+    () => interpreter.interpret({
+      interactionId: 'interaction-after-cancelled', inputRevision: 1, sourceRef: 'ui:after-cancelled',
+      rawInput: 'new input after cancelled turn', clarifications: [], taskCandidates: [],
+    }),
+    (error: unknown) => error instanceof Error
+      && error.message.includes('exact prior input')
+      && error.message.includes('is cancelled, not interrupted'),
+  );
+  assert.deepEqual(await deps.parentJournal.readScopeAbandonedTurns(scope), []);
 });
 
 test('neutral parent loops over exact raw tool pairs, with returned helper separate from explicit acceptance', async () => {

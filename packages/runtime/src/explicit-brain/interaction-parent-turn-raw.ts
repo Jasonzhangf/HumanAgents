@@ -139,7 +139,40 @@ export interface InteractionParentTurnSnapshot {
     InteractionProviderSettlementReceipt
   >[];
   readonly resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null;
+  /**
+   * The single committed discharge of an interrupted epoch, or null. A
+   * discharged turn can never be recovered, replayed or continued: it left no
+   * terminal output and no business side effect.
+   */
+  readonly abandonment: InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact> | null;
 }
+
+/**
+ * The durable fact that one interrupted parent turn was explicitly discharged
+ * as unrecoverable.
+ *
+ * It records only that the provider stream stopped before any terminal output
+ * and before any business side effect, so the turn cannot be recovered and
+ * must not keep blocking its interaction scope. It never claims a settled
+ * output, a semantic success, a provider close or a remote provider state.
+ */
+export interface InteractionParentTurnAbandonmentFact {
+  readonly turn: InteractionTurnIdentity;
+  readonly execution: InteractionParentProviderExecutionIdentityRef;
+  readonly providerBinding: ProviderBinding;
+  /** The only shape this fact may describe: a truly interrupted stream. */
+  readonly reason: 'provider-interrupted-without-terminal-output';
+  readonly abandonedAt: string;
+}
+
+/**
+ * The conservative decision of whether one interrupted parent turn may be
+ * discharged. A held decision carries the exact durable reason so the caller
+ * can keep failing with the original explicit boundary instead of guessing.
+ */
+export type InteractionParentTurnAbandonmentEligibility =
+  | { readonly abandonable: true }
+  | { readonly abandonable: false; readonly heldReason: string };
 
 /** The single append a transactional turn plan may stage. */
 export type InteractionParentTurnAppend =
@@ -176,6 +209,17 @@ export type InteractionParentTurnAppend =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionProviderSettlementReceipt;
+    }
+  | {
+      /**
+       * The terminal discharge of an interrupted epoch. It is appendable only
+       * for the conservative interrupted shape and freezes the turn: no
+       * request or raw fact may follow it.
+       */
+      readonly kind: 'turn-abandonment';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentTurnAbandonmentFact;
     };
 
 /**
@@ -205,6 +249,15 @@ export interface InteractionParentOpenedTurnScopeReadPort {
     readonly organId: OrganId;
     readonly interactionScopeId: string;
   }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnInputFact>[]>;
+  /**
+   * The committed discharges of interrupted turns in one interaction scope.
+   * Scope-level readiness reads this beside the opened-turn and checkpoint
+   * reads so a discharged turn stops blocking and never enters history.
+   */
+  readScopeAbandonedTurns(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>[]>;
 }
 
 /**
@@ -312,6 +365,25 @@ export interface InteractionParentTurnRawOwner {
    * eligibility, ignored-request and continuation rules keep one owner.
    */
   readReconciliationEligibility(): Promise<InteractionParentReconciliationEligibility>;
+  /**
+   * Decide whether this interrupted turn can be durably discharged. The read is
+   * deliberately conservative: only the crash-left shape with committed input,
+   * binding and execution owner, no close, settlement or reconciliation, only
+   * running request phases, no terminal output and no unknown tool side effect
+   * may be discharged.
+   */
+  readAbandonmentEligibility(): Promise<InteractionParentTurnAbandonmentEligibility>;
+  /**
+   * Durably record that this interrupted turn can never be recovered: the
+   * Provider stream stopped before any terminal output and before any business
+   * side effect. The append is validated against one snapshot inside the same
+   * transaction that writes it, so eligibility cannot drift. It is idempotent
+   * and never claims a success, a close or a recovered output.
+   */
+  abandonInterruptedTurn(input: {
+    readonly reason: InteractionParentTurnAbandonmentFact['reason'];
+    readonly abandonedAt: string;
+  }): Promise<InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>>;
 }
 
 export interface InteractionParentTurnRawOwnerInput {
@@ -486,6 +558,7 @@ function snapshotCommitFingerprint(snapshot: InteractionParentTurnSnapshot): str
     ownerReconciliations: snapshot.ownerReconciliations.map((committed) => committed.commit),
     providerSettlements: snapshot.providerSettlements.map((committed) => committed.commit),
     resourceClose: snapshot.resourceClose?.commit ?? null,
+    abandonment: snapshot.abandonment?.commit ?? null,
   });
 }
 
@@ -1092,6 +1165,145 @@ export function createInteractionParentTurnRawOwner(
     return { fact, commit: committed };
   }
 
+  /**
+   * Decide whether one interrupted parent turn may be durably discharged.
+   *
+   * The decision is deliberately conservative and explicit. Discharge is only
+   * possible for the exact shape a process crash leaves behind: a committed
+   * turn input with its Provider binding and execution owner; no committed
+   * close, Provider settlement or owner reconciliation; every non-ignored
+   * request still in a running phase; no terminal output (no request-complete
+   * and no complete assistant text); and no unknown tool side effect (every
+   * tool call has its committed result and every result has its call). Any
+   * other shape keeps its own recovery path or its own explicit hold.
+   */
+  function abandonmentEligibility(
+    snapshot: InteractionParentTurnSnapshot,
+  ): InteractionParentTurnAbandonmentEligibility {
+    const held = (heldReason: string): InteractionParentTurnAbandonmentEligibility => ({
+      abandonable: false,
+      heldReason,
+    });
+    if (snapshot.turnInput === null) return held('the committed turn input is missing');
+    const committedInput = snapshot.turnInput.fact;
+    if (committedInput.providerBinding === undefined) return held('the committed provider binding is missing');
+    if (committedInput.executionOwner === undefined) return held('the authenticated execution owner is missing');
+    if (snapshot.resourceClose !== null) return held('the provider resource close is already committed');
+    if (snapshot.ownerReconciliations.length > 0) return held('an owner reconciliation is committed');
+    if (snapshot.providerSettlements.length > 0) return held('a provider settlement is committed');
+    const ignored = new Set(ignoredRequests(snapshot));
+    const requests = nonIgnoredRequestRecords(snapshot, ignored);
+    for (const record of requests) {
+      if (record.phase !== 'dispatching' && record.phase !== 'dispatched' && record.phase !== 'waiting') {
+        return held(`request ${record.request.requestId} is ${record.phase}, not interrupted`);
+      }
+    }
+    if (snapshot.acceptedFacts.some((committed) =>
+      committed.fact.envelope.fact.kind === 'request-complete')) {
+      return held('a request completion is committed');
+    }
+    if (snapshot.acceptedFacts.some((committed) => {
+      const fact = committed.fact.envelope.fact;
+      return fact.kind === 'content' && fact.channel === 'assistant-text' && fact.complete;
+    })) {
+      return held('complete assistant text is committed');
+    }
+    const toolCalls = snapshot.acceptedFacts.filter((committed) =>
+      committed.fact.envelope.fact.kind === 'tool-call');
+    const toolResults = snapshot.acceptedFacts.filter((committed) =>
+      committed.fact.envelope.fact.kind === 'tool-result');
+    const resultKeys = new Set(toolResults.map((committed) => {
+      const fact = committed.fact.envelope.fact;
+      if (fact.kind !== 'tool-result') return '';
+      return toolPairKey(committed.fact.envelope.request, committed.fact.envelope.execution.executionEpoch,
+        fact.callId, fact.continuationRef);
+    }));
+    for (const committed of toolCalls) {
+      const fact = committed.fact.envelope.fact;
+      if (fact.kind !== 'tool-call') continue;
+      if (!resultKeys.has(toolPairKey(committed.fact.envelope.request,
+        committed.fact.envelope.execution.executionEpoch, fact.call.callId, fact.call.continuationRef))) {
+        return held(`tool call ${fact.call.callId} has no committed result; its side effect is unknown`);
+      }
+    }
+    const callKeys = new Set(toolCalls.map((committed) => {
+      const fact = committed.fact.envelope.fact;
+      if (fact.kind !== 'tool-call') return '';
+      return toolPairKey(committed.fact.envelope.request, committed.fact.envelope.execution.executionEpoch,
+        fact.call.callId, fact.call.continuationRef);
+    }));
+    for (const committed of toolResults) {
+      const fact = committed.fact.envelope.fact;
+      if (fact.kind !== 'tool-result') continue;
+      if (!callKeys.has(toolPairKey(committed.fact.envelope.request,
+        committed.fact.envelope.execution.executionEpoch, fact.callId, fact.continuationRef))) {
+        return held(`tool result ${fact.callId} has no committed call; its side effect is unknown`);
+      }
+    }
+    return { abandonable: true };
+  }
+
+  async function commitAbandonment(input: {
+    readonly reason: InteractionParentTurnAbandonmentFact['reason'];
+    readonly abandonedAt: string;
+  }): Promise<InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>> {
+    if (input.reason !== 'provider-interrupted-without-terminal-output') {
+      throw new ContractError('interaction parent turn abandonment reason is invalid');
+    }
+    if (typeof input.abandonedAt !== 'string' || input.abandonedAt.trim() === '') {
+      throw new ContractError('interaction parent turn abandonment requires an abandonedAt timestamp');
+    }
+    const { committed, result } = await journal.transactTurn<
+      | {
+          readonly kind: 'existing';
+          readonly committed: InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>;
+        }
+      | { readonly kind: 'new'; readonly fact: InteractionParentTurnAbandonmentFact }
+    >(turn, (snapshot) => {
+      if (snapshot.turnInput === null) {
+        throw new ContractError('interaction parent turn abandonment requires the committed turn input');
+      }
+      const existing = snapshot.abandonment;
+      if (existing !== null) {
+        // An exact retry reuses the first durable discharge; a conflicting
+        // reason or binding is a real conflict, never a silent rewrite.
+        const core = (fact: InteractionParentTurnAbandonmentFact): unknown => ({
+          turn: fact.turn, execution: fact.execution, providerBinding: fact.providerBinding, reason: fact.reason,
+        });
+        const requested = {
+          turn,
+          execution: snapshot.turnInput.fact.execution,
+          providerBinding: snapshot.turnInput.fact.providerBinding,
+          reason: input.reason,
+        };
+        if (canonicalJsonStringify(core(existing.fact)) !== canonicalJsonStringify(requested)) {
+          throw new ContractError('interaction parent turn abandonment conflicts with the committed discharge');
+        }
+        return { result: { kind: 'existing', committed: existing } };
+      }
+      const eligibility = abandonmentEligibility(snapshot);
+      if (!eligibility.abandonable) {
+        throw new ContractError(`interaction parent turn cannot be abandoned: ${eligibility.heldReason}`);
+      }
+      const fact: InteractionParentTurnAbandonmentFact = {
+        turn: cloneTurnIdentity(turn),
+        execution: cloneExecution(snapshot.turnInput.fact.execution),
+        providerBinding: cloneProviderBinding(snapshot.turnInput.fact.providerBinding!),
+        reason: input.reason,
+        abandonedAt: input.abandonedAt,
+      };
+      return {
+        append: { kind: 'turn-abandonment', turn, execution: fact.execution, fact },
+        result: { kind: 'new', fact },
+      };
+    });
+    if (result.kind === 'existing') return result.committed;
+    if (committed === undefined) {
+      throw new ContractError('interaction parent turn abandonment append did not commit');
+    }
+    return { fact: result.fact, commit: committed };
+  }
+
   return {
     turn: cloneTurnIdentity(turn),
     execution: cloneExecution(execution),
@@ -1498,6 +1710,17 @@ export function createInteractionParentTurnRawOwner(
 
     async readReconciliationEligibility(): Promise<InteractionParentReconciliationEligibility> {
       return requestEligibility(await journal.readTurnSnapshot(turn));
+    },
+
+    async readAbandonmentEligibility(): Promise<InteractionParentTurnAbandonmentEligibility> {
+      return abandonmentEligibility(await journal.readTurnSnapshot(turn));
+    },
+
+    abandonInterruptedTurn(input: {
+      readonly reason: InteractionParentTurnAbandonmentFact['reason'];
+      readonly abandonedAt: string;
+    }): Promise<InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact>> {
+      return commitAbandonment(input);
     },
   };
 }
