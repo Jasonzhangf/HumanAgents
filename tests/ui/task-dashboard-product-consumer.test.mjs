@@ -1058,3 +1058,53 @@ test('a product location that disagrees with the query does not match the page t
     globalThis.location.hash = previousHash
   }
 })
+
+// Alice rework finding 2 boundary: a project-scoped memory board is not a
+// second task identity. It is supported only as a board whose read scope is the
+// project the query already names, so the same-project memory board keeps the
+// query's task read. A different project, a partial query, or a conflicting
+// task hash stays rejected.
+test('a project-scoped memory board keeps the query task read only for the same project', () => {
+  const resolver = taskReadScopeFromLocation ?? taskReadScopeFromQuery
+  assert.equal(typeof resolver, 'function', 'dashboard scope resolver should be exported')
+
+  const memoryHash = encodeProductLocation({
+    board: 'memory',
+    lane: 'live',
+    scope: { kind: 'project', projectKey: 'project-7' },
+  })
+
+  const supported = resolver(`task-dashboard.html?task=task-1&projectKey=project-7&mode=rcc${memoryHash}`)
+  assert.equal(supported.kind, 'task')
+  assert.equal(supported.projectKey, 'project-7')
+  assert.equal(supported.mode, 'rcc')
+  assert.equal(supported.taskId.value, 'task-1')
+
+  const otherProject = resolver(`task-dashboard.html?task=task-1&projectKey=project-9&mode=rcc${memoryHash}`)
+  assert.equal(otherProject.kind, 'invalid')
+  assert.equal(otherProject.failure?.code, 'read.scope.invalid')
+
+  const partialQuery = resolver(`task-dashboard.html?task=task-1${memoryHash}`)
+  assert.equal(partialQuery.kind, 'invalid')
+  assert.equal(partialQuery.failure?.code, 'read.scope.invalid')
+
+  const conflictingTaskScope = {
+    kind: 'task',
+    projectKey: 'project-7',
+    mode: 'rcc',
+    taskId: { scope: 'task', value: 'task-2' },
+  }
+  const conflictingTaskHash = encodeProductLocation({
+    board: 'interaction',
+    lane: 'live',
+    scope: conflictingTaskScope,
+    focus: { kind: 'interaction', taskRef: conflictingTaskScope.taskId, scope: conflictingTaskScope },
+  })
+  const conflictingTask = resolver(`task-dashboard.html?task=task-1&projectKey=project-7&mode=rcc${conflictingTaskHash}`)
+  assert.equal(conflictingTask.kind, 'invalid')
+  assert.equal(conflictingTask.failure?.code, 'read.scope.invalid')
+
+  const projectBoardWithoutTaskQuery = resolver(`task-dashboard.html${memoryHash}`)
+  assert.equal(projectBoardWithoutTaskQuery.kind, 'invalid')
+  assert.equal(projectBoardWithoutTaskQuery.failure?.code, 'read.scope.invalid')
+})

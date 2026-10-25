@@ -337,6 +337,14 @@ export function taskReadScopeFromLocation(source = (typeof location !== 'undefin
   if (queryScope !== null && queryScope.kind === 'invalid') return queryScope
 
   if (hashScope !== null && queryScope !== null) {
+    // A project-scoped board, such as memory, is a view inside the current
+    // project. It is not a second task identity. Keep the complete query task
+    // only when the board belongs to that same project.
+    if (hashScope.kind === 'project' && queryScope.kind === 'task') {
+      return hashScope.projectKey === queryScope.projectKey
+        ? queryScope
+        : inconsistentTaskScopeFailure()
+    }
     if (hashScope.kind !== queryScope.kind) {
       return inconsistentTaskScopeFailure()
     }
@@ -348,6 +356,7 @@ export function taskReadScopeFromLocation(source = (typeof location !== 'undefin
     }
     return hashScope
   }
+  if (hashScope?.kind === 'project') return taskScopeFromProductLocation({ scope: hashScope })
   return hashScope ?? queryScope ?? { kind: 'legacy', taskId: undefined }
 }
 
@@ -363,6 +372,9 @@ function scopeFromProductRoute(hash) {
         nextAction: 'open the task from the project list so the URL carries task, projectKey, and mode',
       },
     }
+  }
+  if (decoded.location.scope?.kind === 'project') {
+    return { kind: 'project', projectKey: decoded.location.scope.projectKey }
   }
   return taskScopeFromProductLocation(decoded.location)
 }
