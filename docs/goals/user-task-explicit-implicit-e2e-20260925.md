@@ -17,9 +17,8 @@ not source tests or theory.
 ## DAG
 
 ```text
-user task
-  -> explicit brain draft
-  -> user confirm
+user task (form submit is confirmation)
+  -> explicit brain draft & confirmation
   -> implicit queue/admission/resource
   -> executor agent tool rounds
   -> evidence/writeback
@@ -77,8 +76,8 @@ only. It must persist:
    read, the proof falls back to the task list `requirementAdmission`
    projection. No direct task creation or manual dispatch is allowed; the task
    must be created by the implicit consumer.
-4. Executor rounds: the task dashboard/event stream must show at least two
-   `provider.tool` executions and at least one provider event with evidence.
+4. Executor rounds: the task dashboard/event stream must show real
+   `provider.tool` execution and provider events with evidence according to task needs, without requiring a fixed tool-call count.
 5. Evidence and terminal: the task must reach `succeeded` and carry a
    committed checkpoint; provider/observation evidence refs must be non-empty.
 6. Final completed projection: `/api/tasks` and `/api/tasks/{id}/dashboard`
@@ -92,8 +91,7 @@ only. It must persist:
   dispatched by the runtime consumer.
 - No editing of `.appsdk/**`, `note.md`, dirty main, or another worker's
   worktree.
-- A provider that finishes with fewer than two tool rounds is a failed proof,
-  not a skip.
+- Tool calls and turns are dynamically orchestrated; a task finishing in fewer rounds is valid and must not be rejected by artificial count requirements.
 
 ## Tasks
 
