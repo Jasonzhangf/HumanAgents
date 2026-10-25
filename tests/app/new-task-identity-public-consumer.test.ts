@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -6,6 +7,8 @@ import test from 'node:test';
 import {
   id,
   TASK_FLOW_DEFINITION_VERSION,
+  canonicalJsonStringify,
+  type TaskIdentitySource,
   type Checkpoint,
   type EvidenceRef,
   type ExecutionRuntimePort,
@@ -804,6 +807,64 @@ test('public new-task submit binds the real typed source and cold-reads before a
   }
 
   await rm(root, { recursive: true, force: true });
+});
+
+test('the public new-task entry binds the confirmed Task identity the closed-turn Planner reads', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-direct-create-'));
+  const taskControlPath = taskControlPathFor(root);
+  const port = new CountingStartPort({ binding, stepDelayMs: 1 });
+  const runtime = await startRuntime(root, port, { projectKey: 'project-task-identity-direct' });
+  try {
+    const created = await fetch(`${runtime.server.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'direct identity', directive: 'direct create directive' }),
+    });
+    assert.equal(created.status, 201);
+    const taskIdValue = (await created.json() as { readonly taskId: { readonly value: string } }).taskId.value;
+    const taskId = id('task', taskIdValue);
+
+    // The closed-turn Planner reads exactly this owner before its first
+    // whole-task publication and refuses to align without it, so a Task created
+    // through the public entry must carry the confirmed identity already.
+    const identity = await new TaskIdentityConsumer(
+      new JsonlTaskIdentityJournal(new JsonlOrganJournal(taskControlPath)),
+    ).read({ organId, taskId });
+    assert.ok(identity, 'the public new-task entry must bind the confirmed Task identity before a turn can close');
+    const expected: TaskIdentitySource = {
+      requirementId: `requirement:direct-task-create:${taskIdValue}@1`,
+      inputRevision: 1,
+      draftId: `draft:direct-task-create:${taskIdValue}@1`,
+      draftRevisionVersion: 1,
+      draftRevisionHash: `sha256:${createHash('sha256').update(canonicalJsonStringify({
+        kind: 'direct-task-create-input.v1',
+        title: 'direct identity',
+        directive: 'direct create directive',
+      })).digest('hex')}`,
+      confirmationRef: `confirmation:direct-task-create:${taskIdValue}@1`,
+    };
+    assert.deepEqual(identity!.source, expected);
+
+    // The public read composition projects the same committed source for the
+    // same Task scope, so the dashboard cannot show an identity the Planner
+    // would not read.
+    const listResponse = await fetch(`${runtime.server.url}/api/tasks`);
+    assert.equal(listResponse.status, 200);
+    const list = await listResponse.json() as RuntimeTaskListProjection;
+    const row = [
+      ...list.running, ...list.waiting, ...list.completed,
+      ...list.stopped, ...list.draft, ...list.failed,
+    ].find((candidate) => candidate.taskId.value === taskIdValue);
+    assert.ok(row, 'the bound task must appear in the public task list');
+    assert.deepEqual(row!.identitySource, expected);
+
+    // Binding the create never starts work on its own.
+    assert.equal(port.startCount, 0);
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('taskFlow intake fidelity preserves inferred and refined bindings without a confirmation override', async () => {

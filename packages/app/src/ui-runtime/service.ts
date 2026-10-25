@@ -75,6 +75,7 @@ import type {
   InteractionParentCommittedFact,
 } from '../../../runtime/src/explicit-brain/index.js';
 import { DraftRevisionError } from '../../../core/src/draft-revision.js';
+import { directTaskCreateIdentitySource } from '../../../core/src/task-identity.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
@@ -3262,6 +3263,46 @@ export class UiRuntimeService {
 
   createTask(input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshotInput {
     return toRuntimeTaskSnapshotInput(this.coordinator.createTask(input));
+  }
+
+  /**
+   * Create the Task of the public new-task entry together with its confirmed
+   * Task identity.
+   *
+   * The closed-turn Planner reads exactly this owner before it may publish the
+   * first whole-task plan, so a Task created without it can close its turn and
+   * still never reach a terminal state. Submitting the new-task entry is the
+   * user's confirmation for the new Task, so the create binds the committed
+   * create input at its directive revision as the actual confirmed source. The
+   * source values come from the Task this call just committed, never from a
+   * request body, so an entry can only describe the exact Task it created. The
+   * create is refused before any Task exists when the identity owner is absent,
+   * because such a Task could never align a closed turn.
+   */
+  async createTaskWithConfirmedIdentity(
+    input: { readonly title?: string; readonly directive?: string },
+  ): Promise<RuntimeTaskSnapshotInput> {
+    const taskIdentity = this.options.taskIdentity;
+    if (taskIdentity === undefined) {
+      throw new UiRuntimeApiError(
+        'task-identity.owner-missing',
+        APP_OWNER,
+        'the new-task entry cannot create a Task without the Task identity owner',
+        'assemble the Task identity consumer over the runtime control journal',
+        500,
+      );
+    }
+    const created = this.coordinator.createTask(input);
+    await taskIdentity.establish({
+      scope: { organId: this.options.organId, taskId: created.taskId },
+      source: directTaskCreateIdentitySource({
+        taskId: created.taskId.value,
+        title: created.title,
+        directive: created.directive,
+        directiveRevision: created.directiveRevision,
+      }),
+    });
+    return toRuntimeTaskSnapshotInput(created);
   }
 
   updateTask(taskId: TaskId, input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshotInput {
