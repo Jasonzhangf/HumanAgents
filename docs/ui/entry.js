@@ -57,6 +57,28 @@ export function createSubmissionGate() {
   }
 }
 
+/**
+ * Build the visible result for an explicit interaction that does not create a
+ * task. A simple answer is a business result, not an invalid intermediate state.
+ * Keep the reply in the main status region; it must not be hidden in diagnostics.
+ */
+export function answeredSubmissionPresentation(snapshot) {
+  const state = snapshot?.state
+  if (state !== 'answered' && state !== 'status-only') return null
+  const reply = typeof snapshot?.reply === 'string' ? snapshot.reply.trim() : ''
+  // An answered interaction carries the answer itself; a status receipt carries
+  // either its own reply or the runtime's next action. Neither may be invented.
+  const text = state === 'answered' ? reply : reply || (typeof snapshot?.nextAction === 'string' ? snapshot.nextAction.trim() : '')
+  if (text === '') {
+    throw Object.assign(new Error(`显式大脑状态：${state}，但没有返回可展示的结果。`), {
+      code: state === 'answered' ? 'explicit-brain.reply-missing' : 'explicit-brain.state-invalid',
+      ownerId: 'humanagent.app.ui',
+      nextAction: 'inspect the answered interaction before presenting it',
+    })
+  }
+  return { tone: 'success', text, retry: false }
+}
+
 export function entryDraftState(state, draft) {
   const base = state && typeof state === 'object' ? state : {}
   return { ...base, entryDraft: { ...draft } }
@@ -433,7 +455,12 @@ function renderDraft(snapshot) {
     return
   }
 
-  section.append(element('p', `状态：${snapshot.state} · ${snapshot.nextAction}`, 'empty'))
+  // A direct answer or a status receipt has no draft to inspect; the answer is
+  // the result and it is shown in the status region. The raw interaction enum
+  // stays internal instead of being printed as page text.
+  if (snapshot.state !== 'answered' && snapshot.state !== 'status-only') {
+    section.append(element('p', `状态：${snapshot.state} · ${snapshot.nextAction}`, 'empty'))
+  }
   updateCardFromSnapshot(snapshot)
 }
 
@@ -873,9 +900,13 @@ async function executeSubmission(submission, clarificationAnswer) {
   latestState = snapshot.state
   renderDraft(snapshot)
   if (snapshot.state === 'awaiting-clarification') return snapshot
-  if (snapshot.state === 'status-only') {
-    status.dataset.tone = 'success'
-    status.textContent = snapshot.reply || snapshot.nextAction
+  // A simple answer and a status receipt are both the interaction's business
+  // result. They end this submission: the reply is shown in the main status
+  // region with success tone, and no draft, requirement or task is created.
+  const directResult = answeredSubmissionPresentation(snapshot)
+  if (directResult) {
+    status.dataset.tone = directResult.tone
+    status.textContent = directResult.text
     return snapshot
   }
   if (snapshot.state === 'confirmed') {
