@@ -273,6 +273,67 @@ function classed(element, className) {
   return element.className.split(/\s+/).includes(className)
 }
 
+test('a root row with its own blocked facts keeps its own task link while listing one child execution', () => {
+  const rootTaskId = { value: 'task-shell-root' }
+  const childTaskId = { value: 'task-shell-child' }
+  const rootTask = {
+    taskId: rootTaskId,
+    title: 'own execution root',
+    semanticTitle: 'own execution root',
+    state: 'blocked',
+    stateLabel: '受阻',
+    currentState: '文件路径缺失，等待人工处理',
+    nextStep: 'restore the missing path',
+    updatedAt: '2026-10-24T15:00:00.000Z',
+    allowedActions: [],
+    output: '',
+    controlTarget: { projectKey: 'project-shell', mode: 'fake' },
+    error: {
+      code: 'runtime.execution.failure', ownerId: 'runtime', message: 'file.list missing path',
+      retryable: false, nextAction: 'restore the missing path',
+    },
+    executions: [{
+      taskId: childTaskId,
+      title: 'scheduled child',
+      state: 'waiting',
+      stateLabel: '等待中',
+      currentState: '等待执行准入',
+      nextStep: 'wait for admission',
+      updatedAt: '2026-10-24T16:00:00.000Z',
+      allowedActions: [],
+      output: '',
+      controlTarget: { projectKey: 'project-shell', mode: 'fake' },
+      executionLineage: { parentTaskId: rootTaskId, subscriptionId: 'sub-shell', occurrenceId: 'occ-shell' },
+    }],
+    entry: 'task-dashboard',
+  }
+  const root = makeRoot()
+  root.append(runtimeShell.renderProjectRead({
+    surface: 'runtime-project',
+    scope: { kind: 'project', projectKey: 'project-shell' },
+    label: 'project-shell',
+    tasks: [{
+      scope: { kind: 'task', projectKey: 'project-shell', mode: 'fake', taskId: rootTaskId },
+      task: rootTask,
+      basis: 'live-runtime',
+    }],
+    taskCount: 1,
+    complete: true,
+    failures: [],
+  }, { includeProjectLink: false }))
+
+  const primary = root.querySelector('a.task-item-main')
+  assert.ok(primary)
+  assert.match(primary.href, /task=task-shell-root/)
+  assert.doesNotMatch(primary.href, /task-shell-child/)
+  assert.match(primary.textContent, /own execution root/)
+  assert.match(primary.textContent, /受阻/)
+  assert.match(primary.textContent, /暂不能继续/)
+  const childLinks = root.querySelectorAll('a.button')
+  assert.ok(childLinks.some((link) => /task=task-shell-child/.test(link.href)))
+  assert.match(root.textContent, /执行记录（1）/)
+})
+
 test('mountProductShell exposes stable board, center, relation, drawer and config hosts', () => {
   const root = makeRoot()
   const product = runtimeShell.mountProductShell(root, { layout: 'work', title: '任务' })

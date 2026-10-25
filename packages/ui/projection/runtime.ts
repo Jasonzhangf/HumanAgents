@@ -458,8 +458,16 @@ function currentExecution(row: RuntimeTaskRowProjection): RuntimeTaskRowProjecti
   return current;
 }
 
+function hasOwnExecutionOrFailure(source: RuntimeTaskSnapshotInput): boolean {
+  if (source.error !== undefined || source.operationId !== undefined || source.executionEpoch !== undefined) {
+    return true;
+  }
+  return source.state !== 'created' && source.state !== 'admitted' && source.state !== 'waiting';
+}
+
 export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTaskListProjection {
   const rows = input.tasks.map(toRow);
+  const sourcesById = new Map(input.tasks.map((source) => [source.taskId.value, source]));
   const rowsById = new Map(rows.map((row) => [row.taskId.value, row]));
   const childrenByParent = new Map<string, RuntimeTaskRowProjection[]>();
   for (const row of rows) {
@@ -480,6 +488,10 @@ export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTask
       const children = childrenByParent.get(row.taskId.value);
       if (children === undefined) return row;
       const grouped = { ...row, executions: [...children] };
+      const source = sourcesById.get(row.taskId.value);
+      if (source !== undefined && hasOwnExecutionOrFailure(source)) {
+        return grouped;
+      }
       const execution = currentExecution(grouped)!;
       return {
         ...grouped,
@@ -489,7 +501,7 @@ export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTask
         currentState: `当前执行：${execution.currentState}`,
       };
     });
-  const stage = (row: RuntimeTaskRowProjection) => currentExecution(row)?.state ?? row.state;
+  const stage = (row: RuntimeTaskRowProjection) => row.executionState ?? row.state;
   const running = visible.filter((row) => isActive(stage(row)));
   const waiting = visible.filter((row) => isWaiting(stage(row)));
   const completed = visible.filter((row) => isCompleted(stage(row)));

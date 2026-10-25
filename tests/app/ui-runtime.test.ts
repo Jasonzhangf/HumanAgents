@@ -126,11 +126,13 @@ import { validatePersistedToolExecutionFact } from '../../packages/app/src/ui-ru
 import { AccessControlError, AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
-import { JsonlOrganJournal } from '../../packages/adapters/jsonl/src/index.js';
+import { JsonlOrganJournal, JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/index.js';
 import type { JournalAppendInput, JournalRecord, JournalTransactionContext } from '../../packages/adapters/jsonl/src/index.js';
 import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src/interaction-helper-journal.js';
 import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl/src/interaction-parent-turn-journal.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
+import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
+import { SubscriptionControlPort } from '../../packages/runtime/src/subscriptions/index.js';
 import {
   TASK_EXECUTION_ACTION_ID,
   TASK_EXECUTION_CAPABILITY,
@@ -8842,6 +8844,140 @@ test('runtime HTTP API reconstructs task state and SSE replay after a server res
     assert.match(text, /event: checkpoint\.committed/);
   } finally {
     await second.server.close();
+  }
+});
+
+test('service task list keeps root execution facts and exact child claim identity separate', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-root-child-projection-'));
+  const workspaceDir = join(root, 'workspace-project');
+  await mkdir(workspaceDir, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: workspaceDir });
+  await ensureControlLayout(paths);
+  const checkpointRoot = join(root, 'checkpoints');
+  const controlJournal = new JsonlOrganJournal(uiRuntimeControlJournalPath(join(checkpointRoot, 'fake')));
+  const identities = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(controlJournal));
+  const subscriptionPath = join(checkpointRoot, 'fake', 'subscriptions.jsonl');
+  const subscriptions = new SubscriptionControlPort(
+    new JsonlOrganJournal(subscriptionPath), { organId }, subscriptionPath,
+  );
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(
+      join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`),
+    ),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    runtimeComposition: { admitExecution: async () => {} },
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: paths.projectKey,
+      roleId: 'execution',
+    },
+    projectKey: paths.projectKey,
+    workspaceRoot: paths.workspaceCwd,
+    runtimePaths: paths,
+    taskIdentity: identities,
+    subscriptionControl: subscriptions,
+  });
+  try {
+    const rootTask = service.createTask({ title: 'own execution root', directive: 'complete the root run' });
+    await service.startExecution(rootTask.taskId, { prompt: 'complete the root run' });
+    await waitFor(() => assert.equal(service.taskDashboard(rootTask.taskId).state, 'succeeded'));
+    const childTask = service.createTask({ title: 'scheduled child', directive: 'child waits for admission' });
+    const rootTaskId = rootTask.taskId;
+    const childTaskId = childTask.taskId;
+
+    // Both facts commit on the same control/journal authority the service reads.
+    const requirementId = 'requirement-root-child-projection';
+    await identities.establish({
+      scope: { organId, taskId: rootTaskId },
+      source: {
+        requirementId, inputRevision: 1, draftId: 'draft-root-child-projection',
+        draftRevisionVersion: 1, draftRevisionHash: 'hash-root-child-projection',
+        confirmationRef: 'confirm-root-child-projection',
+      },
+      title: 'own execution root',
+    });
+    await identities.establish({
+      scope: { organId, taskId: childTaskId },
+      source: {
+        requirementId: 'requirement-root-child-projection-child', inputRevision: 1,
+        draftId: 'draft-root-child-projection-child', draftRevisionVersion: 1,
+        draftRevisionHash: 'hash-root-child-projection-child',
+        confirmationRef: 'confirm-root-child-projection-child',
+      },
+      title: 'scheduled child',
+    });
+    const subscriptionId = `subscription:${requirementId}`;
+    const dueAt = '2026-10-24T18:00:00.000Z';
+    const schedule = await subscriptions.create({
+      subscriptionId,
+      goalId: requirementId,
+      scheduleRevision: 1,
+      state: 'active',
+      busyPolicy: 'skip',
+      currentOccurrenceOrdinal: 0,
+    }, {
+      policyId: 'policy-root-child-projection',
+      policyRevision: 1,
+      timezone: 'UTC',
+      canonicalInstant: dueAt,
+      dstMode: 'wall',
+      dstMissedPolicy: 'shift-forward',
+      dstAmbiguousPolicy: 'earlier-offset',
+      latePolicy: 'run-once',
+      busyPolicy: 'skip',
+      executionMode: 'once',
+      dueAt,
+    }, subscriptionId);
+    await subscriptions.schedule({
+      occurrence: {
+        subscriptionId,
+        scheduleRevision: schedule.subscription.scheduleRevision,
+        occurrenceOrdinal: 1,
+        state: 'due',
+        dueAt,
+      },
+      nowAt: dueAt,
+    });
+    await subscriptions.claim({
+      subscriptionId,
+      scheduleRevision: schedule.subscription.scheduleRevision,
+      occurrenceOrdinal: 1,
+      dueAt,
+      taskId: childTaskId,
+      operationId: id('operation', 'root-child-projection-claim'),
+      inputArtifactDigest: 'sha256:root-child-projection-claim',
+      schedulerInstanceId: 'root-child-projection-fixture',
+      leaseId: 'root-child-projection-fixture',
+      generation: 1,
+      executionEpoch: 1,
+      nowAt: dueAt,
+      leaseUntil: '2026-10-24T19:00:00.000Z',
+    });
+
+    const list = await service.listTasksWithIdentitySource();
+    const row = list.completed.find((candidate) => candidate.taskId.value === rootTaskId.value);
+    if (row === undefined) throw new Error('the root own execution row must stay in completed');
+    assert.equal(row.state, 'succeeded');
+    assert.equal(row.currentExecutionTaskId, undefined);
+    assert.equal(row.executionState, undefined);
+    assert.equal(row.controlTarget?.projectKey, paths.projectKey);
+    assert.equal(row.controlTarget?.mode, 'fake');
+    assert.equal(row.executions?.length, 1);
+    assert.equal(row.executions?.[0]?.taskId.value, childTaskId.value);
+    assert.equal(row.executions?.[0]?.executionLineage?.parentTaskId.value, rootTaskId.value);
+    assert.equal(row.executions?.[0]?.controlTarget?.projectKey, paths.projectKey);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
