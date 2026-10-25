@@ -29,7 +29,7 @@
  * draft, and the copy's journal shows the wedged turn closed by its own
  * committed `turn-execution-failure` for the continuation epoch.
  */
-import { cp, rm, writeFile, readFile, mkdir, mkdtemp, symlink, realpath } from 'node:fs/promises';
+import { cp, rm, writeFile, readFile, readdir, mkdir, mkdtemp, symlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -57,6 +57,7 @@ const { MemoryCoordinator } = await import(mod('runtime/src/memory/index.js'));
 const { DeterministicMemoryBackend } = await import(mod('adapters/memory/src/index.js'));
 
 const projectKey = '-Users-fanzhang-.humanagent-workspace';
+const scope = { organId: id('organ', 'humanagent-ui'), interactionScopeId: `runtime:${projectKey}` };
 const workspace = '/Users/fanzhang/.humanagent/workspace';
 const tmp = await realpath(await mkdtemp(join(tmpdir(), 'ptor-blackbox-')));
 const controlRoot = join(tmp, 'control');
@@ -80,6 +81,14 @@ const leasePath = join(projectRoot, 'daemon', 'lease.json');
 const originalLease = JSON.parse(await readFile(leasePath, 'utf8'));
 await writeFile(leasePath, JSON.stringify({ ...originalLease, pid: 999999, controlEndpoint: undefined }, null, 2));
 console.log(JSON.stringify({ stage: 'copy', projectRoot, neutralizedPid: originalLease.pid }));
+
+// The copy also carries the production journal's own lock files. Their recorded
+// pid is the live daemon, so keeping them makes every append in the copy wait
+// for a lock that will never be released (`journal lock timeout`). A copied lock
+// is not a lock: the copy is this process's private root, so drop it.
+for (const entry of await readdir(join(projectRoot, 'checkpoints', 'ui-runtime', 'rcc'))) {
+  if (entry.includes('.lock')) await rm(join(projectRoot, 'checkpoints', 'ui-runtime', 'rcc', entry), { force: true });
+}
 
 // mode 'fake' resolves its journal at <checkpointRoot>/fake, so point that at
 // the copied production rcc journal instead of duplicating 66MB.
@@ -175,7 +184,9 @@ const call = async (method, path, body) => {
     headers: { cookie, origin: new URL(base).origin, 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const text = await res.text();
-  return { status: res.status, body: text.slice(0, 700) };
+  let json;
+  try { json = JSON.parse(text); } catch { json = undefined; }
+  return { status: res.status, body: text.slice(0, 700), json };
 };
 
 const received = await call('POST', '/api/explicit/inputs', {
@@ -183,17 +194,46 @@ const received = await call('POST', '/api/explicit/inputs', {
 });
 console.log(JSON.stringify({ stage: 'receive', ...received }));
 if (received.status !== 201) { await runtime.server.close(); await lease.release(); await rm(tmp, { recursive: true, force: true }); process.exit(1); }
-const interactionId = JSON.parse(received.body).interactionId;
+const interactionId = (received.json ?? JSON.parse(received.body)).interactionId;
+
+// The copied journal is the whole production scope, so it already carries the
+// scope's earlier closures. Take the baseline before the call and judge only
+// what this run commits.
+const before = {
+  failures: new Set((await parentJournal.readScopeExecutionFailures(scope)).map((f) => f.fact.turn.turnId)),
+  abandoned: new Set((await parentJournal.readScopeAbandonedTurns(scope)).map((f) => f.fact.turn.turnId)),
+};
 
 const interpreted = await call('POST', `/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, {});
 console.log(JSON.stringify({ stage: 'interpret', interactionId, ...interpreted }));
 
-const failures = await parentJournal.readScopeExecutionFailures({
-  organId: id('organ', 'humanagent-ui'), interactionScopeId: `runtime:${projectKey}`,
-});
+const failures = await parentJournal.readScopeExecutionFailures(scope);
+const added = failures.filter((failure) => !before.failures.has(failure.fact.turn.turnId));
 console.log(JSON.stringify({ stage: 'closure', executionFailures: failures.map((f) => ({
   turnId: f.fact.turn.turnId, epoch: f.fact.execution.executionEpoch,
-})) }));
+})), added: added.map((f) => ({ turnId: f.fact.turn.turnId, epoch: f.fact.execution.executionEpoch })) }));
+
+// This script is the delivery gate for the bug, so it must decide, not print.
+// Pre-fix the calls above answer 500 with
+//   "requires its exact prior input before new input; it cannot be discharged:
+//    an owner reconciliation is committed"
+// and commit nothing, so the checks below fail exactly there.
+const interpretedBody = interpreted.json ?? {};
+const abandoned = await parentJournal.readScopeAbandonedTurns(scope);
+const newlyAbandoned = abandoned.filter((fact) => !before.abandoned.has(fact.fact.turn.turnId));
+const reasons = [];
+if (interpreted.status !== 200) reasons.push(`interpret answered HTTP ${String(interpreted.status)}`);
+if (interpretedBody.state !== 'awaiting-confirmation') {
+  reasons.push(`interpret returned state ${String(interpretedBody.state)}, not a confirmable draft`);
+}
+if (added.length !== 1 || added[0].fact.execution.executionEpoch !== 2) {
+  reasons.push(`the run must close exactly the dead continued epoch (epoch 2) of the wedged turn, committed: ${JSON.stringify(added.map((failure) => ({ turn: failure.fact.turn.turnId, epoch: failure.fact.execution.executionEpoch })))}`);
+} else if (abandoned.some((fact) => fact.fact.turn.turnId === added[0].fact.turn.turnId)) {
+  reasons.push('the wedged turn carries an abandonment fact: it was discharged as abandonment, not by its own epoch failure');
+}
+if (newlyAbandoned.length !== 0) {
+  reasons.push(`the run committed ${String(newlyAbandoned.length)} new abandonment fact(s) instead of an epoch failure`);
+}
 
 await runtime.server.close();
 await lease.release();
@@ -203,3 +243,8 @@ if (process.env.PTOR_KEEP === '1') {
   await rm(tmp, { recursive: true, force: true });
   console.log(JSON.stringify({ stage: 'cleaned' }));
 }
+if (reasons.length > 0) {
+  console.error(JSON.stringify({ stage: 'failed', reasons }));
+  process.exit(1);
+}
+console.log(JSON.stringify({ stage: 'passed', interpretStatus: interpreted.status, state: interpretedBody.state }));
