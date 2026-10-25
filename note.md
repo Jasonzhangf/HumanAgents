@@ -1,5 +1,29 @@
 # HumanAgent 项目状态汇总（2026-10-19）
 
+## 2026-10-24：root/child 行投影交付与三任务收口
+
+本轮 master 串行合流 Alice 的 e1da478 候选 `38aaadae6`（merge `51bb17049`，push origin/main），
+安装 0.1.0039 并正式 `humanagent restart` 把实例从 lease 18 交接到 lease 19（PID 61520）。
+公开 `GET /api/tasks` 与 Alice 的 10086 浏览器列表断言都证明 root
+`ui-task-implicit-draft-141` 保持 `blocked`/「受阻」，独立 child
+`scheduled-task-b258bd97ecc762223c7a` 保持 `waiting`/「等待中」，root/child/control href
+精确指向各自身份。e1da478 按行投影范围关闭。
+
+真实列表点击主标题后出现 `read.scope.invalid`（「读取范围不完整」）是独立的 UI 路由缺陷：
+tasks.js 把 query 链接重写成 hash 路由而 dashboard 只读 query，已单列 canonical `91d4978`
+并发布任务 `task-dashboard-scope-navigation-20261024`（executor Carol，reviewer Alice）。
+
+Carol 的两个任务按「上游已集成、独立核验」收口：provider-file-list 由 `71cdbc7d5` +
+`6d0e60d93` 修复并在真实 RCC 4444 同入口 PASS，canonical `c3d9f8b` 已关；
+discharge 上游 `9b702f584` 被 Alice 独立复核打回 rework（两项 P1：无 lease 的
+shape-only discharge 未证明终止、并发解释用例只 seed 不覆盖真实重叠调用），已重新派给
+Carol 修复，reviewer 仍为 Alice。
+
+合流验证：build contracts/app、tests/ui 58/58、新增投影/service 用例 1/1、
+runtime-shell-product-consumer 6/6。app ui-runtime 整文件 test 33 起的 cancelled 在
+`7f02dd03e` 基线与合流后同样复现，非本轮引入。资源：root-child、provider、discharge 的
+自有 worktree 均已 remove+prune；受保护存量 worktree 未触碰。
+
 ## 2026-10-23 UX 真实可用性修复与结算边界交付
 
 本轮按用户连续反馈处理「任务无法 CRUD、Dashboard 进不去、任务无法执行」三类真实可用性故障，已合入 main 并推送 origin/main（`e748d881..b626df2c`），安装 0.1.0036，正式 restart 将实例更新到 0.1.0036，旧实例 clean 收拢。
@@ -408,3 +432,18 @@ M1 水位修复已合 main `1f731d76`：两个既有语义 builder 透传当前 
 `pnpm run test:compiled:services` 仍失败 13 项（native run/checkpoint/memory 路径，与 origin/main 基线同数同项，非本轮引入，原因同上一条记录），故 `pnpm build:release` 全量门禁继续过不去；产物沿用同一条流水线其余阶段生成：typecheck、build:raw、release 测试 14/14、package:candidate、package:smoke（浏览器配对 passed、显式输入 201、任务列表 200、任意 cwd UI passed）。
 
 本轮 worktree `ux-workspace-input-20261022` 已关闭并 prune，分支已删除；受保护 worktree `navigation-authorization-20261019` 未改动。证据在 `/Volumes/Intel/playground/humanagent/.worker-runs/ux-workspace-input-20261022/`。
+
+## 2026-10-24 真实入口缺陷修复里程碑（0.1.0040 已推送，仍在收口）
+
+本轮以真实产品行为验收为准（用户要求：不能只报「测试通过」）。三个原始缺陷已修复、合并、安装、真实入口验证并推送 origin/main（7f02dd03，随后有其他协作分支 51bb17049 合入，本里程碑五处修复均在其祖先中）：
+1. explicit interpret 间歇失败——task-2 修复（78e2c752），真实入口连续多题 200 且答案正确。
+2. dashboard 不可用（board 读取 31s + 前端轮询压垮 serve）——fix5（1694bad5），黑盒：dashboard 200、五板块渲染、board 读取降到 0.57-1.04s、轮询单飞 maxInflight=1、0 pageerror。
+3. 任务执行因一次工具参数错误即判死——fix6（71cdbc7d/6d0e60d9/2f3f379af），file.list 参数错误改为 typed validation 而非 fatal。
+
+真实黑盒过程中又发现并派发三个新缺陷（仍在收口）：
+- task-5（fix7 处理中）：任务执行永不收敛，工具成功两轮后无限停在 provider.model。根因已确认方向 B：POST /api/tasks 建的 UI 任务缺 Task identity，closed-turn Planner 报「requires the actual confirmed Task identity」→ blocked。次要放大因素：jsonl append 全量重校验 54MB 时每次 ~1.03s，本轮先不修，记为剩余风险。
+- task-6（fix8 处理中）：一次 interpret 失败锁死整个 explicit intake 直到重启。真实证据：interaction-122 失败后 123/124/125 连续 500；intake interpret 内模型调用 helper 工具是一条真实触发路径（interaction-131 停在 seq 19396 未收口）。
+- task-7（fix9/fix5 接手处理中）：产品「新建 Task」入口不处理 explicit `answered` 状态，简单问题得到「本次处理未完成」而非回答正文。根因：docs/ui/entry.js executeSubmission 缺 answered 分支，直接掉进兜底 throw explicit-brain.state-invalid；后端实际已正确作答（state=answered、reply=正文）。
+
+生产实例端口 10086 / control-root /Users/fanzhang/.humanagent 为用户在用：只允许只读，禁止成员对其 restart 或写操作。已向 fix7/fix8 明确此边界（此前 fix7 有三次写操作，已按已披露副作用记录，遗留任务 ui-task-df4ccb97 现为 error「进程已重启或缺少终态 checkpoint」，不追责）。里程碑独立 Review 尚未执行，待 task-5/6/7 合入 main 后一次整体 Review 再推送。
+
