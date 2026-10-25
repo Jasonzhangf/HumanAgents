@@ -560,6 +560,13 @@ export interface UiRuntimeServiceOptions {
   readonly interactionJournal?: UiRuntimeJournal;
   readonly closurePort: CheckpointClosurePort;
   readonly now?: () => Date;
+  /**
+   * Explicit override of the UI runtime execution budget. Absent keeps
+   * `DEFAULT_UI_EXECUTION_EVENT_BUDGET`, the production-calibrated backstop.
+   * Fixtures and accelerated-clock tests must pass their own values instead of
+   * relying on the production defaults.
+   */
+  readonly executionBudget?: Partial<import('../../../runtime/src/agent-io/types.js').AgentIoEventBudget>;
   readonly projectKey?: string;
   readonly workspaceRoot?: string;
   readonly providerTools?: import('../../../contracts/src/index.js').ProviderToolDefinition[];
@@ -2391,6 +2398,7 @@ export class UiRuntimeService {
       hookRegistry: options.hookRegistry,
       taskIdPrefix: randomUUID(),
       now: options.now,
+      ...(options.executionBudget === undefined ? {} : { executionBudget: options.executionBudget }),
       createDriver: (input) => this.createMemoryBoundDriver(input),
       ...(options.providerRetryConfig === undefined || executionPorts !== undefined
         ? {}

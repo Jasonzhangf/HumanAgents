@@ -169,7 +169,17 @@ async function startRuntimeForBudget(root: string, port: ExecutionRuntimePort) {
   // The budget clock is accelerated so the declared 90s no-progress budget
   // elapses in a couple of real seconds. The provider stream, the HTTP
   // dispatcher and the journal are all real.
+  //
+  // The budget is injected explicitly, never inherited: the shipped default is
+  // the production-calibrated backstop (600s of no completed unit), which an
+  // accelerated clock would take minutes of wall time to reach. This fixture
+  // asserts the stop path itself, so it declares the tight budget it needs.
   const now = () => new Date(wallStart + (Date.now() - wallStart) * 200);
+  const executionBudget = {
+    maxSilentDurationMs: 30_000,
+    maxTurnDurationMs: 120_000,
+    noProgressAtMs: 90_000,
+  };
   const runtime = await startUiRuntime({
     mode: 'fake',
     productRoot: root,
@@ -191,6 +201,7 @@ async function startRuntimeForBudget(root: string, port: ExecutionRuntimePort) {
     explicitBrainInterpreter: createInterpreter,
     taskIdentity,
     now,
+    executionBudget,
   });
   return { runtime, cookie: auth.cookie };
 }

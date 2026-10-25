@@ -21,8 +21,14 @@ import {
   type RuntimeTaskJournalPort,
   type RuntimeTaskJournalRecord,
 } from '../../../packages/runtime/src/ui-runtime/coordinator.js';
+import { DEFAULT_UI_EXECUTION_EVENT_BUDGET } from '../../../packages/runtime/src/ui-runtime/execution-budget.js';
 
 const coordinatorOrganId = id('organ', 'organ-request-budget');
+// One provider request that streams a single content unit at the production
+// rate: a new delta about every 2.4 seconds, 130 frames, so the request spans
+// roughly five minutes of provider time.
+const SLOW_ADVANCING_FRAME_MS = 2_400;
+const SLOW_ADVANCING_FRAMES = 130;
 
 declare module 'node:assert/strict' {
   interface Assert {
@@ -58,13 +64,14 @@ class DeltaDriver implements RuntimeExecutionDriver {
 
   constructor(
     readonly input: RuntimeExecutionDriverInput,
-    private readonly scenario: 'never-completes' | 'completes-after-stream' | 'silent' | 'silent-after-first' | 'multi-request',
+    private readonly scenario: 'never-completes' | 'completes-after-stream' | 'silent' | 'silent-after-first' | 'multi-request' | 'slow-advancing',
     private readonly settleState: 'succeeded' | 'stopped',
     private readonly reportLifecycle: (
       phase: ProviderRequestLifecycleEvent['phase'],
       requestId: string,
       turnId: string,
     ) => void = () => undefined,
+    private readonly advanceClock: (ms: number) => void = () => undefined,
   ) {}
 
   private report(phase: ProviderRequestLifecycleEvent['phase'], requestId: string, turnId: string): void {
@@ -212,6 +219,27 @@ class DeltaDriver implements RuntimeExecutionDriver {
         this.report('settled', 'request-multi-3', 'turn-multi-3');
         return;
       }
+      if (this.scenario === 'slow-advancing') {
+        // Production shape: one provider request keeps a single content unit
+        // open and delivers a delta roughly every 2.4 seconds, so the request
+        // spans minutes while it keeps making forward progress.
+        const requestId = 'request-slow-advancing';
+        const turnId = 'turn-slow-advancing';
+        this.requestIds.push(requestId);
+        this.report('dispatching', requestId, turnId);
+        this.report('dispatched', requestId, turnId);
+        for (let seq = 0; seq < SLOW_ADVANCING_FRAMES; seq += 1) {
+          this.advanceClock(SLOW_ADVANCING_FRAME_MS);
+          yield this.deltaEvent(seq, requestId, turnId);
+          await sleep(1);
+        }
+        this.advanceClock(1_000);
+        yield this.completionEvent('output-slow-advancing', requestId, turnId);
+        this.report('waiting', requestId, turnId);
+        yield this.terminalEvent(requestId, turnId, 'waiting-slow-advancing');
+        this.report('settled', requestId, turnId);
+        return;
+      }
       const deltaCount = this.scenario === 'never-completes' ? Number.POSITIVE_INFINITY : 60;
       for (let seq = 0; seq < deltaCount; seq += 1) {
         yield this.deltaEvent(seq);
@@ -306,12 +334,14 @@ class FileRuntimeTaskJournal implements RuntimeTaskJournalPort {
 }
 
 function budgetCoordinator(input: {
-  readonly scenario: 'never-completes' | 'completes-after-stream' | 'silent' | 'silent-after-first' | 'multi-request';
+  readonly scenario: 'never-completes' | 'completes-after-stream' | 'silent' | 'silent-after-first' | 'multi-request' | 'slow-advancing';
   readonly settleState: 'succeeded' | 'stopped';
   readonly orchestrate: boolean;
   readonly failStoppedCommitOnce?: boolean;
   readonly journal?: RuntimeTaskJournalPort;
   readonly executionBudget: { readonly maxTurnDurationMs?: number; readonly maxSilentDurationMs?: number; readonly noProgressAtMs?: number };
+  readonly now?: () => Date;
+  readonly advanceClock?: (ms: number) => void;
 }): { readonly coordinator: RuntimeTaskCoordinator; readonly driver: () => DeltaDriver; readonly store: ReturnType<typeof budgetCheckpointStore> } {
   let driver: DeltaDriver | undefined;
   let coordinator: RuntimeTaskCoordinator;
@@ -332,11 +362,12 @@ function budgetCoordinator(input: {
           occurredAt: new Date().toISOString(),
           evidenceRefs: [evidenceRef(driverInput.scope, `lifecycle-${phase}-${requestId}`)],
         });
-      });
+      }, input.advanceClock);
       return driver;
     },
     admitExecution: async () => {},
     executionBudget: input.executionBudget,
+    ...(input.now === undefined ? {} : { now: input.now }),
     checkpointStoreFor: () => store as never,
     ...(input.journal === undefined ? {} : { journal: input.journal }),
     attentionPort: {
@@ -383,6 +414,55 @@ async function waitForState(
   const stuck = coordinator.taskSnapshot(taskId);
   throw new Error(`runtime did not reach ${states.join('/')}; state=${stuck.state}; nextStep=${stuck.nextStep}; error=${JSON.stringify(stuck.error)}; events=${stuck.events.map((event) => `${event.kind}:${event.state}:${event.summary}`).join(' | ')}`);
 }
+
+test('DEFAULT production budget keeps a five-minute slow but advancing request alive', async () => {
+  // Production RCC keeps one provider request open and streams a single content
+  // unit at roughly one delta every 2.4 seconds for many minutes. The old
+  // agent-io default stopped it at 120s of request lifetime even though it was
+  // advancing. With the production-calibrated UI runtime defaults, no budget
+  // may stop it: it must run past the old 120s window and converge.
+  let clockMs = Date.parse('2026-10-25T09:00:00Z');
+  const built = budgetCoordinator({
+    scenario: 'slow-advancing',
+    settleState: 'succeeded',
+    orchestrate: false,
+    // Absent: the coordinator applies its production-calibrated default budget.
+    executionBudget: {},
+    now: () => new Date(clockMs),
+    advanceClock: (ms) => { clockMs += ms; },
+  });
+  const task = built.coordinator.createTask({ title: 'slow but advancing', directive: 'drip arguments then answer' });
+  built.coordinator.startExecution(task.taskId, { prompt: 'execute', orchestrate: false });
+  await waitForState(built.coordinator, task.taskId, ['succeeded', 'failed', 'blocked', 'stopped']);
+
+  const snapshot = built.coordinator.taskSnapshot(task.taskId);
+  const providerElapsedMs = clockMs - Date.parse('2026-10-25T09:00:00Z');
+  assert.ok(providerElapsedMs > 120_000, `expected the request to span well past the old 120s window, saw ${providerElapsedMs}ms`);
+  assert.strictEqual(snapshot.state, 'succeeded');
+  assert.strictEqual(snapshot.error, undefined);
+  assert.strictEqual(built.driver().stopRequests, 0);
+  assert.ok(!snapshot.events.some((event) => event.summary.includes('request budget exceeded')));
+});
+
+test('the UI runtime fallback budget stays looser than the transport silence judgement', () => {
+  // Two layers judge one provider request. The transport ends real silence at
+  // 120s with the typed stream.no-progress error, which production proved. The
+  // UI runtime budget is only a final backstop, so it must never be tighter
+  // than the transport: otherwise it kills a stream the transport would have
+  // carried to completion, and two layers stop the same attempt.
+  assert.ok(
+    DEFAULT_UI_EXECUTION_EVENT_BUDGET.maxSilentDurationMs > 120_000,
+    `runtime silence fallback must exceed the transport 120s silence judgement, saw ${DEFAULT_UI_EXECUTION_EVENT_BUDGET.maxSilentDurationMs}ms`,
+  );
+  assert.ok(
+    (DEFAULT_UI_EXECUTION_EVENT_BUDGET.noProgressAtMs ?? 0) >= 600_000,
+    `runtime no-progress fallback must not judge a unit by anything tighter than 600s, saw ${DEFAULT_UI_EXECUTION_EVENT_BUDGET.noProgressAtMs}ms`,
+  );
+  assert.ok(
+    DEFAULT_UI_EXECUTION_EVENT_BUDGET.maxTurnDurationMs >= 1_800_000,
+    `runtime per-request ceiling must leave room for a 26 minute production request, saw ${DEFAULT_UI_EXECUTION_EVENT_BUDGET.maxTurnDurationMs}ms`,
+  );
+});
 
 test('a streamed content unit that never completes is stopped by the declared request budget', async () => {
   const built = budgetCoordinator({

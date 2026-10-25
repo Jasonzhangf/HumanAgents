@@ -79,10 +79,8 @@ import {
   type StopSettlementRecovery,
 } from '../control/steering.js';
 import type { AgentHookStage } from '../agent-io/events.js';
-import {
-  DEFAULT_AGENT_IO_EVENT_BUDGET,
-  type AgentIoEventBudget,
-} from '../agent-io/types.js';
+import type { AgentIoEventBudget } from '../agent-io/types.js';
+import { DEFAULT_UI_EXECUTION_EVENT_BUDGET } from './execution-budget.js';
 import { ContextCommitter, type PublishedContext } from '../context/index.js';
 import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
 import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
@@ -638,7 +636,9 @@ export interface RuntimeTaskCoordinatorOptions {
    * The declared request budget applied to one provider attempt observed as
    * normalized provider events. Streamed partials are activity only; a
    * continued-but-unclosed content unit exhausts the budget and drives the
-   * standard stop control. Absent means `DEFAULT_AGENT_IO_EVENT_BUDGET`.
+   * standard stop control. Absent means `DEFAULT_UI_EXECUTION_EVENT_BUDGET`,
+   * the production-calibrated backstop that stays looser than the transport
+   * silence judgement so a slow but advancing request is never killed here.
    */
   readonly executionBudget?: Partial<AgentIoEventBudget>;
   readonly checkpointBoundary?: RuntimeCheckpointBoundaryPort;
@@ -4046,7 +4046,7 @@ export class RuntimeTaskCoordinator {
     }
     const observations = new BudgetedProviderObservations(
       composition.observe()[Symbol.asyncIterator](),
-      { ...DEFAULT_AGENT_IO_EVENT_BUDGET, ...this.options.executionBudget },
+      { ...DEFAULT_UI_EXECUTION_EVENT_BUDGET, ...this.options.executionBudget },
       () => this.now().getTime(),
     );
     record.budgetObservation = observations;
@@ -5134,7 +5134,7 @@ export class RuntimeTaskCoordinator {
         if (record.stopping || record.postCommitRecoveryPending) return;
         const observations = new BudgetedProviderObservations(
           composition!.observe()[Symbol.asyncIterator](),
-          { ...DEFAULT_AGENT_IO_EVENT_BUDGET, ...this.options.executionBudget },
+          { ...DEFAULT_UI_EXECUTION_EVENT_BUDGET, ...this.options.executionBudget },
           () => this.now().getTime(),
         );
         record.budgetObservation = observations;
