@@ -6,9 +6,13 @@
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  validateInteractionProviderSettlementReceipt,
+  validateProviderSettlement,
+} from '../../dist/app/contracts/src/index.js';
 
 const repoRoot = resolve(new URL('../..', import.meta.url).pathname);
 const evidenceRoot = process.env.ENTRY_ANSWERED_EVIDENCE?.trim();
@@ -29,6 +33,20 @@ const playwright = playwrightModule.default ?? playwrightModule;
 await mkdir(evidenceRoot, { recursive: true });
 await mkdir(controlRoot, { recursive: true });
 await mkdir(workspace, { recursive: true });
+
+async function findTaskControlJournal(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const found = await findTaskControlJournal(fullPath);
+      if (found) return found;
+    } else if (entry.isFile() && entry.name === 'task-control.jsonl') {
+      return fullPath;
+    }
+  }
+  return null;
+}
 
 function sleep(ms) { return new Promise((resolveSleep) => setTimeout(resolveSleep, ms)); }
 function assertThat(condition, message, details) {
@@ -168,6 +186,122 @@ try {
   receipt.reply = snapshot.reply;
   receipt.state = snapshot.state;
   receipt.nextAction = snapshot.nextAction;
+
+  const taskControlPath = await findTaskControlJournal(controlRoot);
+  assertThat(taskControlPath, 'task-control.jsonl exists in control root', { controlRoot });
+  const journalContent = await readFile(taskControlPath, 'utf8');
+  const journalLines = journalContent.split('\n').filter((line) => line.trim().length > 0);
+  const parentTurnRecords = [];
+  for (const line of journalLines) {
+    try {
+      const record = JSON.parse(line);
+      const payload = record.payload;
+      if (payload && payload.kind === 'interaction-parent.turn-raw.v1' && payload.turn?.interactionId === interactionId) {
+        parentTurnRecords.push({ record, payload });
+      }
+    } catch {
+      // skip unparseable lines
+    }
+  }
+  assertThat(parentTurnRecords.length > 0, 'parent-turn records exist for interactionId', { interactionId, taskControlPath });
+
+  const settlementRecords = parentTurnRecords.filter(
+    (entry) => entry.payload.discriminant === 'provider-settlement',
+  );
+
+  let turnIdentity;
+  if (settlementRecords.length === 1) {
+    turnIdentity = settlementRecords[0].payload.turn;
+  } else if (settlementRecords.length > 1) {
+    const succeededSettlements = settlementRecords.filter(
+      (entry) => entry.payload.fact?.settlement?.state === 'succeeded',
+    );
+    if (succeededSettlements.length === 1) {
+      turnIdentity = succeededSettlements[0].payload.turn;
+    } else {
+      throw new Error(
+        `Cannot unambiguously identify answered turn identity: found ${settlementRecords.length} settlements (${succeededSettlements.length} succeeded): ${JSON.stringify(settlementRecords.map((r) => r.payload))}`,
+      );
+    }
+  } else {
+    const turnsMap = new Map();
+    for (const entry of parentTurnRecords) {
+      const t = entry.payload.turn;
+      const key = `${t.inputRevision}:${t.turnId}`;
+      turnsMap.set(key, t);
+    }
+    const turns = Array.from(turnsMap.values());
+    if (turns.length === 1) {
+      turnIdentity = turns[0];
+    } else {
+      throw new Error(
+        `Cannot unambiguously identify answered turn identity from multiple turns without provider settlement: ${JSON.stringify(turns)}`,
+      );
+    }
+  }
+  assertThat(turnIdentity && typeof turnIdentity.turnId === 'string' && turnIdentity.turnId.trim() !== '', 'resolved turnId is a non-empty string', turnIdentity);
+  assertThat(Number.isSafeInteger(turnIdentity.inputRevision) && turnIdentity.inputRevision >= 1, 'resolved inputRevision is positive integer', turnIdentity);
+
+  const settlementUrl = new URL(`${base}/api/explicit/interactions/${encodeURIComponent(interactionId)}/control/provider-settlement`);
+  settlementUrl.searchParams.set('inputRevision', String(turnIdentity.inputRevision));
+  settlementUrl.searchParams.set('turnId', turnIdentity.turnId);
+  const settlementResponse = await context.request.get(settlementUrl.toString());
+  const settlementStatus = settlementResponse.status();
+  const settlementBodyText = await settlementResponse.text();
+  let settlementBody;
+  try {
+    settlementBody = JSON.parse(settlementBodyText);
+  } catch {
+    settlementBody = settlementBodyText;
+  }
+  assertThat(settlementStatus === 200, 'GET explicit provider settlement returns 200', {
+    status: settlementStatus,
+    body: settlementBody,
+    url: settlementUrl.toString(),
+  });
+  assertThat(settlementBody && typeof settlementBody === 'object', 'settlement response is an object', settlementBody);
+  assertThat(settlementBody.commit !== undefined, 'settlement response carries commit', settlementBody);
+  assertThat(settlementBody.fact !== undefined, 'settlement response carries fact', settlementBody);
+
+  validateProviderSettlement(settlementBody.fact.settlement);
+  validateInteractionProviderSettlementReceipt(settlementBody.fact);
+
+  assertThat(settlementBody.fact.settlement.state === 'succeeded', 'fact.settlement.state is succeeded', settlementBody.fact.settlement);
+  assertThat(settlementBody.fact.interactionId === interactionId, 'fact interactionId matches answered interaction', {
+    expected: interactionId,
+    actual: settlementBody.fact.interactionId,
+  });
+  assertThat(settlementBody.fact.inputRevision === turnIdentity.inputRevision, 'fact inputRevision matches read turn', {
+    expected: turnIdentity.inputRevision,
+    actual: settlementBody.fact.inputRevision,
+  });
+  assertThat(settlementBody.fact.settlement?.interactionTurn?.turnId === turnIdentity.turnId, 'settlement turnId matches read turn', {
+    expected: turnIdentity.turnId,
+    actual: settlementBody.fact.settlement?.interactionTurn?.turnId,
+  });
+  assertThat(settlementBody.fact.request?.turnId === settlementBody.fact.settlement?.turnId, 'fact request turnId matches settlement turnId', {
+    expected: settlementBody.fact.settlement?.turnId,
+    actual: settlementBody.fact.request?.turnId,
+  });
+  assertThat(settlementBody.fact.settlement?.interactionTurn?.interactionId === interactionId, 'settlement interactionId matches', {
+    expected: interactionId,
+    actual: settlementBody.fact.settlement?.interactionTurn?.interactionId,
+  });
+  assertThat(settlementBody.fact.settlement?.interactionTurn?.inputRevision === turnIdentity.inputRevision, 'settlement inputRevision matches', {
+    expected: turnIdentity.inputRevision,
+    actual: settlementBody.fact.settlement?.interactionTurn?.inputRevision,
+  });
+
+  receipt.providerSettlement = {
+    request: {
+      interactionId,
+      inputRevision: turnIdentity.inputRevision,
+      turnId: turnIdentity.turnId,
+    },
+    commit: settlementBody.commit,
+    fact: settlementBody.fact,
+  };
+  receipt.checks.push('typed provider settlement validated state=succeeded');
 
   const readVisible = () => page.evaluate(() => {
     const status = document.querySelector('[role="status"]');
