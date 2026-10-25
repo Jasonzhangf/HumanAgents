@@ -1569,13 +1569,16 @@ export function createInteractionParentTurnRawOwner(
    * Decide whether the physical epoch this owner is running can be closed as
    * failed.
    *
-   * The caller observed the failure first-hand, so this decision does not
-   * re-derive how the epoch ended: a committed close, a failed request phase or
-   * still-running request phases are all expected after a failure. Everything
-   * that could still carry value or an unknown effect keeps its own lane: a real
-   * terminal output stays deliverable, a committed tool activity keeps its
-   * unknown side effect open, an owner reconciliation belongs to the
-   * continuation lane, and a provider settlement already has its own receipt.
+   * The failure must be provable from the durable record alone. Everything
+   * that could still carry value or an unknown effect keeps its own lane: a
+   * real terminal output stays deliverable, a committed tool activity keeps
+   * its unknown side effect open, and a provider settlement already has its
+   * own receipt. A committed owner reconciliation no longer holds this lane on
+   * its own: a `continue` reconciliation opens a new physical epoch, and when
+   * that continued epoch itself died before any terminal output, it is exactly
+   * the failed-epoch shape this fact exists to describe. The continuation
+   * lane's recoverable shapes stay protected by the terminal-output,
+   * closed-zero-fact and tool-effect checks below.
    */
   async function executionFailureEligibility(
     snapshot: InteractionParentTurnSnapshot,
@@ -1589,7 +1592,15 @@ export function createInteractionParentTurnRawOwner(
     if (snapshot.abandonment !== null) return held('the turn is already discharged as interrupted without terminal output');
     if (snapshot.parseFailure !== null) return held('the turn is already closed as unparseable');
     if (snapshot.executionFailure !== null) return held('the epoch is already closed as failed');
-    if (snapshot.ownerReconciliations.length > 0) return held('an owner reconciliation is committed');
+    // A reconciliation is only a hold when it still owns a deliverable answer.
+    // `terminal-output` reconciliation means the answer already exists and the
+    // continuation lane must read it; a `continue` reconciliation merely opened
+    // the next physical epoch, and that epoch's own live shape is decided by the
+    // terminal-output, tool-effect and settlement checks below.
+    const latestReconciliation = snapshot.ownerReconciliations.at(-1);
+    if (latestReconciliation !== undefined && latestReconciliation.fact.mode === 'terminal-output') {
+      return held('the reconciled turn already carries a deliverable terminal output');
+    }
     if (snapshot.providerSettlements.length > 0) return held('a provider settlement is committed');
     if (snapshot.resourceClose !== null && snapshot.acceptedFacts.length === 0) {
       // A closed epoch that accepted no raw fact is the recoverable

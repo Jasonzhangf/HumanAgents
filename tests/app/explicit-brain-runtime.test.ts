@@ -2977,6 +2977,159 @@ test('provider explicit brain interpreter holds an interrupted turn that dispatc
 // intake for the whole interaction scope, and every further start rewrites the
 // receipt again. Cost: three real lease generations, two real crash takeovers
 // and one seeded interrupted turn.
+// Failure basis: a turn that already reconciled into a continued epoch (mode
+// continue) leaves the abandonment lane permanently held while the continued
+// epoch itself can die before any terminal output. The committed replacement
+// owner is provably terminated, so the turn can never resume, yet every new
+// input is refused with "requires its exact prior input". Impact: one crash
+// after a reconciliation locks explicit intake for the whole scope. Cost: four
+// real lease generations, three real crash/dispose receipts and one seeded
+// reconciled turn.
+test('provider explicit brain interpreter closes the dead continued epoch of a reconciled turn', async () => {
+  const root = join(parentFixtureRoot, `reconciled-dead-epoch-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-reconciled-dead-epoch', providerId: 'provider-reconciled-dead-epoch', protocol: 'responses',
+    endpointRef: 'recorded://reconciled-dead-epoch', modelRef: 'model-reconciled-dead-epoch',
+    configDigest: 'sha256:reconciled-dead-epoch-config', capabilityDigest: 'sha256:reconciled-dead-epoch-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:reconciled-dead-epoch' };
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  let earlyLease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    // Generation 1 owns the turn input and dies. Generation 2 takes over,
+    // records the receipt that proves generation 1 stopped, and becomes the
+    // reconciled replacement owner.
+    const firstCrash = await acquireCrashedOwnerLease(root);
+    assert.equal(firstCrash.generation, 1);
+    earlyLease = await acquireDaemonLease(paths, { takeover: {
+      reason: 'reconciled dead epoch test first takeover', allowed: () => true,
+      stop: { gracefulTimeoutMs: 2_000, pollIntervalMs: 20 },
+    } });
+    assert.equal(earlyLease.record.generation, 2);
+    const replacementOwner = await earlyLease.withCurrentLeaseOwner(async (authenticated) => authenticated);
+
+    // Seed the reconciled shape directly: turn input owned by generation 1,
+    // one continue reconciliation to generation 2 (epoch 2), and only a
+    // reasoning delta in the continued epoch. No terminal output, no tool
+    // effect, no close, no settlement.
+    const turn: InteractionTurnIdentity = {
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      interactionId: 'interaction-reconciled-dead-epoch', inputRevision: 1, turnId: 'explicit-interpret-reconciled-dead-epoch',
+    };
+    const operationScope = { organId: scope.organId, operationId: id('operation', 'op-reconciled-dead-epoch') };
+    const execution = { runtimeId: turn.turnId, ...operationScope, executionEpoch: 1, interactionTurn: turn };
+    const initialInput = {
+      ref: await evidence.write({ scope: operationScope, kind: 'execution', type: 'initial-input', locator: turn.turnId,
+        content: JSON.stringify({ interactionId: 'interaction-reconciled-dead-epoch', inputRevision: 1,
+          sourceRef: 'ui:reconciled-dead-epoch', rawInput: '已 reconcile 又崩溃的旧输入', clarifications: [], taskCandidates: [] }) }),
+      view: { kind: 'utf8-text' as const },
+    };
+    const seedOwner = createInteractionParentTurnRawOwner({
+      turn, execution, scope: operationScope, initialInput, providerBinding: binding, executionOwner: firstCrash.owner,
+      journal: parentJournal, rawContent,
+    });
+    await seedOwner.openTurnInput();
+    const reqOne = { turnId: turn.turnId, requestId: 'reconciled-dead-request-1' };
+    await seedOwner.registerRequest({ execution, record: { request: reqOne, scope: operationScope, phase: 'dispatching' } });
+    await seedOwner.registerRequest({ execution, record: { request: reqOne, scope: operationScope, phase: 'dispatched' } });
+    const reasoningOne = {
+      ref: await evidence.write({ scope: operationScope, kind: 'execution', type: 'reasoning', locator: 'reconciled-dead-reasoning-1',
+        content: 'partial reasoning in the first epoch' }),
+      view: { kind: 'utf8-text' as const },
+    };
+    await seedOwner.acceptRawFact({ execution, scope: operationScope, request: reqOne, producerSeq: 1,
+      fact: { kind: 'content', channel: 'reasoning-summary', update: 'full', contentUnitId: 'reconciled-dead-reasoning-1',
+        content: reasoningOne, complete: false } });
+    const continuedOwner = createInteractionParentTurnRawOwner({
+      turn, execution: { ...execution, executionEpoch: 2 }, scope: operationScope, initialInput, providerBinding: binding,
+      executionOwner: replacementOwner, journal: parentJournal, rawContent,
+    });
+    const reconciled = await continuedOwner.reconcileTurnOwner({
+      previousOwner: firstCrash.owner, replacementOwner, isCommittedReplacement: true,
+      reconciledAt: new Date().toISOString(),
+    });
+    assert.equal(reconciled.fact.mode, 'continue');
+    assert.equal(reconciled.fact.effectiveExecutionEpoch, 2);
+    await continuedOwner.openTurnInput();
+    const executionTwo = { ...execution, executionEpoch: 2 };
+    const reqTwo = { turnId: turn.turnId, requestId: 'reconciled-dead-request-2' };
+    await continuedOwner.registerRequest({ execution: executionTwo, record: { request: reqTwo, scope: operationScope, phase: 'dispatching' } });
+    await continuedOwner.registerRequest({ execution: executionTwo, record: { request: reqTwo, scope: operationScope, phase: 'dispatched' } });
+    const reasoningTwo = {
+      ref: await evidence.write({ scope: operationScope, kind: 'execution', type: 'reasoning', locator: 'reconciled-dead-reasoning-2',
+        content: 'partial reasoning in the continued epoch' }),
+      view: { kind: 'utf8-text' as const },
+    };
+    await continuedOwner.acceptRawFact({ execution: executionTwo, scope: operationScope, request: reqTwo, producerSeq: 1,
+      fact: { kind: 'content', channel: 'reasoning-summary', update: 'full', contentUnitId: 'reconciled-dead-reasoning-2',
+        content: reasoningTwo, complete: false } });
+
+    // The replacement owner (generation 2) is provably gone: it disposes
+    // gracefully, generation 3 crashes, generation 4 takes over and records the
+    // receipt that proves generation 3 stopped. Generation 2's graceful
+    // disposal receipt is written on the next durable lease write.
+    await earlyLease.release();
+    earlyLease = undefined;
+    const thirdCrash = await acquireCrashedOwnerLease(root);
+    assert.equal(thirdCrash.generation, 3);
+    lease = await acquireDaemonLease(paths, { takeover: {
+      reason: 'reconciled dead epoch test final takeover', allowed: () => true,
+      stop: { gracefulTimeoutMs: 2_000, pollIntervalMs: 20 },
+    } });
+    assert.equal(lease.record.generation, 4);
+
+    const interpreterOptions = {
+      parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+      rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    };
+    const served = await createProviderExplicitBrainInterpreter({ ...interpreterOptions,
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId, lease,
+      port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+        { kind: 'output', state: 'output', summary: JSON.stringify({
+          kind: 'requirement', normalizedInput: 'reconcile 之后的新输入', knownFacts: [],
+          proposal: { revision: 1, intent: 'create', title: 'reconcile 之后的新输入', objective: 'reconcile 之后的新输入',
+            deliverable: '结果', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+          decisionRefs: [],
+        }) },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ] }) }).interpret({
+        interactionId: 'interaction-reconciled-dead-epoch-next', inputRevision: 1,
+        sourceRef: 'ui:reconciled-dead-epoch-next', rawInput: 'reconcile 之后的新输入',
+        clarifications: [], taskCandidates: [],
+      });
+    assert.equal(served.kind, 'requirement');
+    const failures = await parentJournal.readScopeExecutionFailures(scope);
+    assert.equal(failures.length, 1, 'the dead continued epoch is closed exactly once');
+    assert.equal(failures[0]!.fact.execution.executionEpoch, 2, 'the closure records the epoch that died');
+    assert.deepEqual(failures[0]!.fact.turn, turn);
+    const snapshot = await parentJournal.readTurnSnapshot(turn);
+    assert.equal(snapshot.resourceClose, null, 'the closure never fabricates a close');
+    assert.deepEqual(snapshot.providerSettlements, [], 'the closure never fabricates a settlement');
+    assert.equal(snapshot.abandonment, null, 'the reconciled turn is closed as a failed epoch, not abandoned');
+    assert.deepEqual(snapshot.ownerReconciliations.map((entry) => entry.fact.effectiveExecutionEpoch), [2],
+      'the committed reconciliation is never rewritten');
+    assert.deepEqual(
+      (await readDaemonLease(paths) as { terminations?: readonly { previousGeneration: number }[] } | undefined)
+        ?.terminations?.map((entry) => entry.previousGeneration),
+      [1, 2, 3],
+      'the replacement owner termination receipt stays durable',
+    );
+  } finally {
+    await earlyLease?.release();
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('provider explicit brain interpreter discharges a turn whose committed owner is two generations behind', async () => {
   const root = join(parentFixtureRoot, `stranded-generation-${randomUUID()}`);
   await mkdir(root, { recursive: true });
