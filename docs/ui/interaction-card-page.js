@@ -296,10 +296,13 @@ export function projectInteractionCardFromSnapshot(snapshot) {
   if (interactionId === undefined) return undefined
   const draft = snapshot?.draft || null
   const enteredAt = snapshot?.occurredAt
+  const requestNumber = snapshot?.requestNumber
   const userTurn = {
     sourceKind: 'user',
     ...(enteredAt === undefined ? {} : { occurredAt: enteredAt }),
-    markdown: snapshot?.rawInput || fallbackText(snapshot?.reply, '尚未收到输入'),
+    markdown: typeof requestNumber === 'number'
+      ? `第 ${requestNumber} 次请求 · ${snapshot?.rawInput || fallbackText(snapshot?.reply, '尚未收到输入')}`
+      : snapshot?.rawInput || fallbackText(snapshot?.reply, '尚未收到输入'),
   }
   const entries = [interactiveEntry({
     sequence: 1,

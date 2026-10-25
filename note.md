@@ -477,3 +477,21 @@ task-dashboard-scope-navigation-20261024 的最终候选 bbc4ce56a（含 655d9bb
 2. task-9 任务永不收敛：Provider 只发 tool-arguments delta 永不 done。实测 task ui-task-b04f4708…-23 / ui-operation-16：03:40 模型已用 bash 正确写入 /tmp/ha-verify-terminal.md 且 tool-result succeeded，但第 5 个 request 之后只持续发 response.function_call_arguments.delta（contentUnitId 固定 item_c704efe2…），没有 done、没有新 tool-call、没有 request-complete，任务 26 分钟停在 running，直到手工 stop。期间 journal 19396→20128 行（55.9MB）、evidence 8478 个文件，每个 delta 都落一条 durable 事实，而单次 append 是 O(文件大小)。修复方向：以「无前进」而非「总时长」为判定，超预算落入诚实可诊断终态，并给同一 contentUnitId 的 delta 堆叠设界。
 
 这两个新缺陷都由我派给 peer 处理（task-8 由 fix8-intake-lock，task-9 由 fix6-tool-failure-fatal）。里程碑整体独立 Review 尚未执行；按门禁在 Review PASS 前不推送。我的两个探针任务（-22、-23）已从生产任务列表删除，生产任务数回到 11，journal 与 evidence 未删除。
+
+## 2026-10-25 B4 r5 集成与请求编号扩权
+
+b4-delta-progress-20261024 的 r5 修复已由合并提交 cc73f98da 进入 main。我在当前 main 1059fe357 复跑受影响门禁：tests/runtime/ui-runtime tsc exit 0、request-budget 11/11、真实 HTTP consumer 1/1（receipt case-delta-never-completes-lYZX2D）。任务板已记录 merged，待 Carol 清理自有 worktree/branch 后正常 close。
+
+请求编号 REWORK 的 router 扩权已确认：只允许 packages/runtime/src/explicit-brain/router.ts 的 RequirementSubmissionOwner.submitSerialized 回执与重试边界，失败时恢复 pending、删除 submitted 并原样抛错；禁止重放 FIFO、重复发号、新增锁/队列/第二账本，也不改 finalSubmit。P1-1 仍由 Carol 在自有 intake/service owner 内同树修复。
+
+资源巡检：cold-recovery-fixes-20261024 与 request-budget-calibration-20261025 均为 dirty、未合并候选，标记 PROTECTED_HOLD，未删除。F-C 五文件候选仍在 fc-public-contract-fixes-20261025，等待 Carol 整批 review。
+
+## 2026-10-25 F-C 五项契约修复集成
+
+Carol 已对 fc-public-contract-fixes-20261025 独立 ACCEPT。五文件候选提交为 c010198cc，组合最新 origin/main cc73f98da 得 a78a75628，并 push origin/main（cc73f98da..a78a75628）。本地 main 8b46e5a32 同步合并 origin/main，保留此前另一条未推送的 provider 修复；该修复没有推送，也没有进入本次安装包。
+
+组合树复跑：packages/app、tests/app/native-delivery、tests/app/new-task-identity 三处 tsc exit 0；7804 真实 HTTP 1/1、e3 task-intervention 2/2、9f native inspect 1/1、825 native two-cycle 1/1、ea native three-turn cold resume 1/1。以上均为隔离 fixture 与受控 Provider，不等于 RCC 在线模型或生产任务 live 证据。
+
+从 a78a75628 打包并安装 humanagent-cli 0.1.0040。正式 restart 完成 generation 29→30（PID 80645），durable lease readyAt 为 2026-10-25T19:05:32.046Z；重启客户端在 30 秒内先报 daemon-restart.ready-timeout，属晚到就绪，lease 已记录 ready。安装后检查：/api/liveness 200，/api/runtime/status 为 ready/rcc；无会话 loopback GET /api/ui/display-preference 返回 200；无效 HA_SESSION 的 PUT 返回 401 auth.session.invalid，随后读取偏好仍为 current；dashboard.html 与 tasks.html 均 200。
+
+任务板记录 integrated 后正常 close，cleanup receipt 已生成。fc worktree 已移除且目录不存在（TREE_GONE），branch codex/fc-public-contract-fixes-20261025 已删除。受保护的其他 worktree 未动。请求编号两项 P1 仍由 Carol 在自有树修复，Alice 已确认只复核这两个 finding。
