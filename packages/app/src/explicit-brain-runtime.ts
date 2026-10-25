@@ -704,10 +704,12 @@ export function createProviderExplicitBrainInterpreter(input: {
           abandonedAt: input.clock.now(),
         });
         if (activeLease === undefined) {
-          // No supervisor lease authority is configured at all, so no owner can
-          // be authenticated: keep the embedded shape-only discharge.
-          await discharge();
-          return;
+          // No authenticated lifecycle authority is configured, so nothing can
+          // prove that the previous execution owner stopped writing. A
+          // shape-only discharge would freeze a possibly live request, so hold
+          // the turn and keep its recovery responsibility instead of writing an
+          // abandonment fact the record shape cannot justify.
+          throw refuse('no authenticated supervisor lease authority is configured to prove the previous execution owner stopped');
         }
         const committedOwner = pendingTurn.fact.executionOwner;
         // Authenticate the old owner, decide, and commit inside one lease-guard

@@ -225,20 +225,35 @@ async function acquireTerminatedOwnerLease(root: string): Promise<{
 // weaken the compiling synthetic-Task RED assertions below.
 class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = InteractionParentProviderExecutionIdentityRef> extends ProviderAdapter<T> {
   constructor(options: { binding: ProviderBinding; stepDelayMs: number; replay: readonly { kind: string; summary: string; state: string; terminalState?: string }[];
-    respond?: (wire: any) => Promise<readonly unknown[]>; evidence?: typeof parentEvidence }) {
+    respond?: (wire: any) => Promise<readonly unknown[]>;
+    /**
+     * Frame-by-frame variant used by the concurrency consumer: it lets one
+     * request stream a partial answer and stay open while a second input is
+     * handled, which a single buffered array cannot express.
+     */
+    stream?: (wire: any) => AsyncIterable<unknown>; evidence?: typeof parentEvidence }) {
     const evidence = options.evidence ?? parentEvidence;
     const transport = new V3ProviderHttpTransport<T>({
       binding: options.binding, baseUrl: 'http://recorded.test', source: 'http', evidence,
       fetch: async (_url, init) => ({ status: 200, headers: new Headers({ 'content-type': 'text/event-stream' }),
         body: (async function* () {
+          const encoder = new TextEncoder();
+          const frame = (value: unknown) => encoder.encode(`data: ${JSON.stringify(value)}\n\n`);
+          const wire = JSON.parse(init.body!);
+          if (options.stream) {
+            yield frame({ type: 'response.created', response: { id: 'recorded' } });
+            for await (const next of options.stream(wire)) yield frame(next);
+            yield frame({ type: 'response.completed', response: { id: 'recorded' } });
+            return;
+          }
           const frames = [
             { type: 'response.created', response: { id: 'recorded' } },
-            ...(options.respond ? await options.respond(JSON.parse(init.body!)) : options.replay.filter((step) => step.kind === 'output').map((step, index) => ({
+            ...(options.respond ? await options.respond(wire) : options.replay.filter((step) => step.kind === 'output').map((step, index) => ({
               type: 'response.output_text.done', item_id: `text-${index}`, text: step.summary,
             }))),
             { type: 'response.completed', response: { id: 'recorded' } },
           ];
-          yield new TextEncoder().encode(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+          yield encoder.encode(frames.map((value) => `data: ${JSON.stringify(value)}\n\n`).join(''));
         })(), text: async () => '' }),
     });
     super({ binding: options.binding, routeRef: 'recorded', codec: new ResponsesProviderCodec(), transport, evidence });
@@ -1936,14 +1951,15 @@ test('provider explicit brain interpreter loads the interaction template and val
   );
 });
 
-// Failure basis: one crashed Provider stream leaves an opened parent turn with
-// incomplete reasoning-summary facts and no terminal output. The current
-// scope-level pending guard answers every later explicit input with "requires
-// its exact prior input", so the whole interaction scope stays permanently
-// bricked and every new user task fails. Impact: the product UI cannot submit
-// any new task in that scope. Cost: one durable seed and one recorded Provider
-// request. Probability: observed in production journal interaction-100.
-test('provider explicit brain interpreter serves a new input after discharging an interrupted parent turn', async () => {
+// Failure basis: an interpreter built without supervisor lease authority used to
+// discharge any turn whose records merely looked abandoned. The record shape
+// cannot prove that the previous execution owner stopped writing, so that path
+// froze a possibly live request from another owner and rejected its legal
+// appends. Impact: a lost delivered answer with no crash and no evidence.
+// Cost: one durable seed and no Provider round. Probability: any embedded
+// composition that omits the lease resolver on a scope with an unclosed turn.
+// The legitimate crash path keeps its own real termination receipt consumer.
+test('provider explicit brain interpreter holds an interrupted turn with no authenticated lifecycle authority', async () => {
   const deps = parentDependencies();
   const binding: ProviderBinding = {
     bindingId: 'binding-interrupted-turn', providerId: 'provider-interrupted-turn', protocol: 'responses',
@@ -1981,52 +1997,22 @@ test('provider explicit brain interpreter serves a new input after discharging a
     interactionId: 'interaction-next-task', inputRevision: 1, sourceRef: 'ui:new-task',
     rawInput: '整理新的启动步骤', clarifications: [], taskCandidates: [],
   };
-  const interpretation = await interpreter.interpret(nextRequest);
-  assert.equal(interpretation.kind, 'requirement');
+  await assert.rejects(
+    () => interpreter.interpret(nextRequest),
+    (error: unknown) => error instanceof Error
+      && error.message.includes('exact prior input')
+      && /no authenticated supervisor lease authority/.test(error.message),
+  );
+  // Nothing was frozen: the unproven turn keeps its recovery responsibility and
+  // the refused input never reaches the Provider or opens a fresh turn.
+  assert.deepEqual(await deps.parentJournal.readScopeAbandonedTurns(scope), [],
+    'a turn shape alone never justifies an abandonment');
   const openedAfter = await deps.parentJournal.readScopeOpenedTurns(scope);
-  assert.equal(openedAfter.length, 2, 'the new input must open a fresh turn after the interrupted one is discharged');
-  assert.equal(openedAfter[0]!.fact.turn.turnId, seeded.turn.turnId);
-  const freshTurn = openedAfter[1]!.fact.turn;
-  assert.ok(freshTurn.turnId !== seeded.turn.turnId, 'a discharged turn identity is never reused');
-  assert.ok(freshTurn.interactionId !== seeded.turn.interactionId);
-  assert.deepEqual(openedAfter[1]!.fact.priorCheckpoints, [],
-    'a discharged turn never enters the next turn semantic history');
-  assert.ok(await deps.helperJournal.readSemanticCheckpointExact(freshTurn));
+  assert.equal(openedAfter.length, 1, 'a held scope does not open a fresh turn');
+  assert.deepEqual(openedAfter[0]!.fact.turn, seeded.turn);
+  const heldSnapshot = await deps.parentJournal.readTurnSnapshot(seeded.turn);
+  assert.equal(heldSnapshot.abandonment, null, 'the held turn is not abandoned');
   assert.equal(await deps.helperJournal.readSemanticCheckpointExact(seeded.turn), null);
-  // The discharge is durable, independently readable and honest: the stream was
-  // interrupted before any terminal output and no business side effect exists.
-  const abandoned = await deps.parentJournal.readScopeAbandonedTurns(scope);
-  assert.equal(abandoned.length, 1);
-  assert.deepEqual(abandoned[0]!.fact.turn, seeded.turn);
-  assert.equal(abandoned[0]!.fact.reason, 'provider-interrupted-without-terminal-output');
-  assert.deepEqual(abandoned[0]!.fact.providerBinding, binding);
-  const crashedSnapshot = await deps.parentJournal.readTurnSnapshot(seeded.turn);
-  assert.deepEqual(crashedSnapshot.abandonment?.fact, abandoned[0]!.fact);
-  assert.equal(crashedSnapshot.resourceClose, null, 'the discharge never fabricates a provider close');
-  assert.deepEqual(crashedSnapshot.providerSettlements, []);
-  assert.deepEqual(crashedSnapshot.ownerReconciliations, []);
-  assert.ok(crashedSnapshot.requests.length > 0);
-  assert.ok(crashedSnapshot.requests.every(({ fact }) =>
-    fact.phase === 'dispatching' || fact.phase === 'dispatched' || fact.phase === 'waiting'));
-  assert.equal(crashedSnapshot.acceptedFacts.some(({ fact }) =>
-    fact.envelope.fact.kind === 'request-complete'), false);
-  assert.equal(crashedSnapshot.acceptedFacts.some(({ fact }) =>
-    fact.envelope.fact.kind === 'content' && fact.envelope.fact.channel === 'assistant-text'), false);
-  assert.ok(crashedSnapshot.acceptedFacts.length > 0,
-    'the honest discharge still describes the partial interrupted facts');
-
-  // B: the same scope keeps serving new inputs afterwards. The discharged turn
-  // must be permanently closed, not bypassed exactly once.
-  const followUp = await interpreter.interpret({
-    interactionId: 'interaction-follow-up', inputRevision: 1, sourceRef: 'ui:follow-up',
-    rawInput: '再整理一次启动步骤', clarifications: [], taskCandidates: [],
-  });
-  assert.equal(followUp.kind, 'requirement');
-  const openedAgain = await deps.parentJournal.readScopeOpenedTurns(scope);
-  assert.equal(openedAgain.length, 3);
-  assert.ok(await deps.helperJournal.readSemanticCheckpointExact(openedAgain[2]!.fact.turn));
-  assert.equal((await deps.parentJournal.readScopeAbandonedTurns(scope)).length, 1,
-    'a healthy turn has no reason to discharge anything');
 });
 
 // Failure basis: a live Provider stream whose turn is still owned by the current
@@ -2166,6 +2152,121 @@ test('provider explicit brain interpreter refuses to discharge a turn owned by t
     );
     assert.deepEqual(await parentJournal.readScopeAbandonedTurns(unknownScope), [],
       'an unprovable owner keeps recovery responsibility');
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: the previous consumer seeded a pending record and completed it
+// by hand, so it never proved that a second interpret really overlaps a live
+// first one. Impact: a guard that only works on hand-written shapes could still
+// freeze a genuinely streaming answer. Cost: one real daemon lease, one
+// controlled Provider stream held open, and two public interpret calls.
+// Probability: any scope whose user types again while the first answer streams.
+test('provider explicit brain interpreter keeps a streaming turn when a second input overlaps it', async () => {
+  const root = join(parentFixtureRoot, `live-overlap-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-live-overlap', providerId: 'provider-live-overlap', protocol: 'responses',
+    endpointRef: 'recorded://live-overlap', modelRef: 'model-live-overlap',
+    configDigest: 'sha256:live-overlap-config', capabilityDigest: 'sha256:live-overlap-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:live-overlap' };
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  let releaseFirst!: () => void;
+  const firstMayFinish = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let firstDeltaFlushed!: () => void;
+  const firstDelta = new Promise<void>((resolve) => { firstDeltaFlushed = resolve; });
+  let providerRequests = 0;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    await ensureControlLayout(paths);
+    lease = await acquireDaemonLease(paths);
+    const decision = (normalizedInput: string, title: string) => JSON.stringify({
+      kind: 'requirement', normalizedInput, knownFacts: [],
+      proposal: {
+        revision: 1, intent: 'create', title, objective: title,
+        deliverable: `${title}的结果`, deliveryConditions: [], evidenceRefs: [], blockingGaps: [],
+      },
+      decisionRefs: [],
+    });
+    const firstAnswer = decision('正在输出的第一个请求', '第一个请求');
+    const port = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [],
+      stream: async function* () {
+        providerRequests += 1;
+        if (providerRequests > 1) {
+          // The refused input must never get this far; keeping an answer here
+          // makes an accidental second dispatch observable instead of silent.
+          yield { type: 'response.output_text.done', item_id: 'text-refused', text: decision('同时到达的第二个输入', '第二个输入') };
+          return;
+        }
+        yield { type: 'response.output_text.delta', item_id: 'text-live', delta: '{"kind":"requirement",' };
+        firstDeltaFlushed();
+        await firstMayFinish;
+        yield { type: 'response.output_text.done', item_id: 'text-live', text: firstAnswer };
+      } });
+    const interpreter = createProviderExplicitBrainInterpreter({
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+      rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease, port,
+    });
+
+    // The first interpret is a real call that stays open mid-answer.
+    const live = interpreter.interpret({
+      interactionId: 'interaction-overlap-first', inputRevision: 1, sourceRef: 'ui:overlap-first',
+      rawInput: '正在输出的第一个请求', clarifications: [], taskCandidates: [],
+    });
+    await firstDelta;
+    const openedWhileLive = await parentJournal.readScopeOpenedTurns(scope);
+    assert.equal(openedWhileLive.length, 1, 'the streaming call owns one opened turn');
+    const liveTurn = openedWhileLive[0]!.fact.turn;
+    const liveSnapshot = await parentJournal.readTurnSnapshot(liveTurn);
+    assert.equal(liveSnapshot.abandonment, null);
+    assert.ok(liveSnapshot.acceptedFacts.some(({ fact }) =>
+      fact.envelope.fact.kind === 'content' && fact.envelope.fact.channel === 'assistant-text'),
+    'the live turn already carries partial Provider output');
+    assert.equal(liveSnapshot.acceptedFacts.some(({ fact }) =>
+      fact.envelope.fact.kind === 'request-complete'), false, 'the live request has no terminal fact yet');
+
+    // A second, different input arrives while the first is still streaming. It
+    // must be refused without abandoning the live turn.
+    await assert.rejects(
+      () => interpreter.interpret({
+        interactionId: 'interaction-overlap-second', inputRevision: 1, sourceRef: 'ui:overlap-second',
+        rawInput: '同时到达的第二个输入', clarifications: [], taskCandidates: [],
+      }),
+      (error: unknown) => error instanceof Error
+        && error.message.includes('exact prior input')
+        && /still the current active lease owner/.test(error.message),
+    );
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
+      'an overlapping input never freezes the streaming turn');
+    assert.equal(providerRequests, 1, 'the refused input never dispatches a Provider request');
+    assert.equal((await parentJournal.readScopeOpenedTurns(scope)).length, 1,
+      'the refused input never opens a second turn');
+
+    // Release the first request: it must finish normally with its own durable end.
+    releaseFirst();
+    const served = await live;
+    assert.equal(served.kind, 'requirement');
+    const finalSnapshot = await parentJournal.readTurnSnapshot(liveTurn);
+    assert.equal(finalSnapshot.abandonment, null);
+    assert.ok(finalSnapshot.acceptedFacts.some(({ fact }) =>
+      fact.envelope.fact.kind === 'request-complete' && fact.envelope.fact.terminal === 'completed'),
+    'the released request keeps its real terminal fact');
+    assert.ok(await helperJournal.readSemanticCheckpointExact(liveTurn),
+      'the released request commits its own semantic checkpoint');
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
+      'a normally finished turn is never abandoned');
   } finally {
     await lease?.release();
     await rm(root, { recursive: true, force: true });
