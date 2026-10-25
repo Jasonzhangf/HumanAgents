@@ -23,7 +23,7 @@ import {
   type InteractionParentTurnSnapshot,
   type InteractionParentTurnAppend,
 } from '../../packages/runtime/src/explicit-brain/index.js';
-import { id, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef, type InteractionTurnIdentity, type OrganId, type OccurrenceExecutionOwner, type JournalCommitRef } from '../../packages/contracts/src/index.js';
+import { id, validateProviderSettlement, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef, type InteractionTurnIdentity, type OrganId, type OccurrenceExecutionOwner, type JournalCommitRef } from '../../packages/contracts/src/index.js';
 import { ProviderAgentDriver, ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -2242,6 +2242,338 @@ test('provider explicit brain interpreter refuses to discharge a turn owned by t
     assert.deepEqual(await parentJournal.readScopeAbandonedTurns(unknownScope), [],
       'an unprovable owner keeps recovery responsibility');
   } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: a blob that cannot be parsed must never be guessed into a
+// recoverable or a new input. Impact: a corrupted asset could silently be
+// treated as a fresh submit and lose the original turn. Cost: one seeded turn
+// with a broken asset.
+test('provider explicit brain interpreter reports an unreadable committed input asset', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-unreadable-asset', providerId: 'provider-unreadable-asset', protocol: 'responses',
+    endpointRef: 'recorded://unreadable-asset', modelRef: 'model-unreadable-asset',
+    configDigest: 'sha256:unreadable-asset-config', capabilityDigest: 'sha256:unreadable-asset-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: 'runtime:unreadable-asset' };
+  await seedInterruptedParentTurn({
+    parentJournal: deps.parentJournal, evidence: deps.rawEvidence, rawContent: deps.rawContent,
+    binding, scope, interactionId: 'interaction-unreadable-asset', turnId: 'explicit-interpret-unreadable-asset',
+    initialInputText: '{"interactionId": "interaction-unreadable-asset", "inputRevision": 1, "rawInput": "broken',
+    executionOwner: { daemonLeaseId: 'lease-unreadable', daemonGeneration: 1, processStartToken: 'process-unreadable' },
+  });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+    binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: new RecordedParentPort({ binding, stepDelayMs: 0, replay: [] }),
+  });
+  await assert.rejects(
+    () => interpreter.interpret({
+      interactionId: 'interaction-unreadable-asset', inputRevision: 1, sourceRef: 'ui:unreadable-asset',
+      rawInput: 'retry', clarifications: [], taskCandidates: [],
+    }),
+    (error: unknown) => error instanceof Error
+      && error.message.includes('unreadable committed input asset'),
+  );
+  assert.deepEqual(await deps.parentJournal.readScopeAbandonedTurns(scope), [],
+    'a corrupt asset is never discharged or guessed');
+  assert.equal(await deps.parentJournal.readScopeOpenedTurns(scope).then((turns) => turns.length), 1,
+    'a corrupt asset never opens a fresh turn');
+});
+
+// Failure basis: a decodable asset that cannot be read as an input object is
+// not evidence that the user's business input changed. With a real terminated
+// owner and no unknown tool/helper side effect the old code fell through to the
+// different-input boundary, discharged the submitted turn and opened a fresh
+// one. Impact: recovery responsibility is silently ended and a new Provider
+// request runs in place of the submitted input. Cost: three seeded shapes on
+// one real takeover lease.
+test('provider explicit brain rejects an invalid committed input asset shape without discharging the turn', async () => {
+  const root = join(parentFixtureRoot, `invalid-asset-shape-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-invalid-asset', providerId: 'provider-invalid-asset', protocol: 'responses',
+    endpointRef: 'recorded://invalid-asset', modelRef: 'model-invalid-asset',
+    configDigest: 'sha256:invalid-asset-config', capabilityDigest: 'sha256:invalid-asset-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const acquired = await acquireTerminatedOwnerLease(root);
+    lease = acquired.lease;
+    const businessInput = {
+      interactionId: 'interaction-invalid-asset', inputRevision: 1, sourceRef: 'ui:invalid-asset',
+      rawInput: '请检查发布会当前状态', clarifications: [],
+    };
+    const shapes = [
+      { label: 'null-root', initialInputText: 'null' },
+      { label: 'array-root', initialInputText: '[]' },
+      { label: 'non-array-candidates', initialInputText: JSON.stringify({ ...businessInput, taskCandidates: 'broken' }) },
+    ] as const;
+    const observations: {
+      readonly shape: (typeof shapes)[number];
+      readonly outcome: { readonly resolved: unknown } | { readonly rejected: unknown };
+      readonly abandoned: readonly unknown[];
+      readonly opened: readonly { readonly fact: { readonly turn: { readonly turnId: string } } }[];
+      readonly wires: readonly unknown[];
+    }[] = [];
+    for (const shape of shapes) {
+      const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: `runtime:invalid-asset-${shape.label}` };
+      const turnId = `explicit-interpret-invalid-asset-${shape.label}`;
+      await seedInterruptedParentTurn({
+        parentJournal, evidence, rawContent, binding, scope,
+        interactionId: businessInput.interactionId, turnId,
+        initialInputText: shape.initialInputText, executionOwner: acquired.previousOwner,
+      });
+      const wires: any[] = [];
+      const port = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [], respond: async (wire) => {
+        wires.push(wire);
+        return [{ type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
+          kind: 'answer', normalizedInput: businessInput.rawInput, knownFacts: [],
+          answer: '不应到达 Provider', decisionRefs: [],
+        }) }];
+      } });
+      const interpreter = createProviderExplicitBrainInterpreter({
+        organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+        parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+        rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
+        helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+        binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), lease,
+        port,
+      });
+      const retry = { ...businessInput, taskCandidates: [] };
+      const outcome = await interpreter.interpret(retry).then(
+        (value) => ({ resolved: value as unknown }),
+        (error: unknown) => ({ rejected: error }),
+      );
+      const abandoned = await parentJournal.readScopeAbandonedTurns(scope);
+      const opened = await parentJournal.readScopeOpenedTurns(scope);
+      observations.push({ shape, outcome, abandoned, opened, wires });
+    }
+    const notRejected = observations
+      .filter((observed) => !('rejected' in observed.outcome
+        && observed.outcome.rejected instanceof Error
+        && observed.outcome.rejected.message.includes('invalid committed input asset')))
+      .map((observed) => `${observed.shape.label}: abandoned=${observed.abandoned.length} opened=${observed.opened.length} providerCalls=${observed.wires.length}`);
+    assert.deepEqual(notRejected, [], `every invalid asset shape must raise an explicit error; observed ${notRejected.join('; ')}`);
+    for (const observed of observations) {
+      const label = observed.shape.label;
+      assert.deepEqual(observed.abandoned, [], `${label}: an invalid asset never discharges the submitted turn`);
+      assert.equal(observed.opened.length, 1, `${label}: an invalid asset never opens a fresh turn`);
+      assert.equal(observed.opened[0]!.fact.turn.turnId, `explicit-interpret-invalid-asset-${label}`,
+        `${label}: the submitted turn is retained`);
+      assert.equal(observed.wires.length, 0, `${label}: an invalid asset never starts a Provider request`);
+    }
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: production only reaches the interpreter through the public
+// HTTP interpret route, which rebuilds the task list from the live coordinator.
+// A unit-only fix could recover the request while the route still refuses the
+// retry or reports a settlement that does not belong to the submitted turn.
+// Impact: the user cannot recover the submitted input in the running product.
+// Cost: one real child crash, one real takeover, one real UI runtime with the
+// real Provider adapter, codec and transport against a controlled upstream.
+test('provider explicit brain recovers a drifted original input on the public HTTP entry', async () => {
+  const root = join(parentFixtureRoot, `cold-input-http-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-cold-input-http', providerId: 'provider-cold-input-http', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'model-cold-input-http',
+    configDigest: 'sha256:cold-input-http-config', capabilityDigest: 'sha256:cold-input-http-capability',
+  };
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
+  const committedCandidates = [
+    { taskId: 'scheduled-task-b258bd97ecc762223c7a', title: '仍在的任务', status: 'running', currentInput: '继续执行仍在的任务' },
+    { taskId: 'scheduled-task-gone-away', title: '已消失的任务', status: 'created', currentInput: '继续执行已消失的任务' },
+  ];
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    // Generation 1 commits the submitted turn and dies. The takeover is the
+    // only lifecycle authority the retry gets.
+    const acquired = await acquireTerminatedOwnerLease(root);
+    lease = acquired.lease;
+    const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+    const rawContent = providerRawContentReader(evidence);
+    const wires: any[] = [];
+    const decisions: string[] = [];
+    const port = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [], respond: async (wire) => {
+      wires.push(wire);
+      const text = decisions.shift();
+      if (text === undefined) throw new Error('unexpected Provider request');
+      return [{ type: 'response.output_text.done', item_id: 'final', text }];
+    } });
+    const composition = { roleId: 'interaction' as const, source: 'http' as const,
+      provider: { source: 'http' as const, provider: 'http' as const, binding: binding.bindingId, protocol: 'responses' as const,
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef }, binding, port };
+    const accessControl = await AccessControlService.open({
+      credentialPath: join(root, 'security', 'web-access.json'), create: true,
+    });
+    // The seatbelt sandbox this consumer runs in refuses fs.watch with EMFILE,
+    // so the credential-directory watcher cannot register here. Credential
+    // hot-reload is unrelated to the recovery path under test; everything else
+    // on this instance (pairing, sessions, HTTP listener) stays real.
+    (accessControl as unknown as {
+      startCredentialWatch: AccessControlService['startCredentialWatch'];
+    }).startCredentialWatch = () => () => Promise.resolve(false);
+    runtime = await startUiRuntime({
+      mode: 'rcc', organId: scope.organId, binding, port: port as any,
+      productRoot: root, checkpointRoot: join(root, 'checkpoints'), evidenceRoot: join(root, 'assets'),
+      uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0, lease, accessControl,
+      explicitBrainTemplateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: 'cold-input-http' },
+      runtimeComposition: {
+        prepareAgentProvider: async () => composition as any,
+        prepareTaskAgentProvider: async () => { throw new Error('intake must not prepare a Task'); },
+      },
+    });
+    const session = await accessControl.consumePairingCode((await accessControl.issuePairingChallenge()).code);
+    const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+    const origin = runtime.server.url;
+    const post = async (path: string, body: unknown): Promise<Response> => fetch(`${origin}${path}`, {
+      method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const get = async (path: string): Promise<Response> => fetch(`${origin}${path}`, { headers: { cookie, origin } });
+    const receive = async (sourceRef: string, rawInput: string): Promise<{ interactionId: string; sourceRef: string; rawInput: string }> => {
+      const response = await post('/api/explicit/inputs', { channel: 'business', sourceRef, rawInput });
+      const text = await response.text();
+      assert.equal(response.status, 201, text);
+      const created = JSON.parse(text) as { readonly interactionId: string };
+      const snapshot = await runtime!.service.inspectExplicitInteraction(created.interactionId);
+      return { interactionId: created.interactionId, sourceRef: snapshot.sourceRef, rawInput: snapshot.rawInput };
+    };
+    const journalFile = uiRuntimeControlJournalPath(join(root, 'checkpoints/rcc'));
+    const parentJournal = new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile));
+    const helperJournal = new JsonlInteractionHelperJournal(new JsonlOrganJournal(journalFile));
+    const submitTurn = async (input: { interactionId: string; sourceRef: string; rawInput: string }, turnId: string) => {
+      // The committed asset is the original submission: it carries the task
+      // snapshot that the live coordinator no longer has.
+      const committedText = JSON.stringify({
+        interactionId: input.interactionId, inputRevision: 1, sourceRef: input.sourceRef,
+        rawInput: input.rawInput, clarifications: [], taskCandidates: committedCandidates,
+      });
+      const seeded = await seedInterruptedParentTurn({
+        parentJournal, evidence, rawContent, binding, scope,
+        interactionId: input.interactionId, turnId, initialInputText: committedText,
+        executionOwner: acquired.previousOwner,
+      });
+      return { seeded, committedText };
+    };
+
+    // 1. The retry of the submitted interaction restores the committed input.
+    const first = await receive('ui:cold-input-http', '请检查发布会当前状态');
+    const firstTurn = await submitTurn(first, 'explicit-interpret-cold-input-http');
+    decisions.push(JSON.stringify({
+      kind: 'answer', normalizedInput: first.rawInput, knownFacts: [],
+      answer: '发布会状态取自原始提交的候选快照', decisionRefs: [],
+    }));
+    const interpreted = await post(`/api/explicit/interactions/${encodeURIComponent(first.interactionId)}/interpret`, {});
+    const interpretedText = await interpreted.text();
+    assert.equal(interpreted.status, 200, interpretedText);
+    const answered = JSON.parse(interpretedText) as { readonly state: string; readonly reply: string };
+    assert.equal(answered.state, 'answered');
+    assert.equal(answered.reply, '发布会状态取自原始提交的候选快照');
+    // The submitted turn, its business execution and one new epoch are the ones
+    // that finished; no discharge happened.
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
+      'the public retry must not discharge the submitted turn');
+    const opened = await parentJournal.readScopeOpenedTurns(scope);
+    assert.equal(opened.length, 1);
+    assert.deepEqual(opened[0]!.fact.turn, firstTurn.seeded.turn);
+    const snapshot = await parentJournal.readTurnSnapshot(firstTurn.seeded.turn);
+    assert.equal(snapshot.ownerReconciliations.length, 1);
+    assert.equal(snapshot.ownerReconciliations[0]!.fact.effectiveExecutionEpoch, 2);
+    assert.equal(snapshot.ownerReconciliations[0]!.fact.replacementOwner.daemonGeneration, lease.record.generation);
+    assert.equal(snapshot.resourceClose?.fact.execution.executionEpoch, 2);
+    assert.deepEqual(snapshot.turnInput?.fact.execution, {
+      runtimeId: firstTurn.seeded.turn.turnId, organId: scope.organId,
+      operationId: id('operation', `op-${firstTurn.seeded.turn.turnId}`),
+      executionEpoch: 1, interactionTurn: firstTurn.seeded.turn,
+    });
+    // The recovered answer carries the original typed settlement of this turn.
+    const settlementResponse = await get(
+      `/api/explicit/interactions/${encodeURIComponent(first.interactionId)}/control/provider-settlement`
+      + `?inputRevision=1&turnId=${encodeURIComponent(firstTurn.seeded.turn.turnId)}`,
+    );
+    const settlementText = await settlementResponse.text();
+    assert.equal(settlementResponse.status, 200, settlementText);
+    const receipt = (JSON.parse(settlementText) as { readonly fact: InteractionProviderSettlementReceipt }).fact;
+    validateProviderSettlement(receipt.settlement);
+    assert.equal(receipt.interactionId, first.interactionId);
+    assert.equal(receipt.inputRevision, 1);
+    assert.equal(receipt.settlement.state, 'succeeded');
+    // The Provider read the committed snapshot, not the reduced live one.
+    assert.equal(wires.length, 1);
+    const firstUserText = wires[0].input
+      .filter((item: any) => item.type === 'message' && item.role === 'user')
+      .map((item: any) => item.content.map((unit: any) => unit.text).join(''))
+      .join('');
+    assert.equal(firstUserText, firstTurn.committedText);
+
+    // 2. A later new input is still served on the same runtime.
+    const second = await receive('ui:cold-input-http-next', '下一个独立问题');
+    decisions.push(JSON.stringify({
+      kind: 'answer', normalizedInput: second.rawInput, knownFacts: [], answer: '后续输入正常处理', decisionRefs: [],
+    }));
+    const nextInterpreted = await post(`/api/explicit/interactions/${encodeURIComponent(second.interactionId)}/interpret`, {});
+    const nextText = await nextInterpreted.text();
+    assert.equal(nextInterpreted.status, 200, nextText);
+    assert.equal((JSON.parse(nextText) as { readonly state: string }).state, 'answered');
+
+    // 3. An answer that selects a task the live coordinator no longer has is
+    // refused by the service, and the closed parent turn does not block the
+    // next input. No task is created or granted.
+    const third = await receive('ui:cold-input-http-vanished', '请更新已消失任务的计划');
+    const thirdTurn = await submitTurn(third, 'explicit-interpret-cold-input-http-vanished');
+    decisions.push(JSON.stringify({
+      kind: 'requirement', normalizedInput: third.rawInput, knownFacts: [],
+      matchedTaskId: 'scheduled-task-gone-away',
+      proposal: {
+        revision: 1, intent: 'change', title: '更新已消失任务的计划', objective: '更新已消失任务的计划',
+        deliverable: '更新后的计划', deliveryConditions: [], evidenceRefs: [], blockingGaps: [],
+      },
+      decisionRefs: [],
+    }));
+    const rejected = await post(`/api/explicit/interactions/${encodeURIComponent(third.interactionId)}/interpret`, {});
+    const rejectedText = await rejected.text();
+    assert.equal(rejected.status, 409, rejectedText);
+    assert.equal((JSON.parse(rejectedText) as { readonly error: { readonly code: string } }).error.code,
+      'explicit-brain.task-match-invalid');
+    assert.equal(runtime.service.listTasks().counts.total, 0, 'a vanished task never becomes a task change');
+    // The recovered parent turn still closed, so the scope accepts new input.
+    assert.ok(await helperJournal.readSemanticCheckpointExact(thirdTurn.seeded.turn));
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), []);
+    const fourth = await receive('ui:cold-input-http-after-reject', '拒绝后的新输入');
+    decisions.push(JSON.stringify({
+      kind: 'answer', normalizedInput: fourth.rawInput, knownFacts: [], answer: '拒绝后仍可继续', decisionRefs: [],
+    }));
+    const fourthInterpreted = await post(`/api/explicit/interactions/${encodeURIComponent(fourth.interactionId)}/interpret`, {});
+    const fourthText = await fourthInterpreted.text();
+    assert.equal(fourthInterpreted.status, 200, fourthText);
+    assert.equal((JSON.parse(fourthText) as { readonly state: string }).state, 'answered');
+    assert.equal(runtime.service.listTasks().counts.total, 0);
+    console.log(JSON.stringify({
+      event: 'cold-input-http-receipt', recoveredTurn: firstTurn.seeded.turn.turnId,
+      epoch: snapshot.resourceClose?.fact.execution.executionEpoch,
+      settlement: { interactionId: receipt.interactionId, inputRevision: receipt.inputRevision, state: receipt.settlement.state },
+      providerSawCommittedCandidates: JSON.parse(firstUserText).taskCandidates.length,
+      vanishedTaskRejected: 409, tasksAfter: runtime.service.listTasks().counts.total,
+    }));
+  } finally {
+    await runtime?.close();
     await lease?.release();
     await rm(root, { recursive: true, force: true });
   }
@@ -5136,4 +5468,210 @@ test('provider explicit brain reads the unique decision when the output echoes i
   // nothing was invented: the scope holds no parse failure.
   const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
   assert.deepEqual(await deps.parentJournal.readScopeParseFailures(scope), []);
+});
+
+// Failure basis: the pending-input selection compared the committed input and
+// the retry byte for byte, so a live task snapshot that drifted between the
+// original submission and the retry made the same interaction/revision look
+// like different input. Impact: the only legal recovery of the submitted turn
+// is refused (or the turn is discharged and its original context lost) while
+// the user retries the same input. Cost: one real terminated-owner takeover
+// receipt, one seeded interrupted turn and one recorded Provider request.
+// Probability: any retry whose task list changed after the original submit,
+// which is every longer-lived interaction.
+test('provider explicit brain interpreter restores the committed input when only live task candidates drifted', async () => {
+  const root = join(parentFixtureRoot, `candidate-drift-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-candidate-drift', providerId: 'provider-candidate-drift', protocol: 'responses',
+    endpointRef: 'recorded://candidate-drift', modelRef: 'model-candidate-drift',
+    configDigest: 'sha256:candidate-drift-config', capabilityDigest: 'sha256:candidate-drift-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    // Generation 1 owns the turn and dies; the takeover proves it stopped, so a
+    // refusal here can only come from the input boundary, never from ownership.
+    const acquired = await acquireTerminatedOwnerLease(root);
+    lease = acquired.lease;
+    const committedCandidates = [
+      { taskId: 'scheduled-task-still-there', title: '仍在的任务', status: 'running', currentInput: '继续执行仍在的任务' },
+      { taskId: 'scheduled-task-gone-away', title: '已消失的任务', status: 'created', currentInput: '继续执行已消失的任务' },
+    ];
+    const businessInput = {
+      interactionId: 'interaction-candidate-drift', inputRevision: 1, sourceRef: 'ui:candidate-drift',
+      rawInput: '请检查发布会当前状态', clarifications: [],
+    };
+    const committedText = JSON.stringify({ ...businessInput, taskCandidates: committedCandidates });
+    // Two owner realities must recover the same submitted input: a takeover
+    // whose termination receipt is retained, and the production shape where the
+    // old generation's receipt was evicted. Recovery needs a committed lease
+    // replacement, never the abandonment receipt that only discharge requires.
+    const owners = [
+      { label: 'retained receipt', owners: acquired.previousOwner },
+      { label: 'lost receipt', owners: { daemonLeaseId: 'lease-candidate-drift-lost', daemonGeneration: 1, processStartToken: 'process-candidate-drift-lost' } },
+    ];
+    for (const owner of owners) {
+      const turnId = `explicit-interpret-candidate-drift-${owner.label.replaceAll(' ', '-')}`;
+      const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: `runtime:candidate-drift-${owner.label.replaceAll(' ', '-')}` };
+      const seeded = await seedInterruptedParentTurn({
+        parentJournal, evidence, rawContent, binding, scope,
+        interactionId: businessInput.interactionId, turnId,
+        initialInputText: committedText, executionOwner: owner.owners,
+      });
+      const wires: any[] = [];
+      const port = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [], respond: async (wire) => {
+        wires.push(wire);
+        return [{ type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
+          kind: 'answer', normalizedInput: businessInput.rawInput, knownFacts: [],
+          answer: '发布会当前状态取自原始提交的候选快照', decisionRefs: [],
+        }) }];
+      } });
+      const composition = { roleId: 'interaction' as const, source: 'http' as const,
+        provider: { source: 'http' as const, provider: 'http' as const, binding: binding.bindingId, protocol: 'responses' as const,
+          model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef }, binding, port };
+      const interpreter = createProviderExplicitBrainInterpreter({
+        organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+        parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+        rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
+        helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+        binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), lease,
+        prepareAgentProvider: async () => composition,
+        port,
+      });
+      // The retry carries the live snapshot: one candidate disappeared since
+      // the original submission. Every user business input is unchanged.
+      const drifted = { ...businessInput, taskCandidates: [committedCandidates[0]!] };
+      const result = await interpreter.interpret(drifted);
+      assert.equal(result.kind, 'answer', owner.label);
+      if (result.kind !== 'answer') throw new Error('expected a recovered answer');
+      assert.equal(result.answer, '发布会当前状态取自原始提交的候选快照');
+      // The submitted turn is recovered, not discharged: one turn, one continue
+      // reconciliation, epoch 2 and no abandonment fact.
+      assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
+        `${owner.label}: a same-input retry must never discharge the submitted turn`);
+      const opened = await parentJournal.readScopeOpenedTurns(scope);
+      assert.equal(opened.length, 1, `${owner.label}: recovery continues the submitted turn instead of opening a second one`);
+      assert.deepEqual(opened[0]!.fact.turn, seeded.turn);
+      assert.equal(opened[0]!.fact.turn.turnId, turnId);
+      const snapshot = await parentJournal.readTurnSnapshot(opened[0]!.fact.turn);
+      assert.equal(snapshot.ownerReconciliations.length, 1);
+      const reconciliation = snapshot.ownerReconciliations[0]!.fact;
+      assert.equal(reconciliation.mode, 'continue');
+      assert.equal(reconciliation.effectiveExecutionEpoch, 2);
+      assert.deepEqual(reconciliation.previousOwner, owner.owners);
+      assert.equal(reconciliation.replacementOwner.daemonGeneration, lease.record.generation);
+      // The original business execution is the one that continues.
+      assert.equal(snapshot.turnInput?.fact.execution.operationId.value, `op-${turnId}`);
+      assert.equal(snapshot.turnInput?.fact.execution.runtimeId, turnId);
+      assert.equal(snapshot.resourceClose?.fact.execution.executionEpoch, 2);
+      // The Provider must read the committed candidate snapshot. A fix that only
+      // relaxes the comparison and runs the retry as new input would hand the
+      // reduced live snapshot to the model instead.
+      assert.equal(wires.length, 1, owner.label);
+      const userText = wires[0].input
+        .filter((item: any) => item.type === 'message' && item.role === 'user')
+        .map((item: any) => item.content.map((unit: any) => unit.text).join(''))
+        .join('');
+      assert.equal(userText, committedText, `${owner.label}: the Provider sees the exact committed request`);
+      assert.match(userText, /scheduled-task-gone-away/);
+      assert.equal(JSON.parse(userText).taskCandidates.length, 2);
+      assert.ok(await helperJournal.readSemanticCheckpointExact(opened[0]!.fact.turn));
+    }
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: the recovery above must stay scoped to one committed input.
+// A wider rule that restored the committed request whenever the task candidates
+// drift would silently replace a genuinely new user input with older text.
+// Impact: the user's new requirement is answered as the previous one. Cost: one
+// seeded turn per mutated field on the same terminated-owner lease.
+test('provider explicit brain keeps the different-input boundary when the business input changed', async () => {
+  const root = join(parentFixtureRoot, `candidate-drift-guard-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-candidate-guard', providerId: 'provider-candidate-guard', protocol: 'responses',
+    endpointRef: 'recorded://candidate-guard', modelRef: 'model-candidate-guard',
+    configDigest: 'sha256:candidate-guard-config', capabilityDigest: 'sha256:candidate-guard-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const acquired = await acquireTerminatedOwnerLease(root);
+    lease = acquired.lease;
+    const committedCandidates = [
+      { taskId: 'scheduled-task-guard-live', title: '仍在的任务', status: 'running', currentInput: '继续执行仍在的任务' },
+      { taskId: 'scheduled-task-guard-gone', title: '已消失的任务', status: 'created', currentInput: '继续执行已消失的任务' },
+    ];
+    const businessInput = {
+      interactionId: 'interaction-candidate-guard', inputRevision: 1, sourceRef: 'ui:candidate-guard',
+      rawInput: '请检查发布会当前状态', clarifications: [{ question: '什么时候？', answer: '明天' }],
+    };
+    const mutations = [
+      { name: 'raw-input', request: { ...businessInput, rawInput: '请检查另一件事' } },
+      { name: 'clarification', request: { ...businessInput, clarifications: [{ question: '什么时候？', answer: '后天' }] } },
+      { name: 'workspace', request: { ...businessInput, workspaceCwd: '/tmp/other-workspace', projectKey: 'other' } },
+      { name: 'interaction', request: { ...businessInput, interactionId: 'interaction-candidate-guard-other' } },
+      { name: 'revision', request: { ...businessInput, inputRevision: 2 } },
+    ] as const;
+    for (const mutation of mutations) {
+      const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: `runtime:candidate-guard-${mutation.name}` };
+      const seeded = await seedInterruptedParentTurn({
+        parentJournal, evidence, rawContent, binding, scope,
+        interactionId: businessInput.interactionId, turnId: `explicit-interpret-candidate-guard-${mutation.name}`,
+        initialInputText: JSON.stringify({ ...businessInput, taskCandidates: committedCandidates }),
+        executionOwner: acquired.previousOwner,
+      });
+      const wires: any[] = [];
+      const port = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [], respond: async (wire) => {
+        wires.push(wire);
+        return [{ type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
+          kind: 'answer', normalizedInput: String(mutation.request.rawInput), knownFacts: [],
+          answer: '新的输入按新输入处理', decisionRefs: [],
+        }) }];
+      } });
+      const interpreter = createProviderExplicitBrainInterpreter({
+        organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+        parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+        rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
+        helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+        binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), lease,
+        port,
+      });
+      const retry = { ...mutation.request, taskCandidates: [committedCandidates[0]!] };
+      const served = await interpreter.interpret(retry);
+      assert.equal(served.kind, 'answer', mutation.name);
+      // The submitted turn keeps its original input and is not recovered: the
+      // existing different-input boundary owns this retry.
+      const abandoned = await parentJournal.readScopeAbandonedTurns(scope);
+      assert.equal(abandoned.length, 1, `${mutation.name}: the submitted turn is discharged, not recovered`);
+      assert.deepEqual(abandoned[0]!.fact.turn, seeded.turn);
+      const opened = await parentJournal.readScopeOpenedTurns(scope);
+      assert.equal(opened.length, 2, `${mutation.name}: the new input opens its own turn`);
+      assert.ok(opened[1]!.fact.turn.turnId !== seeded.turn.turnId, `${mutation.name}: the new turn is distinct`);
+      assert.equal((await parentJournal.readTurnSnapshot(seeded.turn)).ownerReconciliations.length, 0,
+        `${mutation.name}: a changed business input never reconciles the submitted turn`);
+      assert.equal(wires.length, 1, mutation.name);
+      const userText = wires[0].input
+        .filter((item: any) => item.type === 'message' && item.role === 'user')
+        .map((item: any) => item.content.map((unit: any) => unit.text).join(''))
+        .join('');
+      assert.equal(userText, JSON.stringify(retry), `${mutation.name}: the Provider sees the new input`);
+      assert.ok(!/scheduled-task-guard-gone/.test(userText), `${mutation.name}: the original snapshot is not replayed`);
+    }
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
 });
