@@ -459,3 +459,21 @@ task-dashboard-scope-navigation-20261024 的最终候选 bbc4ce56a（含 655d9bb
 
 当前本地 main 较 origin/main 领先 10 个提交，含 task-5/6/7 三个修复（entry-answered d56dc3a51、intake-failure 12d386289、fix7 878273479）与 release 0.1.0040 版本提交。task-5/6/7 milestone 整体独立 Review 尚未执行，按既有门禁在 review PASS 前不推送 origin/main。导航任务本身已闭环，push 随该 milestone 一并收口。
 
+
+## 2026-10-25 task-5/6/7 集成与真实入口验收（发现两个新缺陷，暂不推送）
+
+本轮把三个新缺陷候选合入本地 main 并装成 0.1.0040，用真实入口在生产实例上验收。结论分两半：有三处真的好用了，另外暴露出两处更严重的真问题，所以暂不推送 origin/main。
+
+已合入本地 main：
+- task-7 入口展示简单回答（候选来自 entry-answered-20261024，合入 d56dc3a51）。
+- task-6 同一进程内一次 interpret 失败不再锁死 intake（候选来自 intake-failure-recovery-20261024，提交 9c87819b1，合入 12d386289）。合并时 tests/app/explicit-brain-runtime.test.ts 与 main 上新增的两条测试冲突；处理办法是保留 main 侧全部内容，再把候选新增的 RejectedAcceptanceJournal 与 intake-failure 用例手工插到流测试之后，并补 readScopeExecutionFailures 转发。
+- task-5 公开新建任务入口绑定确认身份（候选来自 task-no-terminal-20261024，提交 e1a069d05，合入 878273479）。
+- 版本提交 f5efaa5a4（0.1.0040），随后由其他协作方追加 f85a48920 记录导航集成。
+
+门禁结果：typecheck 通过；test:journal 25/25、test:explicit-brain 49/49、test:ui 65/65、test:provider 139/139、test:core 33/33 均通过；test:app 465 项中 fail 48，与基线 48 逐条一致（另有 2 条 cancelledByParent 属其他协作方新用例尾部的既有形态）。构建、打包、smoke、全局安装 0.1.0040 完成，正式 restart 从 generation 22 交接为 23（PID 98039），客户端一次 ready-timeout 是晚到回执。安装态实测：/api/runtime/status 0.42s、/api/tasks 0.009s、/api/product/board 0.73s（修复前 31.2s）；dashboard.html 与 tasks.html 均 200、0 pageerror、板块与 12 条任务可见。
+
+真实入口验收中的两处新缺陷：
+1. task-8 跨代 stranded turn 永久锁死 explicit intake。生产上 interaction-134 的 interpret 返回 500「the committed execution owner has no durable termination receipt; recovery responsibility is retained」。根因：该 turn 的 turn-input（journal seq 19386）记录 executionOwner.daemonGeneration=17，而 lease 每次接管只保留最新一条 takeover（当前 gen 23 只描述 22→23），gen 17 的终止收据已被后续代际覆盖，durable 数据里不再存在。于是 discharge 永远无法证明旧 owner 已停，任何新输入都被拒；重启只会让 generation 继续前进，情况更糟。修复方向：lease 侧维护有界终止历史，discharge 按 committed generation 查收据，缺历史时不伪造。
+2. task-9 任务永不收敛：Provider 只发 tool-arguments delta 永不 done。实测 task ui-task-b04f4708…-23 / ui-operation-16：03:40 模型已用 bash 正确写入 /tmp/ha-verify-terminal.md 且 tool-result succeeded，但第 5 个 request 之后只持续发 response.function_call_arguments.delta（contentUnitId 固定 item_c704efe2…），没有 done、没有新 tool-call、没有 request-complete，任务 26 分钟停在 running，直到手工 stop。期间 journal 19396→20128 行（55.9MB）、evidence 8478 个文件，每个 delta 都落一条 durable 事实，而单次 append 是 O(文件大小)。修复方向：以「无前进」而非「总时长」为判定，超预算落入诚实可诊断终态，并给同一 contentUnitId 的 delta 堆叠设界。
+
+这两个新缺陷都由我派给 peer 处理（task-8 由 fix8-intake-lock，task-9 由 fix6-tool-failure-fatal）。里程碑整体独立 Review 尚未执行；按门禁在 Review PASS 前不推送。我的两个探针任务（-22、-23）已从生产任务列表删除，生产任务数回到 11，journal 与 evidence 未删除。
