@@ -39,6 +39,9 @@ function dispatch(listener, { method = 'GET', url, headers = {}, body }) {
     request.method = method;
     request.url = url;
     request.headers = headers;
+    // A real IncomingMessage always carries a socket. The unauthenticated case
+    // must reach the 401 boundary, so model a non-loopback caller.
+    request.socket = { remoteAddress: '203.0.113.9' };
     const chunks = [];
     const response = {
       status: undefined,
@@ -263,11 +266,11 @@ test('stop and grant control derive the principal from the session and refuse a 
       owner: 'forged-owner',
       authority: { owner: 'forged-owner' },
     }, scope);
-    assert.equal(stopped.state, 'settled');
-    assert.equal(stopped.operationId, 'operation-stop-1');
-    assert.equal(stopped.principalOwner, principalOwner,
-      'the server session principal is the only actor, even when the request body forges one');
-    assert.deepEqual(stopped.targetScope, scope);
+    assert.deepEqual(stopped, {
+      state: 'settled',
+      operationId: 'operation-stop-1',
+      targetScope: scope,
+    }, 'the public stop receipt exposes only state, operationId and targetScope; the server principal stays internal even when the request body forges one');
     assert.equal(stops.length, 1);
     assert.deepEqual(verifies.at(-1), { taskId: 'task-a', projectKey: scope.projectKey, mode: scope.mode });
 

@@ -829,6 +829,12 @@ export function createDefaultExecutionComposition(input: {
           // candidates; a foreign or missing reference rejects.
           const candidates: EvidenceRef[] = [admitted.evidence(allocation, binding.admissionCommitRef.commitId)];
           const carryingTool = new Map<string, string>();
+          // A tool result's own raw output is produced by that tool. Its
+          // evidenceRefs may instead cite evidence another tool produced (for
+          // example, the standard end cites the inspect result it delivers).
+          // Producer attribution therefore wins over citation attribution; two
+          // different producers for one reference fail closed at resolution.
+          const producingTool = new Map<string, { readonly toolId: string; readonly conflict: boolean }>();
           const entries = await currentEntries();
           for (const entry of entries) {
             if (!('envelope' in entry)) continue;
@@ -851,8 +857,14 @@ export function createDefaultExecutionComposition(input: {
               && canonicalJsonStringify(fact.rawOutput.ref.scope) === canonicalJsonStringify(allocation.scope)) {
               candidates.push(fact.rawOutput.ref);
               if (materialTool !== undefined) {
-                carryingTool.set(fact.rawOutput.ref.evidenceId.value, materialTool);
-                carryingTool.set(fact.rawOutput.ref.locator, materialTool);
+                for (const key of [fact.rawOutput.ref.evidenceId.value, fact.rawOutput.ref.locator]) {
+                  const existing = producingTool.get(key);
+                  if (existing === undefined) {
+                    producingTool.set(key, { toolId: materialTool, conflict: false });
+                  } else if (existing.toolId !== materialTool) {
+                    producingTool.set(key, { toolId: existing.toolId, conflict: true });
+                  }
+                }
               }
             }
           }
@@ -878,7 +890,14 @@ export function createDefaultExecutionComposition(input: {
             // would only fail later at settlement with no recovery. Refuse it
             // here, where the model can still retry with a text-only delivery.
             if (requireDeliveryMaterial === true) {
-              const toolId = carryingTool.get(reference);
+              const producer = producingTool.get(reference);
+              if (producer?.conflict === true) {
+                throw new StandardTurnEndError(
+                  'standard-turn-end.delivery-unresolved',
+                  `delivery reference ${reference} resolves to conflicting producing tool results`,
+                );
+              }
+              const toolId = producer?.toolId ?? carryingTool.get(reference);
               if (!canCiteDeliveryMaterial(toolId)) {
                 throw new StandardTurnEndError(
                   'standard-turn-end.delivery-unresolved',

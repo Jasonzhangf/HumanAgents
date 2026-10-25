@@ -2416,20 +2416,47 @@ test('app_read_mounts_preference_routes_dispatch_to_config_resource', async () =
     const invalidBody = await invalid.json() as { readonly error?: { readonly code: string } };
     assert.equal(invalidBody.error?.code, 'display-preference.invalid-mode');
 
-    // An unauthenticated mutation keeps the session rejection and changes no
-    // stored value.
-    const unauth = await rawFetch(url, {
+    // A present but invalid session cookie is not adopted; the shared session
+    // guard keeps the typed rejection and the Config stays unchanged.
+    const rejected = await rawNoOrigin(url, 'PUT', 'HA_SESSION=not-a-valid-session', {
+      kind: 'set-default',
+      mode: 'actions',
+    });
+    assert.equal(rejected.status, 401);
+    const rejectedBody = await rejected.json() as { readonly error?: { readonly code: string } };
+    assert.equal(rejectedBody.error?.code, 'auth.session.invalid');
+    const afterRejected = await rawNoOrigin(url, 'GET', cookie);
+    const afterRejectedDto = await afterRejected.json() as {
+      readonly preference: { readonly schemaVersion: number; readonly mode: string };
+      readonly defaultMode: string;
+    };
+    assert.equal(afterRejectedDto.preference.mode, 'current');
+
+    // A loopback browser with no session at all adopts a local session at the
+    // real HTTP entry (the MVP adds no transport restriction), so the same
+    // public mutation succeeds and changes only the Config-backed preference.
+    // The non-loopback rejection stays on the shared dispatcher evidence; the
+    // real loopback listener cannot admit a non-loopback TCP peer, so this case
+    // does not fake one with a Host header.
+    const adopted = await rawFetch(url, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ kind: 'set-default', mode: 'actions' }),
     });
-    assert.equal(unauth.status, 401);
-    const afterInvalid = await rawNoOrigin(url, 'GET', cookie);
-    const afterInvalidDto = await afterInvalid.json() as {
+    assert.equal(adopted.status, 200);
+    assert.match(adopted.headers.get('set-cookie') ?? '', /^HA_SESSION=/, 'the loopback adoption writes a real session cookie');
+    const adoptedDto = await adopted.json() as {
       readonly preference: { readonly schemaVersion: number; readonly mode: string };
       readonly defaultMode: string;
     };
-    assert.equal(afterInvalidDto.preference.mode, 'current');
+    assert.equal(adoptedDto.preference.mode, 'actions');
+    assert.equal(adoptedDto.defaultMode, 'actions');
+    const afterAdoption = await rawNoOrigin(url, 'GET', cookie);
+    const afterAdoptionDto = await afterAdoption.json() as {
+      readonly preference: { readonly schemaVersion: number; readonly mode: string };
+      readonly defaultMode: string;
+    };
+    assert.equal(afterAdoptionDto.preference.mode, 'actions');
 
     // The mount is a pure read/save/reset resource: no task Journal record is
     // appended, and the execution port is never called (there is no task to
