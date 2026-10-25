@@ -495,3 +495,15 @@ Carol 已对 fc-public-contract-fixes-20261025 独立 ACCEPT。五文件候选�
 从 a78a75628 打包并安装 humanagent-cli 0.1.0040。正式 restart 完成 generation 29→30（PID 80645），durable lease readyAt 为 2026-10-25T19:05:32.046Z；重启客户端在 30 秒内先报 daemon-restart.ready-timeout，属晚到就绪，lease 已记录 ready。安装后检查：/api/liveness 200，/api/runtime/status 为 ready/rcc；无会话 loopback GET /api/ui/display-preference 返回 200；无效 HA_SESSION 的 PUT 返回 401 auth.session.invalid，随后读取偏好仍为 current；dashboard.html 与 tasks.html 均 200。
 
 任务板记录 integrated 后正常 close，cleanup receipt 已生成。fc worktree 已移除且目录不存在（TREE_GONE），branch codex/fc-public-contract-fixes-20261025 已删除。受保护的其他 worktree 未动。请求编号两项 P1 仍由 Carol 在自有树修复，Alice 已确认只复核这两个 finding。
+
+## 2026-10-25 请求编号响应错误不消耗编号集成
+
+Carol 的 request-numbering-error-no-consume-20261025 经 Alice 局部复核 ACCEPT 后由我集成。候选 706a050ef（12 文件，编号只在同步成功提交分配，legacy router pending/submitted 回滚）与设计文档 66313af35 已组合 origin/main 并 push，origin/main tip 为 54eec9ec0。
+
+合并后复跑：六处 tsc exit 0；app request-numbering 9/9、intake 12/12、explicit-brain 49/49、UI 7/7。打包安装 humanagent-cli 0.1.0040。
+
+现场验收在隔离 clean control root（/tmp/jenny-rn-live-134233，安装版、--provider rcc、真实 RCC 4444、真实 HTTP 10087，非 FakeReplay）完成，未触碰生产 10086 数据。interaction-1 首次 interpret 因 Provider 输出无 JSON decision 返回 500，requestNumber 为空、nextRequestNumber=1；同一 interaction 重试成功并取得 requestNumber=1；interaction-2 成功取得 requestNumber=2，nextRequestNumber=3。回执为 .worker-runs/request-numbering-error-no-consume-20261025/jenny-live-seq-20261025.md 与 jenny-live-seq-{i1,i2,journal}.json。安装包 UI 的 interaction-card-page.js 读取 snapshot.requestNumber 并渲染「第 N 次请求」。
+
+任务板已记录 integrated（commit 54eec9ec0）并 close，cleanup verified；worktree 与 branch codex/request-numbering-error-no-consume-20261025 已删除（TREE_GONE）。issue 6725903 已关闭并附同一 live 回执。
+
+生产 10086 的 interaction-139/140 仍被 parent turn（explicit-interpret-0d94c7e7-c3a0-412d-b828-82207254f7c6）的 owner reconciliation 永久阻断，任何新 explicit 输入都报 requires its exact prior input。该缺陷属 parent-turn/owner 域，与编号语义无因果，已在独立缺陷记录中跟踪；本次未改生产 journal。
