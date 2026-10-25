@@ -78,6 +78,10 @@ import {
   type StopSettlementRecovery,
 } from '../control/steering.js';
 import type { AgentHookStage } from '../agent-io/events.js';
+import {
+  DEFAULT_AGENT_IO_EVENT_BUDGET,
+  type AgentIoEventBudget,
+} from '../agent-io/types.js';
 import { ContextCommitter, type PublishedContext } from '../context/index.js';
 import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
 import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
@@ -629,6 +633,13 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly hookRegistry?: AgentHookRegistry;
   readonly taskIdPrefix?: string;
   readonly now?: () => Date;
+  /**
+   * The declared request budget applied to one provider attempt observed as
+   * normalized provider events. Streamed partials are activity only; a
+   * continued-but-unclosed content unit exhausts the budget and drives the
+   * standard stop control. Absent means `DEFAULT_AGENT_IO_EVENT_BUDGET`.
+   */
+  readonly executionBudget?: Partial<AgentIoEventBudget>;
   readonly checkpointBoundary?: RuntimeCheckpointBoundaryPort;
   /** Runtime-owned I2 settlement for committed stopped checkpoints. */
   readonly inspectionStop?: RuntimeInspectionStopSettlementPort;
@@ -828,6 +839,120 @@ export interface OperationRecord {
 
 function sameId(left: { readonly scope: string; readonly value: string } | undefined, right: { readonly scope: string; readonly value: string } | undefined): boolean {
   return left?.scope === right?.scope && left?.value === right?.value;
+}
+
+/**
+ * Provider event kinds that represent a completed content unit, a tool call, a
+ * provider terminal state or a provider error. Streamed partials are `model`
+ * activity and never progress, so a content unit that only ever streams stays
+ * outside the progress clock.
+ */
+const PROGRESS_PROVIDER_EVENT_KINDS: ReadonlySet<ProviderEvent['kind']> = new Set([
+  'output',
+  'tool',
+  'terminal',
+  'error',
+]);
+
+function isProgressProviderEvent(event: ProviderEvent): boolean {
+  return PROGRESS_PROVIDER_EVENT_KINDS.has(event.kind);
+}
+
+/** The concrete declared timer an attempt exhausted, for honest diagnostics. */
+function budgetExhaustionReason(
+  budget: AgentIoEventBudget,
+  turnStartedAtMs: number,
+  lastActivityAtMs: number,
+  lastProgressAtMs: number,
+  nowMs: number,
+): string | undefined {
+  if (budget.noProgressAtMs !== undefined && nowMs - lastProgressAtMs >= budget.noProgressAtMs) {
+    return `no completed content unit within ${budget.noProgressAtMs}ms while the request kept streaming`;
+  }
+  if (nowMs - lastActivityAtMs >= budget.maxSilentDurationMs) {
+    return `no provider event within ${budget.maxSilentDurationMs}ms`;
+  }
+  if (nowMs - turnStartedAtMs >= budget.maxTurnDurationMs) {
+    return `request exceeded the ${budget.maxTurnDurationMs}ms turn duration`;
+  }
+  return undefined;
+}
+
+/**
+ * Wraps one provider observation stream with the declared request budget. The
+ * pending iterator step is kept across deadlines, so waiting for a deadline
+ * never starts a second concurrent read on the same stream.
+ */
+class BudgetedProviderObservations {
+  private pending: Promise<IteratorResult<AgentRuntimeObservation>> | undefined;
+  private readonly startedAtMs: number;
+  private lastActivityAtMs: number;
+  private lastProgressAtMs: number;
+
+  constructor(
+    private readonly iterator: AsyncIterator<AgentRuntimeObservation>,
+    private readonly budget: AgentIoEventBudget,
+    private readonly nowMs: () => number,
+  ) {
+    const now = nowMs();
+    this.startedAtMs = now;
+    this.lastActivityAtMs = now;
+    this.lastProgressAtMs = now;
+  }
+
+  exhausted(): string | undefined {
+    return budgetExhaustionReason(
+      this.budget,
+      this.startedAtMs,
+      this.lastActivityAtMs,
+      this.lastProgressAtMs,
+      this.nowMs(),
+    );
+  }
+
+  async next(): Promise<
+    | { readonly kind: 'observation'; readonly step: IteratorResult<AgentRuntimeObservation> }
+    | { readonly kind: 'deadline' }
+  > {
+    this.pending ??= this.iterator.next();
+    const now = this.nowMs();
+    const latestDeadline = Math.min(
+      this.lastActivityAtMs + this.budget.maxSilentDurationMs,
+      this.startedAtMs + this.budget.maxTurnDurationMs,
+      ...(this.budget.noProgressAtMs === undefined
+        ? []
+        : [this.lastProgressAtMs + this.budget.noProgressAtMs]),
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<{ readonly kind: 'deadline' }>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: 'deadline' }), Math.max(1, latestDeadline - now));
+    });
+    try {
+      const step = await Promise.race([
+        this.pending.then((result) => ({ kind: 'observation' as const, step: result })),
+        deadline,
+      ]);
+      if (step.kind === 'observation') this.pending = undefined;
+      return step;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  note(event: ProviderEvent): void {
+    this.lastActivityAtMs = this.nowMs();
+    if (isProgressProviderEvent(event)) this.lastProgressAtMs = this.lastActivityAtMs;
+  }
+
+  async close(): Promise<void> {
+    if (this.pending === undefined) return;
+    const pending = this.pending;
+    this.pending = undefined;
+    // A stalled provider stream may never resume its pending read, so closing
+    // the stream must never block the stop that is already settling it.
+    pending.catch(() => undefined);
+    void this.iterator.return?.(undefined).catch(() => undefined);
+  }
 }
 
 function sameScope(left: ScopeRef, right: ScopeRef): boolean {
@@ -1651,7 +1776,7 @@ const EXECUTION_CAPABILITIES: RuntimeExecutionCapabilities = {
   agentIoRequestLifecycle: {
     state: 'unavailable',
     ownerId: 'humanagent.runtime.agent-io',
-    reason: 'UI execution drivers expose normalized provider events, not AgentIo raw response chunks, durable restart budgets, or settlement publication sinks',
+    reason: 'UI execution drivers expose normalized provider events, not AgentIo raw response chunks, durable restart budgets, or settlement publication sinks; the coordinator enforces the declared AgentIoPolicy activity/progress timers over those events instead',
   },
   contextCommitReentry: { state: 'available', ownerId: 'humanagent.runtime.checkpoints' },
   checkpointSettlementCancellation: { state: 'available', ownerId: 'humanagent.runtime.control' },
@@ -3291,6 +3416,19 @@ export class RuntimeTaskCoordinator {
   }
 
   async stop(taskId: TaskId): Promise<{ readonly state: string; readonly operationId?: string }> {
+    return this.stopWithReason(taskId, 'operator-stop');
+  }
+
+  /**
+   * The single standard stop control with the durable stop reason named by the
+   * caller. An operator stop and a request-budget stop run this same
+   * requestStop -> stopped checkpoint -> settle -> provider close path; a
+   * budget stop never fabricates a different terminal mechanism.
+   */
+  private async stopWithReason(
+    taskId: TaskId,
+    stopReason: string,
+  ): Promise<{ readonly state: string; readonly operationId?: string }> {
     const record = this.requireTask(taskId);
     if ((!record.running && record.release?.state !== 'prepared') || record.stopping || !record.operationId || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'task has no running execution to stop', 'start an execution first');
@@ -3355,7 +3493,7 @@ export class RuntimeTaskCoordinator {
         previousCheckpoint: record.checkpoint ?? null,
         checkpointSeq: record.checkpointSeq + 1,
         directiveRevision: record.directiveRevision,
-        stopReason: 'operator-stop',
+        stopReason,
         recoveryStateRef,
         runtime: record.runtime,
       });
@@ -3673,6 +3811,63 @@ export class RuntimeTaskCoordinator {
     };
   }
 
+  /**
+   * Ends an attempt whose declared request budget is exhausted. The control
+   * truth is a typed runtime error plus the standard stop control; the work
+   * result only reports that the attempt was cancelled by that stop.
+   */
+  private async stopExhaustedAttempt(
+    record: TaskRecord,
+    operation: OperationRecord,
+    report: ReturnType<RuntimeTaskCoordinator['providerAttemptReport']>,
+    input: Parameters<ExecutionAgentPort['execute']>[0],
+    reason: string,
+  ): Promise<{ readonly result: WorkResult; readonly closure?: AgentRuntimeClosure }> {
+    const message = `request budget exceeded: ${reason}`;
+    await this.beginRequestBudgetStop(record, operation, reason);
+    return {
+      result: {
+        taskId: report.taskId,
+        pipelineNodeId: report.pipelineNodeId,
+        agentId: report.agentId,
+        assignmentId: report.assignmentId,
+        attempt: report.attempt,
+        executionEpoch: input.assignment.executionEpoch,
+        inputRevision: report.inputRevision,
+        producedArtifactRefs: [],
+        status: 'cancelled',
+        summary: `provider execution stopped after ${message}`,
+        outputRefs: [],
+        evidenceRefs: [],
+        nextAction: 'settle',
+      },
+    };
+  }
+
+  /**
+   * The control facts of a request-budget stop: a typed runtime error plus the
+   * durable settling event, then the standard stop control with the exact stop
+   * reason. No payload is truncated and no protocol violation is invented.
+   */
+  private async beginRequestBudgetStop(
+    record: TaskRecord,
+    operation: OperationRecord,
+    reason: string,
+  ): Promise<void> {
+    const message = `request budget exceeded: ${reason}`;
+    record.error = {
+      code: 'execution.request-budget.exceeded',
+      ownerId: RUNTIME_OWNER,
+      message,
+      retryable: false,
+      nextAction: 'inspect the unfinished provider request before starting another execution',
+      evidenceRefs: [],
+    };
+    this.pushEvent(record, operation, 'execution.settling', 'settling',
+      `${message}; driving the standard stop control`, [], RUNTIME_OWNER);
+    await this.stopWithReason(record.taskId, 'request-budget-exceeded');
+  }
+
   private async executePreparedProviderAttempt(
     record: TaskRecord,
     operation: OperationRecord,
@@ -3714,7 +3909,21 @@ export class RuntimeTaskCoordinator {
         },
       };
     }
-    for await (const observation of composition.observe()) {
+    const observations = new BudgetedProviderObservations(
+      composition.observe()[Symbol.asyncIterator](),
+      { ...DEFAULT_AGENT_IO_EVENT_BUDGET, ...this.options.executionBudget },
+      () => this.now().getTime(),
+    );
+    try {
+      while (true) {
+        const exhausted = observations.exhausted();
+        if (exhausted !== undefined) {
+          return await this.stopExhaustedAttempt(record, operation, report, input, exhausted);
+        }
+        const step = await observations.next();
+        if (step.kind === 'deadline') continue;
+        if (step.step.done) break;
+        const observation = step.step.value;
       if (record.postCommitRecoveryPending) {
         return {
           result: {
@@ -3741,6 +3950,7 @@ export class RuntimeTaskCoordinator {
       }
       const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
       if (!event.providerEvent) continue;
+      observations.note(event.providerEvent);
       acceptedProviderEventCount += 1;
       acceptedProviderEvidenceRefs.push(...event.providerEvent.evidenceRefs);
       if (event.providerEvent.kind === 'output' && event.providerEvent.summary) {
@@ -3756,6 +3966,9 @@ export class RuntimeTaskCoordinator {
         if (producedPath !== undefined && !producedPaths.includes(producedPath)) producedPaths.push(producedPath);
       }
       await coordinator.recordProviderEvent(record, operation, event.providerEvent);
+      }
+    } finally {
+      await observations.close();
     }
     if (record.postCommitRecoveryPending) {
       return {
@@ -4779,15 +4992,34 @@ export class RuntimeTaskCoordinator {
         await composition!.submit(prompt);
         completeExecutionReady(true);
         if (record.stopping || record.postCommitRecoveryPending) return;
-        for await (const observation of composition!.observe()) {
-          if (record.postCommitRecoveryPending) return;
-          if (!observation.accepted) {
-            this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
-            continue;
+        const observations = new BudgetedProviderObservations(
+          composition!.observe()[Symbol.asyncIterator](),
+          { ...DEFAULT_AGENT_IO_EVENT_BUDGET, ...this.options.executionBudget },
+          () => this.now().getTime(),
+        );
+        try {
+          while (true) {
+            const exhausted = observations.exhausted();
+            if (exhausted !== undefined) {
+              await this.beginRequestBudgetStop(record, operation, exhausted);
+              break;
+            }
+            const step = await observations.next();
+            if (step.kind === 'deadline') continue;
+            if (step.step.done) break;
+            const observation = step.step.value;
+            if (record.postCommitRecoveryPending) return;
+            if (!observation.accepted) {
+              this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
+              continue;
+            }
+            const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
+            if (!event.providerEvent) continue;
+            observations.note(event.providerEvent);
+            await this.recordProviderEvent(record, operation, event.providerEvent);
           }
-          const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
-          if (!event.providerEvent) continue;
-          await this.recordProviderEvent(record, operation, event.providerEvent);
+        } finally {
+          await observations.close();
         }
         if (record.postCommitRecoveryPending) return;
         if (runtime!.snapshot().state === 'stopped') {

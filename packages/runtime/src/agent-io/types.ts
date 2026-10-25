@@ -227,6 +227,30 @@ export const DEFAULT_AGENT_IO_POLICY: AgentIoPolicy = {
   noProgressAtMs: 90_000,
 };
 
+/**
+ * The declared request budget a host can enforce when it only observes
+ * normalized provider events instead of the AgentIo raw response stream.
+ *
+ * Activity is any accepted provider event. Progress is a completed content
+ * unit, a tool call, a provider terminal state or a provider error. Streaming
+ * partials make the request active but never make it progress, which is what
+ * lets a continued-but-unclosed content unit exhaust this budget.
+ *
+ * These values are the same declared AgentIoPolicy timers, not a second
+ * invented limit: no payload, frame or byte ceiling is introduced.
+ */
+export interface AgentIoEventBudget {
+  readonly maxTurnDurationMs: number;
+  readonly maxSilentDurationMs: number;
+  readonly noProgressAtMs?: number;
+}
+
+export const DEFAULT_AGENT_IO_EVENT_BUDGET: AgentIoEventBudget = {
+  maxTurnDurationMs: DEFAULT_AGENT_IO_POLICY.maxTurnDurationMs,
+  maxSilentDurationMs: DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs,
+  noProgressAtMs: DEFAULT_AGENT_IO_POLICY.noProgressAtMs,
+};
+
 export interface AgentIoClock {
   readonly now: () => number;
 }
