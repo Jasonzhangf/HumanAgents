@@ -16,10 +16,12 @@ import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { TaskIdentityConsumer, type TaskIdentityPort } from '../../packages/runtime/src/orchestration/task-identity.js';
 import {
+  FileCheckpointStore,
   FakeReplayExecutionRuntimePort,
   startUiRuntime,
   UiRuntimeJournal,
 } from '../../packages/app/src/ui-runtime/index.js';
+import { projectDurableTaskInventory } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY } from '../../packages/app/src/ui-runtime/task-control.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
@@ -263,10 +265,12 @@ test('real HTTP task execution leaves running when deltas never complete and the
   const port = new NeverCompletingDeltaPort(binding);
   const started = await startRuntimeForBudget(root, port);
   const { runtime, cookie } = started;
+  let runtimeClosed = false;
   try {
     await submitNewTask(runtime, cookie, 'b4-delta-no-done');
 
-    const journal = new UiRuntimeJournal(join(root, 'checkpoints', 'fake', 'ui-runtime-journal.jsonl'));
+    const journalPath = join(root, 'checkpoints', 'fake', 'ui-runtime-journal.jsonl');
+    const journal = new UiRuntimeJournal(journalPath);
     let taskId: string | undefined;
     await waitForAsync(async () => {
       const created = journal.replay().find((record) => record.kind === 'task.created');
@@ -316,12 +320,37 @@ test('real HTTP task execution leaves running when deltas never complete and the
     const stoppedEvent = stoppedCheckpoint as { readonly event: { readonly summary: string } };
     assert.equal(stoppedEvent.event.summary, 'stopped checkpoint committed');
 
+    // r4-4 RED: a fresh read-only consumer over the same durable root must
+    // retain the typed budget error and the stopped checkpoint, without
+    // restarting the business request or appending new records.
+    await runtime.close();
+    runtimeClosed = true;
+    const coldJournal = new UiRuntimeJournal(journalPath);
+    const recordsBeforeColdRead = coldJournal.replay().length;
+    const inventory = await projectDurableTaskInventory({
+      records: coldJournal.replay(),
+      checkpointFor: () => new FileCheckpointStore(join(root, 'checkpoints', 'fake', 'task-control.jsonl')),
+    });
+    const coldEntry = inventory.entries.find((entry) => entry.snapshot.taskId.value === taskId);
+    assert.ok(coldEntry, 'fresh cold read must find the stopped task');
+    const cold = coldEntry!;
+    assert.equal(cold.durableState, 'checkpoint');
+    assert.equal(cold.snapshot.error?.code, 'execution.request-budget.exceeded');
+    assert.equal(cold.snapshot.error?.ownerId, 'humanagent.runtime');
+    assert.match(cold.snapshot.error?.message ?? '', /request budget exceeded/);
+    assert.equal(cold.snapshot.error?.nextAction, 'inspect the unfinished provider request before starting another execution');
+    assert.equal(cold.snapshot.checkpoint?.outcome, 'stopped');
+    assert.equal(cold.snapshot.checkpoint?.summary, 'request-budget-exceeded');
+    assert.equal(coldJournal.replay().length, recordsBeforeColdRead, 'cold read must not append or restart the business request');
+
     const receiptPath = join(root, 'b4-blackbox-receipt.json');
     await writeFile(receiptPath, JSON.stringify({
       root,
       taskId,
       state: dashboard.state,
       errorCode: dashboard.error?.code,
+      coldErrorCode: cold.snapshot.error?.code,
+      coldCheckpointSummary: cold.snapshot.checkpoint?.summary,
       checkpointSummary: dashboard.checkpoint?.summary,
       eventCount: records.filter((record) => record.kind === 'operation.event').length,
       hadBudgetStopEvent: eventSummaries.some((summary) => summary.includes('request budget exceeded')),
@@ -330,6 +359,6 @@ test('real HTTP task execution leaves running when deltas never complete and the
     }, null, 2));
     console.error(`[b4-blackbox] receipt written to ${receiptPath}`);
   } finally {
-    await runtime.close();
+    if (!runtimeClosed) await runtime.close();
   }
 });

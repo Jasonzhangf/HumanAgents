@@ -24,6 +24,7 @@ import {
   type ProviderError,
   type ProviderEvent,
   type ProviderRequestLifecycleEvent,
+  type ProviderRequestPhase,
   type PreparedRecoveryCapture,
   type ProviderToolCall,
   type ToolExecutionFact,
@@ -190,7 +191,7 @@ export interface RuntimeTaskRequestIdentity {
   readonly turnId: string;
   readonly requestId: string;
   readonly parentRequestId?: string;
-  readonly phase: string;
+  readonly phase: ProviderRequestPhase;
   readonly occurredAt: string;
 }
 
@@ -773,6 +774,8 @@ export interface TaskRecord {
   activeTurn?: ActiveTurnContext;
   captureOwner?: ActiveTurnRecoveryCapture;
   preparedCapture?: PreparedRecoveryCapture;
+  /** The budget observer that currently owns this task's provider stream. */
+  budgetObservation?: BudgetedProviderObservations;
   childTurns?: Map<string, { readonly context: ActiveTurnContext; readonly capture: ActiveTurnRecoveryCapture }>;
   originalInput?: string;
   /** The single Runtime-built assignment for the current orchestrated execution. */
@@ -797,6 +800,16 @@ export interface TaskRecord {
   orchestrated: boolean;
   running: boolean;
   stopping: boolean;
+  /**
+   * The single typed stop control that owns this task's pending settlement.
+   * `retryStop` reuses this reason and actor instead of re-labelling the stop,
+   * so an automatic budget stop stays `harness-control` and its
+   * `request-budget-exceeded` reason reaches the committed checkpoint.
+   */
+  stopControl?: {
+    readonly reason: string;
+    readonly actorKind: 'human-operator' | 'harness-control';
+  };
   postCommitRecoveryPending?: boolean;
   executionReady?: Promise<boolean>;
   resolveExecutionReady?: (ready: boolean) => void;
@@ -880,14 +893,34 @@ function budgetExhaustionReason(
 
 /**
  * Wraps one provider observation stream with the declared request budget. The
- * pending iterator step is kept across deadlines, so waiting for a deadline
- * never starts a second concurrent read on the same stream.
+ * declared timers are bounded by the real Provider request/turn identity the
+ * Provider binding reports on each event, not by the whole composition observe
+ * stream: a task that issues several confirmed requests, each inside its own
+ * budget, is never stopped for their cumulative wall time. The typed
+ * `dispatching`/`dispatched` lifecycle opens a request budget and the terminal
+ * phases close it; inter-request tool or orchestration waits are not provider
+ * silence. Until the first identity arrives the submitted request owns the
+ * clock, so a silent stream is still stopped. Events without a reported
+ * identity never restart the clock, so a single open request still exhausts
+ * the turn/no-progress timers.
+ *
+ * The pending iterator step is kept across deadlines, so waiting for a
+ * deadline never starts a second concurrent read on the same stream.
  */
 class BudgetedProviderObservations {
   private pending: Promise<IteratorResult<AgentRuntimeObservation>> | undefined;
-  private readonly startedAtMs: number;
+  /** Provider-reported request identity (`requestId`, else `turnId`). */
+  private requestBoundary: string | undefined;
+  private requestStartedAtMs: number;
+  private requestOpen: boolean;
   private lastActivityAtMs: number;
   private lastProgressAtMs: number;
+  /**
+   * Resolves when the typed Provider request lifecycle changes. A closed
+   * request has no armed deadline, so a later dispatch must wake the pending
+   * observation wait instead of leaving it blocked until the next delta.
+   */
+  private lifecycleWaiter: { readonly promise: Promise<void>; readonly resolve: () => void } | undefined;
 
   constructor(
     private readonly iterator: AsyncIterator<AgentRuntimeObservation>,
@@ -895,18 +928,26 @@ class BudgetedProviderObservations {
     private readonly nowMs: () => number,
   ) {
     const now = nowMs();
-    this.startedAtMs = now;
+    // The submitted request owns this clock until a Provider event reports its
+    // own request identity; a silent stream must still be stopped by silence.
+    this.requestStartedAtMs = now;
+    this.requestOpen = true;
     this.lastActivityAtMs = now;
     this.lastProgressAtMs = now;
   }
 
   exhausted(): string | undefined {
+    // No request is open between a Provider-reported terminal and the next
+    // typed dispatch. A real tool or orchestration wait belongs to neither
+    // request, so it must not be charged to the previous request's silence.
+    if (!this.requestOpen) return undefined;
+    const now = this.nowMs();
     return budgetExhaustionReason(
       this.budget,
-      this.startedAtMs,
+      this.requestStartedAtMs,
       this.lastActivityAtMs,
       this.lastProgressAtMs,
-      this.nowMs(),
+      now,
     );
   }
 
@@ -916,21 +957,26 @@ class BudgetedProviderObservations {
   > {
     this.pending ??= this.iterator.next();
     const now = this.nowMs();
-    const latestDeadline = Math.min(
-      this.lastActivityAtMs + this.budget.maxSilentDurationMs,
-      this.startedAtMs + this.budget.maxTurnDurationMs,
-      ...(this.budget.noProgressAtMs === undefined
-        ? []
-        : [this.lastProgressAtMs + this.budget.noProgressAtMs]),
-    );
+    const latestDeadline = this.requestOpen
+      ? Math.min(
+          this.lastActivityAtMs + this.budget.maxSilentDurationMs,
+          this.requestStartedAtMs + this.budget.maxTurnDurationMs,
+          ...(this.budget.noProgressAtMs === undefined
+            ? []
+            : [this.lastProgressAtMs + this.budget.noProgressAtMs]),
+        )
+      : undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<{ readonly kind: 'deadline' }>((resolve) => {
-      timer = setTimeout(() => resolve({ kind: 'deadline' }), Math.max(1, latestDeadline - now));
-    });
+    const deadline = latestDeadline === undefined
+      ? undefined
+      : new Promise<{ readonly kind: 'deadline' }>((resolve) => {
+          timer = setTimeout(() => resolve({ kind: 'deadline' }), Math.max(1, latestDeadline - now));
+        });
     try {
       const step = await Promise.race([
         this.pending.then((result) => ({ kind: 'observation' as const, step: result })),
-        deadline,
+        this.lifecycleChanged().then(() => ({ kind: 'deadline' as const })),
+        ...(deadline === undefined ? [] : [deadline]),
       ]);
       if (step.kind === 'observation') this.pending = undefined;
       return step;
@@ -940,11 +986,69 @@ class BudgetedProviderObservations {
   }
 
   note(event: ProviderEvent): void {
-    this.lastActivityAtMs = this.nowMs();
+    const now = this.nowMs();
+    const boundary = event.requestId ?? event.turnId;
+    if (boundary !== undefined && boundary !== this.requestBoundary) {
+      // A confirmed new Provider request opens its own budget window. The
+      // first boundary keeps the submitted-request start, so a first request
+      // that only stays silent is still charged to the declared silence timer.
+      const firstBoundary = this.requestBoundary === undefined;
+      this.requestBoundary = boundary;
+      this.requestOpen = true;
+      if (!firstBoundary) {
+        this.requestStartedAtMs = now;
+        this.lastProgressAtMs = now;
+      }
+    }
+    this.lastActivityAtMs = now;
     if (isProgressProviderEvent(event)) this.lastProgressAtMs = this.lastActivityAtMs;
+    // A terminal state closes the reported request. The next typed dispatch,
+    // or a new event identity when lifecycle reporting is unavailable, starts
+    // a fresh window.
+    if (event.kind === 'terminal') this.requestOpen = false;
+  }
+
+  /**
+   * Applies the typed Provider request lifecycle. `dispatching` and
+   * `dispatched` are open; every terminal phase closes the request. A new
+   * request identity, or a dispatch after a closed window, opens a fresh
+   * budget. This is the same report the runtime exposes as
+   * `requestIdentity`, never a log or summary inference.
+   */
+  noteLifecycle(event: ProviderRequestLifecycleEvent): void {
+    const now = this.nowMs();
+    const newIdentity = event.requestId !== this.requestBoundary;
+    if (newIdentity) this.requestBoundary = event.requestId;
+    if (event.phase === 'dispatching' || event.phase === 'dispatched') {
+      if (newIdentity || !this.requestOpen) {
+        this.requestStartedAtMs = now;
+        this.lastActivityAtMs = now;
+        this.lastProgressAtMs = now;
+      }
+      this.requestOpen = true;
+    } else {
+      this.requestOpen = false;
+    }
+    this.signalLifecycleChanged();
+  }
+
+  private lifecycleChanged(): Promise<void> {
+    if (this.lifecycleWaiter === undefined) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((settle) => { resolve = settle; });
+      this.lifecycleWaiter = { promise, resolve };
+    }
+    return this.lifecycleWaiter.promise;
+  }
+
+  private signalLifecycleChanged(): void {
+    const waiter = this.lifecycleWaiter;
+    this.lifecycleWaiter = undefined;
+    waiter?.resolve();
   }
 
   async close(): Promise<void> {
+    this.signalLifecycleChanged();
     if (this.pending === undefined) return;
     const pending = this.pending;
     this.pending = undefined;
@@ -2452,6 +2556,10 @@ export class RuntimeTaskCoordinator {
       phase: event.phase,
       occurredAt: event.occurredAt,
     };
+    if (record.operationId?.value === event.operationId.value
+      && record.executionEpoch === event.executionEpoch) {
+      record.budgetObservation?.noteLifecycle(event);
+    }
   }
 
   /** Required native ingress, separate from best-effort UI lifecycle projection. */
@@ -2722,6 +2830,7 @@ export class RuntimeTaskCoordinator {
     record.nextStep = '完成执行注册与覆盖后释放';
     record.allowedActions = ['stop'];
     record.error = undefined;
+    record.stopControl = undefined;
     record.orchestrated = operation.orchestrated;
     record.updatedAt = this.now().toISOString();
     return allocation;
@@ -3428,11 +3537,13 @@ export class RuntimeTaskCoordinator {
   private async stopWithReason(
     taskId: TaskId,
     stopReason: string,
+    actorKind: 'human-operator' | 'harness-control' = 'human-operator',
   ): Promise<{ readonly state: string; readonly operationId?: string }> {
     const record = this.requireTask(taskId);
     if ((!record.running && record.release?.state !== 'prepared') || record.stopping || !record.operationId || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'task has no running execution to stop', 'start an execution first');
     }
+    record.stopControl = { reason: stopReason, actorKind };
     record.stopping = true;
     if (record.release?.state === 'prepared' && !record.releasePending) {
       const state = await this.stopPreparedExecution(record, this.operations.get(record.operationId.value)!);
@@ -3469,7 +3580,7 @@ export class RuntimeTaskCoordinator {
     const command: RequestStopCommand = {
       source: 'control',
       command: 'steer.request-stop',
-      actorKind: 'human-operator',
+      actorKind,
       hasStopPermission: true,
       organId: this.options.organId,
       taskId,
@@ -3567,10 +3678,14 @@ export class RuntimeTaskCoordinator {
     const stopRequestState = runtimeState === 'admitted' || runtimeState === 'running' || runtimeState === 'waiting' || runtimeState === 'blocked'
       ? runtimeState
       : 'blocked';
+    // The stop owner is the single identity source: `retryStop` reuses the
+    // reason and actor the original stop recorded. It never swaps an automatic
+    // budget stop for an operator stop, or vice versa.
+    const stopControl = record.stopControl ?? { reason: 'operator-stop', actorKind: 'human-operator' as const };
     const command: RequestStopCommand = {
       source: 'control',
       command: 'steer.request-stop',
-      actorKind: 'human-operator',
+      actorKind: stopControl.actorKind,
       hasStopPermission: true,
       organId: this.options.organId,
       taskId,
@@ -3594,7 +3709,7 @@ export class RuntimeTaskCoordinator {
         previousCheckpoint: record.checkpoint ?? null,
         checkpointSeq: record.checkpointSeq + 1,
         directiveRevision: record.directiveRevision,
-        stopReason: 'operator-stop',
+        stopReason: stopControl.reason,
         recoveryStateRef,
         runtime: record.runtime,
       });
@@ -3816,6 +3931,24 @@ export class RuntimeTaskCoordinator {
    * truth is a typed runtime error plus the standard stop control; the work
    * result only reports that the attempt was cancelled by that stop.
    */
+  /**
+   * Whether the budget observer still owns a budget stop for this attempt.
+   * The check runs before any budget control fact is written. A lane that
+   * observes its deadline after another stop (manual, failure cleanup) or
+   * another operation/epoch took the task must exit without writing an error,
+   * an `execution.settling` event, or issuing a second stop.
+   */
+  private budgetStopOwnedByAttempt(record: TaskRecord, operation: OperationRecord): boolean {
+    if (!record.running || record.stopping || record.postCommitRecoveryPending) return false;
+    if (record.state !== 'running' && record.state !== 'admitted') return false;
+    if (record.operationId?.value !== operation.operationId.value) return false;
+    if (record.executionEpoch !== operation.executionEpoch) return false;
+    const runtime = record.runtime;
+    if (runtime === undefined) return false;
+    if (runtime.snapshot().state === 'stopped') return false;
+    return runtime.canStartStopControl(operation.operationId);
+  }
+
   private async stopExhaustedAttempt(
     record: TaskRecord,
     operation: OperationRecord,
@@ -3854,6 +3987,7 @@ export class RuntimeTaskCoordinator {
     operation: OperationRecord,
     reason: string,
   ): Promise<void> {
+    if (!this.budgetStopOwnedByAttempt(record, operation)) return;
     const message = `request budget exceeded: ${reason}`;
     record.error = {
       code: 'execution.request-budget.exceeded',
@@ -3864,8 +3998,9 @@ export class RuntimeTaskCoordinator {
       evidenceRefs: [],
     };
     this.pushEvent(record, operation, 'execution.settling', 'settling',
-      `${message}; driving the standard stop control`, [], RUNTIME_OWNER);
-    await this.stopWithReason(record.taskId, 'request-budget-exceeded');
+      `${message}; driving the standard stop control`, [], RUNTIME_OWNER, false, record.error.nextAction,
+      { error: record.error });
+    await this.stopWithReason(record.taskId, 'request-budget-exceeded', 'harness-control');
   }
 
   private async executePreparedProviderAttempt(
@@ -3914,11 +4049,15 @@ export class RuntimeTaskCoordinator {
       { ...DEFAULT_AGENT_IO_EVENT_BUDGET, ...this.options.executionBudget },
       () => this.now().getTime(),
     );
+    record.budgetObservation = observations;
     try {
       while (true) {
         const exhausted = observations.exhausted();
         if (exhausted !== undefined) {
-          return await this.stopExhaustedAttempt(record, operation, report, input, exhausted);
+          if (this.budgetStopOwnedByAttempt(record, operation)) {
+            return await this.stopExhaustedAttempt(record, operation, report, input, exhausted);
+          }
+          break;
         }
         const step = await observations.next();
         if (step.kind === 'deadline') continue;
@@ -3968,6 +4107,7 @@ export class RuntimeTaskCoordinator {
       await coordinator.recordProviderEvent(record, operation, event.providerEvent);
       }
     } finally {
+      if (record.budgetObservation === observations) record.budgetObservation = undefined;
       await observations.close();
     }
     if (record.postCommitRecoveryPending) {
@@ -4997,11 +5137,14 @@ export class RuntimeTaskCoordinator {
           { ...DEFAULT_AGENT_IO_EVENT_BUDGET, ...this.options.executionBudget },
           () => this.now().getTime(),
         );
+        record.budgetObservation = observations;
         try {
           while (true) {
             const exhausted = observations.exhausted();
             if (exhausted !== undefined) {
-              await this.beginRequestBudgetStop(record, operation, exhausted);
+              if (this.budgetStopOwnedByAttempt(record, operation)) {
+                await this.beginRequestBudgetStop(record, operation, exhausted);
+              }
               break;
             }
             const step = await observations.next();
@@ -5019,6 +5162,7 @@ export class RuntimeTaskCoordinator {
             await this.recordProviderEvent(record, operation, event.providerEvent);
           }
         } finally {
+          if (record.budgetObservation === observations) record.budgetObservation = undefined;
           await observations.close();
         }
         if (record.postCommitRecoveryPending) return;
