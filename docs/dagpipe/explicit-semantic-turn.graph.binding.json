@@ -12,7 +12,7 @@
       "implementationStatus": "pending-contract-and-runtime-validation",
       "plannedOwnerPath": "packages/runtime/src/explicit-brain/interaction-parent-turn-raw.ts",
       "plannedOwnerStatus": "exists-unverified",
-      "designNote": "装配显式交互轮次：写入当前原文 RawAsset，绑定 InteractionTurnIdentity、前序已提交语义检查点与 ExplicitTurnHelperSession；不伪造 Task 准入，也不向业务字段镜像控制真相。"
+      "designNote": "装配显式交互轮次：写入当前原文 RawAsset，绑定 InteractionTurnIdentity、前序已提交语义检查点与 ExplicitTurnHelperSession；不伪造 Task 准入，也不向业务字段镜像控制真相。 同一 interaction/revision 未闭合轮次重试时，若用户业务输入不变且仅实时 taskCandidates 漂移，由 route 在 explicit-brain-runtime.ts 内从已提交 initialInput 恢复完整原请求串联提交；不可解析资产显式报错、不 fallback。"
     },
     "route": {
       "ownerPath": "packages/app/src/explicit-brain-runtime.ts",
@@ -21,7 +21,7 @@
       "contextMaterializerOwnerPath": "packages/runtime/src/context/active-turn-materializer.ts",
       "contextMaterializerOwnerRel": "packages/runtime/src/context/active-turn-materializer.ts",
       "interpreterOwnerSymbol": "createProviderExplicitBrainInterpreter",
-      "designNote": "既有 materializer 汇集前序检查点、当前原文与请求记录；实际 interpreter prompt/parser 在 packages/app/src/explicit-brain-runtime.ts 推理 requirement 的 taskFlow 与 structuredProposal.title。字段复用 TaskFlowBinding；没有可靠结果时保持缺省，不生成 unknown 伪分类。用户 selector、executionPolicy 或固定触发模式不得提供分类。"
+      "designNote": "既有 materializer 汇集前序检查点、当前原文与请求记录；实际 interpreter prompt/parser 在 packages/app/src/explicit-brain-runtime.ts 推理 requirement 的 taskFlow 与 structuredProposal.title。字段复用 TaskFlowBinding；没有可靠结果时保持缺省，不生成 unknown 伪分类。用户 selector、executionPolicy 或固定触发模式不得提供分类。 恢复只允许 taskCandidates 与原资产不同，且用原资产的 taskCandidates 重组后序列化结果与原资产每字节相等；其他任何输入差异仍走原有不同输入边界及 abandon 说明，不放宽。"
     },
     "outcome": {
       "ownerPath": "packages/runtime/src/explicit-brain/index.ts",

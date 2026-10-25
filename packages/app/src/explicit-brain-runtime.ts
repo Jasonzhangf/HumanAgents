@@ -792,10 +792,60 @@ export function createProviderExplicitBrainInterpreter(input: {
           await discharge();
         });
       };
+      // The live task list is rebuilt from the current coordinator on every
+      // retry, so it can drift from the snapshot committed with the submitted
+      // turn. Only that dynamic field may be restored from the committed input;
+      // every other read below must then use the recovered request.
+      let effectiveRequest = request;
       let pending = await readPendingTurn();
       while (pending !== undefined) {
         const original = await input.rawContent.read({ scope: pending.fact.scope, content: pending.fact.initialInput });
-        if (new TextDecoder('utf-8', { fatal: true }).decode(original) === JSON.stringify(request)) break;
+        const committedText = new TextDecoder('utf-8', { fatal: true }).decode(original);
+        if (committedText === JSON.stringify(effectiveRequest)) break;
+        let committed: unknown;
+        try {
+          committed = JSON.parse(committedText);
+        } catch (error) {
+          throw new Error(
+            `unclosed interaction parent turn ${pending.fact.turn.turnId} has an unreadable committed input asset: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        // A decodable asset that cannot be read as an input object is not
+        // evidence that the user's business input changed. Keep the turn and
+        // its recovery responsibility instead of discharging it as new input.
+        const rootKind = committed === null
+          ? 'null'
+          : Array.isArray(committed) ? 'array' : typeof committed;
+        if (committed === null || typeof committed !== 'object' || Array.isArray(committed)) {
+          throw new Error(
+            `unclosed interaction parent turn ${pending.fact.turn.turnId} has an invalid committed input asset: root ${rootKind}`,
+          );
+        }
+        const committedRecord = committed as { readonly taskCandidates?: unknown };
+        // An explicit non-array taskCandidates has the same meaning: the asset
+        // cannot be restored and is not a different user input. A legacy object
+        // without that field keeps the existing different-input boundary.
+        if (Object.hasOwn(committedRecord, 'taskCandidates') && !Array.isArray(committedRecord.taskCandidates)) {
+          const candidatesKind = committedRecord.taskCandidates === null
+            ? 'null'
+            : typeof committedRecord.taskCandidates;
+          throw new Error(
+            `unclosed interaction parent turn ${pending.fact.turn.turnId} has an invalid committed input asset: taskCandidates ${candidatesKind}`,
+          );
+        }
+        // Substituting the committed candidates back into the retry must
+        // reproduce the committed input byte for byte. That single strict
+        // comparison keeps this path to the same interaction/revision with all
+        // user business input unchanged; any other difference still reaches
+        // the existing different-input boundary.
+        const restored = Array.isArray(committedRecord.taskCandidates)
+          ? { ...effectiveRequest, taskCandidates: committedRecord.taskCandidates as readonly ExplicitBrainTaskCandidate[] }
+          : undefined;
+        if (restored !== undefined && JSON.stringify(restored) === committedText) {
+          effectiveRequest = restored;
+          break;
+        }
         await abandonInterruptedTurn(pending);
         pending = await readPendingTurn();
       }
@@ -838,7 +888,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             const finalParentOutput = await coldOwner.readClosedTurnOutput();
             let interpretation: ExplicitBrainInterpretation;
             try {
-              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, effectiveRequest);
             } catch (parseError) {
               // The closed turn's own durable terminal output is unusable.
               // Re-reading it can never recover; close it so new input works.
@@ -875,7 +925,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             const finalParentOutput = await coldOwner.readReconciledTurnOutput();
             let interpretation: ExplicitBrainInterpretation;
             try {
-              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, effectiveRequest);
             } catch (parseError) {
               return await closeUnparseableTurn(coldOwner, parseError);
             }
@@ -890,7 +940,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             executionOwner: reconciliation.fact.replacementOwner };
         } else {
           await prepareScopeSemanticHistory({ activeTurn: pending.fact.turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
-          return finish(retained, request);
+          return finish(retained, effectiveRequest);
         }
       }
       if (input.lease !== undefined && activeLease === undefined) {
@@ -901,7 +951,7 @@ export function createProviderExplicitBrainInterpreter(input: {
       const executionEpoch = continuation?.executionEpoch ?? 1;
       const turn: InteractionTurnIdentity = continuation?.fact.turn ?? {
         organId: input.organId, interactionScopeId: input.interactionScopeId,
-        interactionId: request.interactionId, inputRevision: request.inputRevision, turnId: runtimeId,
+        interactionId: effectiveRequest.interactionId, inputRevision: effectiveRequest.inputRevision, turnId: runtimeId,
       };
       const priorCheckpoints = continuation?.fact.priorCheckpoints
         ?? await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
@@ -933,7 +983,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         const execution = { runtimeId, organId: input.organId, operationId, executionEpoch, interactionTurn: turn };
         const scope = continuation?.fact.scope ?? { organId: input.organId, operationId };
         const initialInput = continuation?.fact.initialInput ?? {
-          ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(request) }),
+          ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(effectiveRequest) }),
           view: { kind: 'utf8-text' as const },
         };
         const openOwner = async (executionOwner?: OccurrenceExecutionOwner) => {
@@ -941,7 +991,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             turn, execution, scope, initialInput, providerBinding: turnProviderBinding,
             ...(executionOwner === undefined ? {} : { executionOwner }),
             journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
-            instructions: async () => ({ text: interpreterPrompt(request, await loadPromptSegments()), toolSurface: 'intake-decision' }),
+            instructions: async () => ({ text: interpreterPrompt(effectiveRequest, await loadPromptSegments()), toolSurface: 'intake-decision' }),
           });
           owner = createdOwner;
           await createdOwner.openTurnInput();
@@ -976,7 +1026,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           ...(parentRequest === undefined ? {} : { parentRequest }),
           assignmentId: `explicit-interpret-${identity}`,
           scope,
-          inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
+          inputRefs: [`humanagent://interaction/${effectiveRequest.interactionId}/revision/${effectiveRequest.inputRevision}`],
           ownerId: 'humanagent.runtime.explicit-brain',
           rawEvidence: input.rawEvidence,
           registerRequest: (registration) => createdOwner.registerRequest(registration),
@@ -1076,7 +1126,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         if (continuation === undefined) {
           const finalParentOutput = await createdOwner.readFinalTurnOutput();
           try {
-            interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            interpretation = parseInterpreterOutput(finalParentOutput.assistantText, effectiveRequest);
           } catch (parseError) {
             // The terminal output is durable and unusable. Mark the shape so the
             // catch below can close the turn honestly after the provider close,
@@ -1092,8 +1142,8 @@ export function createProviderExplicitBrainInterpreter(input: {
               throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
             }
             await input.publishProviderSettlement({
-              interactionId: request.interactionId,
-              inputRevision: request.inputRevision,
+              interactionId: effectiveRequest.interactionId,
+              inputRevision: effectiveRequest.inputRevision,
               request: finalParentOutput.terminalRequest.request,
               settlement,
             });
@@ -1190,7 +1240,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         }
         throw failure;
       }
-      return finish(live, request);
+      return finish(live, effectiveRequest);
     },
   };
 }
