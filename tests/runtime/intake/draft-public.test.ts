@@ -171,7 +171,7 @@ function interactionState(state: ExplicitIntakeState, interactionId: string) {
 async function assertFailedSaveIsAtomic(
   intake: ExplicitIntake,
   journal: FlakyFileIntakeJournal,
-  operation: () => Promise<unknown>,
+  operation: () => unknown,
 ): Promise<{ readonly before: ExplicitIntakeState; readonly interactionId: string }> {
   const before = structuredClone(intake.exportState());
   const durableBefore = structuredClone(new ExplicitIntake(journal).exportState());
@@ -179,7 +179,9 @@ async function assertFailedSaveIsAtomic(
   assert.ok(interactionId);
 
   journal.failNextSave = true;
-  await assert.rejects(operation, /journal unavailable/);
+  // The terminal success methods commit synchronously, while draft edits keep
+  // their async signature; the failure is the same journal save either way.
+  await assert.rejects(async () => operation(), /journal unavailable/);
 
   assert.deepEqual(intake.exportState(), before);
   assert.deepEqual(new ExplicitIntake(journal).exportState(), durableBefore);

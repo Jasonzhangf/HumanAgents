@@ -1042,7 +1042,17 @@ export class RequirementSubmissionOwner {
     };
     this.submitted.set(key, persistedReceipt);
     this.pending.delete(key);
-    this.onSubmitted?.(structuredClone(persistedReceipt));
+    try {
+      this.onSubmitted?.(structuredClone(persistedReceipt));
+    } catch (error) {
+      // The receipt owner must stay consistent with the failed commit: the
+      // submission is not durable yet, so keep the pending entry and the FIFO
+      // envelope identity for the exact same retry, and roll the in-memory
+      // receipt back so a later retry reaches the onSubmitted boundary again.
+      this.pending.set(key, pendingState);
+      this.submitted.delete(key);
+      throw error;
+    }
     return receipt;
   }
 }

@@ -19,3 +19,4 @@ export * from './turn-closure.js';
 export * from './inspection.js';
 export * from './i2-history.js';
 export * from './subscription.js';
+export * from './request-numbering.js';
