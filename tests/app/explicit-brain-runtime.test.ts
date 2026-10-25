@@ -5429,6 +5429,56 @@ test('provider explicit brain asks for one intake decision, not one turn of task
   assert.ok(sentPrompt.includes('# Explicit intake decision output'));
 });
 
+// Failure basis: production gen27 interaction-137 ("5 加 5 等于多少？" with
+// thirteen task candidates, most of them blocked/created/stopped/waiting). One
+// Responses batch came back with two complete message items: a correct answer
+// item and a second, invented requirement item ("继续执行尚未完成的任务；执行过程中
+// 需要工具时直接调用工具；若所有任务均已完成，则给出完成总结。"). That text appears
+// nowhere in the request, so the model derived it from the candidate list. The
+// intake wire never said which of the two it wanted, and the user got a 500
+// instead of the answer. Impact: an ordinary arithmetic question fails on a
+// batch the request itself left under-specified. Cost: one ordinary answer
+// request whose recorded output is that exact two-item batch.
+test('provider explicit brain asks the intake decision to stay one object about the committed input', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-intake-scope', providerId: 'provider-intake-scope', protocol: 'responses',
+    endpointRef: 'recorded://intake-scope', modelRef: 'model-intake-scope',
+    configDigest: 'sha256:intake-scope-config', capabilityDigest: 'sha256:intake-scope-capability',
+  };
+  const sentPrompts: string[] = [];
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire: { readonly instructions?: string }) => {
+    sentPrompts.push(wire.instructions ?? '');
+    return [{ type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
+      kind: 'answer', normalizedInput: '5 加 5 等于多少？', knownFacts: [], answer: '5 加 5 等于 10。', decisionRefs: [],
+    }) }];
+  } });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+  });
+  await interpreter.interpret({
+    interactionId: 'interaction-intake-scope', inputRevision: 1, sourceRef: 'ui:intake-scope',
+    rawInput: '5 加 5 等于多少？', clarifications: [],
+    taskCandidates: [
+      { taskId: 'ui-task-scope-1', title: 'ux-verify-task', status: 'created', currentInput: '列出当前任务并总结' },
+      { taskId: 'ui-task-scope-2', title: 'ux-delivery-material-check', status: 'blocked', currentInput: '说明标准交付的含义' },
+      { taskId: 'ui-task-scope-3', title: '回答 1 加 1 等于几', status: 'stopped', currentInput: '回答 1 加 1 等于几' },
+    ],
+  } as Parameters<typeof interpreter.interpret>[0]);
+  assert.equal(sentPrompts.length, 1);
+  const sentPrompt = sentPrompts[0]!;
+  // RED on the base: the wire said "Return one final JSON object only" and
+  // nothing about the candidate statuses, so a second decision was in contract.
+  assert.ok(sentPrompt.includes('is the only request in this turn'),
+    'taskCandidates are context, so the committed input must be named as the only request');
+  assert.ok(sentPrompt.includes('never a user request'),
+    'an unfinished candidate status must never read as a request for new work');
+  assert.ok(sentPrompt.includes('one assistant message'),
+    'one decision object must also be one message item, or a batch may hold two');
+});
+
 // Failure basis: real isolated-provider run roundfix12 interaction-9 (input
 // "10 加 10 等于几？" with eleven task candidates). The model echoed the request
 // envelope it was handed and then stated the answer, all inside ONE assistant
