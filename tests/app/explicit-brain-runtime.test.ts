@@ -419,11 +419,29 @@ test(`default App composition admits the retained Task only after real HTTP gran
     assert.equal(initial.status, 200, 'default startup must inject the actual grant controller');
     const grantResponse = await fetch(`${controlPath}/grant`, { method: 'POST', headers: { cookie, origin: runtime.server.url, 'content-type': 'application/json' },
       body: JSON.stringify({ requestId: 'controlled-native-grant', expectedRevision: read.readback.grant?.revision ?? 0 }) });
-    const grant = await grantResponse.json() as TaskGrantControlReceipt;
+    const grant = await grantResponse.json() as TaskGrantControlReceipt & { readonly execution?: UiRuntimeGrantExecutionReceipt };
     assert.equal(grantResponse.status, 200);
     assert.equal(grant.readback.grant?.state, 'granted');
-     const released = await runtime.service.releaseExecution(dispatched.taskId, operationId);
-    assert.equal(released.state, 'released');
+    // The public POST grant already runs taskControl.grant then the existing
+    // release path and returns both as {...receipt, execution}. Consume that
+    // release instead of issuing a second releaseExecution for the same
+    // operation. A blocked or non-released execution means the grant did not
+    // reach the existing release path; keep the typed receipt and fail here.
+    const execution = grant.execution;
+    if (execution === undefined) throw new Error('the public grant receipt must carry the release execution');
+    assert.equal(execution.state, 'released',
+      `grant execution must release the prepared allocation, got ${execution.state}${execution.apiError === undefined ? '' : ` (${execution.apiError.code}: ${execution.apiError.message}; next: ${execution.apiError.nextAction})`}`);
+    const selector = execution.selector;
+    if (selector === undefined) throw new Error('release must report the selector it released');
+    assert.equal(selector.taskId.value, dispatched.taskId.value);
+    assert.equal(selector.operationId, operationId.value);
+    assert.equal(selector.executionEpoch, dispatched.executionEpoch);
+    const current = execution.current;
+    if (current === undefined) throw new Error('release must report the current execution view');
+    assert.equal(current.taskId.value, dispatched.taskId.value);
+    assert.equal(current.operationId, operationId.value);
+    assert.equal(current.executionEpoch, dispatched.executionEpoch);
+    const released = execution;
     await Promise.race([posted, new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error('native Provider POST not reached')), 5000); timer.unref?.(); })]);
     assert.equal(posts, 1);
     assert.equal(selections, 2, 'same prepared allocation must select the native Provider exactly once after grant');
@@ -1808,7 +1826,7 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.ok(sentPrompt.includes('# Explicit Brain'));
   assert.ok(sentPrompt.includes('# Explicit intake decision output'));
   assert.ok(sentPrompt.includes('taskFlowKind'));
-  assert.ok(sentPrompt.includes('Omit taskFlowKind when uncertain'));
+  assert.ok(sentPrompt.includes('Omit taskFlowKind only when the task shape is genuinely ambiguous'));
   assert.ok(sentPrompt.includes('semantic task shape only'));
   assert.equal(sentPrompt.includes('executionMode'), false);
   assert.equal(sentPrompt.includes('schedule'), false);
