@@ -453,3 +453,9 @@ discharge-abandonment-b-20261024 的返工候选 05163b817 经 Alice 独立 revi
 
 task-dashboard-scope-navigation-20261024 的 655d9bbe4 经 Alice 独立 review REWORK：两条 P1 为 legacy task-only 读取回归、query 与 hash 冲突被静默自比。当前候选不集成，返工合同已写入任务并由 Carol 继续；P2 只做随修消融。目标仍 ACTIVE，下一轮继续收口导航返工和 B 资源清理。
 
+## 2026-10-25 导航候选集成与安装态验收
+
+task-dashboard-scope-navigation-20261024 的最终候选 bbc4ce56a（含 655d9bbe4、f3a8ae7bd 及项目级 memory board 边界）经 Alice 指定 review ACCEPT 后，master 合入本地 main 为 bc73ce536，记录 collab task integrated，任务已 closed。受影响 consumer 41/41 通过；build:raw、package、install 0.1.0039 完成，正式 restart 从 generation 21 交接为 22（PID 15402），客户端一次 ready-timeout 为晚到回执，durable lease 实际 readyAt 03:10:08Z 且 10086 200。安装态 10086 真实点击 root ui-task-implicit-draft-141 与 child scheduled-task 均进入任务看板，URL 同时保留 query 与 hash，页面无 read.scope.invalid；RED 截图保留在 /tmp/ha-nav-evidence/shots/red-installed-0039.png。Carol 已回收 worktree 与 branch。
+
+当前本地 main 较 origin/main 领先 10 个提交，含 task-5/6/7 三个修复（entry-answered d56dc3a51、intake-failure 12d386289、fix7 878273479）与 release 0.1.0040 版本提交。task-5/6/7 milestone 整体独立 Review 尚未执行，按既有门禁在 review PASS 前不推送 origin/main。导航任务本身已闭环，push 随该 milestone 一并收口。
+
