@@ -75,7 +75,7 @@ test('a task-row scope and an old task-dashboard href produce the same exact foc
   })
 
   const href = taskFocusHref(TASK_SCOPE)
-  assert.equal(href, `${LEGACY_TASK_FOCUS_PAGE}${encodeProductLocation(location)}`)
+  assert.equal(href, `${LEGACY_TASK_FOCUS_PAGE}?task=task-a&projectKey=project-a&mode=fake${encodeProductLocation(location)}`)
 
   const decoded = decodeProductLocation(href)
   assert.equal(decoded.kind, 'valid')

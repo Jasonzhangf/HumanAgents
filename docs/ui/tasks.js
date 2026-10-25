@@ -44,7 +44,15 @@ export function taskFocusLocation(scope) {
 }
 
 export function taskFocusHref(scope) {
-  return `${LEGACY_TASK_FOCUS_PAGE}${encodeProductLocation(taskFocusLocation(scope))}`
+  const params = new URLSearchParams()
+  if (scope?.kind === 'task') {
+    const value = typeof scope.taskId === 'object' ? scope.taskId?.value : scope.taskId
+    if (typeof value === 'string' && value !== '') params.set('task', value)
+    if (typeof scope.projectKey === 'string' && scope.projectKey !== '') params.set('projectKey', scope.projectKey)
+    if (typeof scope.mode === 'string' && scope.mode !== '') params.set('mode', scope.mode)
+  }
+  const query = params.toString()
+  return `${LEGACY_TASK_FOCUS_PAGE}${query ? `?${query}` : ''}${encodeProductLocation(taskFocusLocation(scope))}`
 }
 
 /**

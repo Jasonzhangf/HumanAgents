@@ -6,6 +6,7 @@ import {
   encodeProductLocation,
   locationFromPopState,
 } from '../../docs/ui/product-location.js'
+import { legacyTaskFocusHref } from '../../docs/ui/tasks.js'
 
 // Minimal DOM shared by the page module and the three product renderers. It
 // records real element structure, attributes and click listeners; the consumer
@@ -256,6 +257,8 @@ const {
   dedupeProductRelations,
   productLocationMatchesTask,
   renderProductSessionExtras,
+  taskReadScopeFromLocation,
+  taskReadScopeFromQuery,
   writePageProductLocation,
 } = await import('../../docs/ui/task-dashboard.js')
 
@@ -949,4 +952,44 @@ test('a revoke-only decision fact is not an approval and writes nothing', async 
     0,
   )
   assert.equal(controller.state().controlWrites, 0)
+})
+
+test('legacy task row link rewritten to canonical focus route keeps task read scope on dashboard', () => {
+  const rowHref = 'task-dashboard.html?task=t1&projectKey=p1&mode=rcc'
+  const focusHref = legacyTaskFocusHref(rowHref)
+  assert.ok(focusHref, 'legacyTaskFocusHref should return a rewritten canonical href')
+
+  const parsedUrl = new URL(focusHref, 'http://product.invalid')
+  assert.equal(parsedUrl.searchParams.get('task'), 't1')
+  assert.equal(parsedUrl.searchParams.get('projectKey'), 'p1')
+  assert.equal(parsedUrl.searchParams.get('mode'), 'rcc')
+
+  const decoded = decodeProductLocation(parsedUrl.hash)
+  assert.equal(decoded.kind, 'valid')
+  assert.equal(decoded.location.scope.taskId?.value, 't1')
+  assert.equal(decoded.location.scope.projectKey, 'p1')
+  assert.equal(decoded.location.scope.mode, 'rcc')
+
+  const resolver = taskReadScopeFromLocation ?? taskReadScopeFromQuery
+  assert.equal(typeof resolver, 'function', 'dashboard scope resolver should be exported')
+  const resolved = resolver(focusHref)
+  assert.equal(resolved.kind, 'task')
+  assert.equal(resolved.projectKey, 'p1')
+  assert.equal(resolved.mode, 'rcc')
+  assert.equal(typeof resolved.taskId === 'object' ? resolved.taskId.value : resolved.taskId, 't1')
+})
+
+test('a partial link still yields read.scope.invalid without falling back to catalog', () => {
+  const resolver = taskReadScopeFromLocation ?? taskReadScopeFromQuery
+  assert.equal(typeof resolver, 'function', 'dashboard scope resolver should be exported')
+
+  const partial = resolver('task-dashboard.html?task=t1')
+  assert.equal(partial.kind, 'invalid')
+  assert.equal(partial.failure?.code, 'read.scope.invalid')
+  assert.equal(partial.failure?.ownerId, 'humanagent.ui')
+
+  const partialWithProject = resolver('task-dashboard.html?task=t1&projectKey=p1')
+  assert.equal(partialWithProject.kind, 'invalid')
+  assert.equal(partialWithProject.failure?.code, 'read.scope.invalid')
+  assert.equal(partialWithProject.failure?.ownerId, 'humanagent.ui')
 })
