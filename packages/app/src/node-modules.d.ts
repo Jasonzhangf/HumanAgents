@@ -110,7 +110,15 @@ declare module 'node:fs/promises' {
     isDirectory(): boolean;
     isFile(): boolean;
   }
-  export interface Stats { readonly dev: number; readonly ino: number; readonly mode: number; isDirectory(): boolean; isFile(): boolean; }
+  export interface Stats {
+    readonly dev: number;
+    readonly ino: number;
+    readonly mode: number;
+    readonly size: number;
+    readonly mtimeMs: number;
+    isDirectory(): boolean;
+    isFile(): boolean;
+  }
   export function appendFile(path: string, data: string, encoding?: string): Promise<void>;
   export function mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>;
   export function link(oldPath: string, newPath: string): Promise<void>;
