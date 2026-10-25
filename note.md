@@ -447,3 +447,9 @@ M1 水位修复已合 main `1f731d76`：两个既有语义 builder 透传当前 
 
 生产实例端口 10086 / control-root /Users/fanzhang/.humanagent 为用户在用：只允许只读，禁止成员对其 restart 或写操作。已向 fix7/fix8 明确此边界（此前 fix7 有三次写操作，已按已披露副作用记录，遗留任务 ui-task-df4ccb97 现为 error「进程已重启或缺少终态 checkpoint」，不追责）。里程碑独立 Review 尚未执行，待 task-5/6/7 合入 main 后一次整体 Review 再推送。
 
+## 2026-10-24 discharge 候选集成与导航返工
+
+discharge-abandonment-b-20261024 的返工候选 05163b817 经 Alice 独立 review ACCEPT（findings 空），已由 master 合入 main 为 110f39c2d 并推送 origin/main。受控公开 consumer 的两条新增用例均通过：无认证生命周期权威时不再 shape-only 放电，两个重叠 interpret 时第二个输入被活跃 owner 拒绝且不写 abandonment。focused explicit-brain-runtime 为 38 例中 35 通过，3 个失败与作者基线一致；journal 25/25、explicit-brain 49/49 通过。本地 0.1.0039 已打包、全局安装并正式 restart，durable lease 从 generation 19 交接为 20，PID 98215 ready；客户端一次 ready-timeout 属于晚到回执，实际 lease 已完成。Carol 尚需清理 B 自有 worktree/branch 并关闭任务。
+
+task-dashboard-scope-navigation-20261024 的 655d9bbe4 经 Alice 独立 review REWORK：两条 P1 为 legacy task-only 读取回归、query 与 hash 冲突被静默自比。当前候选不集成，返工合同已写入任务并由 Carol 继续；P2 只做随修消融。目标仍 ACTIVE，下一轮继续收口导航返工和 B 资源清理。
+
