@@ -36,12 +36,17 @@ import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { MemoryCoordinator, RuntimeTaskCoordinator } from '../../packages/runtime/src/index.js';
+import {
+  AgentRuntimePoolManager,
+  OrchestrationManager,
+} from '../../packages/runtime/src/orchestration/index.js';
 import { TaskPlanRevisionConsumer } from '../../packages/runtime/src/orchestration/task-plan-revisions.js';
 import { TaskIdentityConsumer, type TaskIdentityPort } from '../../packages/runtime/src/orchestration/task-identity.js';
 import { SubscriptionControlPort } from '../../packages/runtime/src/subscriptions/index.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 import {
   FakeReplayExecutionRuntimePort,
+  FileCheckpointStore,
   startUiRuntime,
   UiRuntimeJournal,
   type UiRuntimeLaunchOptions,
@@ -807,6 +812,383 @@ test('public new-task submit binds the real typed source and cold-reads before a
   }
 
   await rm(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// B2 combined terminal proof.
+//
+// The existing G-A case stops at the first real execution request because the
+// controlled upstream never accepts a standard turn end. This case answers the
+// real Responses wire in three stages (execution end, drain, closed-turn
+// Planner) so one public submission composes identity -> FIFO -> grant ->
+// execution -> Planner -> committed public result and terminal checkpoint. No
+// terminal fact is mocked: the publication, plan revision and checkpoint are
+// read back from the physical control journal the runtime itself wrote.
+// ---------------------------------------------------------------------------
+
+interface ResponsesWireItem {
+  readonly type?: string;
+  readonly role?: string;
+  readonly name?: string;
+  readonly content?: ReadonlyArray<{ readonly type?: string; readonly text?: string }>;
+}
+
+interface ResponsesWire {
+  readonly input?: readonly ResponsesWireItem[];
+  readonly tools?: ReadonlyArray<{ readonly name?: string }>;
+}
+
+function responsesWire(body: string): ResponsesWire | undefined {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+    return parsed as ResponsesWire;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The closed-turn Planner sends one user message whose input_text is `role: planner`. */
+function plannerPayloadFrom(body: string): Record<string, unknown> | undefined {
+  for (const item of responsesWire(body)?.input ?? []) {
+    if (item.type !== 'message' || item.role !== 'user') continue;
+    for (const part of item.content ?? []) {
+      if (part.type !== 'input_text' || typeof part.text !== 'string') continue;
+      let candidate: unknown;
+      try {
+        candidate = JSON.parse(part.text);
+      } catch {
+        continue;
+      }
+      if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
+        && (candidate as Record<string, unknown>).role === 'planner') {
+        return candidate as Record<string, unknown>;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** True once the execution request replays the accepted standard-end call. */
+function replaysTurnEnd(body: string): boolean {
+  return (responsesWire(body)?.input ?? [])
+    .some((item) => item.type === 'function_call' && item.name === 'humanagent_turn_end');
+}
+
+/** True when the request advertises the Harness standard-end tool surface. */
+function advertisesTurnEnd(body: string): boolean {
+  return (responsesWire(body)?.tools ?? []).some((tool) => tool.name === 'humanagent_turn_end');
+}
+
+interface TerminalUpstream {
+  readonly requests: CapturedUpstreamRequest[];
+  readonly plannerRequests: ReadonlyArray<Record<string, unknown>>;
+  readonly plannerSnapshots: readonly TaskPlanSnapshot[];
+  readonly endArguments: ReadonlyArray<Record<string, unknown>>;
+  restore(): void;
+}
+
+/**
+ * Controlled Responses upstream for the combined chain. It answers the same
+ * three real stages the native delivery wire uses, so the runtime's own
+ * standard-turn acceptance, Planner call and terminal publication all run on
+ * product code instead of a mocked terminal state.
+ */
+function captureTerminalUpstream(origin: string, deliveryText: string): TerminalUpstream {
+  const requests: CapturedUpstreamRequest[] = [];
+  const plannerRequests: Array<Record<string, unknown>> = [];
+  const plannerSnapshots: TaskPlanSnapshot[] = [];
+  const endArguments: Array<Record<string, unknown>> = [];
+  const original = globalThis.fetch;
+  const capture = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1] = {}) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (new URL(url).origin !== origin) return original(input, init);
+    const body = typeof init.body === 'string' ? init.body : '';
+    requests.push({ method: (init.method ?? 'GET').toUpperCase(), url, body });
+
+    const planner = plannerPayloadFrom(body);
+    if (planner !== undefined) {
+      plannerRequests.push(planner);
+      const task = planner.task as { readonly title?: unknown; readonly directive?: unknown } | undefined;
+      if (typeof task?.title !== 'string' || typeof task.directive !== 'string') {
+        throw new Error('the B2 Planner request carries no confirmed Task title/directive');
+      }
+      const snapshot: TaskPlanSnapshot = {
+        title: task.title,
+        summary: `B2 whole-task plan for "${task.title}"`,
+        completeness: { scope: 'whole-task', status: 'complete' },
+        acceptanceCriteria: [{
+          criterionId: 'b2-delivery-satisfied',
+          description: `Satisfy the confirmed directive "${task.directive}".`,
+        }],
+        nodes: [{
+          nodeId: 'whole-task',
+          kind: 'task',
+          title: task.title,
+          intent: task.directive,
+          definition: { directive: task.directive },
+        }],
+        phases: [],
+        relations: [],
+      };
+      plannerSnapshots.push(snapshot);
+      return sseResponse([
+        { type: 'response.created', response: { id: 'b2-planner' } },
+        { type: 'response.output_text.done', item_id: 'b2-planner', text: JSON.stringify({
+          decision: 'complete',
+          snapshot,
+          reasonText: 'the closed turn delivered the whole confirmed result',
+        }) },
+        { type: 'response.completed', response: { id: 'b2-planner' } },
+      ]);
+    }
+
+    if (replaysTurnEnd(body)) {
+      return sseResponse([
+        { type: 'response.created', response: { id: 'b2-drain' } },
+        { type: 'response.output_text.done', item_id: 'b2-drain', text: 'B2 turn drained' },
+        { type: 'response.completed', response: { id: 'b2-drain' } },
+      ]);
+    }
+
+    if (advertisesTurnEnd(body)) {
+      const args: Record<string, unknown> = {
+        summary: {
+          goal: { text: 'Deliver the confirmed B2 task result', evidenceRefs: [] },
+          actions: { text: 'Ran the configured real execution Provider', evidenceRefs: [] },
+          result: { text: deliveryText, evidenceRefs: [] },
+          expectedNextStep: { text: 'Close the turn so the Planner can decide', evidenceRefs: [] },
+        },
+        deliveryText,
+        deliveryRefs: [],
+      };
+      endArguments.push(args);
+      const callId = `b2-end-${endArguments.length}`;
+      return sseResponse([
+        { type: 'response.created', response: { id: callId } },
+        { type: 'response.output_item.done', output_index: 0, item: {
+          type: 'function_call', call_id: callId, name: 'humanagent_turn_end', arguments: JSON.stringify(args) } },
+        { type: 'response.completed', response: { id: callId } },
+      ]);
+    }
+
+    throw new Error(`the B2 controlled upstream received an unidentified Responses stage: ${body.slice(0, 160)}`);
+  }) as typeof fetch;
+  globalThis.fetch = capture;
+  return {
+    requests,
+    plannerRequests,
+    plannerSnapshots,
+    endArguments,
+    restore: () => { if (globalThis.fetch === capture) globalThis.fetch = original; },
+  };
+}
+
+interface TerminalDashboardBody {
+  readonly state?: string;
+  readonly output?: string;
+  readonly checkpoint?: {
+    readonly checkpointId: string;
+    readonly seq: number;
+    readonly outcome: string;
+    readonly summary: string;
+  };
+  readonly history?: {
+    readonly events?: ReadonlyArray<{
+      readonly kind?: string;
+      readonly state?: string;
+      readonly terminalPhase?: string;
+    }>;
+  };
+}
+
+test('B2: one public confirmation composes identity, grant, real execution and the closed-turn Planner to terminal', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-b2-terminal-'));
+  const taskControlPath = taskControlPathFor(root, 'rcc');
+  const evidenceRoot = join(root, 'evidence');
+  const upstreamOrigin = 'http://127.0.0.1:4599';
+  const deliveryText = 'B2 combined terminal delivery: the confirmed result is committed.';
+  const committedTaskFlow: TaskFlowBinding = {
+    kind: 'long-running',
+    definitionVersion: TASK_FLOW_DEFINITION_VERSION,
+  };
+  const upstream = captureTerminalUpstream(upstreamOrigin, deliveryText);
+  const probePort = assembleProviderExecutionPort({
+    binding: gaHttpBinding,
+    routeRef: 'ga-http-route',
+    baseUrl: upstreamOrigin,
+    source: 'http',
+  }, evidenceRoot);
+  const httpProvider: ProviderConfig = {
+    source: 'http',
+    provider: 'http',
+    binding: gaHttpBinding.bindingId,
+    protocol: 'responses',
+    model: gaHttpBinding.modelRef,
+    route: 'ga-http-route',
+    baseUrl: upstreamOrigin,
+  };
+  const entries: EffectiveAgentProviderBinding[] = [
+    { agentId: 'b2-http-execution', roleId: 'execution', source: 'agent', provider: httpProvider },
+    { agentId: 'b2-http-orchestration', roleId: 'orchestration', source: 'agent', provider: httpProvider },
+  ];
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  try {
+    runtime = await startRuntime(root, probePort, {
+      projectKey: 'project-b2-terminal',
+      mode: 'rcc',
+      providerSource: 'http',
+      binding: gaHttpBinding,
+      taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path, undefined, committedTaskFlow),
+      runtimeComposition: {
+        prepareAgentProvider: async (selection) => assembleAgentProvider({
+          roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
+          agentProviderBindings: entries,
+          legacyProvider: httpProvider,
+          evidenceRoot,
+        }),
+        prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({
+          roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
+          agentProviderBindings: entries,
+          legacyProvider: httpProvider,
+          createPort: (selected) => createAgentProviderPort(selected, evidenceRoot),
+        }, owner, lease),
+        // The native lane still resolves the closed-turn Planner through the
+        // real Task assembly pool. Production serve binds the same factory from
+        // its serve composition; this consumer supplies the pool the Planner
+        // actually leases, so the terminal chain runs on product code.
+        createTaskAssembly: ({ executionAgent, maxAttempts }) => {
+          const runtimePool = new AgentRuntimePoolManager({
+            maxRuntimes: 4,
+            ownerId: 'humanagent.runtime.b2-terminal',
+            factory: {
+              async start(request) {
+                return {
+                  runtimeId: request.runtimeId,
+                  generation: request.generation,
+                  capabilities: [...request.requiredCapabilities],
+                };
+              },
+              async dispose() {},
+            },
+          });
+          return {
+            runtimePool,
+            orchestration: new OrchestrationManager({
+              ownerId: 'humanagent.runtime.b2-terminal',
+              runtimePool,
+              ...(executionAgent === undefined ? {} : { executionAgent }),
+              ...(maxAttempts === undefined ? {} : { maxAttempts }),
+            }),
+          };
+        },
+      },
+    });
+    // The HTTP source performs no discovery; the first wire call is the real
+    // confirmed execution, not a health probe.
+    assert.deepEqual(upstream.requests, []);
+
+    const submission = await submitNewTask(runtime, 'b2-terminal');
+
+    // The single confirmation must have created the real typed identity first.
+    await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, 1));
+    const identity = (await identityRecords(taskControlPath))[0]!;
+    const taskId = id('task', identity.scope.taskId.value);
+    assert.equal(identity.source.requirementId, submission.receipt.requirement.requirementId);
+
+    // Terminal state is observed through the public dashboard, which composes
+    // the authoritative publication rather than the raw task output. The wait
+    // also requires the durable final turn event: the coordinator flips the
+    // task to `succeeded` while applying the typed advance and only writes the
+    // final settlement event after that, so observing the state alone can
+    // outrun the last control-journal append.
+    let dashboard: TerminalDashboardBody = {};
+    await waitForAsync(async () => {
+      const response = await fetch(`${runtime!.server.url}/api/tasks/${encodeURIComponent(taskId.value)}/dashboard`);
+      assert.equal(response.status, 200);
+      dashboard = await response.json() as TerminalDashboardBody;
+      assert.equal(dashboard.state, 'succeeded');
+      assert.ok(dashboard.checkpoint, 'the terminal turn must have committed its checkpoint');
+      assert.ok(
+        (dashboard.history?.events ?? []).some((event) => event.kind === 'execution.terminal'
+          && event.terminalPhase === 'final' && event.state === 'succeeded'),
+        'the final turn event must be durable before the terminal result is asserted',
+      );
+    }, 15_000);
+
+    // The real execution accepted the standard turn end and the real
+    // closed-turn Planner consumed that accepted result once.
+    assert.ok(upstream.endArguments.length >= 1, 'the real execution must accept a standard turn end');
+    assert.equal(
+      (upstream.endArguments[0] as { readonly deliveryText?: string }).deliveryText,
+      deliveryText,
+      'the accepted end must carry the exact delivery text',
+    );
+    assert.equal(upstream.plannerRequests.length, 1, 'the closed-turn Planner must be called exactly once');
+    const plannerPayload = upstream.plannerRequests[0]!;
+    const closure = plannerPayload.closure as {
+      readonly summary: { readonly result: { readonly text: string } };
+    };
+    assert.equal(closure.summary.result.text, deliveryText,
+      'the Planner must read the accepted execution result, not a placeholder');
+    const confirmedSource = plannerPayload.confirmedSource as {
+      readonly requirementId: string;
+      readonly draftId: string;
+      readonly confirmationRef: string;
+    };
+    assert.equal(confirmedSource.requirementId, submission.receipt.requirement.requirementId);
+    assert.equal(confirmedSource.draftId, submission.draftId);
+    assert.equal(confirmedSource.confirmationRef, 'confirmation:b2-terminal');
+
+    // The committed plan revision is exactly the Planner's whole-task snapshot
+    // and remains bound to the confirmed source.
+    const plans = new TaskPlanRevisionConsumer(
+      new JsonlTaskPlanRevisionJournal(new JsonlOrganJournal(taskControlPath)),
+    );
+    const revisions = await plans.list({ organId, taskId });
+    assert.equal(revisions.length, 1, 'the terminal turn must publish exactly one current plan');
+    assert.equal(revisions[0]!.sequence, 1);
+    assert.equal(revisions[0]!.predecessor, null);
+    assert.deepEqual(revisions[0]!.snapshot, upstream.plannerSnapshots[0]);
+    assert.equal(revisions[0]!.source.requirementId, submission.receipt.requirement.requirementId);
+    assert.equal(revisions[0]!.source.confirmationRef, identity.source.confirmationRef);
+
+    // The public committed result is the exact accepted delivery text.
+    assert.equal(dashboard.output, deliveryText, 'the dashboard output must be the committed delivery text');
+    const outputResponse = await fetch(
+      `${runtime.server.url}/api/product/output?taskId=${encodeURIComponent(taskId.value)}`,
+    );
+    assert.equal(outputResponse.status, 200);
+    const productOutput = await outputResponse.json() as {
+      readonly resultAvailable?: boolean;
+      readonly commits?: ReadonlyArray<{ readonly text?: string }>;
+    };
+    assert.equal(productOutput.resultAvailable, true);
+    assert.deepEqual(productOutput.commits?.map((commit) => commit.text), [deliveryText]);
+
+    // The terminal checkpoint is durable in the same physical control journal,
+    // not only a dashboard projection value.
+    assert.ok(dashboard.checkpoint, 'the terminal turn must commit a checkpoint');
+    const records = (await new JsonlOrganJournal(taskControlPath).verify()).records;
+    const checkpointRecord = records.find((record) => record.kind === 'checkpoint'
+      && record.checkpoint?.id.value === dashboard.checkpoint!.checkpointId);
+    assert.ok(checkpointRecord?.checkpoint, 'the dashboard checkpoint must exist in the control journal');
+    const committedCheckpoint = await new FileCheckpointStore(taskControlPath).readCommitted(
+      checkpointRecord!.scope,
+      checkpointRecord!.checkpoint!.id,
+    );
+    assert.ok(committedCheckpoint, 'the terminal checkpoint must resolve from the durable journal');
+    assert.equal(committedCheckpoint!.checkpoint.id.value, dashboard.checkpoint!.checkpointId);
+    assert.equal(committedCheckpoint!.checkpoint.scope.taskId?.value, taskId.value);
+    assert.ok(committedCheckpoint!.checkpoint.outcome.length > 0);
+  } finally {
+    await runtime?.close();
+    upstream.restore();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('the public new-task entry binds the confirmed Task identity the closed-turn Planner reads', async () => {
