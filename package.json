@@ -1,7 +1,7 @@
 {
   "name": "humanagent",
-  "version": "0.1.39",
-  "releaseVersion": "0.1.0039",
+  "version": "0.1.40",
+  "releaseVersion": "0.1.0040",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.31.0",
