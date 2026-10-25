@@ -253,10 +253,11 @@ function taskScopeFromProductLocation(location) {
 }
 
 /**
- * Read an explicit task scope from the URL location. Authoritative source is
- * the product-location hash first, followed by the query string as fallback.
- * A task page without any scope is kept as a legacy read for old links.
- * A partial or unsupported explicit scope is invalid and fails visibly.
+ * Read an explicit task scope from the URL location. The product-location hash
+ * and the query string are two carriers of the same read position, so when both
+ * are present they must be complete and agree. A hash-only or a complete query
+ * keeps its previous contract. A partial explicit scope, or a disagreement
+ * between the two carriers, is invalid and fails visibly.
  */
 export function taskReadScopeFromLocation(source = (typeof location !== 'undefined' ? location : undefined)) {
   if (!source) {
@@ -313,31 +314,60 @@ export function taskReadScopeFromLocation(source = (typeof location !== 'undefin
     }
   }
 
-  if (hash && (hash.startsWith('#/boards/') || hash.includes('/boards/'))) {
-    const decoded = decodeProductLocation(hash)
-    if (decoded.kind !== 'valid') {
-      return {
-        kind: 'invalid',
-        failure: {
-          code: 'read.scope.invalid',
-          ownerId: 'humanagent.ui',
-          message: decoded.failure?.message || 'product location scope is invalid',
-          nextAction: 'open the task from the project list so the URL carries task, projectKey, and mode',
-        },
-      }
-    }
-    return taskScopeFromProductLocation(decoded.location)
-  }
-
+  const hasProductRoute = hash && (hash.startsWith('#/boards/') || hash.includes('/boards/'))
   const params = search instanceof URLSearchParams ? search : new URLSearchParams(search ?? '')
-  const task = params.get('task')
-  const projectKey = params.get('projectKey')
-  const mode = params.get('mode')
+  const queryTask = params.get('task')
+  const queryProjectKey = params.get('projectKey')
+  const queryMode = params.get('mode')
 
-  if (!task && !projectKey && !mode) {
+  // An old task-only link is a legacy read. Both carriers must stay silent for
+  // it to remain one, because a task id plus any explicit field is a partial
+  // scope and has to fail instead of silently degrading.
+  if (!hasProductRoute && queryTask && !queryProjectKey && !queryMode) {
+    return { kind: 'legacy', taskId: queryTask }
+  }
+  if (!hasProductRoute && !queryTask && !queryProjectKey && !queryMode) {
     return { kind: 'legacy', taskId: undefined }
   }
 
+  const hashScope = hasProductRoute ? scopeFromProductRoute(hash) : null
+  if (hashScope !== null && hashScope.kind === 'invalid') return hashScope
+  const hasQueryScope = Boolean(queryTask || queryProjectKey || queryMode)
+  const queryScope = hasQueryScope ? scopeFromTaskQuery(queryTask, queryProjectKey, queryMode) : null
+  if (queryScope !== null && queryScope.kind === 'invalid') return queryScope
+
+  if (hashScope !== null && queryScope !== null) {
+    if (hashScope.kind !== queryScope.kind) {
+      return inconsistentTaskScopeFailure()
+    }
+    if (hashScope.kind === 'task'
+      && (taskIdValue(hashScope.taskId) !== taskIdValue(queryScope.taskId)
+        || hashScope.projectKey !== queryScope.projectKey
+        || hashScope.mode !== queryScope.mode)) {
+      return inconsistentTaskScopeFailure()
+    }
+    return hashScope
+  }
+  return hashScope ?? queryScope ?? { kind: 'legacy', taskId: undefined }
+}
+
+function scopeFromProductRoute(hash) {
+  const decoded = decodeProductLocation(hash)
+  if (decoded.kind !== 'valid') {
+    return {
+      kind: 'invalid',
+      failure: {
+        code: 'read.scope.invalid',
+        ownerId: 'humanagent.ui',
+        message: decoded.failure?.message || 'product location scope is invalid',
+        nextAction: 'open the task from the project list so the URL carries task, projectKey, and mode',
+      },
+    }
+  }
+  return taskScopeFromProductLocation(decoded.location)
+}
+
+function scopeFromTaskQuery(task, projectKey, mode) {
   const missing = []
   if (!task) missing.push('task')
   if (!projectKey) missing.push('projectKey')
@@ -367,7 +397,46 @@ export function taskReadScopeFromLocation(source = (typeof location !== 'undefin
   return { kind: 'task', projectKey, mode, taskId: { value: task } }
 }
 
-export const taskReadScopeFromQuery = taskReadScopeFromLocation
+function inconsistentTaskScopeFailure() {
+  return {
+    kind: 'invalid',
+    failure: {
+      code: 'read.scope.invalid',
+      ownerId: 'humanagent.ui',
+      message: 'the product location and the query string disagree about the task read scope',
+      nextAction: 'open the task again from the task list so both URL locations carry the same scope',
+    },
+  }
+}
+
+export function taskReadScopeFromQuery(source = (typeof location !== 'undefined' ? location : undefined)) {
+  let search = ''
+  if (typeof source === 'string') {
+    if (source.startsWith('?')) search = source
+    else {
+      try {
+        search = new URL(source, 'http://product.invalid').search
+      } catch {
+        const queryIndex = source.indexOf('?')
+        search = queryIndex >= 0 ? source.slice(queryIndex) : ''
+      }
+    }
+  } else if (source && typeof source === 'object') {
+    search = typeof source.search === 'string' ? source.search : ''
+    if (!search && typeof source.href === 'string') {
+      try {
+        search = new URL(source.href, 'http://product.invalid').search
+      } catch {}
+    }
+  }
+  const params = search instanceof URLSearchParams ? search : new URLSearchParams(search)
+  const task = params.get('task')
+  const projectKey = params.get('projectKey')
+  const mode = params.get('mode')
+  if (task && !projectKey && !mode) return { kind: 'legacy', taskId: task }
+  if (!task && !projectKey && !mode) return { kind: 'legacy', taskId: undefined }
+  return scopeFromTaskQuery(task, projectKey, mode)
+}
 
 function addTaskScope(params, scope) {
   if (scope?.kind === 'task') {

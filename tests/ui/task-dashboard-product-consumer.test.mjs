@@ -979,17 +979,82 @@ test('legacy task row link rewritten to canonical focus route keeps task read sc
   assert.equal(typeof resolved.taskId === 'object' ? resolved.taskId.value : resolved.taskId, 't1')
 })
 
-test('a partial link still yields read.scope.invalid without falling back to catalog', () => {
+test('a task-only legacy link stays readable while a partial explicit link is invalid', () => {
   const resolver = taskReadScopeFromLocation ?? taskReadScopeFromQuery
   assert.equal(typeof resolver, 'function', 'dashboard scope resolver should be exported')
 
-  const partial = resolver('task-dashboard.html?task=t1')
-  assert.equal(partial.kind, 'invalid')
-  assert.equal(partial.failure?.code, 'read.scope.invalid')
-  assert.equal(partial.failure?.ownerId, 'humanagent.ui')
+  const legacy = resolver('task-dashboard.html?task=t1')
+  assert.equal(legacy.kind, 'legacy')
+  assert.equal(legacy.taskId, 't1')
 
   const partialWithProject = resolver('task-dashboard.html?task=t1&projectKey=p1')
   assert.equal(partialWithProject.kind, 'invalid')
   assert.equal(partialWithProject.failure?.code, 'read.scope.invalid')
   assert.equal(partialWithProject.failure?.ownerId, 'humanagent.ui')
+})
+
+// Alice rework P1-2: when the query and the canonical product location are both
+// present they must be complete and agree. Taking the hash alone made control
+// intent and agent selection read the query while the product location compared
+// against itself. Hash-only and a complete query keep their previous contract.
+test('query and product location must both be complete and agree', () => {
+  const resolver = taskReadScopeFromLocation ?? taskReadScopeFromQuery
+  assert.equal(typeof resolver, 'function', 'dashboard scope resolver should be exported')
+
+  const hash = encodeProductLocation(location())
+  const consistent = resolver(`task-dashboard.html?task=task-1&projectKey=project-7&mode=rcc${hash}`)
+  assert.equal(consistent.kind, 'task')
+  assert.equal(consistent.projectKey, 'project-7')
+  assert.equal(consistent.mode, 'rcc')
+  assert.equal(consistent.taskId.value, 'task-1')
+
+  const hashOnly = resolver(`task-dashboard.html${hash}`)
+  assert.equal(hashOnly.kind, 'task')
+  assert.equal(hashOnly.taskId.value, 'task-1')
+
+  const completeQuery = resolver('task-dashboard.html?task=task-1&projectKey=project-7&mode=rcc')
+  assert.equal(completeQuery.kind, 'task')
+
+  const mismatchedTask = resolver(`task-dashboard.html?task=task-2&projectKey=project-7&mode=rcc${hash}`)
+  assert.equal(mismatchedTask.kind, 'invalid')
+  assert.equal(mismatchedTask.failure?.code, 'read.scope.invalid')
+
+  const mismatchedMode = resolver(`task-dashboard.html?task=task-1&projectKey=project-7&mode=fake${hash}`)
+  assert.equal(mismatchedMode.kind, 'invalid')
+  assert.equal(mismatchedMode.failure?.code, 'read.scope.invalid')
+
+  const partialSecondSource = resolver(`task-dashboard.html?task=task-1${hash}`)
+  assert.equal(partialSecondSource.kind, 'invalid')
+  assert.equal(partialSecondSource.failure?.code, 'read.scope.invalid')
+})
+
+// Alice rework P1-2: the product location check must compare the hash against
+// the query source. Reading both from the hash made the check compare the hash
+// with itself and always agree.
+test('a product location that disagrees with the query does not match the page task', () => {
+  const previousSearch = globalThis.location.search
+  const previousHash = globalThis.location.hash
+  const otherScope = {
+    kind: 'task',
+    projectKey: 'project-7',
+    mode: 'rcc',
+    taskId: { scope: 'task', value: 'task-2' },
+  }
+  const otherLocation = {
+    board: 'interaction',
+    lane: 'live',
+    focus: { kind: 'interaction', taskRef: otherScope.taskId, scope: otherScope },
+    scope: otherScope,
+  }
+  try {
+    globalThis.location.search = '?task=task-1&projectKey=project-7&mode=rcc'
+    globalThis.location.hash = encodeProductLocation(location())
+    assert.equal(productLocationMatchesTask(location()), true)
+
+    globalThis.location.hash = encodeProductLocation(otherLocation)
+    assert.equal(productLocationMatchesTask(otherLocation), false)
+  } finally {
+    globalThis.location.search = previousSearch
+    globalThis.location.hash = previousHash
+  }
 })
