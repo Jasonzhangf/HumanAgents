@@ -49,7 +49,11 @@ const SLOW_MIN_DELTAS = 40;
 const SLOW_MIN_SPAN_MS = 300_000;
 const SLOW_TIMEOUT_MS = 600_000;
 const SILENCE_TIMEOUT_MS = 300_000;
-const NORMAL_TIMEOUT_MS = 180_000;
+// The real RCC endpoint answers a short task in about a minute, but production
+// shows minutes of provider latency on the same shape. This case only needs to
+// prove the calibrated budget does not disturb a real request, so it waits well
+// past the observed latency instead of racing it.
+const NORMAL_TIMEOUT_MS = 420_000;
 const SETTLE_OBSERVATION_MS = 15_000;
 
 const sleep = (ms) => new Promise((settle) => setTimeout(settle, ms));
