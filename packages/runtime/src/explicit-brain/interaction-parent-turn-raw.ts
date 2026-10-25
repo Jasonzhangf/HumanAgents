@@ -153,6 +153,16 @@ export interface InteractionParentTurnSnapshot {
    * output) and never claims a settled answer, route, close or settlement.
    */
   readonly parseFailure: InteractionParentCommittedFact<InteractionParentTurnParseFailureFact> | null;
+  /**
+   * The single committed failure-closing of an epoch that died before any
+   * terminal output, or null. It records only that this exact physical epoch
+   * failed and can never produce a deliverable output, so the interaction scope
+   * must not keep blocking on it. It never claims a settled answer, a route, a
+   * close or a provider settlement; a committed close of the same epoch stays
+   * its own separate record.
+   */
+  readonly executionFailure:
+    InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact> | null;
 }
 
 /**
@@ -197,6 +207,27 @@ export interface InteractionParentTurnParseFailureFact {
 }
 
 /**
+ * The durable fact that one physical Provider epoch of a parent turn failed
+ * before it produced any terminal output.
+ *
+ * It is the honest closure of a failure the process observed first-hand: the
+ * epoch it was driving stopped, nothing usable is durable, and no later input
+ * can prove the stream is dead because the owner of that stream is asking. The
+ * fact is distinct from abandonment (which describes a crash-left epoch and
+ * requires no committed close) and from a parse failure (which requires a real
+ * terminal output): it takes no position on the close, so a committed close of
+ * the same epoch stays its own record, and it never claims an answer, a route,
+ * a settlement or a recovered output.
+ */
+export interface InteractionParentTurnExecutionFailureFact {
+  readonly turn: InteractionTurnIdentity;
+  readonly execution: InteractionParentProviderExecutionIdentityRef;
+  readonly providerBinding: ProviderBinding;
+  /** When this epoch was closed as failed. */
+  readonly failedAt: string;
+}
+
+/**
  * The conservative decision of whether one interrupted parent turn may be
  * discharged. A held decision carries the exact durable reason so the caller
  * can keep failing with the original explicit boundary instead of guessing.
@@ -214,6 +245,16 @@ export type InteractionParentTurnAbandonmentEligibility =
 export type InteractionParentTurnParseFailureEligibility =
   | { readonly closeable: true; readonly terminalRequestId: string; readonly executionEpoch: number }
   | { readonly closeable: false; readonly heldReason: string };
+
+/**
+ * The conservative decision of whether one failed epoch may be closed as
+ * failed. A held decision carries the exact durable reason so the failing
+ * caller keeps its original explicit error instead of writing an unfounded
+ * fact.
+ */
+export type InteractionParentTurnExecutionFailureEligibility =
+  | { readonly closable: true }
+  | { readonly closable: false; readonly heldReason: string };
 
 /** The single append a transactional turn plan may stage. */
 export type InteractionParentTurnAppend =
@@ -272,6 +313,18 @@ export type InteractionParentTurnAppend =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionParentTurnParseFailureFact;
+    }
+  | {
+      /**
+       * The failure-closing of one physical epoch that died before any terminal
+       * output. It freezes the turn like the other two terminal closures, and it
+       * may follow a committed close of its own epoch: a released provider that
+       * never produced an output is exactly the shape it records.
+       */
+      readonly kind: 'turn-execution-failure';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentTurnExecutionFailureFact;
     };
 
 /**
@@ -320,6 +373,16 @@ export interface InteractionParentOpenedTurnScopeReadPort {
     readonly organId: OrganId;
     readonly interactionScopeId: string;
   }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>[]>;
+  /**
+   * The committed failure-closings of epochs that died before any terminal
+   * output. Scope-level readiness reads this beside the abandonment and
+   * parse-failure reads so a failed epoch stops blocking and never enters
+   * history.
+   */
+  readScopeExecutionFailures(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>[]>;
 }
 
 /**
@@ -463,6 +526,23 @@ export interface InteractionParentTurnRawOwner {
   closeUnparseableTurn(input: {
     readonly failedAt: string;
   }): Promise<InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>>;
+  /**
+   * Decide whether the physical epoch this owner is running may be closed as
+   * failed. Only an epoch without any terminal output and without an unknown
+   * tool side effect qualifies; a deliverable output, a committed
+   * reconciliation or a committed settlement keeps its own lane.
+   */
+  readExecutionFailureEligibility(): Promise<InteractionParentTurnExecutionFailureEligibility>;
+  /**
+   * Durably close the physical epoch this owner is running after it failed
+   * before any terminal output. The caller observed the failure first-hand, so
+   * this fact is the honest counterpart of the interrupted-crash discharge: it
+   * records the exact epoch, binding and time, never an answer, a route, a
+   * close, a settlement or a recovered output, and it is idempotent.
+   */
+  closeFailedEpoch(input: {
+    readonly failedAt: string;
+  }): Promise<InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>>;
 }
 
 export interface InteractionParentTurnRawOwnerInput {
@@ -1485,6 +1565,113 @@ export function createInteractionParentTurnRawOwner(
     return { fact: result.fact, commit: committed };
   }
 
+  /**
+   * Decide whether the physical epoch this owner is running can be closed as
+   * failed.
+   *
+   * The caller observed the failure first-hand, so this decision does not
+   * re-derive how the epoch ended: a committed close, a failed request phase or
+   * still-running request phases are all expected after a failure. Everything
+   * that could still carry value or an unknown effect keeps its own lane: a real
+   * terminal output stays deliverable, a committed tool activity keeps its
+   * unknown side effect open, an owner reconciliation belongs to the
+   * continuation lane, and a provider settlement already has its own receipt.
+   */
+  async function executionFailureEligibility(
+    snapshot: InteractionParentTurnSnapshot,
+  ): Promise<InteractionParentTurnExecutionFailureEligibility> {
+    const held = (heldReason: string): InteractionParentTurnExecutionFailureEligibility => ({
+      closable: false,
+      heldReason,
+    });
+    if (snapshot.turnInput === null) return held('the committed turn input is missing');
+    if (snapshot.turnInput.fact.providerBinding === undefined) return held('the committed provider binding is missing');
+    if (snapshot.abandonment !== null) return held('the turn is already discharged as interrupted without terminal output');
+    if (snapshot.parseFailure !== null) return held('the turn is already closed as unparseable');
+    if (snapshot.executionFailure !== null) return held('the epoch is already closed as failed');
+    if (snapshot.ownerReconciliations.length > 0) return held('an owner reconciliation is committed');
+    if (snapshot.providerSettlements.length > 0) return held('a provider settlement is committed');
+    if (snapshot.resourceClose !== null && snapshot.acceptedFacts.length === 0) {
+      // A closed epoch that accepted no raw fact is the recoverable
+      // continuation shape: the same interaction and revision owns a new
+      // physical epoch through the reconciliation lane, so closing it here
+      // would rob that retry of its durable identity.
+      return held('the closed epoch left no accepted fact; its exact prior input owns the continuation lane');
+    }
+    try {
+      // A real terminal output is deliverable by the exact-input recovery lane,
+      // so closing it here would discard a recoverable answer.
+      await finalOutputFromSnapshot(snapshot, ignoredRequests(snapshot));
+      return held('a real terminal output exists and stays recoverable');
+    } catch {
+      // No terminal output: this epoch can never deliver anything.
+    }
+    const toolCall = snapshot.acceptedFacts.find((committed) =>
+      committed.fact.envelope.fact.kind === 'tool-call');
+    if (toolCall !== undefined) {
+      const fact = toolCall.fact.envelope.fact;
+      if (fact.kind === 'tool-call') {
+        return held(`tool call ${fact.call.callId} is committed; its side effect is unknown`);
+      }
+    }
+    const toolResult = snapshot.acceptedFacts.find((committed) =>
+      committed.fact.envelope.fact.kind === 'tool-result');
+    if (toolResult !== undefined) {
+      const fact = toolResult.fact.envelope.fact;
+      if (fact.kind === 'tool-result') {
+        return held(`tool result ${fact.callId} is committed; its side effect is unknown`);
+      }
+    }
+    return { closable: true };
+  }
+
+  async function commitExecutionFailure(input: {
+    readonly failedAt: string;
+  }): Promise<InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>> {
+    if (typeof input.failedAt !== 'string' || input.failedAt.trim() === '') {
+      throw new ContractError('interaction parent epoch failure requires a failedAt timestamp');
+    }
+    const planSnapshot = await journal.readTurnSnapshot(turn);
+    const existing = planSnapshot.executionFailure;
+    // An exact retry reuses the first committed closure; a repeated failure
+    // never writes a second fact and never conflicts with itself.
+    if (existing !== null) return existing;
+    const eligibility = await executionFailureEligibility(planSnapshot);
+    if (!eligibility.closable) {
+      throw new ContractError(`interaction parent epoch cannot be closed as failed: ${eligibility.heldReason}`);
+    }
+    const active = activeExecutionState(planSnapshot);
+    const fact: InteractionParentTurnExecutionFailureFact = {
+      turn: cloneTurnIdentity(turn),
+      execution: cloneExecution(active.execution),
+      providerBinding: cloneProviderBinding(planSnapshot.turnInput!.fact.providerBinding!),
+      failedAt: input.failedAt,
+    };
+    const fingerprint = snapshotCommitFingerprint(planSnapshot);
+    const { committed, result } = await journal.transactTurn<
+      | {
+          readonly kind: 'existing';
+          readonly committed: InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>;
+        }
+      | { readonly kind: 'new'; readonly fact: InteractionParentTurnExecutionFailureFact }
+    >(turn, (snapshot) => {
+      const raced = snapshot.executionFailure;
+      if (raced !== null) return { result: { kind: 'existing', committed: raced } };
+      if (snapshotCommitFingerprint(snapshot) !== fingerprint) {
+        throw new ContractError('interaction parent epoch failure conflicts with a concurrent durable write');
+      }
+      return {
+        append: { kind: 'turn-execution-failure', turn, execution: fact.execution, fact },
+        result: { kind: 'new', fact },
+      };
+    });
+    if (result.kind === 'existing') return result.committed;
+    if (committed === undefined) {
+      throw new ContractError('interaction parent epoch failure append did not commit');
+    }
+    return { fact: result.fact, commit: committed };
+  }
+
   return {
     turn: cloneTurnIdentity(turn),
     execution: cloneExecution(execution),
@@ -1912,6 +2099,16 @@ export function createInteractionParentTurnRawOwner(
       readonly failedAt: string;
     }): Promise<InteractionParentCommittedFact<InteractionParentTurnParseFailureFact>> {
       return commitParseFailure(input);
+    },
+
+    async readExecutionFailureEligibility(): Promise<InteractionParentTurnExecutionFailureEligibility> {
+      return executionFailureEligibility(await journal.readTurnSnapshot(turn));
+    },
+
+    closeFailedEpoch(input: {
+      readonly failedAt: string;
+    }): Promise<InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>> {
+      return commitExecutionFailure(input);
     },
   };
 }

@@ -480,6 +480,44 @@ function sameInteractionTurn(left: InteractionTurnIdentity, right: InteractionTu
     && left.turnId === right.turnId;
 }
 
+/**
+ * The most specific message of a failure chain. An AggregateError keeps the
+ * primary failure at `errors[0]`, so a message built from the wrapper alone
+ * would report the cleanup detail instead of the cause that started it.
+ */
+function describeFailure(error: unknown): string {
+  let current = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (current instanceof AggregateError && current.errors.length > 0) {
+      current = current.errors[0];
+      continue;
+    }
+    break;
+  }
+  return current instanceof Error ? current.message : String(current);
+}
+
+/**
+ * The durable reason one failed epoch must keep its recovery lane instead of
+ * being closed as failed, or undefined when no dispatched helper blocks it. A
+ * dispatched helper already reached the side-effect stage, and a recorded
+ * return never proves the effect was not applied, so that turn is not closed
+ * as failed.
+ */
+async function holdsDispatchedHelper(
+  journal: InteractionHelperTurnReadPort,
+  turn: InteractionTurnIdentity,
+): Promise<string | undefined> {
+  let durableHelpers: Awaited<ReturnType<InteractionHelperTurnReadPort['readTurnHelpers']>>;
+  try {
+    durableHelpers = await journal.readTurnHelpers(turn);
+  } catch (error) {
+    return `the durable helper turn read failed: ${describeFailure(error)}`;
+  }
+  if (durableHelpers.length === 0) return undefined;
+  return `it dispatched helper ${durableHelpers[0]!.identity.helperCallId}`;
+}
+
 export function createProviderExplicitBrainInterpreter(input: {
   readonly lease?: SupervisorLease | (() => SupervisorLease | undefined);
   readonly port?: ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>;
@@ -637,6 +675,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         const closed = await input.checkpointJournal.readScopeSemanticCheckpoints(scopeKey);
         const abandoned = await input.parentJournal.readScopeAbandonedTurns(scopeKey);
         const unusable = await input.parentJournal.readScopeParseFailures(scopeKey);
+        const failedEpochs = await input.parentJournal.readScopeExecutionFailures(scopeKey);
         return opened.find(({ fact }) => !closed.some(({ checkpoint }) =>
           checkpoint.organId.scope === fact.turn.organId.scope
           && checkpoint.organId.value === fact.turn.organId.value
@@ -648,7 +687,11 @@ export function createProviderExplicitBrainInterpreter(input: {
           // A turn closed as unparseable is durably closed: its real terminal
           // output exists but yielded no decision, so it is not pending and it
           // must never block the next input.
-          && !unusable.some(({ fact: unusableFact }) => sameInteractionTurn(unusableFact.turn, fact.turn)));
+          && !unusable.some(({ fact: unusableFact }) => sameInteractionTurn(unusableFact.turn, fact.turn))
+          // A turn whose epoch failed before any terminal output is closed by
+          // its own durable fact: nothing about it can ever be delivered, so it
+          // is not pending and it must never block the next input.
+          && !failedEpochs.some(({ fact: failedFact }) => sameInteractionTurn(failedFact.turn, fact.turn)));
       };
       /**
        * Discharge one interrupted parent turn that can provably never be
@@ -1062,21 +1105,31 @@ export function createProviderExplicitBrainInterpreter(input: {
             failure = new AggregateError([failure, settleError], 'interaction observation and settlement failed');
           }
         }
+        // Every cleanup step below runs even when an earlier one fails. A
+        // failed close used to throw away the only chance to record a durable
+        // terminal fact, so one broken stream left the whole interaction scope
+        // blocked until the daemon restarted.
+        const cleanupFailures: unknown[] = [];
         if (owned !== undefined) {
+          let receipt: Awaited<ReturnType<typeof closeAgentProvider>> | undefined;
           try {
-            const receipt = await closeAgentProvider(owned, { returnReceipt: true });
-            // Record the real close even without a successful semantic output.
-            // The turn input must already be committed; a failed input commit
-            // keeps the original error and records no fabricated fact.
-            if (owner !== undefined && committedInput) {
+            receipt = await closeAgentProvider(owned, { returnReceipt: true });
+          } catch (closeError) {
+            cleanupFailures.push(closeError);
+          }
+          // Record the real close even without a successful semantic output.
+          // The turn input must already be committed; a failed input commit
+          // keeps the original error and records no fabricated fact.
+          if (receipt !== undefined && owner !== undefined && committedInput) {
+            try {
               await owner.recordProviderClose({
                 providerBinding: owned.binding,
                 result: receipt,
                 closedAt: input.clock.now(),
               });
+            } catch (recordError) {
+              cleanupFailures.push(recordError);
             }
-          } catch (closeError) {
-            throw new AggregateError([failure, closeError], 'interaction execution and provider close failed');
           }
         }
         if (unparseableOutput) {
@@ -1091,11 +1144,36 @@ export function createProviderExplicitBrainInterpreter(input: {
           try {
             await owner.closeUnparseableTurn({ failedAt: input.clock.now() });
           } catch (closeError) {
-            throw new AggregateError(
-              [failure, closeError],
-              'interaction terminal output is unusable and the turn could not be closed',
-            );
+            cleanupFailures.push(closeError);
           }
+        } else if (owner !== undefined && committedInput) {
+          // This batch failed before any terminal output, and this process owns
+          // the stream that died, so it is the only party that can honestly
+          // attest that this epoch can never deliver. A shape with its own
+          // recovery lane (a deliverable output, the closed-zero-fact
+          // continuation, a committed settlement or a tool side effect) keeps
+          // that lane instead of being closed here.
+          try {
+            const eligibility = await owner.readExecutionFailureEligibility();
+            if (eligibility.closable) {
+              const heldReason = input.turnHelperJournal === undefined
+                ? 'the durable helper turn read port is unavailable'
+                : await holdsDispatchedHelper(input.turnHelperJournal, owner.turn);
+              if (heldReason === undefined) {
+                await owner.closeFailedEpoch({ failedAt: input.clock.now() });
+              }
+            }
+          } catch (closeError) {
+            cleanupFailures.push(closeError);
+          }
+        }
+        if (cleanupFailures.length > 0) {
+          // The primary failure stays first and named in the message: the
+          // cleanup detail is additive, never a replacement for the cause.
+          throw new AggregateError(
+            [failure, ...cleanupFailures],
+            `interaction execution failed: ${describeFailure(failure)}`,
+          );
         }
         throw failure;
       }

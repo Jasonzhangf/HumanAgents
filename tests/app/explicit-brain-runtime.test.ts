@@ -15,8 +15,15 @@ import {
   readInteractionProviderSettlement,
 } from '../../packages/runtime/src/explicit-brain/index.js';
 import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
-import { createInteractionParentTurnRawOwner, type InteractionSemanticCheckpointJournalPort } from '../../packages/runtime/src/explicit-brain/index.js';
-import { id, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef, type InteractionTurnIdentity, type OrganId, type OccurrenceExecutionOwner } from '../../packages/contracts/src/index.js';
+import {
+  createInteractionParentTurnRawOwner,
+  type InteractionSemanticCheckpointJournalPort,
+  type InteractionParentTurnRawJournalPort,
+  type InteractionParentOpenedTurnScopeReadPort,
+  type InteractionParentTurnSnapshot,
+  type InteractionParentTurnAppend,
+} from '../../packages/runtime/src/explicit-brain/index.js';
+import { id, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef, type InteractionTurnIdentity, type OrganId, type OccurrenceExecutionOwner, type JournalCommitRef } from '../../packages/contracts/src/index.js';
 import { ProviderAgentDriver, ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -257,6 +264,60 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
         })(), text: async () => '' }),
     });
     super({ binding: options.binding, routeRef: 'recorded', codec: new ResponsesProviderCodec(), transport, evidence });
+  }
+}
+/**
+ * A real JSONL parent journal whose Nth durable raw acceptance is rejected.
+ *
+ * The rejection happens inside the very transaction the owner staged its plan
+ * in, so nothing is appended and the durable turn keeps exactly the accepted
+ * prefix a busy journal leaves behind. Every other read and write is the real
+ * journal, so the test observes the production shape instead of a mock.
+ */
+class RejectedAcceptanceJournal implements InteractionParentTurnRawJournalPort, InteractionParentOpenedTurnScopeReadPort {
+  private accepted = 0;
+  constructor(
+    private readonly inner: JsonlInteractionParentTurnJournal,
+    private readonly rejectAt: number,
+  ) {}
+
+  transactTurn<TResult>(
+    turn: InteractionTurnIdentity,
+    plan: (snapshot: InteractionParentTurnSnapshot) => {
+      readonly append?: InteractionParentTurnAppend;
+      readonly result: TResult;
+    },
+  ): Promise<{ readonly committed?: JournalCommitRef; readonly result: TResult }> {
+    return this.inner.transactTurn<TResult>(turn, (snapshot) => {
+      const planned = plan(snapshot);
+      if (planned.append !== undefined && planned.append.kind === 'accepted-fact') {
+        this.accepted += 1;
+        if (this.accepted === this.rejectAt) {
+          throw new Error('durable raw acceptance is temporarily unavailable');
+        }
+      }
+      return planned;
+    });
+  }
+
+  readTurnSnapshot(turn: InteractionTurnIdentity): Promise<InteractionParentTurnSnapshot> {
+    return this.inner.readTurnSnapshot(turn);
+  }
+
+  readScopeOpenedTurns(scope: { readonly organId: OrganId; readonly interactionScopeId: string }) {
+    return this.inner.readScopeOpenedTurns(scope);
+  }
+
+  readScopeAbandonedTurns(scope: { readonly organId: OrganId; readonly interactionScopeId: string }) {
+    return this.inner.readScopeAbandonedTurns(scope);
+  }
+
+  readScopeParseFailures(scope: { readonly organId: OrganId; readonly interactionScopeId: string }) {
+    return this.inner.readScopeParseFailures(scope);
+  }
+
+  readScopeExecutionFailures(scope: { readonly organId: OrganId; readonly interactionScopeId: string }) {
+    return this.inner.readScopeExecutionFailures(scope);
   }
 }
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
@@ -1767,6 +1828,7 @@ test('provider explicit brain interpreter loads the interaction template and val
       readScopeOpenedTurns: (scope) => selectedOptions.parentJournal.readScopeOpenedTurns(scope),
       readScopeAbandonedTurns: (scope) => selectedOptions.parentJournal.readScopeAbandonedTurns(scope),
       readScopeParseFailures: (scope) => selectedOptions.parentJournal.readScopeParseFailures(scope),
+      readScopeExecutionFailures: (scope) => selectedOptions.parentJournal.readScopeExecutionFailures(scope),
     },
   });
   await assert.rejects(() => commitBlocked.interpret({ interactionId: 'blocked-input', inputRevision: 1,
@@ -2272,6 +2334,122 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
     await rm(root, { recursive: true, force: true });
   }
 });
+test('provider explicit brain interpreter keeps the intake usable after an interpret failure whose provider close also fails', async () => {
+  // Failure basis: one interpret batch whose Provider stream broke with the
+  // journal briefly rejecting the next durable raw fact. The owner process
+  // settled, closed and threw, but the old catch lane threw the close error
+  // immediately, so no durable terminal fact was ever written for the epoch it
+  // had just opened. The turn stayed "pending" forever and every later input in
+  // the scope was refused because the live lease cannot prove its own stream is
+  // dead: the whole explicit intake froze until a daemon restart. Impact: a
+  // single transient failure bricks intake. Cost: one real lease, one failing
+  // recorded Provider stream and one healthy replay on the existing JSONL
+  // consumer. Probability: any transient raw-acceptance or socket failure on
+  // the intake stream.
+  const root = join(parentFixtureRoot, `intake-failure-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-intake-failure', providerId: 'provider-intake-failure', protocol: 'responses',
+    endpointRef: 'fake://intake-failure', modelRef: 'model-intake-failure',
+    configDigest: 'sha256:intake-failure-config', capabilityDigest: 'sha256:intake-failure-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:intake-failure' };
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    await ensureControlLayout(paths);
+    lease = await acquireDaemonLease(paths);
+    const ownerIdentity = await lease.withCurrentLeaseOwner(async (owner) => owner);
+    // The first interpret serves a stream whose second durable raw acceptance
+    // is rejected: the first reasoning unit is durable, the next one is not.
+    // That is the exact shape interaction-122 left in the production journal:
+    // a rejected raw fact, a settle that failed before the request could be
+    // marked failed, and a close that came back pending because the Provider
+    // worker never released its execution.
+    const parentWithRejection = new RejectedAcceptanceJournal(parentJournal, 2);
+    let prepared = 0;
+    const failingPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence, respond: async () => [
+      { type: 'response.reasoning_summary_text.delta', item_id: 'rs-intake', delta: 'part one' },
+      { type: 'response.reasoning_summary_text.delta', item_id: 'rs-intake', delta: 'part two' },
+    ] });
+    const failingComposition: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef> = {
+      roleId: 'interaction' as const, source: 'http' as const,
+      provider: { source: 'http' as const, provider: 'http' as const, binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'intake-failure', baseUrl: binding.endpointRef },
+      binding, port: failingPort,
+    };
+    const healthyPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence, respond: async () => [
+      { type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
+        kind: 'answer', normalizedInput: '4 加 4 等于几？', knownFacts: [], answer: '8', decisionRefs: [],
+      }) },
+    ] });
+    const healthyComposition: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef> = {
+      roleId: 'interaction' as const, source: 'http' as const,
+      provider: { source: 'http' as const, provider: 'http' as const, binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'intake-failure-ok', baseUrl: binding.endpointRef },
+      binding, port: healthyPort,
+    };
+    const interpreter = createProviderExplicitBrainInterpreter({
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      parentJournal: parentWithRejection, checkpointJournal: helperJournal, helperJournal,
+      turnHelperJournal: helperJournal, rawEvidence: evidence, rawContent,
+      clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease,
+      prepareAgentProvider: async () => {
+        prepared += 1;
+        return prepared === 1 ? failingComposition : healthyComposition;
+      },
+    });
+    // The committed record kind is new in this change, so the durable read is
+    // probed instead of assumed: against the pre-fix build the record cannot
+    // exist at all, which is exactly the red state this test reports.
+    const readExecutionFailures = async (): Promise<number> => {
+      const reader = parentJournal as unknown as {
+        readonly readScopeExecutionFailures?: (input: typeof scope) => Promise<readonly unknown[]>;
+      };
+      if (reader.readScopeExecutionFailures === undefined) return 0;
+      return (await reader.readScopeExecutionFailures(scope)).length;
+    };
+    const failedRequest = {
+      interactionId: 'interaction-intake-failure', inputRevision: 1, sourceRef: 'ui:intake-failure',
+      rawInput: '4 加 4 等于几？', clarifications: [], taskCandidates: [],
+    };
+    // The first interpret fails honestly, and the primary causal error is
+    // exposed instead of being masked by the close failure.
+    await assert.rejects(
+      () => interpreter.interpret(failedRequest),
+      (error: unknown) => error instanceof AggregateError
+        && error.message.includes('provider raw fact was rejected by durable acceptance'),
+    );
+    assert.equal(await readExecutionFailures(), 1,
+      'the failed epoch is durably closed by its own fact');
+    // Without the fix this next input is refused with "the committed execution
+    // owner is still the current active lease owner; a live Provider stream is
+    // not an interrupted crash": the turn stayed pending forever.
+    const nextRequest = {
+      interactionId: 'interaction-after-intake-failure', inputRevision: 1, sourceRef: 'ui:after-intake-failure',
+      rawInput: '4 加 4 等于几？', clarifications: [], taskCandidates: [],
+    };
+    const second = await interpreter.interpret(nextRequest);
+    assert.equal(second.kind, 'answer');
+    if (second.kind !== 'answer') throw new Error('expected an answer');
+    assert.equal(second.answer, '8');
+    assert.equal(prepared, 2, 'the second interpret drives its own fresh provider');
+    assert.equal(await readExecutionFailures(), 1, 'the closure is written exactly once');
+    assert.ok((await parentJournal.readScopeOpenedTurns(scope)).length >= 2);
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 
 // Failure basis: a tool-call, a tool-result or a dispatched helper proves the
 // turn reached the side-effect stage. The old rule treated a recorded tool

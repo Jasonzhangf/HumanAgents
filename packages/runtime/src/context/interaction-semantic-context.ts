@@ -326,7 +326,7 @@ export async function prepareScopeSemanticHistory(input: {
   readonly activeTurn: InteractionTurnIdentity;
   readonly parentJournal: Pick<
     InteractionParentOpenedTurnScopeReadPort,
-    'readScopeOpenedTurns' | 'readScopeAbandonedTurns' | 'readScopeParseFailures'
+    'readScopeOpenedTurns' | 'readScopeAbandonedTurns' | 'readScopeParseFailures' | 'readScopeExecutionFailures'
   >;
   readonly checkpointJournal: Pick<
     InteractionSemanticCheckpointJournalPort,
@@ -342,11 +342,15 @@ export async function prepareScopeSemanticHistory(input: {
   const openedTurns = await input.parentJournal.readScopeOpenedTurns(scope);
   const abandonedTurns = await input.parentJournal.readScopeAbandonedTurns(scope);
   const parseFailures = await input.parentJournal.readScopeParseFailures(scope);
+  const executionFailures = await input.parentJournal.readScopeExecutionFailures(scope);
   const abandoned = new Set(abandonedTurns.map(({ fact }) => interactionTurnKey(fact.turn)));
   // A turn closed as unparseable is durable history-free closure too: its
   // terminal output exists but yielded no decision, so it neither blocks the
   // next turn nor feeds it a claim it never made.
   const unusable = new Set(parseFailures.map(({ fact }) => interactionTurnKey(fact.turn)));
+  // A turn whose epoch failed before any terminal output is closed by its own
+  // durable fact: it holds no claim either, so it must not block or feed.
+  const failedEpochs = new Set(executionFailures.map(({ fact }) => interactionTurnKey(fact.turn)));
   const committed = [...commits].sort((left, right) => left.commit.journalSeq - right.commit.journalSeq);
   const history: InteractionSemanticCheckpoint[] = [];
   for (const opened of openedTurns) {
@@ -363,6 +367,9 @@ export async function prepareScopeSemanticHistory(input: {
       // is closed by its own durable fact in the same way: it holds no claim, so
       // it must not block the next turn.
       if (unusable.has(interactionTurnKey(opened.fact.turn))) continue;
+      // A turn whose epoch failed before any terminal output is equally closed:
+      // its partial reasoning is not a claim about the answer.
+      if (failedEpochs.has(interactionTurnKey(opened.fact.turn))) continue;
       throw new ContractError(
         `unclosed interaction parent turn ${opened.fact.turn.turnId} requires recovery or semantic closure before opening ${input.activeTurn.turnId}`,
       );

@@ -26,6 +26,7 @@ import type {
   InteractionParentResourceCloseFact,
   InteractionParentTurnAbandonmentFact,
   InteractionParentTurnAppend,
+  InteractionParentTurnExecutionFailureFact,
   InteractionParentTurnInputFact,
   InteractionParentTurnParseFailureFact,
   InteractionParentTurnRawJournalPort,
@@ -114,6 +115,13 @@ type ParentRawPayload =
       readonly turn: InteractionTurnIdentity;
       readonly execution: InteractionParentProviderExecutionIdentityRef;
       readonly fact: InteractionParentTurnParseFailureFact;
+    }
+  | {
+      readonly kind: typeof INTERACTION_PARENT_RAW_RECORD_TYPE;
+      readonly discriminant: 'turn-execution-failure';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: InteractionParentTurnExecutionFailureFact;
     };
 
 function sameScopedId(
@@ -397,6 +405,31 @@ function assertParseFailureFact(
   }
 }
 
+/**
+ * Validate one durable failure-closing of a physical epoch.
+ *
+ * It says only that this exact epoch failed before any terminal output, so it
+ * may never carry a success, an answer, a close, a settlement or an abandonment
+ * claim. The epoch it names must be a real epoch of the committed turn input.
+ */
+function assertExecutionFailureFact(
+  fact: InteractionParentTurnExecutionFailureFact,
+  turn: InteractionTurnIdentity,
+): void {
+  if (fact === null || typeof fact !== 'object') {
+    throw new JournalIntegrityError('interaction parent epoch failure fact is invalid');
+  }
+  assertTurn(fact.turn);
+  if (!sameTurnIdentity(fact.turn, turn)) {
+    throw new JournalIntegrityError('interaction parent epoch failure turn does not match its record turn');
+  }
+  assertInteractionParentExecution(fact.execution, fact.turn);
+  validateProviderBinding(fact.providerBinding);
+  if (typeof fact.failedAt !== 'string' || fact.failedAt.trim() === '') {
+    throw new JournalIntegrityError('interaction parent epoch failure requires a failedAt timestamp');
+  }
+}
+
 function assertRequestRecord(
   record: RuntimeRequestRecord,
   turn: InteractionTurnIdentity,
@@ -517,6 +550,20 @@ function readParentRawPayload(record: JournalRecord): ParentRawPayload | null {
     }
     return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
   }
+  if (discriminant === 'turn-execution-failure') {
+    const turn = payload.turn as InteractionTurnIdentity;
+    const execution = payload.execution as InteractionParentProviderExecutionIdentityRef;
+    const fact = payload.fact as InteractionParentTurnExecutionFailureFact;
+    assertTurn(turn);
+    assertInteractionParentExecution(execution, turn);
+    assertExecutionFailureFact(fact, turn);
+    if (canonicalJsonStringify(fact.execution) !== canonicalJsonStringify(execution)) {
+      throw new JournalIntegrityError(
+        'interaction parent epoch failure execution does not match its record execution',
+      );
+    }
+    return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
+  }
   throw new JournalIntegrityError('interaction parent raw record discriminant is invalid');
 }
 
@@ -549,6 +596,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
   let resourceClose: InteractionParentCommittedFact<InteractionParentResourceCloseFact> | null = null;
   let abandonment: InteractionParentCommittedFact<InteractionParentTurnAbandonmentFact> | null = null;
   let parseFailure: InteractionParentCommittedFact<InteractionParentTurnParseFailureFact> | null = null;
+  let executionFailure: InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact> | null = null;
 
   for (const record of records) {
     const payload = readParentRawPayload(record);
@@ -565,6 +613,11 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
     // terminal output is frozen, so nothing may append after the closure.
     if (parseFailure !== null) {
       throw new JournalIntegrityError('interaction parent raw append follows the committed turn parse failure');
+    }
+    // A failed epoch is terminal for the whole turn: its partial history is
+    // frozen exactly like the other two closures.
+    if (executionFailure !== null) {
+      throw new JournalIntegrityError('interaction parent raw append follows the committed epoch failure');
     }
     const commit = commitRef(record);
     if (payload.discriminant === 'turn-input') {
@@ -760,6 +813,59 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       parseFailure = { fact: payload.fact, commit };
       continue;
     }
+    // A failed epoch closes the turn after its own close is already committed,
+    // which is exactly why it must not be confused with abandonment: it makes no
+    // claim about the close and only records that no output can ever arrive.
+    if (payload.discriminant === 'turn-execution-failure') {
+      if (turnInput === null) {
+        throw new JournalIntegrityError(
+          'interaction parent epoch failure requires the committed turn input before it',
+        );
+      }
+      const activeEpoch = ownerReconciliations.at(-1)?.fact.effectiveExecutionEpoch
+        ?? turnInput.fact.execution.executionEpoch;
+      if (!sameParentExecutionBusinessIdentity(turnInput.fact.execution, payload.fact.execution)
+        || payload.fact.execution.executionEpoch !== activeEpoch) {
+        throw new JournalIntegrityError(
+          'interaction parent epoch failure execution does not match the active execution',
+        );
+      }
+      const committedBinding = turnInput.fact.providerBinding;
+      if (committedBinding === undefined
+        || canonicalJsonStringify(committedBinding) !== canonicalJsonStringify(payload.fact.providerBinding)) {
+        throw new JournalIntegrityError(
+          'interaction parent epoch failure requires the original committed provider binding',
+        );
+      }
+      if (providerSettlements.length > 0 || ownerReconciliations.length > 0) {
+        throw new JournalIntegrityError(
+          'interaction parent epoch failure requires a turn without a settlement or reconciliation',
+        );
+      }
+      if (acceptedFacts.some((committed) =>
+        committed.fact.envelope.fact.kind === 'request-complete'
+        || (committed.fact.envelope.fact.kind === 'content'
+          && committed.fact.envelope.fact.channel === 'assistant-text'
+          && committed.fact.envelope.fact.complete))) {
+        throw new JournalIntegrityError(
+          'interaction parent epoch failure requires an epoch without a terminal output',
+        );
+      }
+      if (acceptedFacts.some((committed) =>
+        committed.fact.envelope.fact.kind === 'tool-call'
+        || committed.fact.envelope.fact.kind === 'tool-result')) {
+        throw new JournalIntegrityError(
+          'interaction parent epoch failure requires an epoch without a tool side effect',
+        );
+      }
+      if (abandonment !== null || parseFailure !== null) {
+        throw new JournalIntegrityError(
+          'interaction parent epoch failure follows another committed turn closure',
+        );
+      }
+      executionFailure = { fact: payload.fact, commit };
+      continue;
+    }
     // Every other discriminant appends request or raw history, so it can never
     // physically follow a committed resource close.
     if (resourceClose !== null) {
@@ -789,7 +895,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
 
   return {
     turnInput, requests, acceptedFacts, ownerReconciliations, providerSettlements,
-    resourceClose, abandonment, parseFailure,
+    resourceClose, abandonment, parseFailure, executionFailure,
   };
 }
 
@@ -905,6 +1011,24 @@ function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput 
       },
     };
   }
+  if (append.kind === 'turn-execution-failure') {
+    const epoch = append.execution.executionEpoch;
+    return {
+      // The original epoch keeps a stable id so the exact retry stays
+      // idempotent; a later epoch scopes its own closure to the real epoch.
+      commitId: parentRawCommitId(append.turn,
+        epoch === 1 ? 'turn-execution-failure' : `turn-execution-failure:${epoch}`),
+      kind: 'event',
+      scope: parentScope(append.turn, append.execution),
+      payload: {
+        kind: INTERACTION_PARENT_RAW_RECORD_TYPE,
+        discriminant: 'turn-execution-failure',
+        turn: append.turn,
+        execution: append.execution,
+        fact: append.fact,
+      },
+    };
+  }
   const entry = append.entry;
   return {
     commitId: parentRawCommitId(
@@ -947,6 +1071,9 @@ export class JsonlInteractionParentTurnJournal
         }
         if (planned.append !== undefined && snapshot.parseFailure !== null) {
           throw new JournalIntegrityError('interaction parent raw append follows the committed turn parse failure');
+        }
+        if (planned.append !== undefined && snapshot.executionFailure !== null) {
+          throw new JournalIntegrityError('interaction parent raw append follows the committed epoch failure');
         }
         return planned;
       },
@@ -1007,6 +1134,29 @@ export class JsonlInteractionParentTurnJournal
       abandoned.push({ fact: payload.fact, commit: commitRef(record) });
     }
     return abandoned;
+  }
+
+  async readScopeExecutionFailures(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>[]> {
+    if (scope.organId === null || typeof scope.organId !== 'object'
+      || scope.organId.scope !== 'organ' || !scope.organId.value.trim()) {
+      throw new JournalIntegrityError('interaction parent scope read requires a valid organ id');
+    }
+    if (typeof scope.interactionScopeId !== 'string' || scope.interactionScopeId.trim() === '') {
+      throw new JournalIntegrityError('interaction parent scope read requires an interactionScopeId');
+    }
+    const failed: InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>[] = [];
+    for (const record of await this.journal.replay()) {
+      const payload = readParentRawPayload(record);
+      if (payload === null || payload.discriminant !== 'turn-execution-failure') continue;
+      if (!sameScopedId(payload.fact.turn.organId, scope.organId)) continue;
+      if (payload.fact.turn.interactionScopeId !== scope.interactionScopeId) continue;
+      assertRecordScope(record, payload.fact.turn, payload.execution);
+      failed.push({ fact: payload.fact, commit: commitRef(record) });
+    }
+    return failed;
   }
 
   async readScopeParseFailures(scope: {
