@@ -2366,7 +2366,7 @@ export class UiRuntimeService {
         submit: async (envelope) => ({ requirementId: envelope.requirementId }),
       },
       () => this.persistExplicitBrainState(),
-      () => this.persistExplicitBrainState(),
+      (receipt) => this.commitSubmittedRequestNumber(receipt),
     );
     this.mode = options.mode;
     // The native launch assembly builds its execution ports once, before this
@@ -6083,8 +6083,7 @@ export class UiRuntimeService {
       }
       // A general answer ends before task matching or requirement recording.
       if (interpreted.kind === 'answer') {
-        await this.explicitIntake.completeAnswer(snapshot.interactionId, interpreted.answer);
-        this.persistExplicitBrainState();
+        this.commitExplicitIntakeSuccess(() => this.explicitIntake.completeAnswer(snapshot.interactionId, interpreted.answer));
         return await this.explicitIntake.inspect(snapshot.interactionId);
       }
       const matched = interpreted.matchedTaskId === undefined
@@ -6119,15 +6118,24 @@ export class UiRuntimeService {
           409,
         );
       }
-      await this.explicitIntake.recordMatch(snapshot.interactionId, {
+      const matchResult = {
         normalizedInput: interpreted.normalizedInput,
-        matchedTasks: matched === undefined ? [] : [{ taskId: matched.taskId, relation: 'current', status: matched.state }],
+        matchedTasks: matched === undefined ? [] : [{ taskId: matched.taskId, relation: 'current' as const, status: matched.state }],
         knownFacts: interpreted.knownFacts,
-      });
+      };
       if (interpreted.kind === 'status-query') {
-        await this.explicitIntake.beginStatusCheck(snapshot.interactionId);
-        await this.explicitIntake.completeStatusOnly(snapshot.interactionId, interpreted.answer);
+        // The status-only success fact, its request number and the counter
+        // advance belong to the same explicit-brain.state save. The match and
+        // status-check transitions are part of that save too, so a failed
+        // append restores the interaction to its prior durable state instead of
+        // leaking a half-applied success.
+        this.commitExplicitIntakeSuccess(() => {
+          this.explicitIntake.recordMatch(snapshot.interactionId, matchResult);
+          this.explicitIntake.beginStatusCheck(snapshot.interactionId);
+          return this.explicitIntake.completeStatusOnly(snapshot.interactionId, interpreted.answer);
+        });
       } else {
+        this.explicitIntake.recordMatch(snapshot.interactionId, matchResult);
         await this.explicitIntake.propose(snapshot.interactionId, {
           proposedIntent: interpreted.intent,
           proposal: interpreted.proposal,
@@ -6139,8 +6147,8 @@ export class UiRuntimeService {
           title: interpreted.structuredProposal.title,
           taskFlow: interpreted.taskFlow,
         });
+        this.persistExplicitBrainState();
       }
-      this.persistExplicitBrainState();
       return await this.explicitIntake.inspect(snapshot.interactionId);
     } catch (error) {
       throw apiError(error);
@@ -6375,10 +6383,12 @@ export class UiRuntimeService {
 
   async completeExplicitStatusQuery(interactionId: string): Promise<StatusQueryReceipt> {
     try {
-      await this.explicitIntake.beginStatusCheck(interactionId);
-      const receipt = await this.explicitIntake.completeStatusOnly(interactionId);
-      this.persistExplicitBrainState();
-      return receipt;
+      let receipt: StatusQueryReceipt | undefined;
+      this.commitExplicitIntakeSuccess(() => {
+        this.explicitIntake.beginStatusCheck(interactionId);
+        receipt = this.explicitIntake.completeStatusOnly(interactionId);
+      });
+      return receipt!;
     } catch (error) {
       throw apiError(error);
     }
@@ -7589,6 +7599,43 @@ export class UiRuntimeService {
       };
     }
     return undefined;
+  }
+
+  /**
+   * Commit a terminal success fact and its request number as one durable save.
+   * The mutation, the explicit-brain.state append and the rollback all run in
+   * one synchronous block, so a failed append restores only this interaction's
+   * uncommitted transition: a success another interaction committed earlier is
+   * already inside the captured state and is not reverted.
+   */
+  private commitExplicitIntakeSuccess<T>(mutate: () => T): T {
+    const previous = this.explicitIntake.exportState();
+    try {
+      const result = mutate();
+      this.persistExplicitBrainState();
+      return result;
+    } catch (error) {
+      this.explicitIntake.restoreState(previous);
+      throw error;
+    }
+  }
+
+  /**
+   * Allocate the user-facing request number in the same save as the
+   * authoritative requirement submission receipt. The submission owner has
+   * already recorded the receipt when this callback runs, so one journal
+   * append carries both facts. A failed append rolls the allocation back and
+   * rethrows so the submission is not reported as accepted.
+   */
+  private commitSubmittedRequestNumber(receipt: PersistedSubmittedReceipt): void {
+    const previous = this.explicitIntake.exportState();
+    try {
+      this.explicitIntake.assignRequestNumber(receipt.interactionId);
+      this.persistExplicitBrainState();
+    } catch (error) {
+      this.explicitIntake.restoreState(previous);
+      throw error;
+    }
   }
 
   private persistExplicitBrainState(): void {

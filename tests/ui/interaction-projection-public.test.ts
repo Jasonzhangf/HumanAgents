@@ -274,3 +274,27 @@ test('answered explicit snapshot projects as a succeeded interaction without inv
   assert.equal(projection.conversation.turns.at(-1)?.markdown, '4');
   assert.deepEqual(projection.cardMetadata.source, { interactionId: 'interaction-2' });
 });
+
+// Failure mode (basis: the new request-number rule): the card must show only
+// the authoritative number the runtime committed. Rendering a number while the
+// interaction is still processing, or counting messages in the UI, would show
+// the user a number that no success fact owns. Cost is one small projection
+// case in the existing public consumer.
+test('explicit snapshot projects the committed request number and invents none while processing', () => {
+  const answered = interactionCardPage.projectInteractionCardFromSnapshot({
+    interactionId: 'interaction-8',
+    state: 'answered',
+    rawInput: '整理周报证据',
+    reply: '已整理',
+    requestNumber: 8,
+  });
+  assert.equal(answered.conversation.turns[0]?.markdown, '第 8 次请求 · 整理周报证据');
+
+  const processing = interactionCardPage.projectInteractionCardFromSnapshot({
+    interactionId: 'interaction-9',
+    state: 'matching',
+    rawInput: '整理周报证据',
+  });
+  assert.equal(processing.conversation.turns[0]?.markdown, '整理周报证据');
+  assert.equal(JSON.stringify(processing.conversation).includes('次请求'), false);
+});

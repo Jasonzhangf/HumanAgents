@@ -22,6 +22,7 @@ import {
 } from '../../../contracts/src/index.js';
 import {
   assertDraftRevisionCurrent,
+  allocateRequestNumber,
   createDraftRevision,
   DraftRevisionError,
   refineDraftRevision,
@@ -149,6 +150,7 @@ export interface Proposal {
 
 export interface ExplicitInteractionSnapshot {
   readonly interactionId: InteractionId;
+  readonly requestNumber?: number;
   readonly state: ExplicitInteractionState;
   readonly sourceRef: string;
   readonly rawInput: string;
@@ -215,11 +217,13 @@ export interface StatusQueryReceipt {
 export interface ExplicitIntakeState {
   readonly nextInteractionSeq: number;
   readonly nextDraftSeq: number;
+  readonly nextRequestNumber?: number;
   readonly interactions: readonly ExplicitInteractionRecordState[];
 }
 
 interface ExplicitInteractionRecordState {
   readonly interactionId: InteractionId;
+  readonly requestNumber?: number;
   readonly inputRevision: number;
   readonly sourceRef: string;
   readonly rawInput: string;
@@ -246,6 +250,7 @@ interface ExplicitInteractionRecordState {
 
 interface InteractionRecord {
   readonly interactionId: InteractionId;
+  requestNumber?: number;
   readonly inputRevision: number;
   readonly sourceRef: string;
   readonly rawInput: string;
@@ -325,6 +330,7 @@ export class ExplicitIntake {
   private readonly draftInteractions = new Map<string, InteractionId>();
   private nextInteractionSeq = 1;
   private nextDraftSeq = 1;
+  private nextRequestNumber = 1;
 
   constructor(
     private readonly journal?: ExplicitIntakeJournalPort,
@@ -338,6 +344,7 @@ export class ExplicitIntake {
     return {
       nextInteractionSeq: this.nextInteractionSeq,
       nextDraftSeq: this.nextDraftSeq,
+      nextRequestNumber: this.nextRequestNumber,
       interactions: [...this.interactions.values()].map((interaction) => structuredClone(interaction)),
     };
   }
@@ -347,6 +354,7 @@ export class ExplicitIntake {
     this.draftInteractions.clear();
     this.nextInteractionSeq = state.nextInteractionSeq;
     this.nextDraftSeq = state.nextDraftSeq;
+    this.nextRequestNumber = state.nextRequestNumber ?? 1;
     for (const input of state.interactions) {
       const interaction = structuredClone(input) as InteractionRecord;
       this.interactions.set(interaction.interactionId, interaction);
@@ -462,6 +470,7 @@ export class ExplicitIntake {
     const interaction = this.requireInteraction(input);
     return structuredClone({
       interactionId: interaction.interactionId,
+      requestNumber: interaction.requestNumber,
       state: interaction.state,
       sourceRef: interaction.sourceRef,
       rawInput: interaction.rawInput,
@@ -494,7 +503,7 @@ export class ExplicitIntake {
     this.transition(interaction, 'matching', 'explicit-intake', 'inspect-candidates', 'task-match-available');
   }
 
-  async recordMatch(input: InteractionId, result: MatchResult): Promise<void> {
+  recordMatch(input: InteractionId, result: MatchResult): void {
     const interaction = this.requireState(input, ['matching'], 'record match');
     if (!result.normalizedInput || !result.normalizedInput.trim()) {
       throw this.invalidState('record match', 'normalized input is required', 'request-normalized-input');
@@ -518,18 +527,19 @@ export class ExplicitIntake {
     });
   }
 
-  async beginStatusCheck(input: InteractionId): Promise<void> {
+  beginStatusCheck(input: InteractionId): void {
     const interaction = this.requireState(input, ['matching', 'awaiting-intent'], 'begin status check');
     this.transition(interaction, 'status-checking', 'explicit-intake', 'read-status', 'status-projection-available');
   }
 
-  async completeStatusOnly(input: InteractionId, answer?: string): Promise<StatusQueryReceipt> {
+  completeStatusOnly(input: InteractionId, answer?: string): StatusQueryReceipt {
     const interaction = this.requireState(input, ['status-checking'], 'complete status query');
     if (answer !== undefined) {
       if (!answer.trim()) throw this.invalidState('complete status query', 'status answer is required', 'provide-status-answer');
     }
     this.transition(interaction, 'status-only', 'explicit-intake', 'present-status', undefined, (candidate) => {
       if (answer !== undefined) candidate.reply = answer;
+      this.assignRequestNumberFor(candidate);
     });
     return {
       kind: 'status-only',
@@ -546,14 +556,35 @@ export class ExplicitIntake {
    * `matching`, so a status query (`status-checking`) and a requirement draft
    * (`awaiting-intent`/`awaiting-confirmation`) keep their own paths.
    */
-  async completeAnswer(input: InteractionId, answer: string): Promise<void> {
+  completeAnswer(input: InteractionId, answer: string): void {
     const interaction = this.requireState(input, ['matching'], 'complete answer');
     if (!answer || !answer.trim()) {
       throw this.invalidState('complete answer', 'answer is required', 'provide-answer');
     }
     this.transition(interaction, 'answered', 'explicit-intake', 'present-answer', undefined, (candidate) => {
       candidate.reply = answer;
+      this.assignRequestNumberFor(candidate);
     });
+  }
+
+  /**
+   * Assign the user-facing request number at the authoritative success commit.
+   * Idempotent: the same interaction returns its existing number without
+   * advancing the sequence. The caller persists the state in the same save as
+   * the success fact (see the app's `persistExplicitBrainState`).
+   */
+  assignRequestNumber(interactionId: InteractionId): number {
+    const interaction = this.requireState(
+      interactionId,
+      ['answered', 'status-only', 'confirmed', 'dispatched'],
+      'assign request number',
+    );
+    if (interaction.requestNumber !== undefined) return interaction.requestNumber;
+    let assigned: number | undefined;
+    this.persistMutation(() => {
+      assigned = this.assignRequestNumberFor(interaction);
+    });
+    return assigned!;
   }
 
   async requestClarification(input: InteractionId, question: string): Promise<void> {
@@ -1291,6 +1322,13 @@ export class ExplicitIntake {
         interaction.draft = { ...interaction.draft, state };
       }
     });
+  }
+
+  private assignRequestNumberFor(interaction: InteractionRecord): number {
+    const allocation = allocateRequestNumber(this.nextRequestNumber, interaction.requestNumber);
+    interaction.requestNumber = allocation.requestNumber;
+    this.nextRequestNumber = allocation.nextRequestNumber;
+    return allocation.requestNumber;
   }
 
   private persistMutation(mutate: () => void): void {
