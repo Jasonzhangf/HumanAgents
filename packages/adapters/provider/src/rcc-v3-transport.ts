@@ -43,14 +43,19 @@ const HTTP_OWNER = 'humanagent.provider-adapter.http';
 const DEFAULT_MAX_EVENT_BYTES = 1024 * 1024;
 const DEFAULT_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const DEFAULT_PROBE_TTL_MS = 5 * 60 * 1000;
-// A tool-argument payload is bounded JSON: real providers finish it in a
-// handful of frames. The count and the elapsed window bound one unit's delta
-// stream, so a provider that dribbles deltas forever cannot hold the turn open.
-const DEFAULT_TOOL_ARGUMENT_DELTA_BUDGET = 512;
-const DEFAULT_TOOL_ARGUMENT_WINDOW_MS = 120_000;
-// A long text or reasoning unit is legitimate, so it has no wall-clock budget.
-// The cap only bounds a runaway unit and stays far above any real stream.
-const DEFAULT_CONTENT_DELTA_BUDGET = 8192;
+// No-progress is measured as silence, not as elapsed unit lifetime or frame
+// count: real RCC dribbles one function_call_arguments delta roughly every
+// 2.4 seconds, so a normal turn_end call can keep one unit open for many
+// minutes while every frame advances the payload. The budget therefore starts
+// from the last real progress (a delta carrying new bytes) and only fires when
+// no new bytes arrive for this long. At ~2.4s/frame, 120s is roughly fifty
+// frames of silence, far beyond any live stream's inter-frame gap.
+const DEFAULT_NO_PROGRESS_BUDGET_MS = 120_000;
+// A pure runaway guard, not a progress criterion: it only stops a provider
+// that floods one unit with an absurd number of delta frames. It sits far
+// above any real stream (the largest production sample was 535 frames) and
+// must never be lowered to a value a slow but advancing stream could reach.
+const DEFAULT_DELTA_RUNAWAY_CAP = 100_000;
 
 /**
  * Source strategy for the provider HTTP transport. `rcc` keeps the RCC
@@ -116,24 +121,18 @@ export interface RccV3ProviderTransportOptions<
   readonly source?: ProviderTransportSource;
   readonly credential?: string;
   /**
-   * No-progress budget for one tool-argument delta stream: how many delta
-   * events a single content unit may receive before its item completes. A
-   * provider that keeps dribbling deltas for the same unit never finishes the
-   * call, so the stream fails instead of holding the turn open.
+   * Silence budget for one SSE stream, in milliseconds. No-progress means no
+   * new bytes from the provider for this long; it is measured from the last
+   * real progress, never from a unit's start or a frame count, so a slow but
+   * advancing stream never triggers it.
    */
-  readonly toolArgumentDeltaBudget?: number;
+  readonly noProgressBudgetMs?: number;
   /**
-   * No-progress window for one tool-argument delta stream, in milliseconds,
-   * measured from that unit's first delta until it completes. Content deltas
-   * are not bounded by time: a long text unit is legitimate.
+   * Pure runaway guard: the maximum number of delta frames one content unit
+   * may receive before the stream is ended as unbounded. It is not a progress
+   * criterion and must stay far above any real stream.
    */
-  readonly toolArgumentWindowMs?: number;
-  /**
-   * Structural delta cap for one content (text/reasoning) unit. It exists only
-   * to bound a runaway unit; it must stay far above any real stream, and there
-   * is no wall-clock budget that could kill a normal long stream.
-   */
-  readonly contentDeltaBudget?: number;
+  readonly deltaRunawayCap?: number;
 }
 
 interface ActiveExecution {
@@ -484,11 +483,100 @@ function contentDeltaUnit(
   return { kind: 'content', key: `content:openai:${index}` };
 }
 
+/**
+ * A provider can accept a request and then stop writing bytes while the socket
+ * stays open. Waiting on that reader never returns, so the stream is wrapped in
+ * a silence watchdog: every received chunk re-arms the timer, and a budget of
+ * complete silence ends the read with `StreamSilenceError`. A slow but
+ * advancing stream always delivers bytes inside the budget and never trips it.
+ */
+class StreamSilenceError extends Error {
+  constructor(readonly silenceMs: number) {
+    super(`RCC v3 stream delivered no bytes for ${String(silenceMs)} ms`);
+    this.name = 'StreamSilenceError';
+  }
+}
+
+async function* withSilenceWatchdog(
+  body: AsyncIterable<Uint8Array>,
+  silenceBudgetMs: number,
+): AsyncIterable<Uint8Array> {
+  const iterator = body[Symbol.asyncIterator]();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    while (true) {
+      const silence = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new StreamSilenceError(silenceBudgetMs)), silenceBudgetMs);
+        // The watchdog timer must fire even when the dead socket is the only
+        // pending work in the process, so it cannot be unref'd.
+      });
+      let next: IteratorResult<Uint8Array>;
+      try {
+        next = await Promise.race([iterator.next(), silence]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        timer = undefined;
+      }
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    // The raw body iterator may be suspended inside a never-resolving await of
+    // its own (a socket that never writes again). Its return() can never
+    // settle, so race it against a short grace so cleanup cannot hang the
+    // stream end.
+    await Promise.race([
+      Promise.resolve(iterator.return?.()),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 1_000);
+      }),
+    ]);
+  }
+}
+
 function readRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('RCC v3 SSE data must be a JSON object');
   }
   return value as Record<string, unknown>;
+}
+
+/**
+ * How many new bytes a delta event contributes to its content unit. Progress
+ * means the payload actually grows; a delta that repeats an empty string (or
+ * undecodable fields) is not progress.
+ */
+function deltaProgressBytes(
+  protocol: 'responses' | 'anthropic' | 'openai',
+  type: string,
+  record: Record<string, unknown>,
+): number {
+  if (protocol === 'responses') {
+    if (type === 'response.function_call_arguments.delta' || type === 'response.output_text.delta'
+      || type === 'response.reasoning_text.delta' || type === 'response.reasoning_summary_text.delta') {
+      return typeof record.delta === 'string' ? record.delta.length : 0;
+    }
+    return 0;
+  }
+  if (protocol === 'anthropic' && type === 'content_block_delta') {
+    const delta = optionalRecord(record.delta);
+    if (!delta) return 0;
+    if (delta.type === 'input_json_delta' || delta.type === 'signature_delta') {
+      return typeof delta.partial_json === 'string' ? delta.partial_json.length : (typeof delta.signature === 'string' ? delta.signature.length : 0);
+    }
+    if (delta.type === 'text_delta' || delta.type === 'thinking_delta') {
+      return typeof delta.text === 'string' ? delta.text.length : 0;
+    }
+    return 0;
+  }
+  if (protocol === 'openai' && type === 'openai.chat.completion') {
+    const choices = Array.isArray(record.choices) ? record.choices : [];
+    const choice = choices.find((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value));
+    const delta = choice ? optionalRecord(choice.delta) : undefined;
+    return typeof delta?.content === 'string' ? delta.content.length : 0;
+  }
+  return 0;
 }
 
 function optionalRecord(value: unknown): Record<string, unknown> | undefined {
@@ -538,9 +626,10 @@ async function* parseSse(
   body: AsyncIterable<Uint8Array>,
   maxEventBytes: number,
   maxBufferBytes: number,
+  silenceBudgetMs: number,
 ): AsyncIterable<SseFrame> {
   const decoder = new TextDecoder();
-  const iterator = body[Symbol.asyncIterator]();
+  const iterator = withSilenceWatchdog(body, silenceBudgetMs)[Symbol.asyncIterator]();
   let buffer = '';
   let event: string | undefined;
   let data: string[] = [];
@@ -658,9 +747,8 @@ export class RccV3ProviderTransport<
   private readonly executions = new Map<string, ActiveExecution>();
   private readonly stopReasons = new Map<AnyProviderExecutionIdentityRef, string>();
   private readonly options: Omit<RccV3ProviderTransportOptions<TIdentity>, 'credential'>;
-  private readonly toolArgumentDeltaBudget: number;
-  private readonly toolArgumentWindowMs: number;
-  private readonly contentDeltaBudget: number;
+  private readonly noProgressBudgetMs: number;
+  private readonly deltaRunawayCap: number;
   private credential: string | undefined;
 
   constructor({ credential, ...options }: RccV3ProviderTransportOptions<TIdentity>) {
@@ -697,9 +785,8 @@ export class RccV3ProviderTransport<
     }
     this.fetcher = options.fetch ?? defaultFetch;
     this.maxEventBytes = options.maxEventBytes ?? DEFAULT_MAX_EVENT_BYTES;
-    this.toolArgumentDeltaBudget = options.toolArgumentDeltaBudget ?? DEFAULT_TOOL_ARGUMENT_DELTA_BUDGET;
-    this.toolArgumentWindowMs = options.toolArgumentWindowMs ?? DEFAULT_TOOL_ARGUMENT_WINDOW_MS;
-    this.contentDeltaBudget = options.contentDeltaBudget ?? DEFAULT_CONTENT_DELTA_BUDGET;
+    this.noProgressBudgetMs = options.noProgressBudgetMs ?? DEFAULT_NO_PROGRESS_BUDGET_MS;
+    this.deltaRunawayCap = options.deltaRunawayCap ?? DEFAULT_DELTA_RUNAWAY_CAP;
     this.maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
     this.probeTtlMs = options.probeTtlMs ?? DEFAULT_PROBE_TTL_MS;
     this.now = options.now ?? (() => new Date());
@@ -910,9 +997,14 @@ export class RccV3ProviderTransport<
     // Open content-unit delta streams of this observation. A unit leaves the
     // map when its own done event arrives, and every unit is dropped once the
     // stream reports a terminal event.
-    const openUnits = new Map<string, { readonly kind: ContentDeltaUnit['kind']; deltas: number; readonly startedAtMs: number }>();
+    const openUnits = new Map<string, { readonly kind: ContentDeltaUnit['kind']; deltas: number }>();
+    // The moment the stream last made real progress: a delta carrying new
+    // bytes, a unit opening, or any non-delta event. Silence is measured from
+    // here, never from the stream start, so a slow but advancing stream never
+    // trips the no-progress budget.
+    let lastProgressAtMs = this.now().getTime();
     try {
-      for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes)) {
+      for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes, this.noProgressBudgetMs)) {
         if (active.stopRequested) throw active.stopCause;
         if (!frame.data) continue;
         if (frame.data === '[DONE]') {
@@ -946,30 +1038,34 @@ export class RccV3ProviderTransport<
           : record;
         const raw = { protocol: active.protocol, ...normalized, type } as unknown as ProviderWireEvent;
         const unit = contentDeltaUnit(active.protocol, type, record);
+        const nowMs = this.now().getTime();
+        let progressed = false;
         if (unit !== undefined) {
-          const nowMs = this.now().getTime();
-          const state = openUnits.get(unit.key) ?? { kind: unit.kind, deltas: 0, startedAtMs: nowMs };
-          state.deltas += 1;
-          openUnits.set(unit.key, state);
-          const deltaBudget = state.kind === 'tool-arguments' ? this.toolArgumentDeltaBudget : this.contentDeltaBudget;
-          const windowMs = state.kind === 'tool-arguments' ? this.toolArgumentWindowMs : undefined;
-          const elapsedMs = nowMs - state.startedAtMs;
-          const outOfBudget = state.deltas > deltaBudget;
-          const outOfWindow = windowMs !== undefined && elapsedMs >= windowMs;
-          if (outOfBudget || outOfWindow) {
-            // The provider keeps feeding one content unit and never completes
-            // it. Waiting for a terminal event would hold the turn open with no
-            // forward progress, so the budget ends the stream as a typed
-            // failure instead.
-            const detail = outOfWindow
-              ? `its delta stream stayed open for ${String(elapsedMs)} ms`
-              : `it received ${String(state.deltas)} deltas`;
-            const message = `RCC v3 ${state.kind} delta stream made no forward progress: content unit ${unit.key} never completed its item and ${detail}; the declared no-progress budget ended the stream`;
+          // Deltas that carry no new bytes are not progress: a provider can
+          // repeat an empty delta forever while the payload never grows. Only a
+          // delta that adds bytes, or that opens a new unit, moves the clock.
+          const state = openUnits.get(unit.key);
+          const addedBytes = deltaProgressBytes(active.protocol, type, record);
+          if (state === undefined) {
+            openUnits.set(unit.key, { kind: unit.kind, deltas: 1 });
+            progressed = true;
+          } else {
+            state.deltas += 1;
+            // A delta that carries new bytes advances the payload, so the
+            // stream is making progress. A delta that repeats an empty payload
+            // is activity without progress and does not move the clock.
+            if (addedBytes > 0) progressed = true;
+          }
+          // The runaway cap only stops a provider that floods one unit with an
+          // absurd number of frames. It is never a progress criterion: it sits
+          // far above any real stream.
+          if (state !== undefined && state.deltas > this.deltaRunawayCap) {
+            const message = `RCC v3 ${unit.kind} unit ${unit.key} exceeded the runaway delta cap of ${String(this.deltaRunawayCap)} frames without completing its item; the stream was ended as unbounded`;
             const error = this.providerError(active.evidenceScope, 'observe', 'stream.no-progress', message, 'timeout');
             active.terminalError = error;
             active.terminalState = 'failed';
             if (!active.controller.signal.aborted) {
-              active.controller.abort(new DOMException('RCC v3 observe no-progress budget reached', 'AbortError'));
+              active.controller.abort(new DOMException('RCC v3 observe runaway delta cap reached', 'AbortError'));
             }
             throw new ProviderAdapterError({
               code: error.code,
@@ -980,6 +1076,34 @@ export class RccV3ProviderTransport<
               evidenceRefs: error.evidenceRefs,
             });
           }
+        } else {
+          // A non-delta event (a new item, a completion, a status change) is
+          // stream activity in its own right.
+          progressed = true;
+        }
+        if (progressed) lastProgressAtMs = nowMs;
+        if (nowMs - lastProgressAtMs >= this.noProgressBudgetMs) {
+          // Silence, not elapsed lifetime, is the no-progress criterion: the
+          // provider stopped delivering new bytes while the stream stays open.
+          const open = [...openUnits.keys()];
+          const where = open.length > 0
+            ? `the open content unit${open.length > 1 ? 's' : ''} ${open.join(', ')} stopped advancing`
+            : 'the provider sent no further events';
+          const message = `RCC v3 stream made no forward progress: ${where} for ${String(nowMs - lastProgressAtMs)} ms; the declared no-progress budget of ${String(this.noProgressBudgetMs)} ms ended the stream`;
+          const error = this.providerError(active.evidenceScope, 'observe', 'stream.no-progress', message, 'timeout');
+          active.terminalError = error;
+          active.terminalState = 'failed';
+          if (!active.controller.signal.aborted) {
+            active.controller.abort(new DOMException('RCC v3 observe no-progress budget reached', 'AbortError'));
+          }
+          throw new ProviderAdapterError({
+            code: error.code,
+            category: 'timeout',
+            phase: 'observe',
+            message,
+            scope: active.evidenceScope,
+            evidenceRefs: error.evidenceRefs,
+          });
         }
         if (active.protocol === 'responses' && type === 'response.output_item.done') {
           const item = readRecord(normalized.item);
@@ -1081,7 +1205,26 @@ export class RccV3ProviderTransport<
       // observed outcome or surface a fabricated failure to the consumer.
       if (observedTerminal && !active.terminalError) return;
       let thrown = cause;
-      if (!active.terminalError && !(cause instanceof ProviderAdapterError)) {
+      if (cause instanceof StreamSilenceError && !active.terminalError) {
+        // The provider stopped writing bytes. This is the pure no-progress
+        // case: no new bytes reached the reader for the whole budget, so the
+        // stream ends as a typed failure the harness can recover from.
+        const message = `RCC v3 stream made no forward progress: the provider delivered no bytes for ${String(cause.silenceMs)} ms; the declared no-progress budget of ${String(this.noProgressBudgetMs)} ms ended the stream`;
+        const error = this.providerError(active.evidenceScope, 'observe', 'stream.no-progress', message, 'timeout');
+        active.terminalError = error;
+        active.terminalState = 'failed';
+        if (!active.controller.signal.aborted) {
+          active.controller.abort(new DOMException('RCC v3 observe no-progress budget reached', 'AbortError'));
+        }
+        thrown = new ProviderAdapterError({
+          code: error.code,
+          category: 'timeout',
+          phase: 'observe',
+          message,
+          scope: active.evidenceScope,
+          evidenceRefs: error.evidenceRefs,
+        });
+      } else if (!active.terminalError && !(cause instanceof ProviderAdapterError)) {
         // A raw stream read failure (for example Node fetch's
         // TypeError('terminated')) hides the real socket cause on its `cause`
         // chain. Persist a request-scoped observe-error artifact, keep the
