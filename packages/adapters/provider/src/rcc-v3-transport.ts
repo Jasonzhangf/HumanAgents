@@ -43,6 +43,14 @@ const HTTP_OWNER = 'humanagent.provider-adapter.http';
 const DEFAULT_MAX_EVENT_BYTES = 1024 * 1024;
 const DEFAULT_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const DEFAULT_PROBE_TTL_MS = 5 * 60 * 1000;
+// A tool-argument payload is bounded JSON: real providers finish it in a
+// handful of frames. The count and the elapsed window bound one unit's delta
+// stream, so a provider that dribbles deltas forever cannot hold the turn open.
+const DEFAULT_TOOL_ARGUMENT_DELTA_BUDGET = 512;
+const DEFAULT_TOOL_ARGUMENT_WINDOW_MS = 120_000;
+// A long text or reasoning unit is legitimate, so it has no wall-clock budget.
+// The cap only bounds a runaway unit and stays far above any real stream.
+const DEFAULT_CONTENT_DELTA_BUDGET = 8192;
 
 /**
  * Source strategy for the provider HTTP transport. `rcc` keeps the RCC
@@ -107,6 +115,25 @@ export interface RccV3ProviderTransportOptions<
   readonly now?: () => Date;
   readonly source?: ProviderTransportSource;
   readonly credential?: string;
+  /**
+   * No-progress budget for one tool-argument delta stream: how many delta
+   * events a single content unit may receive before its item completes. A
+   * provider that keeps dribbling deltas for the same unit never finishes the
+   * call, so the stream fails instead of holding the turn open.
+   */
+  readonly toolArgumentDeltaBudget?: number;
+  /**
+   * No-progress window for one tool-argument delta stream, in milliseconds,
+   * measured from that unit's first delta until it completes. Content deltas
+   * are not bounded by time: a long text unit is legitimate.
+   */
+  readonly toolArgumentWindowMs?: number;
+  /**
+   * Structural delta cap for one content (text/reasoning) unit. It exists only
+   * to bound a runaway unit; it must stay far above any real stream, and there
+   * is no wall-clock budget that could kill a normal long stream.
+   */
+  readonly contentDeltaBudget?: number;
 }
 
 interface ActiveExecution {
@@ -406,6 +433,52 @@ function isExpectedStopAbort(cause: unknown, active: ActiveExecution): boolean {
   return cause instanceof DOMException && cause.name === 'AbortError';
 }
 
+/**
+ * The content unit a delta event feeds. One unit is one provider-side content
+ * identity (an item's text, its reasoning summary or its tool arguments), so a
+ * stream that keeps feeding the same unit without completing it is the shape
+ * the no-progress budgets bound.
+ */
+interface ContentDeltaUnit {
+  readonly kind: 'tool-arguments' | 'content';
+  readonly key: string;
+}
+
+function contentDeltaUnit(
+  protocol: 'responses' | 'anthropic' | 'openai',
+  type: string,
+  record: Record<string, unknown>,
+): ContentDeltaUnit | undefined {
+  if (protocol === 'responses') {
+    if (type === 'response.function_call_arguments.delta') {
+      const itemId = typeof record.item_id === 'string' && record.item_id !== ''
+        ? record.item_id
+        : typeof record.call_id === 'string' && record.call_id !== '' ? record.call_id : undefined;
+      return itemId === undefined ? undefined : { kind: 'tool-arguments', key: `tool-arguments:${itemId}` };
+    }
+    if (type === 'response.output_text.delta' || type === 'response.reasoning_text.delta' || type === 'response.reasoning_summary_text.delta') {
+      return typeof record.item_id === 'string' ? { kind: 'content', key: `content:${record.item_id}` } : undefined;
+    }
+    return undefined;
+  }
+  if (protocol === 'anthropic') {
+    if (type !== 'content_block_delta') return undefined;
+    const index = typeof record.index === 'number' ? record.index : 0;
+    const delta = optionalRecord(record.delta);
+    const deltaType = delta && typeof delta.type === 'string' ? delta.type : undefined;
+    if (deltaType === 'input_json_delta') return { kind: 'tool-arguments', key: `tool-arguments:block:${index}` };
+    if (deltaType === 'text_delta' || deltaType === 'thinking_delta') return { kind: 'content', key: `content:block:${index}` };
+    return undefined;
+  }
+  if (type !== 'openai.chat.completion') return undefined;
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  const choice = choices.find((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value));
+  const delta = choice ? optionalRecord(choice.delta) : undefined;
+  if (!delta || typeof delta.content !== 'string') return undefined;
+  const index = choice && typeof choice.index === 'number' ? choice.index : 0;
+  return { kind: 'content', key: `content:openai:${index}` };
+}
+
 function readRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('RCC v3 SSE data must be a JSON object');
@@ -580,6 +653,9 @@ export class RccV3ProviderTransport<
   private readonly executions = new Map<string, ActiveExecution>();
   private readonly stopReasons = new Map<AnyProviderExecutionIdentityRef, string>();
   private readonly options: Omit<RccV3ProviderTransportOptions<TIdentity>, 'credential'>;
+  private readonly toolArgumentDeltaBudget: number;
+  private readonly toolArgumentWindowMs: number;
+  private readonly contentDeltaBudget: number;
   private credential: string | undefined;
 
   constructor({ credential, ...options }: RccV3ProviderTransportOptions<TIdentity>) {
@@ -616,6 +692,9 @@ export class RccV3ProviderTransport<
     }
     this.fetcher = options.fetch ?? defaultFetch;
     this.maxEventBytes = options.maxEventBytes ?? DEFAULT_MAX_EVENT_BYTES;
+    this.toolArgumentDeltaBudget = options.toolArgumentDeltaBudget ?? DEFAULT_TOOL_ARGUMENT_DELTA_BUDGET;
+    this.toolArgumentWindowMs = options.toolArgumentWindowMs ?? DEFAULT_TOOL_ARGUMENT_WINDOW_MS;
+    this.contentDeltaBudget = options.contentDeltaBudget ?? DEFAULT_CONTENT_DELTA_BUDGET;
     this.maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
     this.probeTtlMs = options.probeTtlMs ?? DEFAULT_PROBE_TTL_MS;
     this.now = options.now ?? (() => new Date());
@@ -823,6 +902,10 @@ export class RccV3ProviderTransport<
     // True once this stream decoded a terminal outcome reported by the
     // provider itself. Any later transport close only releases the stream.
     let observedTerminal = false;
+    // Open content-unit delta streams of this observation. A unit leaves the
+    // map when its own done event arrives, and every unit is dropped once the
+    // stream reports a terminal event.
+    const openUnits = new Map<string, { readonly kind: ContentDeltaUnit['kind']; deltas: number; readonly startedAtMs: number }>();
     try {
       for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes)) {
         if (active.stopRequested) throw active.stopCause;
@@ -857,12 +940,66 @@ export class RccV3ProviderTransport<
           ? (this.source === 'http' ? record : normalizeServertoolCall(record))
           : record;
         const raw = { protocol: active.protocol, ...normalized, type } as unknown as ProviderWireEvent;
+        const unit = contentDeltaUnit(active.protocol, type, record);
+        if (unit !== undefined) {
+          const nowMs = this.now().getTime();
+          const state = openUnits.get(unit.key) ?? { kind: unit.kind, deltas: 0, startedAtMs: nowMs };
+          state.deltas += 1;
+          openUnits.set(unit.key, state);
+          const deltaBudget = state.kind === 'tool-arguments' ? this.toolArgumentDeltaBudget : this.contentDeltaBudget;
+          const windowMs = state.kind === 'tool-arguments' ? this.toolArgumentWindowMs : undefined;
+          const elapsedMs = nowMs - state.startedAtMs;
+          const outOfBudget = state.deltas > deltaBudget;
+          const outOfWindow = windowMs !== undefined && elapsedMs >= windowMs;
+          if (outOfBudget || outOfWindow) {
+            // The provider keeps feeding one content unit and never completes
+            // it. Waiting for a terminal event would hold the turn open with no
+            // forward progress, so the budget ends the stream as a typed
+            // failure instead.
+            const detail = outOfWindow
+              ? `its delta stream stayed open for ${String(elapsedMs)} ms`
+              : `it received ${String(state.deltas)} deltas`;
+            const message = `RCC v3 ${state.kind} delta stream made no forward progress: content unit ${unit.key} never completed its item and ${detail}; the declared no-progress budget ended the stream`;
+            const error = this.providerError(active.evidenceScope, 'observe', 'stream.no-progress', message, 'timeout');
+            active.terminalError = error;
+            active.terminalState = 'failed';
+            if (!active.controller.signal.aborted) {
+              active.controller.abort(new DOMException('RCC v3 observe no-progress budget reached', 'AbortError'));
+            }
+            throw new ProviderAdapterError({
+              code: error.code,
+              category: 'timeout',
+              phase: 'observe',
+              message,
+              scope: active.evidenceScope,
+              evidenceRefs: error.evidenceRefs,
+            });
+          }
+        }
         if (active.protocol === 'responses' && type === 'response.output_item.done') {
           const item = readRecord(normalized.item);
           if (item.type === 'function_call') active.responsesToolCallsPending = true;
+          if (typeof item.id === 'string') {
+            openUnits.delete(`tool-arguments:${item.id}`);
+            openUnits.delete(`content:${item.id}`);
+          }
+        }
+        if (active.protocol === 'responses' && (type === 'response.function_call_arguments.done' || type === 'response.output_text.done'
+          || type === 'response.reasoning_text.done' || type === 'response.reasoning_summary_text.done')) {
+          // The unit completed, so its no-progress budget no longer applies.
+          if (typeof record.item_id === 'string') {
+            openUnits.delete(`tool-arguments:${record.item_id}`);
+            openUnits.delete(`content:${record.item_id}`);
+          }
+        }
+        if (active.protocol === 'anthropic' && type === 'content_block_stop') {
+          const index = typeof record.index === 'number' ? record.index : 0;
+          openUnits.delete(`tool-arguments:block:${index}`);
+          openUnits.delete(`content:block:${index}`);
         }
         if (isTerminalEvent(active.protocol, type)) {
           observedTerminal = true;
+          openUnits.clear();
           if (type === 'error' || type.endsWith('.failed')) {
             const errorRecord = type.endsWith('.failed')
               ? (readRecord(record.response).error ?? {})
@@ -896,6 +1033,7 @@ export class RccV3ProviderTransport<
             const mapping = mapOpenAIFinishReason(finishReason);
             active.terminalState = mapping.terminalState;
             observedTerminal = true;
+            openUnits.clear();
             if (mapping.errorCode) {
               active.terminalError = this.providerError(
                 active.evidenceScope,

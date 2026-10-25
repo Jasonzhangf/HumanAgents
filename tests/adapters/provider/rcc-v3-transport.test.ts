@@ -588,7 +588,12 @@ test('P-Stop1: accepted stop after Chat finish chunk converges on stopped after 
   assert.equal((built.writes.find((write) => write.type === 'stop-requested')?.content as { remoteStopSupported: boolean }).remoteStopSupported, false);
 });
 
-function transportHarness() {
+function transportHarness(extra: {
+  readonly now?: () => Date;
+  readonly toolArgumentDeltaBudget?: number;
+  readonly toolArgumentWindowMs?: number;
+  readonly contentDeltaBudget?: number;
+} = {}) {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const writes: ProviderEvidenceWrite[] = [];
   const refs: EvidenceRef[] = [];
@@ -621,6 +626,7 @@ function transportHarness() {
       calls.push({ url, init });
       throw new Error(`unexpected fetch: ${url}`);
     },
+    ...extra,
   });
   return { transport, calls, writes, refs, evidence };
 }
@@ -1756,4 +1762,96 @@ test('RCC v3 native fetch preserves the Response owner before observation across
   assert.equal(result.settledState, 'succeeded', diagnostic);
   assert.equal(result.settleError, undefined, diagnostic);
   assert.equal(result.closeState, 'closed', diagnostic);
+});
+
+function frame(type: string, fields: Record<string, unknown>): string {
+  return `data: ${JSON.stringify({ type, ...fields })}\n\n`;
+}
+
+test('RCC v3 observe fails a tool-argument delta stream that never completes', async () => {
+  // RCC can dribble function_call_arguments deltas for one content unit and
+  // never send that item's done event. The delta stream then holds the turn
+  // open without forward progress, so the transport must end it by its
+  // per-unit no-progress budget instead of waiting for a terminal event that
+  // never arrives.
+  const frames = [frame('response.created', { response: { id: 'response-stall' } })];
+  for (let index = 0; index < 40; index += 1) {
+    frames.push(frame('response.function_call_arguments.delta', { item_id: 'item-stall', delta: String(index) }));
+  }
+  const built = transportHarness({ toolArgumentDeltaBudget: 8 });
+  seedActive(built.transport, chunks(frames));
+
+  const observed: string[] = [];
+  await assert.rejects(async () => {
+    for await (const event of built.transport.observe(execution)) observed.push(event.type);
+  }, (error: unknown) => {
+    assert.equal(error instanceof ProviderAdapterError, true);
+    const failure = (error as ProviderAdapterError).providerError;
+    assert.equal(failure.code, 'stream.no-progress');
+    assert.equal(failure.category, 'timeout');
+    assert.match(failure.message, /item-stall/);
+    return true;
+  });
+  // The budget ends the stream early instead of draining every frame.
+  assert.ok(observed.length < frames.length, `observed ${String(observed.length)} of ${String(frames.length)} frames`);
+
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.error?.code, 'stream.no-progress');
+  assert.equal(settled.resourceRelease.state, 'released');
+});
+
+test('RCC v3 observe fails a tool-argument delta stream that outlives its no-progress window', async () => {
+  // The same unit stays open while deltas keep dribbling in. Content growth
+  // alone is not forward progress for a bounded tool-argument payload, so the
+  // stream fails once the unit outlives its no-progress window.
+  let clockMs = Date.parse('2026-10-24T18:00:00Z');
+  const body: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      const encoder = new TextEncoder();
+      yield encoder.encode(frame('response.created', { response: { id: 'response-window' } }));
+      for (let index = 0; index < 5; index += 1) {
+        clockMs += 30_000;
+        yield encoder.encode(frame('response.function_call_arguments.delta', { item_id: 'item-window', delta: String(index) }));
+      }
+    },
+  };
+  const built = transportHarness({ now: () => new Date(clockMs), toolArgumentWindowMs: 60_000 });
+  seedActive(built.transport, body);
+
+  await assert.rejects(async () => {
+    for await (const event of built.transport.observe(execution)) void event;
+  }, (error: unknown) => {
+    assert.equal((error as ProviderAdapterError).providerError.code, 'stream.no-progress');
+    return true;
+  });
+});
+
+test('RCC v3 observe keeps a normal long content stream alive past the tool-argument budgets', async () => {
+  // A long text unit is legitimate: it must not be killed by the tool-argument
+  // delta budget, and it must not be killed by elapsed wall-clock time.
+  const frames = [frame('response.created', { response: { id: 'response-long' } })];
+  for (let index = 0; index < 200; index += 1) {
+    frames.push(frame('response.output_text.delta', { item_id: 'item-long', content_index: 0, delta: `chunk-${String(index)} ` }));
+  }
+  frames.push(frame('response.output_text.done', { item_id: 'item-long', content_index: 0, text: 'done' }));
+  frames.push(frame('response.completed', { response: { id: 'response-long' } }));
+  let clockMs = Date.parse('2026-10-24T18:00:00Z');
+  const body: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      const encoder = new TextEncoder();
+      for (const value of frames) {
+        clockMs += 1_000;
+        yield encoder.encode(value);
+      }
+    },
+  };
+  const built = transportHarness({ now: () => new Date(clockMs), toolArgumentDeltaBudget: 2, toolArgumentWindowMs: 60_000 });
+  seedActive(built.transport, body);
+
+  const observed: string[] = [];
+  for await (const event of built.transport.observe(execution)) observed.push(event.type);
+  assert.equal(observed.filter((type) => type === 'response.output_text.delta').length, 200);
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'succeeded');
 });
