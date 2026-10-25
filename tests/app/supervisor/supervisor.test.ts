@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, resolveRuntimePaths, type RuntimePaths } from '../../../packages/config/src/index.js';
 import { SessionStore } from '../../../packages/app/src/session-store.js';
@@ -61,6 +61,54 @@ test('daemon lease is unique and generation advances after release', async () =>
   assert.equal(second.record.generation, 2);
   assert.equal(second.record.ownerId, 'host-test');
   await second.release();
+});
+
+// Failure basis: an old pending turn can still reference its cleanly disposed
+// owner after arbitrarily many daemon generations. A fixed 64-record window or
+// an acquire path that drops disposedAt locks that scope again. Cost: local
+// lease writes only, no Provider or spawned processes.
+test('daemon lease preserves referenced clean disposal beyond 64 generations', async () => {
+  const paths = await fixture();
+  let lease = await acquireDaemonLease(paths);
+  const first = lease.record;
+  try {
+    for (let n = 0; n < 66; n += 1) {
+      await lease.release();
+      lease = await acquireDaemonLease(paths);
+    }
+    const record = await readDaemonLease(paths);
+    const proof = record?.terminations?.find((entry) => entry.previousLeaseId === first.leaseId
+      && entry.previousGeneration === first.generation);
+    assert.equal(proof?.termination, 'graceful');
+    assert.equal(record?.terminations?.length, 66);
+  } finally {
+    await lease.release();
+    await rm(dirname(paths.controlRoot), { recursive: true });
+  }
+});
+
+// Failure basis: installed leases predate terminations, so upgrade must carry
+// the already-issued takeover unchanged. This small persisted fixture catches
+// loss on both stop-configured and ordinary acquisition without a real daemon.
+test('daemon lease carries legacy takeover proof through each disposed acquisition path', async () => {
+  for (const stop of [false, true]) {
+    const paths = await fixture();
+    let lease = await acquireDaemonLease(paths);
+    try {
+      const closed = await lease.release();
+      const legacy = { previousLeaseId: 'legacy-terminated-owner', previousGeneration: 1,
+        termination: 'already-dead' as const, reason: 'verified legacy takeover',
+        detectedAt: '2026-10-24T00:00:00.000Z' };
+      await writeFile(daemonLeasePath(paths), JSON.stringify({ ...closed, generation: 2, takeover: legacy }));
+      lease = await acquireDaemonLease(paths, stop ? { takeover: { reason: 'upgrade', stop: {} } } : {});
+      const proofs = (await readDaemonLease(paths))?.terminations;
+      assert.deepEqual(proofs?.find((entry) => entry.previousLeaseId === legacy.previousLeaseId), legacy);
+      assert.equal(proofs?.find((entry) => entry.previousLeaseId === closed.leaseId)?.termination, 'graceful');
+    } finally {
+      await lease.release();
+      await rm(dirname(paths.controlRoot), { recursive: true });
+    }
+  }
 });
 
 test('daemon lease identity requires a live process before an HTTP identity check', async () => {
@@ -466,6 +514,8 @@ test('serve restart marker replaces a disposed pending owner and completes the t
   assert.equal(replacement.startup.lease.record.generation, owner.record.generation + 1);
   assert.equal(replacement.startup.lease.record.restart?.requestId, transition.requestId);
   assert.ok(replacement.startup.lease.record.restart?.completedAt);
+  assert.equal(replacement.startup.lease.record.terminations?.find((entry) =>
+    entry.previousLeaseId === owner.record.leaseId)?.termination, 'graceful');
   await replacement.startup.dispose();
 });
 
@@ -534,6 +584,10 @@ test('dispose cleanup failure is durable in the lease and the caller receipt', a
   assert.equal(receipt.cleanupFailure?.ownerId, 'owner-a');
   assert.match(receipt.cleanupFailure?.message ?? '', /listener close failed/);
   assert.equal(receipt.lease.failure?.errorCode, 'supervisor-dispose.cleanup-failed');
+  await assert.rejects(
+    () => acquireDaemonLease(paths),
+    (error: any) => error.code === 'daemon-takeover.previous-close-unverified',
+  );
   await assert.rejects(
     () => acquireDaemonLease(paths, { takeover: { reason: 'retry after failed cleanup', stop: {} } }),
     (error: any) => error.code === 'daemon-takeover.previous-close-unverified',
