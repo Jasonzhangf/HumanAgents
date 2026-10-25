@@ -740,14 +740,34 @@ export function createProviderExplicitBrainInterpreter(input: {
           journal: input.parentJournal,
           rawContent: input.rawContent,
         });
-        const eligibility = await owner.readAbandonmentEligibility();
-        if (!eligibility.abandonable) {
-          throw refuse(`it cannot be discharged: ${eligibility.heldReason}`);
+        // A committed owner reconciliation means the turn already continued
+        // into a newer physical epoch, so the recovery owner is the reconciled
+        // replacement owner, never the original turn-input owner. The lane is
+        // the active epoch's execution failure, not the abandonment lane: an
+        // abandonment fact must match the turn-input epoch, and it is that
+        // continued epoch (not epoch 1) which actually died.
+        const snapshot = await input.parentJournal.readTurnSnapshot(pendingTurn.fact.turn);
+        const latestReconciliation = snapshot.ownerReconciliations.at(-1);
+        if (latestReconciliation === undefined) {
+          const eligibility = await owner.readAbandonmentEligibility();
+          if (!eligibility.abandonable) {
+            throw refuse(`it cannot be discharged: ${eligibility.heldReason}`);
+          }
+        } else {
+          const eligibility = await owner.readExecutionFailureEligibility();
+          if (!eligibility.closable) {
+            throw refuse(`it cannot be discharged: ${eligibility.heldReason}`);
+          }
         }
-        const discharge = () => owner.abandonInterruptedTurn({
-          reason: 'provider-interrupted-without-terminal-output',
-          abandonedAt: input.clock.now(),
-        });
+        const discharge = async () => {
+          if (latestReconciliation === undefined) {
+            return owner.abandonInterruptedTurn({
+              reason: 'provider-interrupted-without-terminal-output',
+              abandonedAt: input.clock.now(),
+            });
+          }
+          return owner.closeFailedEpoch({ failedAt: input.clock.now() });
+        };
         if (activeLease === undefined) {
           // No authenticated lifecycle authority is configured, so nothing can
           // prove that the previous execution owner stopped writing. A
@@ -756,21 +776,25 @@ export function createProviderExplicitBrainInterpreter(input: {
           // abandonment fact the record shape cannot justify.
           throw refuse('no authenticated supervisor lease authority is configured to prove the previous execution owner stopped');
         }
-        const committedOwner = pendingTurn.fact.executionOwner;
-        // Authenticate the old owner, decide, and commit inside one lease-guard
-        // critical section. Level 1 refuses a live owner; level 2 discharges only
-        // with the current lease record's durable termination receipt.
+        // The owner that must be proven stopped is the one currently owning the
+        // active epoch: the reconciled replacement owner when a reconciliation
+        // is committed, the original turn-input owner otherwise.
+        const activeOwner = latestReconciliation?.fact.replacementOwner ?? pendingTurn.fact.executionOwner;
+        // Authenticate the active owner, decide, and commit inside one
+        // lease-guard critical section. Level 1 refuses a live owner; level 2
+        // discharges only with the current lease record's durable termination
+        // receipt for that exact owner.
         await activeLease.withCurrentLeaseOwner(async (authenticatedCaller) => {
           // Read the freshest durable record inside the guard: the cached getter
           // could predate a concurrent takeover write.
           const current = await activeLease.refresh();
-          if (committedOwner !== undefined
-            && authenticatedCaller.daemonLeaseId === committedOwner.daemonLeaseId
-            && authenticatedCaller.daemonGeneration === committedOwner.daemonGeneration
-            && authenticatedCaller.processStartToken === committedOwner.processStartToken) {
+          if (activeOwner !== undefined
+            && authenticatedCaller.daemonLeaseId === activeOwner.daemonLeaseId
+            && authenticatedCaller.daemonGeneration === activeOwner.daemonGeneration
+            && authenticatedCaller.processStartToken === activeOwner.processStartToken) {
             throw refuse('the committed execution owner is still the current active lease owner; a live Provider stream is not an interrupted crash');
           }
-          if (committedOwner === undefined) {
+          if (activeOwner === undefined) {
             throw refuse('the committed execution owner has no durable termination receipt; the committed turn input records no execution owner; recovery responsibility is retained');
           }
           const retained = readSupervisorTerminationReceipts(current);
@@ -778,8 +802,8 @@ export function createProviderExplicitBrainInterpreter(input: {
           // under a different lease id is a different daemon run and proves
           // nothing about this turn.
           const receipt = retained.find((entry) =>
-            entry.previousGeneration === committedOwner.daemonGeneration
-            && entry.previousLeaseId === committedOwner.daemonLeaseId
+            entry.previousGeneration === activeOwner.daemonGeneration
+            && entry.previousLeaseId === activeOwner.daemonLeaseId
             && entry.termination !== undefined);
           if (receipt === undefined) {
             const generations = retained.map((entry) => entry.previousGeneration);
@@ -788,7 +812,7 @@ export function createProviderExplicitBrainInterpreter(input: {
               : `retained takeover receipts cover generations ${generations[0]}..${generations[generations.length - 1]}`;
             throw refuse(
               'the committed execution owner has no durable termination receipt; recovery responsibility is retained'
-              + ` (committed generation ${committedOwner.daemonGeneration}, current generation ${current.generation}, ${window})`,
+              + ` (committed generation ${activeOwner.daemonGeneration}, current generation ${current.generation}, ${window})`,
             );
           }
           await discharge();

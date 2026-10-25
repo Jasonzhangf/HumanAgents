@@ -837,9 +837,16 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
           'interaction parent epoch failure requires the original committed provider binding',
         );
       }
-      if (providerSettlements.length > 0 || ownerReconciliations.length > 0) {
+      // A committed provider settlement already owns the close receipt, so a
+      // failed epoch must never double-record it. A committed owner
+      // reconciliation is allowed: a `continue` reconciliation only opened the
+      // next physical epoch, and that continued epoch's own failure is exactly
+      // the shape this fact records. A `terminal-output` reconciliation is
+      // rejected below by the real terminal-output checks (request-complete /
+      // complete assistant-text), which stay in force here.
+      if (providerSettlements.length > 0) {
         throw new JournalIntegrityError(
-          'interaction parent epoch failure requires a turn without a settlement or reconciliation',
+          'interaction parent epoch failure requires a turn without a provider settlement',
         );
       }
       if (acceptedFacts.some((committed) =>
