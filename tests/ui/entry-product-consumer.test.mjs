@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  answeredSubmissionPresentation,
   createSubmissionGate,
   entryDraftFromState,
   entryDraftState,
@@ -220,4 +221,51 @@ test('an unresolved landing scope stays an explicit failure instead of an unscop
     },
   )
   assert.deepEqual(calls, ['systemDashboard'])
+})
+
+/*
+ * The product entry must present a simple answer as the interaction's business
+ * result. Failure mode: state `answered` reached the submission fallback and
+ * threw `explicit-brain.state-invalid`, so the page showed "本次处理未完成" and a
+ * retry action instead of the answer. The decision is a pure seam because the
+ * browser-only submission closure needs a DOM; the real browser acceptance in
+ * tests/ui/entry-answered-browser.mjs checks the rendered text, tone, and
+ * actions on the served page.
+ */
+test('an answered explicit snapshot presents its reply as a visible success result', () => {
+  const presentation = answeredSubmissionPresentation({
+    state: 'answered',
+    reply: '13 加 14 等于 27。',
+    nextAction: 'present-answer',
+  })
+  assert.deepEqual(presentation, {
+    tone: 'success',
+    text: '13 加 14 等于 27。',
+    retry: false,
+  })
+})
+
+/*
+ * A status receipt keeps its own reply wording, and an answered snapshot with no
+ * reply text must stay an explicit contract failure instead of a fabricated
+ * answer. Both cases decide the same status region, so they share one seam.
+ */
+test('answered and status receipts never fabricate the answer text', () => {
+  assert.deepEqual(
+    answeredSubmissionPresentation({ state: 'status-only', reply: '当前没有待执行任务。', nextAction: 'present-status' }),
+    { tone: 'success', text: '当前没有待执行任务。', retry: false },
+  )
+  assert.deepEqual(
+    answeredSubmissionPresentation({ state: 'status-only', nextAction: 'inspect-runtime' }),
+    { tone: 'success', text: 'inspect-runtime', retry: false },
+  )
+  assert.throws(
+    () => answeredSubmissionPresentation({ state: 'answered', nextAction: 'present-answer' }),
+    (error) => {
+      assert.equal(error.code, 'explicit-brain.reply-missing')
+      assert.equal(error.ownerId, 'humanagent.app.ui')
+      return true
+    },
+  )
+  assert.equal(answeredSubmissionPresentation({ state: 'awaiting-confirmation' }), null)
 })

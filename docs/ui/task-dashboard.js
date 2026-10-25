@@ -24,6 +24,7 @@ import {
   taskDetailHref,
   taskControlHref,
   taskIdFromQuery,
+  taskReadScopeFromLocation,
   taskReadScopeFromQuery,
   taskRowTitle,
 } from './runtime-shell.js'
@@ -86,9 +87,11 @@ import {
   renderPendingDecision,
 } from './product-control-view.js'
 
-const taskId = taskIdFromQuery(false)
-const readScope = taskReadScopeFromQuery()
+const readScope = taskReadScopeFromLocation()
 const explicitScope = readScope.kind === 'task' ? readScope : null
+const taskId = explicitScope
+  ? (typeof explicitScope.taskId === 'object' ? explicitScope.taskId.value : explicitScope.taskId)
+  : taskIdFromQuery(false)
 const scopeFailure = readScope.kind === 'invalid' ? readScope.failure : null
 const taskGrantIntent = queryParam('control') === '1'
 const ABSENT_WAITING_STATUS = '尚无执行等待信息'
@@ -314,6 +317,8 @@ function productControllerHost(host, label) {
   }
   return host
 }
+
+export { taskReadScopeFromLocation, taskReadScopeFromQuery }
 
 /**
  * Consume the owner's ProductOutputView. Only an existing publication with at
@@ -1241,7 +1246,7 @@ function productTaskScope() {
   // Focus navigation rewrites the query and hash together, so the live URL is
   // the current product task. The initial scope is the fallback for a page
   // opened without a complete explicit task query.
-  const live = taskReadScopeFromQuery()
+  const live = taskReadScopeFromLocation()
   const source = live.kind === 'task' ? live : explicitScope
   if (!source) return undefined
   const value = typeof source.taskId === 'object'

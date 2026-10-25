@@ -14,8 +14,8 @@
 
 ```text
 自然语言输入
-  → [A] 理解：显式大脑整理成 draft/understanding，不自动确认
-  → [B] 确认：用户显式确认后才入库（无 auto-confirm、无 auto-redirect）
+  → [A] 理解：显式大脑同次整理成 draft/understanding
+  → [B] 确认：新任务表单提交即确认入库（单次提交即确认，不要求第二次确认；已有任务变更仍须单独确认）
   → [C] 派发：按 FIFO 进入隐式队列并创建 task
   → [D] 执行：真实 provider 轮次拿到要求正文并实际执行
   → [E] 观测：Pipeline Observation 只读展示节点树、状态、输入/输出与证据
@@ -45,7 +45,7 @@ origin/main：`a2e9e96`（已推送）
 ## 3. 完成定义
 
 1. `7b6c725` 候选 `7783557` 合入 clean main，重建前端，在 main 同入口用真实 serve 复验 A/B 段
-   （不自动确认、draft/confirmation 可见、queued/retired/blocked 与 admitted/executing/completed 区分）。
+   （表单提交即确认且无第二次确认按钮、draft/confirmation 可见、queued/retired/blocked 与 admitted/executing/completed 区分；已有任务变更仍须单独确认）。
 2. `80ad80c` 两条 P1 修复 + live 真实 provider 跑通**至少一次** candidate → approve/reject → 后续任务召回；
    若确认是外部 provider 契约阻塞，给出精确 raw artifact、parser 错误、owner 与决策，不得以"未实现"含糊收口。
 3. D 段在 main 上真实入口复验：真实 provider 轮次读到要求正文（非 payloadRef），工具轮续传成功。

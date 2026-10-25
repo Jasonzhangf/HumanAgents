@@ -6,6 +6,7 @@ import {
   encodeProductLocation,
   locationFromPopState,
 } from '../../docs/ui/product-location.js'
+import { legacyTaskFocusHref } from '../../docs/ui/tasks.js'
 
 // Minimal DOM shared by the page module and the three product renderers. It
 // records real element structure, attributes and click listeners; the consumer
@@ -256,6 +257,8 @@ const {
   dedupeProductRelations,
   productLocationMatchesTask,
   renderProductSessionExtras,
+  taskReadScopeFromLocation,
+  taskReadScopeFromQuery,
   writePageProductLocation,
 } = await import('../../docs/ui/task-dashboard.js')
 
@@ -949,4 +952,159 @@ test('a revoke-only decision fact is not an approval and writes nothing', async 
     0,
   )
   assert.equal(controller.state().controlWrites, 0)
+})
+
+test('legacy task row link rewritten to canonical focus route keeps task read scope on dashboard', () => {
+  const rowHref = 'task-dashboard.html?task=t1&projectKey=p1&mode=rcc'
+  const focusHref = legacyTaskFocusHref(rowHref)
+  assert.ok(focusHref, 'legacyTaskFocusHref should return a rewritten canonical href')
+
+  const parsedUrl = new URL(focusHref, 'http://product.invalid')
+  assert.equal(parsedUrl.searchParams.get('task'), 't1')
+  assert.equal(parsedUrl.searchParams.get('projectKey'), 'p1')
+  assert.equal(parsedUrl.searchParams.get('mode'), 'rcc')
+
+  const decoded = decodeProductLocation(parsedUrl.hash)
+  assert.equal(decoded.kind, 'valid')
+  assert.equal(decoded.location.scope.taskId?.value, 't1')
+  assert.equal(decoded.location.scope.projectKey, 'p1')
+  assert.equal(decoded.location.scope.mode, 'rcc')
+
+  const resolver = taskReadScopeFromLocation ?? taskReadScopeFromQuery
+  assert.equal(typeof resolver, 'function', 'dashboard scope resolver should be exported')
+  const resolved = resolver(focusHref)
+  assert.equal(resolved.kind, 'task')
+  assert.equal(resolved.projectKey, 'p1')
+  assert.equal(resolved.mode, 'rcc')
+  assert.equal(typeof resolved.taskId === 'object' ? resolved.taskId.value : resolved.taskId, 't1')
+})
+
+test('a task-only legacy link stays readable while a partial explicit link is invalid', () => {
+  const resolver = taskReadScopeFromLocation ?? taskReadScopeFromQuery
+  assert.equal(typeof resolver, 'function', 'dashboard scope resolver should be exported')
+
+  const legacy = resolver('task-dashboard.html?task=t1')
+  assert.equal(legacy.kind, 'legacy')
+  assert.equal(legacy.taskId, 't1')
+
+  const partialWithProject = resolver('task-dashboard.html?task=t1&projectKey=p1')
+  assert.equal(partialWithProject.kind, 'invalid')
+  assert.equal(partialWithProject.failure?.code, 'read.scope.invalid')
+  assert.equal(partialWithProject.failure?.ownerId, 'humanagent.ui')
+})
+
+// Alice rework P1-2: when the query and the canonical product location are both
+// present they must be complete and agree. Taking the hash alone made control
+// intent and agent selection read the query while the product location compared
+// against itself. Hash-only and a complete query keep their previous contract.
+test('query and product location must both be complete and agree', () => {
+  const resolver = taskReadScopeFromLocation ?? taskReadScopeFromQuery
+  assert.equal(typeof resolver, 'function', 'dashboard scope resolver should be exported')
+
+  const hash = encodeProductLocation(location())
+  const consistent = resolver(`task-dashboard.html?task=task-1&projectKey=project-7&mode=rcc${hash}`)
+  assert.equal(consistent.kind, 'task')
+  assert.equal(consistent.projectKey, 'project-7')
+  assert.equal(consistent.mode, 'rcc')
+  assert.equal(consistent.taskId.value, 'task-1')
+
+  const hashOnly = resolver(`task-dashboard.html${hash}`)
+  assert.equal(hashOnly.kind, 'task')
+  assert.equal(hashOnly.taskId.value, 'task-1')
+
+  const completeQuery = resolver('task-dashboard.html?task=task-1&projectKey=project-7&mode=rcc')
+  assert.equal(completeQuery.kind, 'task')
+
+  const mismatchedTask = resolver(`task-dashboard.html?task=task-2&projectKey=project-7&mode=rcc${hash}`)
+  assert.equal(mismatchedTask.kind, 'invalid')
+  assert.equal(mismatchedTask.failure?.code, 'read.scope.invalid')
+
+  const mismatchedMode = resolver(`task-dashboard.html?task=task-1&projectKey=project-7&mode=fake${hash}`)
+  assert.equal(mismatchedMode.kind, 'invalid')
+  assert.equal(mismatchedMode.failure?.code, 'read.scope.invalid')
+
+  const partialSecondSource = resolver(`task-dashboard.html?task=task-1${hash}`)
+  assert.equal(partialSecondSource.kind, 'invalid')
+  assert.equal(partialSecondSource.failure?.code, 'read.scope.invalid')
+})
+
+// Alice rework P1-2: the product location check must compare the hash against
+// the query source. Reading both from the hash made the check compare the hash
+// with itself and always agree.
+test('a product location that disagrees with the query does not match the page task', () => {
+  const previousSearch = globalThis.location.search
+  const previousHash = globalThis.location.hash
+  const otherScope = {
+    kind: 'task',
+    projectKey: 'project-7',
+    mode: 'rcc',
+    taskId: { scope: 'task', value: 'task-2' },
+  }
+  const otherLocation = {
+    board: 'interaction',
+    lane: 'live',
+    focus: { kind: 'interaction', taskRef: otherScope.taskId, scope: otherScope },
+    scope: otherScope,
+  }
+  try {
+    globalThis.location.search = '?task=task-1&projectKey=project-7&mode=rcc'
+    globalThis.location.hash = encodeProductLocation(location())
+    assert.equal(productLocationMatchesTask(location()), true)
+
+    globalThis.location.hash = encodeProductLocation(otherLocation)
+    assert.equal(productLocationMatchesTask(otherLocation), false)
+  } finally {
+    globalThis.location.search = previousSearch
+    globalThis.location.hash = previousHash
+  }
+})
+
+// Alice rework finding 2 boundary: a project-scoped memory board is not a
+// second task identity. It is supported only as a board whose read scope is the
+// project the query already names, so the same-project memory board keeps the
+// query's task read. A different project, a partial query, or a conflicting
+// task hash stays rejected.
+test('a project-scoped memory board keeps the query task read only for the same project', () => {
+  const resolver = taskReadScopeFromLocation ?? taskReadScopeFromQuery
+  assert.equal(typeof resolver, 'function', 'dashboard scope resolver should be exported')
+
+  const memoryHash = encodeProductLocation({
+    board: 'memory',
+    lane: 'live',
+    scope: { kind: 'project', projectKey: 'project-7' },
+  })
+
+  const supported = resolver(`task-dashboard.html?task=task-1&projectKey=project-7&mode=rcc${memoryHash}`)
+  assert.equal(supported.kind, 'task')
+  assert.equal(supported.projectKey, 'project-7')
+  assert.equal(supported.mode, 'rcc')
+  assert.equal(supported.taskId.value, 'task-1')
+
+  const otherProject = resolver(`task-dashboard.html?task=task-1&projectKey=project-9&mode=rcc${memoryHash}`)
+  assert.equal(otherProject.kind, 'invalid')
+  assert.equal(otherProject.failure?.code, 'read.scope.invalid')
+
+  const partialQuery = resolver(`task-dashboard.html?task=task-1${memoryHash}`)
+  assert.equal(partialQuery.kind, 'invalid')
+  assert.equal(partialQuery.failure?.code, 'read.scope.invalid')
+
+  const conflictingTaskScope = {
+    kind: 'task',
+    projectKey: 'project-7',
+    mode: 'rcc',
+    taskId: { scope: 'task', value: 'task-2' },
+  }
+  const conflictingTaskHash = encodeProductLocation({
+    board: 'interaction',
+    lane: 'live',
+    scope: conflictingTaskScope,
+    focus: { kind: 'interaction', taskRef: conflictingTaskScope.taskId, scope: conflictingTaskScope },
+  })
+  const conflictingTask = resolver(`task-dashboard.html?task=task-1&projectKey=project-7&mode=rcc${conflictingTaskHash}`)
+  assert.equal(conflictingTask.kind, 'invalid')
+  assert.equal(conflictingTask.failure?.code, 'read.scope.invalid')
+
+  const projectBoardWithoutTaskQuery = resolver(`task-dashboard.html${memoryHash}`)
+  assert.equal(projectBoardWithoutTaskQuery.kind, 'invalid')
+  assert.equal(projectBoardWithoutTaskQuery.failure?.code, 'read.scope.invalid')
 })

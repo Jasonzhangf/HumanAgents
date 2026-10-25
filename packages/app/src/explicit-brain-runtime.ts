@@ -52,7 +52,7 @@ import {
 } from '../../runtime/src/explicit-brain/index.js';
 import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
 import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
-import type { SupervisorLease } from './supervisor/supervisor.js';
+import { readSupervisorTerminationReceipts, type SupervisorLease } from './supervisor/supervisor.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
@@ -229,6 +229,8 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     'Every variant carries normalizedInput, knownFacts (string array), and decisionRefs (string array) at the top level, plus the fields for its own kind: proposal, taskFlowKind for a semantically clear requirement shape, and the optional matchedTaskId for requirement; answer for status-query and answer; and question for clarification.',
     'Never nest a decision wrapper, and never emit a selected-action, summary, user-input flag, tool-result flag, or tool-intents field.',
     'Never echo the input envelope back as output fields: interactionId, inputRevision, sourceRef, rawInput, clarifications, and taskCandidates are input only.',
+    'The committed rawInput is the only request in this turn. taskCandidates and the prior turn checkpoints are reference history: read them only to match a status-query or an append/change target. A candidate status such as created, blocked, stopped, or waiting is never a user request, so never propose continuing, resuming, or finishing candidate tasks unless rawInput itself asks for that.',
+    'The whole reply is exactly one decision object and one assistant message. Never emit a second decision object, a second message item, a preface, or a closing note.',
     'Classify by the requested outcome, not by whether intake can execute a requested tool. A concrete request to perform work and deliver a result is a requirement; when it asks for new work, use proposal.intent=create even if taskCandidates is empty.',
     'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
     'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
@@ -480,6 +482,44 @@ function sameInteractionTurn(left: InteractionTurnIdentity, right: InteractionTu
     && left.turnId === right.turnId;
 }
 
+/**
+ * The most specific message of a failure chain. An AggregateError keeps the
+ * primary failure at `errors[0]`, so a message built from the wrapper alone
+ * would report the cleanup detail instead of the cause that started it.
+ */
+function describeFailure(error: unknown): string {
+  let current = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (current instanceof AggregateError && current.errors.length > 0) {
+      current = current.errors[0];
+      continue;
+    }
+    break;
+  }
+  return current instanceof Error ? current.message : String(current);
+}
+
+/**
+ * The durable reason one failed epoch must keep its recovery lane instead of
+ * being closed as failed, or undefined when no dispatched helper blocks it. A
+ * dispatched helper already reached the side-effect stage, and a recorded
+ * return never proves the effect was not applied, so that turn is not closed
+ * as failed.
+ */
+async function holdsDispatchedHelper(
+  journal: InteractionHelperTurnReadPort,
+  turn: InteractionTurnIdentity,
+): Promise<string | undefined> {
+  let durableHelpers: Awaited<ReturnType<InteractionHelperTurnReadPort['readTurnHelpers']>>;
+  try {
+    durableHelpers = await journal.readTurnHelpers(turn);
+  } catch (error) {
+    return `the durable helper turn read failed: ${describeFailure(error)}`;
+  }
+  if (durableHelpers.length === 0) return undefined;
+  return `it dispatched helper ${durableHelpers[0]!.identity.helperCallId}`;
+}
+
 export function createProviderExplicitBrainInterpreter(input: {
   readonly lease?: SupervisorLease | (() => SupervisorLease | undefined);
   readonly port?: ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>;
@@ -637,6 +677,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         const closed = await input.checkpointJournal.readScopeSemanticCheckpoints(scopeKey);
         const abandoned = await input.parentJournal.readScopeAbandonedTurns(scopeKey);
         const unusable = await input.parentJournal.readScopeParseFailures(scopeKey);
+        const failedEpochs = await input.parentJournal.readScopeExecutionFailures(scopeKey);
         return opened.find(({ fact }) => !closed.some(({ checkpoint }) =>
           checkpoint.organId.scope === fact.turn.organId.scope
           && checkpoint.organId.value === fact.turn.organId.value
@@ -648,7 +689,11 @@ export function createProviderExplicitBrainInterpreter(input: {
           // A turn closed as unparseable is durably closed: its real terminal
           // output exists but yielded no decision, so it is not pending and it
           // must never block the next input.
-          && !unusable.some(({ fact: unusableFact }) => sameInteractionTurn(unusableFact.turn, fact.turn)));
+          && !unusable.some(({ fact: unusableFact }) => sameInteractionTurn(unusableFact.turn, fact.turn))
+          // A turn whose epoch failed before any terminal output is closed by
+          // its own durable fact: nothing about it can ever be delivered, so it
+          // is not pending and it must never block the next input.
+          && !failedEpochs.some(({ fact: failedFact }) => sameInteractionTurn(failedFact.turn, fact.turn)));
       };
       /**
        * Discharge one interrupted parent turn that can provably never be
@@ -725,21 +770,84 @@ export function createProviderExplicitBrainInterpreter(input: {
             && authenticatedCaller.processStartToken === committedOwner.processStartToken) {
             throw refuse('the committed execution owner is still the current active lease owner; a live Provider stream is not an interrupted crash');
           }
-          const takeover = current.takeover;
-          if (committedOwner === undefined
-            || takeover === undefined
-            || takeover.previousLeaseId !== committedOwner.daemonLeaseId
-            || takeover.previousGeneration !== committedOwner.daemonGeneration
-            || takeover.termination === undefined) {
-            throw refuse('the committed execution owner has no durable termination receipt; recovery responsibility is retained');
+          if (committedOwner === undefined) {
+            throw refuse('the committed execution owner has no durable termination receipt; the committed turn input records no execution owner; recovery responsibility is retained');
+          }
+          const retained = readSupervisorTerminationReceipts(current);
+          // A receipt must name the exact owner: the same generation number
+          // under a different lease id is a different daemon run and proves
+          // nothing about this turn.
+          const receipt = retained.find((entry) =>
+            entry.previousGeneration === committedOwner.daemonGeneration
+            && entry.previousLeaseId === committedOwner.daemonLeaseId
+            && entry.termination !== undefined);
+          if (receipt === undefined) {
+            const generations = retained.map((entry) => entry.previousGeneration);
+            const window = generations.length === 0
+              ? 'no termination receipt is retained'
+              : `retained takeover receipts cover generations ${generations[0]}..${generations[generations.length - 1]}`;
+            throw refuse(
+              'the committed execution owner has no durable termination receipt; recovery responsibility is retained'
+              + ` (committed generation ${committedOwner.daemonGeneration}, current generation ${current.generation}, ${window})`,
+            );
           }
           await discharge();
         });
       };
+      // The live task list is rebuilt from the current coordinator on every
+      // retry, so it can drift from the snapshot committed with the submitted
+      // turn. Only that dynamic field may be restored from the committed input;
+      // every other read below must then use the recovered request.
+      let effectiveRequest = request;
       let pending = await readPendingTurn();
       while (pending !== undefined) {
         const original = await input.rawContent.read({ scope: pending.fact.scope, content: pending.fact.initialInput });
-        if (new TextDecoder('utf-8', { fatal: true }).decode(original) === JSON.stringify(request)) break;
+        const committedText = new TextDecoder('utf-8', { fatal: true }).decode(original);
+        if (committedText === JSON.stringify(effectiveRequest)) break;
+        let committed: unknown;
+        try {
+          committed = JSON.parse(committedText);
+        } catch (error) {
+          throw new Error(
+            `unclosed interaction parent turn ${pending.fact.turn.turnId} has an unreadable committed input asset: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        // A decodable asset that cannot be read as an input object is not
+        // evidence that the user's business input changed. Keep the turn and
+        // its recovery responsibility instead of discharging it as new input.
+        const rootKind = committed === null
+          ? 'null'
+          : Array.isArray(committed) ? 'array' : typeof committed;
+        if (committed === null || typeof committed !== 'object' || Array.isArray(committed)) {
+          throw new Error(
+            `unclosed interaction parent turn ${pending.fact.turn.turnId} has an invalid committed input asset: root ${rootKind}`,
+          );
+        }
+        const committedRecord = committed as { readonly taskCandidates?: unknown };
+        // An explicit non-array taskCandidates has the same meaning: the asset
+        // cannot be restored and is not a different user input. A legacy object
+        // without that field keeps the existing different-input boundary.
+        if (Object.hasOwn(committedRecord, 'taskCandidates') && !Array.isArray(committedRecord.taskCandidates)) {
+          const candidatesKind = committedRecord.taskCandidates === null
+            ? 'null'
+            : typeof committedRecord.taskCandidates;
+          throw new Error(
+            `unclosed interaction parent turn ${pending.fact.turn.turnId} has an invalid committed input asset: taskCandidates ${candidatesKind}`,
+          );
+        }
+        // Substituting the committed candidates back into the retry must
+        // reproduce the committed input byte for byte. That single strict
+        // comparison keeps this path to the same interaction/revision with all
+        // user business input unchanged; any other difference still reaches
+        // the existing different-input boundary.
+        const restored = Array.isArray(committedRecord.taskCandidates)
+          ? { ...effectiveRequest, taskCandidates: committedRecord.taskCandidates as readonly ExplicitBrainTaskCandidate[] }
+          : undefined;
+        if (restored !== undefined && JSON.stringify(restored) === committedText) {
+          effectiveRequest = restored;
+          break;
+        }
         await abandonInterruptedTurn(pending);
         pending = await readPendingTurn();
       }
@@ -782,7 +890,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             const finalParentOutput = await coldOwner.readClosedTurnOutput();
             let interpretation: ExplicitBrainInterpretation;
             try {
-              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, effectiveRequest);
             } catch (parseError) {
               // The closed turn's own durable terminal output is unusable.
               // Re-reading it can never recover; close it so new input works.
@@ -819,7 +927,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             const finalParentOutput = await coldOwner.readReconciledTurnOutput();
             let interpretation: ExplicitBrainInterpretation;
             try {
-              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, effectiveRequest);
             } catch (parseError) {
               return await closeUnparseableTurn(coldOwner, parseError);
             }
@@ -834,7 +942,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             executionOwner: reconciliation.fact.replacementOwner };
         } else {
           await prepareScopeSemanticHistory({ activeTurn: pending.fact.turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
-          return finish(retained, request);
+          return finish(retained, effectiveRequest);
         }
       }
       if (input.lease !== undefined && activeLease === undefined) {
@@ -845,7 +953,7 @@ export function createProviderExplicitBrainInterpreter(input: {
       const executionEpoch = continuation?.executionEpoch ?? 1;
       const turn: InteractionTurnIdentity = continuation?.fact.turn ?? {
         organId: input.organId, interactionScopeId: input.interactionScopeId,
-        interactionId: request.interactionId, inputRevision: request.inputRevision, turnId: runtimeId,
+        interactionId: effectiveRequest.interactionId, inputRevision: effectiveRequest.inputRevision, turnId: runtimeId,
       };
       const priorCheckpoints = continuation?.fact.priorCheckpoints
         ?? await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
@@ -877,7 +985,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         const execution = { runtimeId, organId: input.organId, operationId, executionEpoch, interactionTurn: turn };
         const scope = continuation?.fact.scope ?? { organId: input.organId, operationId };
         const initialInput = continuation?.fact.initialInput ?? {
-          ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(request) }),
+          ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(effectiveRequest) }),
           view: { kind: 'utf8-text' as const },
         };
         const openOwner = async (executionOwner?: OccurrenceExecutionOwner) => {
@@ -885,7 +993,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             turn, execution, scope, initialInput, providerBinding: turnProviderBinding,
             ...(executionOwner === undefined ? {} : { executionOwner }),
             journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
-            instructions: async () => ({ text: interpreterPrompt(request, await loadPromptSegments()), toolSurface: 'intake-decision' }),
+            instructions: async () => ({ text: interpreterPrompt(effectiveRequest, await loadPromptSegments()), toolSurface: 'intake-decision' }),
           });
           owner = createdOwner;
           await createdOwner.openTurnInput();
@@ -920,7 +1028,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           ...(parentRequest === undefined ? {} : { parentRequest }),
           assignmentId: `explicit-interpret-${identity}`,
           scope,
-          inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
+          inputRefs: [`humanagent://interaction/${effectiveRequest.interactionId}/revision/${effectiveRequest.inputRevision}`],
           ownerId: 'humanagent.runtime.explicit-brain',
           rawEvidence: input.rawEvidence,
           registerRequest: (registration) => createdOwner.registerRequest(registration),
@@ -1020,7 +1128,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         if (continuation === undefined) {
           const finalParentOutput = await createdOwner.readFinalTurnOutput();
           try {
-            interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+            interpretation = parseInterpreterOutput(finalParentOutput.assistantText, effectiveRequest);
           } catch (parseError) {
             // The terminal output is durable and unusable. Mark the shape so the
             // catch below can close the turn honestly after the provider close,
@@ -1036,8 +1144,8 @@ export function createProviderExplicitBrainInterpreter(input: {
               throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
             }
             await input.publishProviderSettlement({
-              interactionId: request.interactionId,
-              inputRevision: request.inputRevision,
+              interactionId: effectiveRequest.interactionId,
+              inputRevision: effectiveRequest.inputRevision,
               request: finalParentOutput.terminalRequest.request,
               settlement,
             });
@@ -1062,21 +1170,31 @@ export function createProviderExplicitBrainInterpreter(input: {
             failure = new AggregateError([failure, settleError], 'interaction observation and settlement failed');
           }
         }
+        // Every cleanup step below runs even when an earlier one fails. A
+        // failed close used to throw away the only chance to record a durable
+        // terminal fact, so one broken stream left the whole interaction scope
+        // blocked until the daemon restarted.
+        const cleanupFailures: unknown[] = [];
         if (owned !== undefined) {
+          let receipt: Awaited<ReturnType<typeof closeAgentProvider>> | undefined;
           try {
-            const receipt = await closeAgentProvider(owned, { returnReceipt: true });
-            // Record the real close even without a successful semantic output.
-            // The turn input must already be committed; a failed input commit
-            // keeps the original error and records no fabricated fact.
-            if (owner !== undefined && committedInput) {
+            receipt = await closeAgentProvider(owned, { returnReceipt: true });
+          } catch (closeError) {
+            cleanupFailures.push(closeError);
+          }
+          // Record the real close even without a successful semantic output.
+          // The turn input must already be committed; a failed input commit
+          // keeps the original error and records no fabricated fact.
+          if (receipt !== undefined && owner !== undefined && committedInput) {
+            try {
               await owner.recordProviderClose({
                 providerBinding: owned.binding,
                 result: receipt,
                 closedAt: input.clock.now(),
               });
+            } catch (recordError) {
+              cleanupFailures.push(recordError);
             }
-          } catch (closeError) {
-            throw new AggregateError([failure, closeError], 'interaction execution and provider close failed');
           }
         }
         if (unparseableOutput) {
@@ -1091,15 +1209,40 @@ export function createProviderExplicitBrainInterpreter(input: {
           try {
             await owner.closeUnparseableTurn({ failedAt: input.clock.now() });
           } catch (closeError) {
-            throw new AggregateError(
-              [failure, closeError],
-              'interaction terminal output is unusable and the turn could not be closed',
-            );
+            cleanupFailures.push(closeError);
           }
+        } else if (owner !== undefined && committedInput) {
+          // This batch failed before any terminal output, and this process owns
+          // the stream that died, so it is the only party that can honestly
+          // attest that this epoch can never deliver. A shape with its own
+          // recovery lane (a deliverable output, the closed-zero-fact
+          // continuation, a committed settlement or a tool side effect) keeps
+          // that lane instead of being closed here.
+          try {
+            const eligibility = await owner.readExecutionFailureEligibility();
+            if (eligibility.closable) {
+              const heldReason = input.turnHelperJournal === undefined
+                ? 'the durable helper turn read port is unavailable'
+                : await holdsDispatchedHelper(input.turnHelperJournal, owner.turn);
+              if (heldReason === undefined) {
+                await owner.closeFailedEpoch({ failedAt: input.clock.now() });
+              }
+            }
+          } catch (closeError) {
+            cleanupFailures.push(closeError);
+          }
+        }
+        if (cleanupFailures.length > 0) {
+          // The primary failure stays first and named in the message: the
+          // cleanup detail is additive, never a replacement for the cause.
+          throw new AggregateError(
+            [failure, ...cleanupFailures],
+            `interaction execution failed: ${describeFailure(failure)}`,
+          );
         }
         throw failure;
       }
-      return finish(live, request);
+      return finish(live, effectiveRequest);
     },
   };
 }

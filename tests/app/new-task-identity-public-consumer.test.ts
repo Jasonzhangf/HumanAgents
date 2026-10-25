@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -6,6 +7,8 @@ import test from 'node:test';
 import {
   id,
   TASK_FLOW_DEFINITION_VERSION,
+  canonicalJsonStringify,
+  type TaskIdentitySource,
   type Checkpoint,
   type EvidenceRef,
   type ExecutionRuntimePort,
@@ -33,12 +36,17 @@ import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { MemoryCoordinator, RuntimeTaskCoordinator } from '../../packages/runtime/src/index.js';
+import {
+  AgentRuntimePoolManager,
+  OrchestrationManager,
+} from '../../packages/runtime/src/orchestration/index.js';
 import { TaskPlanRevisionConsumer } from '../../packages/runtime/src/orchestration/task-plan-revisions.js';
 import { TaskIdentityConsumer, type TaskIdentityPort } from '../../packages/runtime/src/orchestration/task-identity.js';
 import { SubscriptionControlPort } from '../../packages/runtime/src/subscriptions/index.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/src/runtime-current-state-journal.js';
 import {
   FakeReplayExecutionRuntimePort,
+  FileCheckpointStore,
   startUiRuntime,
   UiRuntimeJournal,
   type UiRuntimeLaunchOptions,
@@ -806,6 +814,441 @@ test('public new-task submit binds the real typed source and cold-reads before a
   await rm(root, { recursive: true, force: true });
 });
 
+// ---------------------------------------------------------------------------
+// B2 combined terminal proof.
+//
+// The existing G-A case stops at the first real execution request because the
+// controlled upstream never accepts a standard turn end. This case answers the
+// real Responses wire in three stages (execution end, drain, closed-turn
+// Planner) so one public submission composes identity -> FIFO -> grant ->
+// execution -> Planner -> committed public result and terminal checkpoint. No
+// terminal fact is mocked: the publication, plan revision and checkpoint are
+// read back from the physical control journal the runtime itself wrote.
+// ---------------------------------------------------------------------------
+
+interface ResponsesWireItem {
+  readonly type?: string;
+  readonly role?: string;
+  readonly name?: string;
+  readonly content?: ReadonlyArray<{ readonly type?: string; readonly text?: string }>;
+}
+
+interface ResponsesWire {
+  readonly input?: readonly ResponsesWireItem[];
+  readonly tools?: ReadonlyArray<{ readonly name?: string }>;
+}
+
+function responsesWire(body: string): ResponsesWire | undefined {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+    return parsed as ResponsesWire;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The closed-turn Planner sends one user message whose input_text is `role: planner`. */
+function plannerPayloadFrom(body: string): Record<string, unknown> | undefined {
+  for (const item of responsesWire(body)?.input ?? []) {
+    if (item.type !== 'message' || item.role !== 'user') continue;
+    for (const part of item.content ?? []) {
+      if (part.type !== 'input_text' || typeof part.text !== 'string') continue;
+      let candidate: unknown;
+      try {
+        candidate = JSON.parse(part.text);
+      } catch {
+        continue;
+      }
+      if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
+        && (candidate as Record<string, unknown>).role === 'planner') {
+        return candidate as Record<string, unknown>;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** True once the execution request replays the accepted standard-end call. */
+function replaysTurnEnd(body: string): boolean {
+  return (responsesWire(body)?.input ?? [])
+    .some((item) => item.type === 'function_call' && item.name === 'humanagent_turn_end');
+}
+
+/** True when the request advertises the Harness standard-end tool surface. */
+function advertisesTurnEnd(body: string): boolean {
+  return (responsesWire(body)?.tools ?? []).some((tool) => tool.name === 'humanagent_turn_end');
+}
+
+interface TerminalUpstream {
+  readonly requests: CapturedUpstreamRequest[];
+  readonly plannerRequests: ReadonlyArray<Record<string, unknown>>;
+  readonly plannerSnapshots: readonly TaskPlanSnapshot[];
+  readonly endArguments: ReadonlyArray<Record<string, unknown>>;
+  restore(): void;
+}
+
+/**
+ * Controlled Responses upstream for the combined chain. It answers the same
+ * three real stages the native delivery wire uses, so the runtime's own
+ * standard-turn acceptance, Planner call and terminal publication all run on
+ * product code instead of a mocked terminal state.
+ */
+function captureTerminalUpstream(origin: string, deliveryText: string): TerminalUpstream {
+  const requests: CapturedUpstreamRequest[] = [];
+  const plannerRequests: Array<Record<string, unknown>> = [];
+  const plannerSnapshots: TaskPlanSnapshot[] = [];
+  const endArguments: Array<Record<string, unknown>> = [];
+  const original = globalThis.fetch;
+  const capture = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1] = {}) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (new URL(url).origin !== origin) return original(input, init);
+    const body = typeof init.body === 'string' ? init.body : '';
+    requests.push({ method: (init.method ?? 'GET').toUpperCase(), url, body });
+
+    const planner = plannerPayloadFrom(body);
+    if (planner !== undefined) {
+      plannerRequests.push(planner);
+      const task = planner.task as { readonly title?: unknown; readonly directive?: unknown } | undefined;
+      if (typeof task?.title !== 'string' || typeof task.directive !== 'string') {
+        throw new Error('the B2 Planner request carries no confirmed Task title/directive');
+      }
+      const snapshot: TaskPlanSnapshot = {
+        title: task.title,
+        summary: `B2 whole-task plan for "${task.title}"`,
+        completeness: { scope: 'whole-task', status: 'complete' },
+        acceptanceCriteria: [{
+          criterionId: 'b2-delivery-satisfied',
+          description: `Satisfy the confirmed directive "${task.directive}".`,
+        }],
+        nodes: [{
+          nodeId: 'whole-task',
+          kind: 'task',
+          title: task.title,
+          intent: task.directive,
+          definition: { directive: task.directive },
+        }],
+        phases: [],
+        relations: [],
+      };
+      plannerSnapshots.push(snapshot);
+      return sseResponse([
+        { type: 'response.created', response: { id: 'b2-planner' } },
+        { type: 'response.output_text.done', item_id: 'b2-planner', text: JSON.stringify({
+          decision: 'complete',
+          snapshot,
+          reasonText: 'the closed turn delivered the whole confirmed result',
+        }) },
+        { type: 'response.completed', response: { id: 'b2-planner' } },
+      ]);
+    }
+
+    if (replaysTurnEnd(body)) {
+      return sseResponse([
+        { type: 'response.created', response: { id: 'b2-drain' } },
+        { type: 'response.output_text.done', item_id: 'b2-drain', text: 'B2 turn drained' },
+        { type: 'response.completed', response: { id: 'b2-drain' } },
+      ]);
+    }
+
+    if (advertisesTurnEnd(body)) {
+      const args: Record<string, unknown> = {
+        summary: {
+          goal: { text: 'Deliver the confirmed B2 task result', evidenceRefs: [] },
+          actions: { text: 'Ran the configured real execution Provider', evidenceRefs: [] },
+          result: { text: deliveryText, evidenceRefs: [] },
+          expectedNextStep: { text: 'Close the turn so the Planner can decide', evidenceRefs: [] },
+        },
+        deliveryText,
+        deliveryRefs: [],
+      };
+      endArguments.push(args);
+      const callId = `b2-end-${endArguments.length}`;
+      return sseResponse([
+        { type: 'response.created', response: { id: callId } },
+        { type: 'response.output_item.done', output_index: 0, item: {
+          type: 'function_call', call_id: callId, name: 'humanagent_turn_end', arguments: JSON.stringify(args) } },
+        { type: 'response.completed', response: { id: callId } },
+      ]);
+    }
+
+    throw new Error(`the B2 controlled upstream received an unidentified Responses stage: ${body.slice(0, 160)}`);
+  }) as typeof fetch;
+  globalThis.fetch = capture;
+  return {
+    requests,
+    plannerRequests,
+    plannerSnapshots,
+    endArguments,
+    restore: () => { if (globalThis.fetch === capture) globalThis.fetch = original; },
+  };
+}
+
+interface TerminalDashboardBody {
+  readonly state?: string;
+  readonly output?: string;
+  readonly checkpoint?: {
+    readonly checkpointId: string;
+    readonly seq: number;
+    readonly outcome: string;
+    readonly summary: string;
+  };
+  readonly history?: {
+    readonly events?: ReadonlyArray<{
+      readonly kind?: string;
+      readonly state?: string;
+      readonly terminalPhase?: string;
+    }>;
+  };
+}
+
+test('B2: one public confirmation composes identity, grant, real execution and the closed-turn Planner to terminal', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-b2-terminal-'));
+  const taskControlPath = taskControlPathFor(root, 'rcc');
+  const evidenceRoot = join(root, 'evidence');
+  const upstreamOrigin = 'http://127.0.0.1:4599';
+  const deliveryText = 'B2 combined terminal delivery: the confirmed result is committed.';
+  const committedTaskFlow: TaskFlowBinding = {
+    kind: 'long-running',
+    definitionVersion: TASK_FLOW_DEFINITION_VERSION,
+  };
+  const upstream = captureTerminalUpstream(upstreamOrigin, deliveryText);
+  const probePort = assembleProviderExecutionPort({
+    binding: gaHttpBinding,
+    routeRef: 'ga-http-route',
+    baseUrl: upstreamOrigin,
+    source: 'http',
+  }, evidenceRoot);
+  const httpProvider: ProviderConfig = {
+    source: 'http',
+    provider: 'http',
+    binding: gaHttpBinding.bindingId,
+    protocol: 'responses',
+    model: gaHttpBinding.modelRef,
+    route: 'ga-http-route',
+    baseUrl: upstreamOrigin,
+  };
+  const entries: EffectiveAgentProviderBinding[] = [
+    { agentId: 'b2-http-execution', roleId: 'execution', source: 'agent', provider: httpProvider },
+    { agentId: 'b2-http-orchestration', roleId: 'orchestration', source: 'agent', provider: httpProvider },
+  ];
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  try {
+    runtime = await startRuntime(root, probePort, {
+      projectKey: 'project-b2-terminal',
+      mode: 'rcc',
+      providerSource: 'http',
+      binding: gaHttpBinding,
+      taskIdentity: (owner, path) => identityWithFixtureGrant(owner, path, undefined, committedTaskFlow),
+      runtimeComposition: {
+        prepareAgentProvider: async (selection) => assembleAgentProvider({
+          roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
+          agentProviderBindings: entries,
+          legacyProvider: httpProvider,
+          evidenceRoot,
+        }),
+        prepareTaskAgentProvider: (selection, owner, lease) => prepareExecutionAgentProvider({
+          roleId: selection.roleId,
+          ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
+          agentProviderBindings: entries,
+          legacyProvider: httpProvider,
+          createPort: (selected) => createAgentProviderPort(selected, evidenceRoot),
+        }, owner, lease),
+        // The native lane still resolves the closed-turn Planner through the
+        // real Task assembly pool. Production serve binds the same factory from
+        // its serve composition; this consumer supplies the pool the Planner
+        // actually leases, so the terminal chain runs on product code.
+        createTaskAssembly: ({ executionAgent, maxAttempts }) => {
+          const runtimePool = new AgentRuntimePoolManager({
+            maxRuntimes: 4,
+            ownerId: 'humanagent.runtime.b2-terminal',
+            factory: {
+              async start(request) {
+                return {
+                  runtimeId: request.runtimeId,
+                  generation: request.generation,
+                  capabilities: [...request.requiredCapabilities],
+                };
+              },
+              async dispose() {},
+            },
+          });
+          return {
+            runtimePool,
+            orchestration: new OrchestrationManager({
+              ownerId: 'humanagent.runtime.b2-terminal',
+              runtimePool,
+              ...(executionAgent === undefined ? {} : { executionAgent }),
+              ...(maxAttempts === undefined ? {} : { maxAttempts }),
+            }),
+          };
+        },
+      },
+    });
+    // The HTTP source performs no discovery; the first wire call is the real
+    // confirmed execution, not a health probe.
+    assert.deepEqual(upstream.requests, []);
+
+    const submission = await submitNewTask(runtime, 'b2-terminal');
+
+    // The single confirmation must have created the real typed identity first.
+    await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, 1));
+    const identity = (await identityRecords(taskControlPath))[0]!;
+    const taskId = id('task', identity.scope.taskId.value);
+    assert.equal(identity.source.requirementId, submission.receipt.requirement.requirementId);
+
+    // Terminal state is observed through the public dashboard, which composes
+    // the authoritative publication rather than the raw task output. The wait
+    // also requires the durable final turn event: the coordinator flips the
+    // task to `succeeded` while applying the typed advance and only writes the
+    // final settlement event after that, so observing the state alone can
+    // outrun the last control-journal append.
+    let dashboard: TerminalDashboardBody = {};
+    await waitForAsync(async () => {
+      const response = await fetch(`${runtime!.server.url}/api/tasks/${encodeURIComponent(taskId.value)}/dashboard`);
+      assert.equal(response.status, 200);
+      dashboard = await response.json() as TerminalDashboardBody;
+      assert.equal(dashboard.state, 'succeeded');
+      assert.ok(dashboard.checkpoint, 'the terminal turn must have committed its checkpoint');
+      assert.ok(
+        (dashboard.history?.events ?? []).some((event) => event.kind === 'execution.terminal'
+          && event.terminalPhase === 'final' && event.state === 'succeeded'),
+        'the final turn event must be durable before the terminal result is asserted',
+      );
+    }, 15_000);
+
+    // The real execution accepted the standard turn end and the real
+    // closed-turn Planner consumed that accepted result once.
+    assert.ok(upstream.endArguments.length >= 1, 'the real execution must accept a standard turn end');
+    assert.equal(
+      (upstream.endArguments[0] as { readonly deliveryText?: string }).deliveryText,
+      deliveryText,
+      'the accepted end must carry the exact delivery text',
+    );
+    assert.equal(upstream.plannerRequests.length, 1, 'the closed-turn Planner must be called exactly once');
+    const plannerPayload = upstream.plannerRequests[0]!;
+    const closure = plannerPayload.closure as {
+      readonly summary: { readonly result: { readonly text: string } };
+    };
+    assert.equal(closure.summary.result.text, deliveryText,
+      'the Planner must read the accepted execution result, not a placeholder');
+    const confirmedSource = plannerPayload.confirmedSource as {
+      readonly requirementId: string;
+      readonly draftId: string;
+      readonly confirmationRef: string;
+    };
+    assert.equal(confirmedSource.requirementId, submission.receipt.requirement.requirementId);
+    assert.equal(confirmedSource.draftId, submission.draftId);
+    assert.equal(confirmedSource.confirmationRef, 'confirmation:b2-terminal');
+
+    // The committed plan revision is exactly the Planner's whole-task snapshot
+    // and remains bound to the confirmed source.
+    const plans = new TaskPlanRevisionConsumer(
+      new JsonlTaskPlanRevisionJournal(new JsonlOrganJournal(taskControlPath)),
+    );
+    const revisions = await plans.list({ organId, taskId });
+    assert.equal(revisions.length, 1, 'the terminal turn must publish exactly one current plan');
+    assert.equal(revisions[0]!.sequence, 1);
+    assert.equal(revisions[0]!.predecessor, null);
+    assert.deepEqual(revisions[0]!.snapshot, upstream.plannerSnapshots[0]);
+    assert.equal(revisions[0]!.source.requirementId, submission.receipt.requirement.requirementId);
+    assert.equal(revisions[0]!.source.confirmationRef, identity.source.confirmationRef);
+
+    // The public committed result is the exact accepted delivery text.
+    assert.equal(dashboard.output, deliveryText, 'the dashboard output must be the committed delivery text');
+    const outputResponse = await fetch(
+      `${runtime.server.url}/api/product/output?taskId=${encodeURIComponent(taskId.value)}`,
+    );
+    assert.equal(outputResponse.status, 200);
+    const productOutput = await outputResponse.json() as {
+      readonly resultAvailable?: boolean;
+      readonly commits?: ReadonlyArray<{ readonly text?: string }>;
+    };
+    assert.equal(productOutput.resultAvailable, true);
+    assert.deepEqual(productOutput.commits?.map((commit) => commit.text), [deliveryText]);
+
+    // The terminal checkpoint is durable in the same physical control journal,
+    // not only a dashboard projection value.
+    assert.ok(dashboard.checkpoint, 'the terminal turn must commit a checkpoint');
+    const records = (await new JsonlOrganJournal(taskControlPath).verify()).records;
+    const checkpointRecord = records.find((record) => record.kind === 'checkpoint'
+      && record.checkpoint?.id.value === dashboard.checkpoint!.checkpointId);
+    assert.ok(checkpointRecord?.checkpoint, 'the dashboard checkpoint must exist in the control journal');
+    const committedCheckpoint = await new FileCheckpointStore(taskControlPath).readCommitted(
+      checkpointRecord!.scope,
+      checkpointRecord!.checkpoint!.id,
+    );
+    assert.ok(committedCheckpoint, 'the terminal checkpoint must resolve from the durable journal');
+    assert.equal(committedCheckpoint!.checkpoint.id.value, dashboard.checkpoint!.checkpointId);
+    assert.equal(committedCheckpoint!.checkpoint.scope.taskId?.value, taskId.value);
+    assert.ok(committedCheckpoint!.checkpoint.outcome.length > 0);
+  } finally {
+    await runtime?.close();
+    upstream.restore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the public new-task entry binds the confirmed Task identity the closed-turn Planner reads', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'case-direct-create-'));
+  const taskControlPath = taskControlPathFor(root);
+  const port = new CountingStartPort({ binding, stepDelayMs: 1 });
+  const runtime = await startRuntime(root, port, { projectKey: 'project-task-identity-direct' });
+  try {
+    const created = await fetch(`${runtime.server.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'direct identity', directive: 'direct create directive' }),
+    });
+    assert.equal(created.status, 201);
+    const taskIdValue = (await created.json() as { readonly taskId: { readonly value: string } }).taskId.value;
+    const taskId = id('task', taskIdValue);
+
+    // The closed-turn Planner reads exactly this owner before its first
+    // whole-task publication and refuses to align without it, so a Task created
+    // through the public entry must carry the confirmed identity already.
+    const identity = await new TaskIdentityConsumer(
+      new JsonlTaskIdentityJournal(new JsonlOrganJournal(taskControlPath)),
+    ).read({ organId, taskId });
+    assert.ok(identity, 'the public new-task entry must bind the confirmed Task identity before a turn can close');
+    const expected: TaskIdentitySource = {
+      requirementId: `requirement:direct-task-create:${taskIdValue}@1`,
+      inputRevision: 1,
+      draftId: `draft:direct-task-create:${taskIdValue}@1`,
+      draftRevisionVersion: 1,
+      draftRevisionHash: `sha256:${createHash('sha256').update(canonicalJsonStringify({
+        kind: 'direct-task-create-input.v1',
+        title: 'direct identity',
+        directive: 'direct create directive',
+      })).digest('hex')}`,
+      confirmationRef: `confirmation:direct-task-create:${taskIdValue}@1`,
+    };
+    assert.deepEqual(identity!.source, expected);
+
+    // The public read composition projects the same committed source for the
+    // same Task scope, so the dashboard cannot show an identity the Planner
+    // would not read.
+    const listResponse = await fetch(`${runtime.server.url}/api/tasks`);
+    assert.equal(listResponse.status, 200);
+    const list = await listResponse.json() as RuntimeTaskListProjection;
+    const row = [
+      ...list.running, ...list.waiting, ...list.completed,
+      ...list.stopped, ...list.draft, ...list.failed,
+    ].find((candidate) => candidate.taskId.value === taskIdValue);
+    assert.ok(row, 'the bound task must appear in the public task list');
+    assert.deepEqual(row!.identitySource, expected);
+
+    // Binding the create never starts work on its own.
+    assert.equal(port.startCount, 0);
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('taskFlow intake fidelity preserves inferred and refined bindings without a confirmation override', async () => {
   await mkdir(ROOT, { recursive: true });
   const root = await mkdtemp(join(ROOT, 'case-task-flow-intake-'));
@@ -1325,6 +1768,404 @@ test('taskFlow intake fidelity preserves confirmed template through task directi
 /**
  * Component failure basis for this focused consumer.
  *
+ * Failure mode (real production shape, 0.1.0040, task
+ * ui-task-a3198d24-d2ae-4da9-86cd-41e437a1b401-24): the Planner model omitted
+ * the optional node `phaseId` while its phase declared those nodes as members.
+ * The turn had already succeeded and its checkpoint was committed, but
+ * `validateTaskPlanSnapshot` rejected the publication with `task plan node n1
+ * phaseId does not match phase membership`, so the task settled `blocked` after
+ * real success. Impact: a succeeded task reports failure to the user. The fix
+ * belongs at this producer boundary: membership is the declared source and the
+ * node `phaseId` is its redundant mirror, so an omitted mirror is completed
+ * deterministically here instead of the task failing.
+ */
+test('the closed-turn Planner completes an omitted node phaseId from its phase membership', async () => {
+  const cycleId = id('cycle', 'planner-phase-cycle');
+  const operationId = id('operation', 'planner-phase-operation');
+  const taskId = id('task', 'planner-phase-task');
+  const plannerScope: ScopeRef = { organId, taskId, cycleId, operationId };
+  const checkpointCommitRef: JournalCommitRef = {
+    commitId: 'planner-phase-checkpoint-commit',
+    journalSeq: 1,
+    recordDigest: `sha256:${'1'.repeat(64)}`,
+  };
+  const plannerEvidence = (label: string): EvidenceRef => ({
+    evidenceId: id('evidence', `planner-phase-${label}`),
+    kind: 'operation',
+    source: 'new-task-identity-public-consumer',
+    locator: `planner-phase/${label}`,
+    scope: plannerScope,
+  });
+  const checkpointId = id('checkpoint', 'planner-phase-checkpoint');
+  const checkpoint: Checkpoint = {
+    id: checkpointId,
+    scope: plannerScope,
+    cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'succeeded',
+    summary: 'The single reply turn closed.',
+    recoveryStateRef: plannerEvidence('recovery'),
+    evidenceRefs: [plannerEvidence('checkpoint')],
+    next: { kind: 'continue', ref: 'planner:phase' },
+  };
+  const closure: TurnClosureReference = {
+    identity: {
+      turnId: 'planner-phase-turn',
+      workAssignmentRef: 'planner-phase-assignment',
+      taskRef: taskId,
+      scopeRef: plannerScope,
+      cycleRef: cycleId,
+      inputRevision: 1,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      runtimeBindingRef: 'planner-phase-runtime',
+      permissionRevision: 'planner-phase-permission',
+    },
+    checkpointId,
+    closureRef: 'planner-phase-closure',
+    summary: {
+      goal: { text: 'Reply with exactly: OK', evidenceRefs: [plannerEvidence('goal')] },
+      actions: { text: 'No tools were required.', evidenceRefs: [plannerEvidence('actions')] },
+      result: { text: 'Delivered exactly "OK".', evidenceRefs: [plannerEvidence('result')] },
+      expectedNextStep: { text: 'No further work.', evidenceRefs: [plannerEvidence('next')] },
+    },
+    recoveryStateRef: plannerEvidence('closure-recovery'),
+    closedAt: '2026-10-25T09:43:40.645Z',
+  };
+  const task: Task = {
+    id: taskId,
+    organId,
+    title: 'live stream terminal verification',
+    directive: 'Reply with exactly: OK',
+    directiveRevision: 1,
+    state: 'settling',
+    memoryScope: 'task',
+  };
+  const identity: TaskIdentityRecord = {
+    scope: { organId, taskId },
+    title: 'live stream terminal verification',
+    source: {
+      requirementId: `requirement:direct-task-create:${taskId.value}@1`,
+      inputRevision: 1,
+      draftId: `draft:direct-task-create:${taskId.value}@1`,
+      draftRevisionVersion: 1,
+      draftRevisionHash: `sha256:${'a'.repeat(64)}`,
+      confirmationRef: `confirmation:direct-task-create:${taskId.value}@1`,
+    },
+    journalCommitRef: 'jsonl:task-identity:planner-phase',
+  };
+  const plannerIncarnation: TaskRuntimeIncarnation = {
+    runtimeId: 'planner-phase-runtime',
+    generation: 1,
+    agentInstanceId: 'planner-phase-instance',
+    roleId: 'orchestration',
+    taskId,
+    assignmentId: 'planner-phase-assignment',
+    executionEpoch: 1,
+  };
+  const plannerExecution: ProviderExecutionIdentityRef = {
+    runtimeId: plannerIncarnation.runtimeId,
+    taskId,
+    operationId,
+    organId,
+    cycleId,
+    executionEpoch: plannerIncarnation.executionEpoch,
+  };
+  const plannerInput = {
+    task,
+    closure,
+    refinedResults: [],
+    priorPlan: null,
+    identity,
+    allocation: { operationId, cycleId, executionEpoch: plannerIncarnation.executionEpoch },
+  };
+  const duty = deriveClosedTurnPlannerDuty(plannerInput, checkpointCommitRef);
+  const preparedCall = {
+    duty,
+    invocationId: 'planner-phase-invocation',
+    execution: plannerExecution,
+    scope: plannerScope,
+    assignmentId: plannerIncarnation.assignmentId,
+    incarnation: plannerIncarnation,
+    lease: {
+      leaseId: 'planner-phase-lease',
+      runtimeId: plannerIncarnation.runtimeId,
+      generation: plannerIncarnation.generation,
+      incarnation: plannerIncarnation,
+      executionEpoch: plannerIncarnation.executionEpoch,
+      ownerId: 'planner-phase-pool',
+      assignmentId: plannerIncarnation.assignmentId,
+      capabilities: ['provider.execution'],
+    },
+    decision: {
+      action: 'spawn' as const,
+      ownerId: 'planner-phase-pool',
+      condition: 'orchestration.runtime.capacity',
+      nextAction: { kind: 'continue' as const, ref: plannerIncarnation.runtimeId },
+      reason: 'planner phase capacity is available',
+      runtimeId: plannerIncarnation.runtimeId,
+    },
+    grantCommitRef: { commitId: 'planner-phase-grant-commit', journalSeq: 2, recordDigest: `sha256:${'2'.repeat(64)}` },
+    admissionCommitRef: { commitId: 'planner-phase-admission-commit', journalSeq: 3, recordDigest: `sha256:${'3'.repeat(64)}` },
+    checkpoint: { checkpoint, previous: null, commitRef: checkpointCommitRef },
+    preparationCommitRef: { commitId: 'planner-phase-preparation-commit', journalSeq: 4, recordDigest: `sha256:${'4'.repeat(64)}` },
+  };
+  // The exact production shape: two nodes, one phase claiming both, and no
+  // node-level phaseId at all.
+  const membershipOnlySnapshot: TaskPlanSnapshot = {
+    title: 'Live stream terminal verification',
+    summary: 'One turn replies with exactly OK; no tools were required.',
+    completeness: { scope: 'whole-task', status: 'complete' },
+    acceptanceCriteria: [{ criterionId: 'ac-1', description: 'The reply is exactly the literal token OK.' }],
+    nodes: [
+      { nodeId: 'n1', kind: 'verification', title: 'Confirm required reply', intent: 'Establish the required reply.', definition: { expectedReply: 'OK' } },
+      { nodeId: 'n2', kind: 'delivery', title: 'Output literal OK', intent: 'Return OK as the whole response.', definition: { reply: 'OK', wholeResponse: true } },
+    ],
+    phases: [{ phaseId: 'p1', title: 'Terminal verification', memberNodeIds: ['n1', 'n2'] }],
+    relations: [],
+  };
+  const plannerPort = new FakeReplayExecutionRuntimePort({
+    binding,
+    replay: [
+      {
+        kind: 'output',
+        state: 'output',
+        summary: JSON.stringify({
+          decision: 'complete',
+          snapshot: membershipOnlySnapshot,
+          reasonText: 'The committed closure confirms the reply was delivered.',
+        }),
+      },
+      { kind: 'terminal', state: 'succeeded', summary: 'planner phase succeeded', terminalState: 'succeeded' },
+    ],
+    stepDelayMs: 1,
+  });
+  const planner = createIndependentTurnPlanner({
+    prepareAgentProvider: async (selection): Promise<AgentProviderComposition> => ({
+      roleId: selection.roleId,
+      provider: {
+        source: 'rcc',
+        provider: 'rcc',
+        binding: binding.bindingId,
+        protocol: 'responses',
+        model: binding.modelRef,
+        route: 'planner-phase-route',
+        baseUrl: 'http://127.0.0.1:4444',
+      },
+      source: 'rcc',
+      binding,
+      port: plannerPort,
+    }),
+    now: () => new Date('2026-10-25T09:44:00.000Z'),
+  });
+  const result = await planner.plan({ ...plannerInput, preparedCall });
+  assert.equal(result.decision, 'complete');
+  const nodes = result.publication.snapshot.nodes;
+  assert.deepEqual(
+    nodes.map((node) => [node.nodeId, node.phaseId]),
+    [['n1', 'p1'], ['n2', 'p1']],
+    'the producer completes the omitted mirror from the declared phase membership',
+  );
+  assert.deepEqual(result.publication.snapshot.phases, membershipOnlySnapshot.phases);
+});
+
+/**
+ * The conflicting shape must still fail with the original text. A node that
+ * declares its own phaseId while a different phase claims it is a real
+ * inconsistency; the producer never rewrites or deletes it, so the Contracts
+ * validator rejects the publication exactly as before.
+ */
+test('the closed-turn Planner rejects a node phaseId that conflicts with the phase membership', async () => {
+  const cycleId = id('cycle', 'planner-phase-conflict-cycle');
+  const operationId = id('operation', 'planner-phase-conflict-operation');
+  const taskId = id('task', 'planner-phase-conflict-task');
+  const plannerScope: ScopeRef = { organId, taskId, cycleId, operationId };
+  const checkpointCommitRef: JournalCommitRef = {
+    commitId: 'planner-phase-conflict-checkpoint-commit',
+    journalSeq: 1,
+    recordDigest: `sha256:${'1'.repeat(64)}`,
+  };
+  const plannerEvidence = (label: string): EvidenceRef => ({
+    evidenceId: id('evidence', `planner-phase-conflict-${label}`),
+    kind: 'operation',
+    source: 'new-task-identity-public-consumer',
+    locator: `planner-phase-conflict/${label}`,
+    scope: plannerScope,
+  });
+  const checkpointId = id('checkpoint', 'planner-phase-conflict-checkpoint');
+  const checkpoint: Checkpoint = {
+    id: checkpointId,
+    scope: plannerScope,
+    cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'succeeded',
+    summary: 'The single reply turn closed.',
+    recoveryStateRef: plannerEvidence('recovery'),
+    evidenceRefs: [plannerEvidence('checkpoint')],
+    next: { kind: 'continue', ref: 'planner:phase:conflict' },
+  };
+  const closure: TurnClosureReference = {
+    identity: {
+      turnId: 'planner-phase-conflict-turn',
+      workAssignmentRef: 'planner-phase-conflict-assignment',
+      taskRef: taskId,
+      scopeRef: plannerScope,
+      cycleRef: cycleId,
+      inputRevision: 1,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      runtimeBindingRef: 'planner-phase-conflict-runtime',
+      permissionRevision: 'planner-phase-conflict-permission',
+    },
+    checkpointId,
+    closureRef: 'planner-phase-conflict-closure',
+    summary: {
+      goal: { text: 'Reply with exactly: OK', evidenceRefs: [plannerEvidence('goal')] },
+      actions: { text: 'No tools were required.', evidenceRefs: [plannerEvidence('actions')] },
+      result: { text: 'Delivered exactly "OK".', evidenceRefs: [plannerEvidence('result')] },
+      expectedNextStep: { text: 'No further work.', evidenceRefs: [plannerEvidence('next')] },
+    },
+    recoveryStateRef: plannerEvidence('closure-recovery'),
+    closedAt: '2026-10-25T09:43:40.645Z',
+  };
+  const task: Task = {
+    id: taskId,
+    organId,
+    title: 'conflicting phase verification',
+    directive: 'Reply with exactly: OK',
+    directiveRevision: 1,
+    state: 'settling',
+    memoryScope: 'task',
+  };
+  const identity: TaskIdentityRecord = {
+    scope: { organId, taskId },
+    title: 'conflicting phase verification',
+    source: {
+      requirementId: `requirement:direct-task-create:${taskId.value}@1`,
+      inputRevision: 1,
+      draftId: `draft:direct-task-create:${taskId.value}@1`,
+      draftRevisionVersion: 1,
+      draftRevisionHash: `sha256:${'a'.repeat(64)}`,
+      confirmationRef: `confirmation:direct-task-create:${taskId.value}@1`,
+    },
+    journalCommitRef: 'jsonl:task-identity:planner-phase-conflict',
+  };
+  const plannerIncarnation: TaskRuntimeIncarnation = {
+    runtimeId: 'planner-phase-conflict-runtime',
+    generation: 1,
+    agentInstanceId: 'planner-phase-conflict-instance',
+    roleId: 'orchestration',
+    taskId,
+    assignmentId: 'planner-phase-conflict-assignment',
+    executionEpoch: 1,
+  };
+  const plannerInput = {
+    task,
+    closure,
+    refinedResults: [],
+    priorPlan: null,
+    identity,
+    allocation: { operationId, cycleId, executionEpoch: plannerIncarnation.executionEpoch },
+  };
+  const duty = deriveClosedTurnPlannerDuty(plannerInput, checkpointCommitRef);
+  const preparedCall = {
+    duty,
+    invocationId: 'planner-phase-conflict-invocation',
+    execution: {
+      runtimeId: plannerIncarnation.runtimeId,
+      taskId,
+      operationId,
+      organId,
+      cycleId,
+      executionEpoch: plannerIncarnation.executionEpoch,
+    } satisfies ProviderExecutionIdentityRef,
+    scope: plannerScope,
+    assignmentId: plannerIncarnation.assignmentId,
+    incarnation: plannerIncarnation,
+    lease: {
+      leaseId: 'planner-phase-conflict-lease',
+      runtimeId: plannerIncarnation.runtimeId,
+      generation: plannerIncarnation.generation,
+      incarnation: plannerIncarnation,
+      executionEpoch: plannerIncarnation.executionEpoch,
+      ownerId: 'planner-phase-conflict-pool',
+      assignmentId: plannerIncarnation.assignmentId,
+      capabilities: ['provider.execution'],
+    },
+    decision: {
+      action: 'spawn' as const,
+      ownerId: 'planner-phase-conflict-pool',
+      condition: 'orchestration.runtime.capacity',
+      nextAction: { kind: 'continue' as const, ref: plannerIncarnation.runtimeId },
+      reason: 'planner phase conflict capacity is available',
+      runtimeId: plannerIncarnation.runtimeId,
+    },
+    grantCommitRef: { commitId: 'planner-phase-conflict-grant-commit', journalSeq: 2, recordDigest: `sha256:${'2'.repeat(64)}` },
+    admissionCommitRef: { commitId: 'planner-phase-conflict-admission-commit', journalSeq: 3, recordDigest: `sha256:${'3'.repeat(64)}` },
+    checkpoint: { checkpoint, previous: null, commitRef: checkpointCommitRef },
+    preparationCommitRef: { commitId: 'planner-phase-conflict-preparation-commit', journalSeq: 4, recordDigest: `sha256:${'4'.repeat(64)}` },
+  };
+  const conflictingSnapshot: TaskPlanSnapshot = {
+    title: 'Conflicting phase verification',
+    summary: 'The node declares a phase that does not claim it.',
+    completeness: { scope: 'whole-task', status: 'complete' },
+    acceptanceCriteria: [{ criterionId: 'ac-1', description: 'The reply is exactly the literal token OK.' }],
+    nodes: [
+      { nodeId: 'n1', kind: 'verification', title: 'Confirm required reply', intent: 'Establish the required reply.', definition: { expectedReply: 'OK' }, phaseId: 'p2' },
+    ],
+    phases: [{ phaseId: 'p1', title: 'Terminal verification', memberNodeIds: ['n1'] }],
+    relations: [],
+  };
+  const plannerPort = new FakeReplayExecutionRuntimePort({
+    binding,
+    replay: [
+      {
+        kind: 'output',
+        state: 'output',
+        summary: JSON.stringify({
+          decision: 'complete',
+          snapshot: conflictingSnapshot,
+          reasonText: 'The committed closure confirms the reply was delivered.',
+        }),
+      },
+      { kind: 'terminal', state: 'succeeded', summary: 'planner phase conflict succeeded', terminalState: 'succeeded' },
+    ],
+    stepDelayMs: 1,
+  });
+  const planner = createIndependentTurnPlanner({
+    prepareAgentProvider: async (selection): Promise<AgentProviderComposition> => ({
+      roleId: selection.roleId,
+      provider: {
+        source: 'rcc',
+        provider: 'rcc',
+        binding: binding.bindingId,
+        protocol: 'responses',
+        model: binding.modelRef,
+        route: 'planner-phase-conflict-route',
+        baseUrl: 'http://127.0.0.1:4444',
+      },
+      source: 'rcc',
+      binding,
+      port: plannerPort,
+    }),
+    now: () => new Date('2026-10-25T09:44:00.000Z'),
+  });
+  await assert.rejects(
+    () => planner.plan({ ...plannerInput, preparedCall }),
+    (error: unknown) => error instanceof Error
+      && error.message === 'task plan node n1 phaseId does not match phase membership',
+  );
+});
+
+/**
+ * Component failure basis for this focused consumer.
+ *
  * Failure mode: a validated `source: 'http'` binding whose real probe is the
  * honest `unknown` with `continue -> http.start` still fails Task admission,
  * because the readiness gate drops the source-aware requestability and the Task
@@ -1575,20 +2416,47 @@ test('app_read_mounts_preference_routes_dispatch_to_config_resource', async () =
     const invalidBody = await invalid.json() as { readonly error?: { readonly code: string } };
     assert.equal(invalidBody.error?.code, 'display-preference.invalid-mode');
 
-    // An unauthenticated mutation keeps the session rejection and changes no
-    // stored value.
-    const unauth = await rawFetch(url, {
+    // A present but invalid session cookie is not adopted; the shared session
+    // guard keeps the typed rejection and the Config stays unchanged.
+    const rejected = await rawNoOrigin(url, 'PUT', 'HA_SESSION=not-a-valid-session', {
+      kind: 'set-default',
+      mode: 'actions',
+    });
+    assert.equal(rejected.status, 401);
+    const rejectedBody = await rejected.json() as { readonly error?: { readonly code: string } };
+    assert.equal(rejectedBody.error?.code, 'auth.session.invalid');
+    const afterRejected = await rawNoOrigin(url, 'GET', cookie);
+    const afterRejectedDto = await afterRejected.json() as {
+      readonly preference: { readonly schemaVersion: number; readonly mode: string };
+      readonly defaultMode: string;
+    };
+    assert.equal(afterRejectedDto.preference.mode, 'current');
+
+    // A loopback browser with no session at all adopts a local session at the
+    // real HTTP entry (the MVP adds no transport restriction), so the same
+    // public mutation succeeds and changes only the Config-backed preference.
+    // The non-loopback rejection stays on the shared dispatcher evidence; the
+    // real loopback listener cannot admit a non-loopback TCP peer, so this case
+    // does not fake one with a Host header.
+    const adopted = await rawFetch(url, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ kind: 'set-default', mode: 'actions' }),
     });
-    assert.equal(unauth.status, 401);
-    const afterInvalid = await rawNoOrigin(url, 'GET', cookie);
-    const afterInvalidDto = await afterInvalid.json() as {
+    assert.equal(adopted.status, 200);
+    assert.match(adopted.headers.get('set-cookie') ?? '', /^HA_SESSION=/, 'the loopback adoption writes a real session cookie');
+    const adoptedDto = await adopted.json() as {
       readonly preference: { readonly schemaVersion: number; readonly mode: string };
       readonly defaultMode: string;
     };
-    assert.equal(afterInvalidDto.preference.mode, 'current');
+    assert.equal(adoptedDto.preference.mode, 'actions');
+    assert.equal(adoptedDto.defaultMode, 'actions');
+    const afterAdoption = await rawNoOrigin(url, 'GET', cookie);
+    const afterAdoptionDto = await afterAdoption.json() as {
+      readonly preference: { readonly schemaVersion: number; readonly mode: string };
+      readonly defaultMode: string;
+    };
+    assert.equal(afterAdoptionDto.preference.mode, 'actions');
 
     // The mount is a pure read/save/reset resource: no task Journal record is
     // appended, and the execution port is never called (there is no task to

@@ -2146,16 +2146,36 @@ test('interaction card DOM shows a declared lifecycle label after the requiremen
   }
 });
 
-test('entry page projects the post-confirmation state instead of the pre-confirmation snapshot', async () => {
-  const source = await readFile('docs/ui/entry.js', 'utf8');
-  const start = source.indexOf('const POST_CONFIRMATION_STATES');
-  const end = source.indexOf('function handleSubmissionError');
-  assert.ok(start >= 0, 'entry.js must name the post-confirmation states');
-  assert.ok(end > start, 'entry.js must keep the confirmation flow before its error handler');
-  const block = source.slice(start, end);
+type EntrySubmissionHarness = {
+  readonly run: (submission: unknown, api: unknown) => Promise<unknown>;
+  readonly cardStates: readonly { readonly kind: string; readonly state: string }[];
+  readonly draftedStates: readonly string[];
+  readonly status: { readonly dataset: Record<string, string>; readonly textContent: string };
+  readonly state: () => string;
+};
 
+/**
+ * Compile the real entry submission flow into an evaluable harness.
+ *
+ * The flow is a closure over page state, so the source is sliced by its stable
+ * markers and evaluated with page-level collaborators stubbed. The slices are
+ * the shipped code, not copies: a new branch that mutates the status region or
+ * throws on a supported state is caught here without a browser.
+ */
+function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHarness {
+  const answerStart = source.indexOf('export function answeredSubmissionPresentation');
+  const answerEnd = source.indexOf('export function entryDraftState');
+  const confirmationStart = source.indexOf('const POST_CONFIRMATION_STATES');
+  const confirmationEnd = source.indexOf('function handleSubmissionError');
+  assert.ok(answerStart >= 0, 'entry.js must define the answered presentation seam');
+  assert.ok(answerEnd > answerStart, 'entry.js must keep the answered seam before other exports');
+  assert.ok(confirmationStart >= 0, 'entry.js must name the post-confirmation states');
+  assert.ok(confirmationEnd > confirmationStart, 'entry.js must keep the confirmation flow before its error handler');
+  const answerBlock = source.slice(answerStart, answerEnd).replace(/^export /, '');
+  const confirmationBlock = source.slice(confirmationStart, confirmationEnd);
   const harnessSource = [
-    block,
+    answerBlock,
+    confirmationBlock,
     'let interactionId;',
     'let latestState = "received";',
     'let confirmation;',
@@ -2174,8 +2194,9 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
     // is defined outside the sliced confirmation block, so the harness supplies
     // a minimal mirror of the real call chain.
     'async function landOnSubmittedTask(identity) { await waitForTask(identity); await refreshQueue(); }',
-    // The identity helpers sit before the sliced confirmation block, so the harness stubs them for
-    // the waitForTask call. waitForTask is stubbed here too, so these only keep the call chain real.
+    // The identity helpers sit before the sliced confirmation block, so the
+    // harness stubs them for the waitForTask call. waitForTask is stubbed here
+    // too, so these only keep the call chain real.
     'function identityFromReceipt(requirement) { return requirement ?? null; }',
     'function identityFromConfirmedSnapshot(snapshot) { return snapshot?.confirmation ?? null; }',
     'return {',
@@ -2189,16 +2210,16 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
     '  },',
     '  cardStates,',
     '  draftedStates,',
+    '  status,',
     '  state: () => latestState,',
     '};',
   ].join('\n');
-  type EntryHarness = {
-    readonly run: (submission: unknown, api: unknown) => Promise<unknown>;
-    readonly cardStates: readonly { readonly kind: string; readonly state: string }[];
-    readonly draftedStates: readonly string[];
-    readonly state: () => string;
-  };
-  const buildHarness = (): EntryHarness => new Function('apiRef', harnessSource)({ current: undefined }) as EntryHarness;
+  return () => new Function('apiRef', harnessSource)({ current: undefined }) as EntrySubmissionHarness;
+}
+
+test('entry page projects the post-confirmation state instead of the pre-confirmation snapshot', async () => {
+  const source = await readFile('docs/ui/entry.js', 'utf8');
+  const buildHarness = compileEntrySubmissionHarness(source);
 
   const preConfirmation = {
     state: 'awaiting-confirmation',
@@ -2244,4 +2265,39 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
     assert.equal(harness.cardStates[0]!.state, expected);
     assert.equal(harness.cardStates[0]!.state === 'awaiting-confirmation', false);
   }
+});
+
+/*
+ * A simple answer is a completed interaction, not an unfinished submission.
+ * Failure mode: executeSubmission hit its final "not awaiting-confirmation"
+ * guard for state `answered`, threw `explicit-brain.state-invalid`, and the page
+ * replaced the answer with the danger summary plus a retry action. This drives
+ * the real submission code, so the branch itself is covered; the browser test
+ * covers the rendered page.
+ */
+test('entry page presents an answered snapshot as a success result instead of failing', async () => {
+  const source = await readFile('docs/ui/entry.js', 'utf8');
+  const buildHarness = compileEntrySubmissionHarness(source);
+  const harness = buildHarness();
+  const answer = { state: 'answered', reply: '13 加 14 等于 27。', nextAction: 'present-answer' };
+  const calls: string[] = [];
+  const api = {
+    async inspectExplicitInteraction() {
+      calls.push('inspect');
+      return answer;
+    },
+    async confirmExplicitRequirement() {
+      calls.push('confirm');
+      return { requirement: { requirementId: 'requirement:answered:1', fifoSeq: 1 } };
+    },
+  };
+
+  const result = await harness.run({ rawInput: '13 加 14 等于多少？', executionPolicy: { executionMode: 'once' } }, api);
+
+  assert.equal(result, answer);
+  assert.deepEqual(calls, ['inspect']);
+  assert.equal(harness.state(), 'answered');
+  assert.deepEqual(harness.draftedStates, ['answered']);
+  assert.equal(harness.status.dataset.tone, 'success');
+  assert.equal(harness.status.textContent, '13 加 14 等于 27。');
 });

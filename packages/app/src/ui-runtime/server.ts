@@ -1403,7 +1403,10 @@ async function handleRequest(
     }
     if (path === '/api/tasks' && method === 'POST') {
       const body = await readBody(request);
-      const created = service.createTask({
+      // Submitting the new-task entry is the human's confirmation for this Task,
+      // so the confirmed identity is bound with the create instead of leaving the
+      // closed-turn Planner without the source it requires.
+      const created = await service.createTaskWithConfirmedIdentity({
         title: typeof body.title === 'string' ? body.title : undefined,
         directive: typeof body.directive === 'string' ? body.directive : undefined,
       });
@@ -2002,7 +2005,6 @@ async function handleRequest(
       const result = await service.stop(taskId);
       writeJson(response, 202, {
         ...result,
-        principalOwner: accessControl.readProductPrincipalOwner(),
         ...(targetScope === undefined ? {} : { targetScope }),
       });
       return;
