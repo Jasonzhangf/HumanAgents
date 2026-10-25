@@ -926,13 +926,17 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
       record = await assertLeaseIdentity(paths, leaseIdentity);
     },
     async markReady() {
-      return update((current) => ({
-        ...current,
-        readyAt: new Date().toISOString(),
-        ...(current.restart === undefined || current.restart.completedAt !== undefined
-          ? {}
-          : { restart: { ...current.restart, completedAt: new Date().toISOString() } }),
-      }));
+      return update((current) => {
+        const readyAt = new Date().toISOString();
+        if (current.restart === undefined || current.restart.completedAt !== undefined) {
+          return { ...current, readyAt };
+        }
+        const { failure: _recordedFailure, ...completed } = current.restart;
+        // Readiness of the replacement owner is the authoritative restart
+        // outcome: a caller-side timeout recorded while this owner was still
+        // starting must not survive beside completedAt.
+        return { ...current, readyAt, restart: { ...completed, completedAt: readyAt } };
+      });
     },
     async setControlEndpoint(endpoint) {
       if (!Number.isSafeInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) {
@@ -1328,6 +1332,9 @@ export async function recordDaemonRestartFailure(
   return withLeaseGuard(daemonLeasePath(paths), async () => {
     const latest = await readLeaseRecord(paths);
     if (latest?.restart?.requestId !== requestId) return undefined;
+    // A completed transition is final: the replacement owner became ready. A
+    // late caller-side timeout must not add a second, contradictory outcome.
+    if (latest.restart.completedAt !== undefined) return undefined;
     const next = {
       ...latest,
       restart: {

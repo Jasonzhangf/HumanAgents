@@ -13,6 +13,7 @@ import {
   daemonLeasePath,
   isDaemonLeaseHandoffCommitted,
   readDaemonLease,
+  recordDaemonRestartFailure,
   recordDaemonRestartTransition,
   runSupervisorStartup,
   runSupervisorServeStartup,
@@ -154,6 +155,347 @@ test('code handoff preserves the first replacement spawn failure', async () => {
   const persisted = await readDaemonLease(paths);
   assert.equal(persisted?.restart?.failure?.errorCode, 'daemon-restart.spawn-failed');
   await lease.release();
+});
+
+interface FakeServeLauncher {
+  readonly launcherPath: string;
+  readonly pidFile: string;
+  readonly startedFile: string;
+  readonly gateFile: string;
+}
+
+/**
+ * A replacement serve stand-in. It records the new lease in two steps the real
+ * serve path also uses: commit the replacement generation first, publish
+ * readiness later. The test releases the gate, so readiness timing is a test
+ * decision instead of a machine-speed accident.
+ */
+async function writeFakeServeLauncher(root: string): Promise<FakeServeLauncher> {
+  const launcherPath = join(root, 'fake-serve.mjs');
+  const launcher: FakeServeLauncher = {
+    launcherPath,
+    pidFile: join(root, 'fake-serve.pid'),
+    startedFile: join(root, 'fake-serve.started'),
+    gateFile: join(root, 'fake-serve.gate'),
+  };
+  await writeFile(launcherPath, `
+import { readFile, rename, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
+
+const argv = process.argv.slice(2);
+const flag = (name) => { const index = argv.indexOf(name); return index < 0 ? undefined : argv[index + 1]; };
+const requestId = flag('--restart-request');
+const leasePath = flag('--fixture-lease');
+const mode = flag('--fixture-mode') ?? 'ready';
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+await writeFile(${JSON.stringify(launcher.pidFile)}, String(process.pid));
+if (mode === 'exit') process.exit(0);
+
+let current;
+for (let attempt = 0; attempt < 4_000; attempt += 1) {
+  try {
+    current = JSON.parse(await readFile(leasePath, 'utf8'));
+    if (current.restart?.requestId === requestId) break;
+  } catch {}
+  await sleep(5);
+}
+if (current?.restart?.requestId !== requestId) process.exit(2);
+await writeFile(${JSON.stringify(launcher.startedFile)}, String(process.pid));
+if (mode === 'never') {
+  setInterval(() => {}, 1_000);
+} else if (mode === 'commit') {
+  const leaseId = randomUUID();
+  const processStartToken = 'node:fake-' + randomUUID();
+  const generation = current.generation + 1;
+  const writeLease = async (record) => {
+    const tempPath = leasePath + '.tmp-fake';
+    await writeFile(tempPath, JSON.stringify(record) + '\\n', 'utf8');
+    await rename(tempPath, leasePath);
+  };
+  const committed = { ...current, leaseId, generation, pid: process.pid, processStartToken };
+  delete committed.readyAt;
+  await writeLease(committed);
+  setInterval(() => {}, 1_000);
+} else {
+  const leaseId = randomUUID();
+  const processStartToken = 'node:fake-' + randomUUID();
+  const generation = current.generation + 1;
+  const server = createServer((request, response) => {
+    if (request.method !== 'GET' || request.url !== '/api/runtime/identity') {
+      response.writeHead(404).end();
+      return;
+    }
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ leaseId, generation, pid: process.pid, processStartToken }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') process.exit(3);
+  const writeLease = async (record) => {
+    const tempPath = leasePath + '.tmp-fake';
+    await writeFile(tempPath, JSON.stringify(record) + '\\n', 'utf8');
+    await rename(tempPath, leasePath);
+  };
+  const committed = { ...current, leaseId, generation, pid: process.pid, processStartToken,
+    controlEndpoint: { host: '127.0.0.1', port: address.port } };
+  delete committed.readyAt;
+  await writeLease(committed);
+  for (;;) {
+    try {
+      await readFile(${JSON.stringify(launcher.gateFile)});
+      break;
+    } catch {}
+    await sleep(5);
+  }
+  const latest = JSON.parse(await readFile(leasePath, 'utf8'));
+  await writeLease({ ...latest, leaseId, generation, pid: process.pid, processStartToken,
+    controlEndpoint: { host: '127.0.0.1', port: address.port },
+    readyAt: new Date().toISOString(),
+    restart: { ...latest.restart, completedAt: new Date().toISOString() } });
+  setInterval(() => {}, 1_000);
+}
+`.trimStart(), 'utf8');
+  return launcher;
+}
+
+function fakeServeStartup(
+  paths: RuntimePaths,
+  launcher: FakeServeLauncher,
+  mode: 'ready' | 'exit' | 'never' | 'commit' = 'ready',
+) {
+  return {
+    launcherPath: launcher.launcherPath,
+    cwd: paths.workspaceCwd,
+    args: [
+      '--control-root', paths.controlRoot,
+      '--workspace', paths.workspaceCwd,
+      '--fixture-lease', daemonLeasePath(paths),
+      '--fixture-mode', mode,
+    ],
+    source: {
+      entryPath: launcher.launcherPath,
+      packageVersion: '0.1.40',
+    },
+  };
+}
+
+async function waitForReplacementLease(paths: RuntimePaths, generation: number): Promise<void> {
+  for (let attempt = 0; attempt < 4_000; attempt += 1) {
+    const lease = await readDaemonLease(paths);
+    if (lease !== undefined && lease.generation >= generation) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`replacement lease generation ${generation} was not published`);
+}
+
+async function stopFakeServe(launcher: FakeServeLauncher): Promise<void> {
+  const pid = Number(await readFile(launcher.pidFile, 'utf8').catch(() => ''));
+  if (!Number.isSafeInteger(pid) || pid < 1 || !processIsAliveForTest(pid)) return;
+  process.kill(pid, 'SIGTERM');
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (!processIsAliveForTest(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`fake replacement ${pid} did not exit after SIGTERM`);
+}
+
+// Failure basis: production daemon restart 0.1.0041 (requestId
+// b2d81e08-291c-4012-addc-660747abcfb1) needed about 65 s from replacement spawn
+// to readiness, so the old 30 s bound declared a successful replacement failed
+// and left `restart.failure` beside `restart.completedAt`. The caller clock is
+// mocked, so this case needs no real minute-long wait.
+test('code handoff keeps a replacement that becomes ready after the old 30s bound', async () => {
+  const realNow = Date.now;
+  let offset = 0;
+  Date.now = () => realNow() + offset;
+  const paths = await fixture();
+  let launcher: FakeServeLauncher | undefined;
+  try {
+    launcher = await writeFakeServeLauncher(dirname(paths.controlRoot));
+    const startup = fakeServeStartup(paths, launcher);
+    const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+    const handoff = startDaemonCodeHandoff(paths, { expected: owner.record, startup });
+    await waitForReplacementLease(paths, owner.record.generation + 1);
+    const committed = await readDaemonLease(paths);
+    assert.equal(committed?.restart?.requestId, handoff.receipt.requestId);
+    assert.equal(committed?.restart?.completedAt, undefined, 'the replacement must still be starting here');
+
+    offset = 65_000;
+    await writeFile(launcher.gateFile, 'ready');
+    const completion = await handoff.completion;
+
+    assert.equal(completion.current.generation, owner.record.generation + 1);
+    const persisted = await readDaemonLease(paths);
+    assert.equal(typeof persisted?.restart?.completedAt, 'string');
+    assert.equal(persisted?.restart?.failure, undefined, 'a slow success must not publish a failure');
+  } finally {
+    Date.now = realNow;
+    if (launcher !== undefined) await stopFakeServe(launcher).catch(() => undefined);
+    await rm(dirname(paths.controlRoot), { recursive: true, force: true });
+  }
+});
+
+// Failure basis: raising the bound must not hide a replacement that commits the
+// new lease and then never publishes readiness. Cost: one fake child that dies
+// only on SIGTERM.
+test('code handoff still fails explicitly when a committed replacement never becomes ready', async () => {
+  const paths = await fixture();
+  let launcher: FakeServeLauncher | undefined;
+  try {
+    launcher = await writeFakeServeLauncher(dirname(paths.controlRoot));
+    const startup = fakeServeStartup(paths, launcher, 'commit');
+    const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+    const handoff = startDaemonCodeHandoff(paths, {
+      expected: owner.record,
+      startup,
+      timeoutMs: 400,
+    });
+    await assert.rejects(() => handoff.completion, (error: any) => {
+      assert.equal(error.code, 'daemon-restart.ready-timeout');
+      return true;
+    });
+    const persisted = await readDaemonLease(paths);
+    assert.equal(persisted?.generation, owner.record.generation + 1);
+    assert.equal(persisted?.restart?.failure?.errorCode, 'daemon-restart.ready-timeout');
+    assert.equal(persisted?.restart?.completedAt, undefined, 'a failed handoff must not also complete');
+  } finally {
+    if (launcher !== undefined) await stopFakeServe(launcher).catch(() => undefined);
+    await rm(dirname(paths.controlRoot), { recursive: true, force: true });
+  }
+});
+
+// Failure basis: raising the bound must not hide a replacement that never
+// publishes readiness. Cost: one fake child that only stays alive.
+test('code handoff still fails explicitly when the replacement never publishes readiness', async () => {
+  const paths = await fixture();
+  let launcher: FakeServeLauncher | undefined;
+  try {
+    launcher = await writeFakeServeLauncher(dirname(paths.controlRoot));
+    const startup = fakeServeStartup(paths, launcher, 'never');
+    const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+    const handoff = startDaemonCodeHandoff(paths, {
+      expected: owner.record,
+      startup,
+      timeoutMs: 400,
+    });
+    await assert.rejects(() => handoff.completion, (error: any) => {
+      assert.equal(error.code, 'daemon-restart.ready-timeout');
+      return true;
+    });
+    const persisted = await readDaemonLease(paths);
+    assert.equal(persisted?.restart?.failure?.errorCode, 'daemon-restart.ready-timeout');
+    assert.equal(persisted?.restart?.completedAt, undefined, 'a failed handoff must not also complete');
+  } finally {
+    if (launcher !== undefined) await stopFakeServe(launcher).catch(() => undefined);
+    await rm(dirname(paths.controlRoot), { recursive: true, force: true });
+  }
+});
+
+test('code handoff treats an early replacement exit as an explicit failure', async () => {
+  const paths = await fixture();
+  let launcher: FakeServeLauncher | undefined;
+  try {
+    launcher = await writeFakeServeLauncher(dirname(paths.controlRoot));
+    const startup = fakeServeStartup(paths, launcher, 'exit');
+    const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+    const handoff = startDaemonCodeHandoff(paths, {
+      expected: owner.record,
+      startup,
+      timeoutMs: 2_000,
+    });
+    await assert.rejects(() => handoff.completion, (error: any) => {
+      assert.equal(error.code, 'daemon-restart.child-exited');
+      return true;
+    });
+    const persisted = await readDaemonLease(paths);
+    assert.equal(persisted?.restart?.failure?.errorCode, 'daemon-restart.child-exited');
+    assert.equal(persisted?.restart?.completedAt, undefined);
+  } finally {
+    if (launcher !== undefined) await stopFakeServe(launcher).catch(() => undefined);
+    await rm(dirname(paths.controlRoot), { recursive: true, force: true });
+  }
+});
+
+// Failure basis: a caller-side timeout may be recorded while the replacement is
+// still starting. The replacement's later readiness is the real outcome, so the
+// lease must carry completedAt without the stale failure beside it.
+test('a ready replacement resolves a recorded timeout instead of coexisting with it', async () => {
+  const paths = await fixture();
+  const startup = serveStartup(paths);
+  const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+  try {
+    const transition = {
+      requestId: 'restart-request-slow-success',
+      requestedAt: new Date().toISOString(),
+      previousLeaseId: owner.record.leaseId,
+      previousGeneration: owner.record.generation,
+      previousProcessStartToken: owner.record.processStartToken,
+      targetEntryPath: startup.source.entryPath,
+    };
+    await recordDaemonRestartTransition(paths, {
+      leaseId: owner.record.leaseId,
+      generation: owner.record.generation,
+      processStartToken: owner.record.processStartToken,
+    }, transition);
+    await recordDaemonRestartFailure(paths, transition.requestId, {
+      errorCode: 'daemon-restart.ready-timeout',
+      ownerId: 'humanagent.app.serve',
+      nextAction: 'inspect the replacement serve startup output and the daemon lease before retrying',
+      message: 'replacement serve did not become ready',
+      occurredAt: new Date().toISOString(),
+    });
+
+    const ready = await owner.markReady();
+    assert.equal(typeof ready.restart?.completedAt, 'string');
+    assert.equal(ready.restart?.failure, undefined, 'readiness must replace the caller timeout');
+    const persisted = await readDaemonLease(paths);
+    assert.equal(typeof persisted?.restart?.completedAt, 'string');
+    assert.equal(persisted?.restart?.failure, undefined);
+  } finally {
+    await owner.release();
+  }
+});
+
+// Failure basis: a completed transition is final. A late caller-side timeout
+// must not add a second, contradictory outcome to the same marker.
+test('a completed restart transition refuses a later timeout failure', async () => {
+  const paths = await fixture();
+  const startup = serveStartup(paths);
+  const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+  try {
+    const transition = {
+      requestId: 'restart-request-late-failure',
+      requestedAt: new Date().toISOString(),
+      previousLeaseId: owner.record.leaseId,
+      previousGeneration: owner.record.generation,
+      previousProcessStartToken: owner.record.processStartToken,
+      targetEntryPath: startup.source.entryPath,
+    };
+    await recordDaemonRestartTransition(paths, {
+      leaseId: owner.record.leaseId,
+      generation: owner.record.generation,
+      processStartToken: owner.record.processStartToken,
+    }, transition);
+    await owner.markReady();
+    await recordDaemonRestartFailure(paths, transition.requestId, {
+      errorCode: 'daemon-restart.ready-timeout',
+      ownerId: 'humanagent.app.serve',
+      nextAction: 'inspect the replacement serve startup output and the daemon lease before retrying',
+      message: 'replacement serve did not become ready',
+      occurredAt: new Date().toISOString(),
+    });
+
+    const persisted = await readDaemonLease(paths);
+    assert.equal(typeof persisted?.restart?.completedAt, 'string');
+    assert.equal(persisted?.restart?.failure, undefined, 'a completed transition is final');
+  } finally {
+    await owner.release();
+  }
 });
 
 test('missing readiness is not availability and marked ready is still leased', async () => {
