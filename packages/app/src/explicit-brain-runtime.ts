@@ -52,7 +52,7 @@ import {
 } from '../../runtime/src/explicit-brain/index.js';
 import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
 import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
-import type { SupervisorLease } from './supervisor/supervisor.js';
+import { readSupervisorTerminationReceipts, type SupervisorLease } from './supervisor/supervisor.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
@@ -768,13 +768,26 @@ export function createProviderExplicitBrainInterpreter(input: {
             && authenticatedCaller.processStartToken === committedOwner.processStartToken) {
             throw refuse('the committed execution owner is still the current active lease owner; a live Provider stream is not an interrupted crash');
           }
-          const takeover = current.takeover;
-          if (committedOwner === undefined
-            || takeover === undefined
-            || takeover.previousLeaseId !== committedOwner.daemonLeaseId
-            || takeover.previousGeneration !== committedOwner.daemonGeneration
-            || takeover.termination === undefined) {
-            throw refuse('the committed execution owner has no durable termination receipt; recovery responsibility is retained');
+          if (committedOwner === undefined) {
+            throw refuse('the committed execution owner has no durable termination receipt; the committed turn input records no execution owner; recovery responsibility is retained');
+          }
+          const retained = readSupervisorTerminationReceipts(current);
+          // A receipt must name the exact owner: the same generation number
+          // under a different lease id is a different daemon run and proves
+          // nothing about this turn.
+          const receipt = retained.find((entry) =>
+            entry.previousGeneration === committedOwner.daemonGeneration
+            && entry.previousLeaseId === committedOwner.daemonLeaseId
+            && entry.termination !== undefined);
+          if (receipt === undefined) {
+            const generations = retained.map((entry) => entry.previousGeneration);
+            const window = generations.length === 0
+              ? 'no termination receipt is retained'
+              : `retained takeover receipts cover generations ${generations[0]}..${generations[generations.length - 1]}`;
+            throw refuse(
+              'the committed execution owner has no durable termination receipt; recovery responsibility is retained'
+              + ` (committed generation ${committedOwner.daemonGeneration}, current generation ${current.generation}, ${window})`,
+            );
           }
           await discharge();
         });

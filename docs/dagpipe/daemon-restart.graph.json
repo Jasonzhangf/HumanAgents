@@ -11,6 +11,7 @@
     "outcomeContract": "每一步传递本次结果或原始失败；失败不继续副作用，统一进入最终结果。ready只表示服务可用，不证明旧业务已收拢。",
     "preservationContract": "正式重启保留旧 serve owner 的规范化 workspace 与显式 control root 启动声明；不根据 cwd 重新选择项目。替换 daemon generation 不改写产品凭证、浏览器 session generation 或未过期 pending pairing challenge。",
     "generationContract": "supervisor lease generation 与 WebAccessCredential.sessionGeneration 是不同身份域。普通重启可推进 daemon generation；不得因此旋转 sessionGeneration、清除已配对 session 或使其他独立配对终端失效。既有 logout 仍按自己的 generation 变更清除 pending challenge。",
+    "terminationRetentionContract": "commit_generation 在同一次 lease 写入中保留已验证的历代终止证明，按 previousLeaseId 与 previousGeneration 去重。旧格式 takeover 中已有的终止证明须继承；同一旧 lease 的 clean disposedAt 关闭证明也须保留。恢复责任仍可能引用旧 owner，不按固定条数淘汰证明。cleanupFailure 不构成 clean 关闭证明；已经丢失的历史不补造。explicit intake 只消费当前权威 lease 中匹配旧 owner 的证明，活跃 owner 或缺证仍保留恢复责任。",
     "pairingOrderContract": "pair 签发不依赖本图、serve owner、lease、HTTP endpoint 或启动顺序；本图只约束已经启动的 serve 被正式替换时如何保留其产品级配对状态。",
     "previousOwnerCases": {
       "closed": "同一旧 lease 已 disposed 且无 cleanupFailure：使用真实关闭证据。",

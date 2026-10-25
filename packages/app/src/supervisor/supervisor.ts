@@ -88,6 +88,14 @@ export interface SupervisorLeaseRecord {
   readonly startup?: SupervisorStartupDeclaration;
   readonly restart?: SupervisorRestartTransition;
   readonly takeover?: SupervisorTakeoverRecord;
+  /**
+   * Durable termination receipts, oldest first. `takeover` alone only describes
+   * the transition that produced the current lease, so it stops proving an
+   * execution owner as soon as the daemon advances one more generation. Each
+   * entry here is a takeover record that carried a verified `termination`, and
+   * it is written into the same lease file update that completed the takeover.
+   */
+  readonly terminations?: readonly SupervisorTakeoverRecord[];
   readonly failure?: SupervisorFailureRecord;
 }
 
@@ -323,6 +331,35 @@ function validateLeaseRecord(value: Partial<SupervisorLeaseRecord>): void {
       || typeof failure.occurredAt !== 'string'
     ) {
       throw supervisorError('daemon-lease-corrupt', 'daemon lease failure record is invalid', 'inspect and repair the daemon lease');
+    }
+  }
+  if (value.terminations !== undefined) {
+    if (!Array.isArray(value.terminations)) {
+      throw supervisorError(
+        'daemon-lease-corrupt',
+        'daemon lease termination history is invalid',
+        'inspect and repair the daemon lease',
+      );
+    }
+    for (const entry of value.terminations) {
+      // Every retained entry is a proven termination receipt: a takeover that
+      // never classified the previous owner as stopped is not proof and never
+      // enters this history.
+      if (
+        typeof entry?.previousLeaseId !== 'string'
+        || !entry.previousLeaseId
+        || !Number.isSafeInteger(entry.previousGeneration)
+        || entry.previousGeneration < 1
+        || typeof entry.reason !== 'string'
+        || typeof entry.detectedAt !== 'string'
+        || (entry.termination !== 'graceful' && entry.termination !== 'forced' && entry.termination !== 'already-dead')
+      ) {
+        throw supervisorError(
+          'daemon-lease-corrupt',
+          'daemon lease termination receipt is invalid',
+          'inspect and repair the daemon lease',
+        );
+      }
     }
   }
 }
@@ -658,6 +695,46 @@ function assertRestartMarker(
   }
 }
 
+/**
+ * The termination receipts a lease carries forward. A receipt is appended to
+ * the record that completed the takeover which proved it, and that same array
+ * is copied into every later generation, so the history survives restarts and
+ * never depends on a write that happens after the fact.
+ */
+export function readSupervisorTerminationReceipts(previous: SupervisorLeaseRecord | undefined): readonly SupervisorTakeoverRecord[] {
+  const retained = previous?.terminations ?? [];
+  const legacy = previous?.takeover;
+  if (legacy?.termination === undefined || retained.some((entry) =>
+    entry.previousLeaseId === legacy.previousLeaseId && entry.previousGeneration === legacy.previousGeneration)) {
+    return retained;
+  }
+  // Old leases already carry an authoritative receipt. Preserve that exact
+  // record both on upgrade reads and on the next generation's durable write.
+  return [...retained, legacy];
+}
+
+function appendTermination(
+  previous: SupervisorLeaseRecord | undefined,
+  takeover: SupervisorTakeoverRecord | undefined,
+): readonly SupervisorTakeoverRecord[] | undefined {
+  const retained = readSupervisorTerminationReceipts(previous);
+  const receipt = takeover?.termination !== undefined ? takeover
+    : previous?.disposedAt !== undefined && !hasCleanupFailure(previous.failure) ? {
+      previousLeaseId: previous.leaseId,
+      previousGeneration: previous.generation,
+      reason: 'previous-owner-disposed',
+      detectedAt: previous.disposedAt,
+      termination: 'graceful' as const,
+    } : undefined;
+  if (receipt === undefined || retained.some((entry) =>
+    entry.previousLeaseId === receipt.previousLeaseId && entry.previousGeneration === receipt.previousGeneration)) {
+    return retained.length === 0 ? undefined : retained;
+  }
+  // A pending turn can reference any prior owner. Without a proven retention
+  // horizon, dropping a receipt here would discard its recovery authority.
+  return [...retained, receipt];
+}
+
 function newLeaseRecord(
   paths: RuntimePaths,
   generation: number,
@@ -666,6 +743,7 @@ function newLeaseRecord(
     readonly ownerId?: string;
     readonly startup?: SupervisorStartupDeclaration;
     readonly restart?: SupervisorRestartTransition;
+    readonly terminations?: readonly SupervisorTakeoverRecord[];
   },
 ): SupervisorLeaseRecord {
   return {
@@ -679,6 +757,7 @@ function newLeaseRecord(
     ...(options.startup === undefined ? {} : { startup: options.startup }),
     ...(options.restart === undefined ? {} : { restart: options.restart }),
     ...(options.takeover === undefined ? {} : { takeover: options.takeover }),
+    ...(options.terminations === undefined || options.terminations.length === 0 ? {} : { terminations: options.terminations }),
   };
 }
 
@@ -961,25 +1040,29 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
         );
       }
       const previous = latest;
+      const takeoverRecord: SupervisorTakeoverRecord | undefined = existing === undefined || termination === undefined
+        ? undefined
+        : {
+          previousLeaseId: existing.leaseId,
+          previousGeneration: existing.generation,
+          reason: options.takeover!.reason,
+          detectedAt: new Date().toISOString(),
+          ...termination,
+          // A takeover that carries an unverified close does not invent a
+          // clean one: it keeps the typed previous responsibility here
+          // instead of reconstructing it from a business payload or log.
+          ...((latest?.failure ?? existing.failure) === undefined
+            ? {}
+            : { previousFailure: latest?.failure ?? existing.failure }),
+        };
       const record = newLeaseRecord(paths, (previous?.generation ?? 0) + 1, {
         ownerId: options.ownerId,
         ...(options.startup === undefined ? {} : { startup: options.startup }),
         ...(previous?.restart === undefined ? {} : { restart: previous.restart }),
-        ...(existing === undefined || termination === undefined ? {} : {
-          takeover: {
-            previousLeaseId: existing.leaseId,
-            previousGeneration: existing.generation,
-            reason: options.takeover!.reason,
-            detectedAt: new Date().toISOString(),
-            ...termination,
-            // A takeover that carries an unverified close does not invent a
-            // clean one: it keeps the typed previous responsibility here
-            // instead of reconstructing it from a business payload or log.
-            ...((latest?.failure ?? existing.failure) === undefined
-              ? {}
-              : { previousFailure: latest?.failure ?? existing.failure }),
-          },
-        }),
+        ...(takeoverRecord === undefined ? {} : { takeover: takeoverRecord }),
+        // The receipt lands in the same durable write that completes the
+        // takeover, so a process killed right after never loses the proof.
+        terminations: appendTermination(previous, takeoverRecord),
       });
       await writeLeaseRecord(paths, record);
       return createLease(paths, record);
@@ -994,24 +1077,30 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
         ? !processIsAlive(existing.pid)
         : await options.takeover.allowed(existing);
       if (!allowed) throw leaseOwnedError(existing);
+      // This takeover classified nothing about the previous owner, so it adds
+      // no receipt; the receipts it inherited stay durable.
+      const takeoverRecord: SupervisorTakeoverRecord = {
+        previousLeaseId: existing.leaseId,
+        previousGeneration: existing.generation,
+        reason: options.takeover.reason,
+        detectedAt: new Date().toISOString(),
+      };
       const record = newLeaseRecord(paths, existing.generation + 1, {
         ownerId: options.ownerId,
         ...(options.startup === undefined ? {} : { startup: options.startup }),
         ...(existing.restart === undefined ? {} : { restart: existing.restart }),
-        takeover: {
-          previousLeaseId: existing.leaseId,
-          previousGeneration: existing.generation,
-          reason: options.takeover.reason,
-          detectedAt: new Date().toISOString(),
-        },
+        takeover: takeoverRecord,
+        terminations: appendTermination(existing, takeoverRecord),
       });
       await writeLeaseRecord(paths, record);
       return createLease(paths, record);
     }
+    if (existing !== undefined && hasCleanupFailure(existing.failure)) throw previousCloseUnverifiedError(existing);
     const record = newLeaseRecord(paths, existing ? existing.generation + 1 : 1, {
       ownerId: options.ownerId,
       ...(options.startup === undefined ? {} : { startup: options.startup }),
       ...(existing?.restart === undefined ? {} : { restart: existing.restart }),
+      terminations: appendTermination(existing, undefined),
     });
     await writeLeaseRecord(paths, record);
     return createLease(paths, record);
@@ -1046,6 +1135,7 @@ function commitServeLease(
   ownerId: string,
   startup: SupervisorStartupDeclaration | undefined,
   restart: SupervisorRestartTransition | undefined,
+  previous: SupervisorLeaseRecord | undefined,
   takeover?: SupervisorTakeoverRecord,
 ): SupervisorLease {
   const record = newLeaseRecord(paths, generation, {
@@ -1053,6 +1143,7 @@ function commitServeLease(
     ...(startup === undefined ? {} : { startup }),
     ...(restart === undefined ? {} : { restart }),
     ...(takeover === undefined ? {} : { takeover }),
+    terminations: appendTermination(previous, takeover),
   });
   return createLease(paths, record);
 }
@@ -1079,7 +1170,7 @@ async function decideServeLease(
       assertRestartMarker(current, restartRequest, startup);
       if (current.disposedAt) {
         if (hasCleanupFailure(current.failure)) throw previousCloseUnverifiedError(current);
-        const lease = commitServeLease(paths, current.generation + 1, ownerId, startup, current.restart);
+        const lease = commitServeLease(paths, current.generation + 1, ownerId, startup, current.restart, current);
         await writeLeaseRecord(paths, lease.record);
         return { kind: 'acquired', lease };
       }
@@ -1097,6 +1188,7 @@ async function decideServeLease(
         ownerId,
         startup,
         undefined,
+        current,
       );
       await writeLeaseRecord(paths, lease.record);
       return { kind: 'acquired', lease };
@@ -1153,20 +1245,22 @@ async function decideServeLease(
     ) {
       throw previousCloseUnverifiedError(existing);
     }
+    const takeoverRecord: SupervisorTakeoverRecord = {
+      previousLeaseId: existing.leaseId,
+      previousGeneration: existing.generation,
+      reason: `formal restart request ${restartRequest}`,
+      detectedAt: new Date().toISOString(),
+      ...termination,
+      ...((latest.failure ?? existing.failure) === undefined ? {} : { previousFailure: latest.failure ?? existing.failure }),
+    };
     const lease = commitServeLease(
       paths,
       latest.generation + 1,
       ownerId,
       startup,
       latest.restart,
-      {
-        previousLeaseId: existing.leaseId,
-        previousGeneration: existing.generation,
-        reason: `formal restart request ${restartRequest}`,
-        detectedAt: new Date().toISOString(),
-        ...termination,
-        ...((latest.failure ?? existing.failure) === undefined ? {} : { previousFailure: latest.failure ?? existing.failure }),
-      },
+      latest,
+      takeoverRecord,
     );
     await writeLeaseRecord(paths, lease.record);
     return { kind: 'acquired', lease };

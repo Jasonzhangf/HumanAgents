@@ -40,7 +40,7 @@ import { FileCheckpointStore, UiRuntimeApiError, UiRuntimeJournal, UiRuntimeServ
 import type { UiRuntimeGrantExecutionReceipt } from '../../packages/app/src/ui-runtime/service.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/journal.js';
-import { acquireDaemonLease } from '../../packages/app/src/supervisor/index.js';
+import { acquireDaemonLease, readDaemonLease } from '../../packages/app/src/supervisor/index.js';
 import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
@@ -188,9 +188,10 @@ async function seedInterruptedParentTurn(input: {
  * pid and records a real `already-dead` termination receipt. This is the durable
  * evidence the Runtime is allowed to read before it discharges a crashed turn.
  */
-async function acquireTerminatedOwnerLease(root: string): Promise<{
-  readonly lease: Awaited<ReturnType<typeof acquireDaemonLease>>;
-  readonly previousOwner: OccurrenceExecutionOwner;
+async function acquireCrashedOwnerLease(root: string): Promise<{
+  readonly owner: OccurrenceExecutionOwner;
+  readonly leaseId: string;
+  readonly generation: number;
 }> {
   const moduleUrl = (path: string) => new URL(`../../packages/${path}`, import.meta.url).href;
   const script = `
@@ -214,6 +215,14 @@ async function acquireTerminatedOwnerLease(root: string): Promise<{
   });
   assert.equal(exit, 0, stderr);
   const receipt = JSON.parse(stdout.trim());
+  return {owner: receipt.owner, leaseId: receipt.leaseId, generation: receipt.generation};
+}
+
+async function acquireTerminatedOwnerLease(root: string): Promise<{
+  readonly lease: Awaited<ReturnType<typeof acquireDaemonLease>>;
+  readonly previousOwner: OccurrenceExecutionOwner;
+}> {
+  const receipt = await acquireCrashedOwnerLease(root);
   const paths = await resolveRuntimePaths({controlRoot: join(root, 'control'), workspace: process.cwd()});
   const lease = await acquireDaemonLease(paths, {takeover: {
     reason: 'discharge proof test dead owner takeover', allowed: () => true,
@@ -2602,6 +2611,139 @@ test('provider explicit brain interpreter holds an interrupted turn that dispatc
     assert.equal(reasoningSnapshot.resourceClose, null, 'the discharge still never fabricates a close');
     assert.deepEqual(reasoningSnapshot.providerSettlements, []);
     assert.deepEqual(reasoningSnapshot.ownerReconciliations, []);
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: the daemon lease keeps exactly one takeover record, so the
+// termination receipt of a committed owner survives only until the next
+// generation is written. A turn owned by generation N therefore becomes
+// undischargeable as soon as the daemon reaches generation N+2: every new input
+// to that scope is refused with "has no durable termination receipt" although
+// the committed owner is provably gone and the live owner is generations newer.
+// Impact: one crash plus one later daemon start permanently locks explicit
+// intake for the whole interaction scope, and every further start rewrites the
+// receipt again. Cost: three real lease generations, two real crash takeovers
+// and one seeded interrupted turn.
+test('provider explicit brain interpreter discharges a turn whose committed owner is two generations behind', async () => {
+  const root = join(parentFixtureRoot, `stranded-generation-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-stranded-generation', providerId: 'provider-stranded-generation', protocol: 'responses',
+    endpointRef: 'recorded://stranded-generation', modelRef: 'model-stranded-generation',
+    configDigest: 'sha256:stranded-generation-config', capabilityDigest: 'sha256:stranded-generation-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:stranded-generation' };
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    // Generation 1 owns the turn and dies. Generation 2 takes over and records
+    // the receipt that proves generation 1 stopped.
+    const firstCrash = await acquireCrashedOwnerLease(root);
+    assert.equal(firstCrash.generation, 1);
+    const gen2 = await acquireDaemonLease(paths, { takeover: {
+      reason: 'stranded generation test first takeover', allowed: () => true,
+      stop: { gracefulTimeoutMs: 2_000, pollIntervalMs: 20 },
+    } });
+    assert.equal(gen2.record.generation, 2);
+    assert.equal(gen2.record.takeover?.previousGeneration, 1);
+    assert.equal(gen2.record.takeover?.termination, 'already-dead');
+    await gen2.release();
+    // Generations 3 and 4 replay the same shape one step later: the surviving
+    // takeover record now describes generation 3 only, exactly like production
+    // where generation 17 was overwritten by generations 18..23.
+    const secondCrash = await acquireCrashedOwnerLease(root);
+    assert.equal(secondCrash.generation, 3);
+    lease = await acquireDaemonLease(paths, { takeover: {
+      reason: 'stranded generation test second takeover', allowed: () => true,
+      stop: { gracefulTimeoutMs: 2_000, pollIntervalMs: 20 },
+    } });
+    assert.equal(lease.record.generation, 4);
+    assert.equal(lease.record.takeover?.previousGeneration, 3);
+    assert.equal(lease.record.takeover?.termination, 'already-dead');
+
+    const strandedInput = JSON.stringify({
+      interactionId: 'interaction-stranded-generation', inputRevision: 1, sourceRef: 'ui:stranded-generation',
+      rawInput: '两代之前崩溃的纯推理', clarifications: [], taskCandidates: [],
+    });
+    const seeded = await seedInterruptedParentTurn({
+      parentJournal, evidence, rawContent, binding, scope,
+      interactionId: 'interaction-stranded-generation', turnId: 'explicit-interpret-stranded-generation',
+      initialInputText: strandedInput, executionOwner: firstCrash.owner,
+    });
+    const interpreterOptions = {
+      parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+      rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    };
+    const served = await createProviderExplicitBrainInterpreter({ ...interpreterOptions,
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId, lease,
+      port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+        { kind: 'output', state: 'output', summary: JSON.stringify({
+          kind: 'requirement', normalizedInput: '两代之后的新输入', knownFacts: [],
+          proposal: { revision: 1, intent: 'create', title: '两代之后的新输入', objective: '两代之后的新输入',
+            deliverable: '结果', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+          decisionRefs: [],
+        }) },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ] }) }).interpret({
+        interactionId: 'interaction-stranded-generation-next', inputRevision: 1,
+        sourceRef: 'ui:stranded-generation-next', rawInput: '两代之后的新输入',
+        clarifications: [], taskCandidates: [],
+      });
+    assert.equal(served.kind, 'requirement');
+    const abandoned = await parentJournal.readScopeAbandonedTurns(scope);
+    assert.equal(abandoned.length, 1, 'the stranded turn is discharged exactly once');
+    assert.deepEqual(abandoned[0]!.fact.turn, seeded.turn);
+    assert.equal(abandoned[0]!.fact.reason, 'provider-interrupted-without-terminal-output');
+    const snapshot = await parentJournal.readTurnSnapshot(seeded.turn);
+    assert.equal(snapshot.resourceClose, null, 'the discharge never fabricates a close');
+    // The proof is durable, not the incident: the lease keeps every termination
+    // receipt it ever wrote, so the next generation still answers for it.
+    assert.deepEqual(
+      (await readDaemonLease(paths) as { terminations?: readonly { previousGeneration: number }[] } | undefined)
+        ?.terminations?.map((entry) => entry.previousGeneration),
+      [1, 2, 3],
+      'each takeover receipt stays in the durable lease history',
+    );
+
+    // A committed owner that is genuinely outside the retained history keeps an
+    // explicit, diagnosable refusal: the same generation number under a lease
+    // id this daemon never terminated is not proof.
+    const evictedScope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:stranded-generation-evicted' };
+    await seedInterruptedParentTurn({
+      parentJournal, evidence, rawContent, binding, scope: evictedScope,
+      interactionId: 'interaction-stranded-evicted', turnId: 'explicit-interpret-stranded-evicted',
+      initialInputText: JSON.stringify({
+        interactionId: 'interaction-stranded-evicted', inputRevision: 1, sourceRef: 'ui:stranded-evicted',
+        rawInput: '窗口之外的旧 owner', clarifications: [], taskCandidates: [],
+      }),
+      executionOwner: { daemonLeaseId: 'lease-outside-retained-window', daemonGeneration: 1, processStartToken: 'node:outside-window' },
+    });
+    await assert.rejects(
+      () => createProviderExplicitBrainInterpreter({ ...interpreterOptions,
+        organId: evictedScope.organId, interactionScopeId: evictedScope.interactionScopeId, lease,
+        port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [] }) }).interpret({
+          interactionId: 'interaction-stranded-evicted-next', inputRevision: 1,
+          sourceRef: 'ui:stranded-evicted-next', rawInput: '窗口之外的新输入',
+          clarifications: [], taskCandidates: [],
+        }),
+      (error: unknown) => error instanceof Error
+        && /has no durable termination receipt/.test(error.message)
+        && /committed generation 1/.test(error.message)
+        && /current generation 4/.test(error.message)
+        && /retained takeover receipts cover generations/.test(error.message),
+    );
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(evictedScope), [],
+      'an unprovable owner keeps recovery responsibility');
   } finally {
     await lease?.release();
     await rm(root, { recursive: true, force: true });
