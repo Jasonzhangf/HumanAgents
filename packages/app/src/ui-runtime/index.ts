@@ -154,6 +154,14 @@ export interface UiRuntimeLaunchOptions {
     readonly config: RetryCycleConfigSet;
     readonly journalRoot: string;
   };
+  /**
+   * Explicit override of the UI runtime execution budget for one observed
+   * provider request. Absent keeps `DEFAULT_UI_EXECUTION_EVENT_BUDGET`, the
+   * production-calibrated backstop that stays looser than the transport silence
+   * judgement. Accelerated-clock fixtures must pass their own values rather
+   * than depend on the production defaults.
+   */
+  readonly executionBudget?: Partial<import('../../../runtime/src/agent-io/types.js').AgentIoEventBudget>;
   readonly explicitBrainAgentQuery?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
   readonly explicitBrainAgentMessage?: (input: {
     readonly recipientRef: string;
@@ -627,6 +635,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
     ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
     ...(options.providerRetryConfig === undefined ? {} : { providerRetryConfig: options.providerRetryConfig }),
+    ...(options.executionBudget === undefined ? {} : { executionBudget: options.executionBudget }),
     ...(providerToolExecutor === undefined ? {} : {
       providerTools: [...NATIVE_PROVIDER_TOOLS],
       providerToolExecutor: providerToolExecutor.executor,
