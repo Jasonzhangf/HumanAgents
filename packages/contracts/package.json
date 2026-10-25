@@ -1,7 +1,7 @@
 {
   "name": "@humanagent/contracts",
-  "version": "0.1.41",
-  "releaseVersion": "0.1.0041",
+  "version": "0.1.42",
+  "releaseVersion": "0.1.0042",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
