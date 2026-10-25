@@ -191,6 +191,49 @@ function parseModelResponse(text: string): PlannerModelResponse {
   };
 }
 
+/**
+ * Phase membership is the declarative source of truth: a phase's
+ * `memberNodeIds` names the nodes that belong to it. `node.phaseId` is a
+ * redundant mirror of that membership on the node, kept only because the plan
+ * snapshot contract requires the two encodings to agree in both directions.
+ *
+ * The model legitimately omits the optional `node.phaseId` (the Planner prompt
+ * marks it optional), and the snapshot contract then rejects the publication
+ * because a node that a phase claims as a member has no agreeing `phaseId`.
+ * That is not a contract defect to paper over in validation: the membership is
+ * the declaration, so this producer boundary deterministically completes the
+ * missing mirror from the membership, making the legal output self-consistent.
+ *
+ * A node that already declares a `phaseId` is never rewritten: when the
+ * declared id conflicts with the phase that claims it, the conflict is left in
+ * place so the Contracts validator rejects it with the exact original text.
+ * This function never invents or deletes phases, nodes or memberships.
+ */
+function canonicalizeSnapshotPhaseMirrors(snapshot: TaskPlanSnapshot): TaskPlanSnapshot {
+  if (snapshot.phases.length === 0) return snapshot;
+  const claimedPhaseByNode = new Map<string, string>();
+  for (const phase of snapshot.phases) {
+    for (const nodeId of phase.memberNodeIds) {
+      if (claimedPhaseByNode.has(nodeId) && claimedPhaseByNode.get(nodeId) !== phase.phaseId) {
+        // A node claimed by two different phases is already inconsistent; keep
+        // the conflict so validation rejects it instead of choosing a winner.
+        return snapshot;
+      }
+      claimedPhaseByNode.set(nodeId, phase.phaseId);
+    }
+  }
+  return {
+    ...snapshot,
+    nodes: snapshot.nodes.map((node) => {
+      const claimed = claimedPhaseByNode.get(node.nodeId);
+      if (claimed !== undefined && node.phaseId === undefined) {
+        return { ...node, phaseId: claimed };
+      }
+      return node;
+    }),
+  };
+}
+
 function taskIdentityEvidence(input: IndependentTurnPlannerInput & { readonly priorPlan: null }): readonly EvidenceRef[] {
   return [{
     evidenceId: id('evidence', `task-plan-source-${input.task.id.value}`),
@@ -520,7 +563,10 @@ export function createIndependentTurnPlanner(deps: IndependentTurnPlannerDeps): 
           ...input.refinedResults.map((result) => result.assignmentId)],
       }, (text) => {
         const response = parseModelResponse(text);
-        const publication = assemblePublication(input, response, now);
+        const publication = assemblePublication(input, {
+          ...response,
+          snapshot: canonicalizeSnapshotPhaseMirrors(response.snapshot),
+        }, now);
         const candidate = createPublishedTaskPlanRevision({
           ...publication,
           journalCommitRef: `planner-candidate:${publication.revisionId}`,

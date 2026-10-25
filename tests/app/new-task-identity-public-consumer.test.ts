@@ -1386,6 +1386,404 @@ test('taskFlow intake fidelity preserves confirmed template through task directi
 /**
  * Component failure basis for this focused consumer.
  *
+ * Failure mode (real production shape, 0.1.0040, task
+ * ui-task-a3198d24-d2ae-4da9-86cd-41e437a1b401-24): the Planner model omitted
+ * the optional node `phaseId` while its phase declared those nodes as members.
+ * The turn had already succeeded and its checkpoint was committed, but
+ * `validateTaskPlanSnapshot` rejected the publication with `task plan node n1
+ * phaseId does not match phase membership`, so the task settled `blocked` after
+ * real success. Impact: a succeeded task reports failure to the user. The fix
+ * belongs at this producer boundary: membership is the declared source and the
+ * node `phaseId` is its redundant mirror, so an omitted mirror is completed
+ * deterministically here instead of the task failing.
+ */
+test('the closed-turn Planner completes an omitted node phaseId from its phase membership', async () => {
+  const cycleId = id('cycle', 'planner-phase-cycle');
+  const operationId = id('operation', 'planner-phase-operation');
+  const taskId = id('task', 'planner-phase-task');
+  const plannerScope: ScopeRef = { organId, taskId, cycleId, operationId };
+  const checkpointCommitRef: JournalCommitRef = {
+    commitId: 'planner-phase-checkpoint-commit',
+    journalSeq: 1,
+    recordDigest: `sha256:${'1'.repeat(64)}`,
+  };
+  const plannerEvidence = (label: string): EvidenceRef => ({
+    evidenceId: id('evidence', `planner-phase-${label}`),
+    kind: 'operation',
+    source: 'new-task-identity-public-consumer',
+    locator: `planner-phase/${label}`,
+    scope: plannerScope,
+  });
+  const checkpointId = id('checkpoint', 'planner-phase-checkpoint');
+  const checkpoint: Checkpoint = {
+    id: checkpointId,
+    scope: plannerScope,
+    cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'succeeded',
+    summary: 'The single reply turn closed.',
+    recoveryStateRef: plannerEvidence('recovery'),
+    evidenceRefs: [plannerEvidence('checkpoint')],
+    next: { kind: 'continue', ref: 'planner:phase' },
+  };
+  const closure: TurnClosureReference = {
+    identity: {
+      turnId: 'planner-phase-turn',
+      workAssignmentRef: 'planner-phase-assignment',
+      taskRef: taskId,
+      scopeRef: plannerScope,
+      cycleRef: cycleId,
+      inputRevision: 1,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      runtimeBindingRef: 'planner-phase-runtime',
+      permissionRevision: 'planner-phase-permission',
+    },
+    checkpointId,
+    closureRef: 'planner-phase-closure',
+    summary: {
+      goal: { text: 'Reply with exactly: OK', evidenceRefs: [plannerEvidence('goal')] },
+      actions: { text: 'No tools were required.', evidenceRefs: [plannerEvidence('actions')] },
+      result: { text: 'Delivered exactly "OK".', evidenceRefs: [plannerEvidence('result')] },
+      expectedNextStep: { text: 'No further work.', evidenceRefs: [plannerEvidence('next')] },
+    },
+    recoveryStateRef: plannerEvidence('closure-recovery'),
+    closedAt: '2026-10-25T09:43:40.645Z',
+  };
+  const task: Task = {
+    id: taskId,
+    organId,
+    title: 'live stream terminal verification',
+    directive: 'Reply with exactly: OK',
+    directiveRevision: 1,
+    state: 'settling',
+    memoryScope: 'task',
+  };
+  const identity: TaskIdentityRecord = {
+    scope: { organId, taskId },
+    title: 'live stream terminal verification',
+    source: {
+      requirementId: `requirement:direct-task-create:${taskId.value}@1`,
+      inputRevision: 1,
+      draftId: `draft:direct-task-create:${taskId.value}@1`,
+      draftRevisionVersion: 1,
+      draftRevisionHash: `sha256:${'a'.repeat(64)}`,
+      confirmationRef: `confirmation:direct-task-create:${taskId.value}@1`,
+    },
+    journalCommitRef: 'jsonl:task-identity:planner-phase',
+  };
+  const plannerIncarnation: TaskRuntimeIncarnation = {
+    runtimeId: 'planner-phase-runtime',
+    generation: 1,
+    agentInstanceId: 'planner-phase-instance',
+    roleId: 'orchestration',
+    taskId,
+    assignmentId: 'planner-phase-assignment',
+    executionEpoch: 1,
+  };
+  const plannerExecution: ProviderExecutionIdentityRef = {
+    runtimeId: plannerIncarnation.runtimeId,
+    taskId,
+    operationId,
+    organId,
+    cycleId,
+    executionEpoch: plannerIncarnation.executionEpoch,
+  };
+  const plannerInput = {
+    task,
+    closure,
+    refinedResults: [],
+    priorPlan: null,
+    identity,
+    allocation: { operationId, cycleId, executionEpoch: plannerIncarnation.executionEpoch },
+  };
+  const duty = deriveClosedTurnPlannerDuty(plannerInput, checkpointCommitRef);
+  const preparedCall = {
+    duty,
+    invocationId: 'planner-phase-invocation',
+    execution: plannerExecution,
+    scope: plannerScope,
+    assignmentId: plannerIncarnation.assignmentId,
+    incarnation: plannerIncarnation,
+    lease: {
+      leaseId: 'planner-phase-lease',
+      runtimeId: plannerIncarnation.runtimeId,
+      generation: plannerIncarnation.generation,
+      incarnation: plannerIncarnation,
+      executionEpoch: plannerIncarnation.executionEpoch,
+      ownerId: 'planner-phase-pool',
+      assignmentId: plannerIncarnation.assignmentId,
+      capabilities: ['provider.execution'],
+    },
+    decision: {
+      action: 'spawn' as const,
+      ownerId: 'planner-phase-pool',
+      condition: 'orchestration.runtime.capacity',
+      nextAction: { kind: 'continue' as const, ref: plannerIncarnation.runtimeId },
+      reason: 'planner phase capacity is available',
+      runtimeId: plannerIncarnation.runtimeId,
+    },
+    grantCommitRef: { commitId: 'planner-phase-grant-commit', journalSeq: 2, recordDigest: `sha256:${'2'.repeat(64)}` },
+    admissionCommitRef: { commitId: 'planner-phase-admission-commit', journalSeq: 3, recordDigest: `sha256:${'3'.repeat(64)}` },
+    checkpoint: { checkpoint, previous: null, commitRef: checkpointCommitRef },
+    preparationCommitRef: { commitId: 'planner-phase-preparation-commit', journalSeq: 4, recordDigest: `sha256:${'4'.repeat(64)}` },
+  };
+  // The exact production shape: two nodes, one phase claiming both, and no
+  // node-level phaseId at all.
+  const membershipOnlySnapshot: TaskPlanSnapshot = {
+    title: 'Live stream terminal verification',
+    summary: 'One turn replies with exactly OK; no tools were required.',
+    completeness: { scope: 'whole-task', status: 'complete' },
+    acceptanceCriteria: [{ criterionId: 'ac-1', description: 'The reply is exactly the literal token OK.' }],
+    nodes: [
+      { nodeId: 'n1', kind: 'verification', title: 'Confirm required reply', intent: 'Establish the required reply.', definition: { expectedReply: 'OK' } },
+      { nodeId: 'n2', kind: 'delivery', title: 'Output literal OK', intent: 'Return OK as the whole response.', definition: { reply: 'OK', wholeResponse: true } },
+    ],
+    phases: [{ phaseId: 'p1', title: 'Terminal verification', memberNodeIds: ['n1', 'n2'] }],
+    relations: [],
+  };
+  const plannerPort = new FakeReplayExecutionRuntimePort({
+    binding,
+    replay: [
+      {
+        kind: 'output',
+        state: 'output',
+        summary: JSON.stringify({
+          decision: 'complete',
+          snapshot: membershipOnlySnapshot,
+          reasonText: 'The committed closure confirms the reply was delivered.',
+        }),
+      },
+      { kind: 'terminal', state: 'succeeded', summary: 'planner phase succeeded', terminalState: 'succeeded' },
+    ],
+    stepDelayMs: 1,
+  });
+  const planner = createIndependentTurnPlanner({
+    prepareAgentProvider: async (selection): Promise<AgentProviderComposition> => ({
+      roleId: selection.roleId,
+      provider: {
+        source: 'rcc',
+        provider: 'rcc',
+        binding: binding.bindingId,
+        protocol: 'responses',
+        model: binding.modelRef,
+        route: 'planner-phase-route',
+        baseUrl: 'http://127.0.0.1:4444',
+      },
+      source: 'rcc',
+      binding,
+      port: plannerPort,
+    }),
+    now: () => new Date('2026-10-25T09:44:00.000Z'),
+  });
+  const result = await planner.plan({ ...plannerInput, preparedCall });
+  assert.equal(result.decision, 'complete');
+  const nodes = result.publication.snapshot.nodes;
+  assert.deepEqual(
+    nodes.map((node) => [node.nodeId, node.phaseId]),
+    [['n1', 'p1'], ['n2', 'p1']],
+    'the producer completes the omitted mirror from the declared phase membership',
+  );
+  assert.deepEqual(result.publication.snapshot.phases, membershipOnlySnapshot.phases);
+});
+
+/**
+ * The conflicting shape must still fail with the original text. A node that
+ * declares its own phaseId while a different phase claims it is a real
+ * inconsistency; the producer never rewrites or deletes it, so the Contracts
+ * validator rejects the publication exactly as before.
+ */
+test('the closed-turn Planner rejects a node phaseId that conflicts with the phase membership', async () => {
+  const cycleId = id('cycle', 'planner-phase-conflict-cycle');
+  const operationId = id('operation', 'planner-phase-conflict-operation');
+  const taskId = id('task', 'planner-phase-conflict-task');
+  const plannerScope: ScopeRef = { organId, taskId, cycleId, operationId };
+  const checkpointCommitRef: JournalCommitRef = {
+    commitId: 'planner-phase-conflict-checkpoint-commit',
+    journalSeq: 1,
+    recordDigest: `sha256:${'1'.repeat(64)}`,
+  };
+  const plannerEvidence = (label: string): EvidenceRef => ({
+    evidenceId: id('evidence', `planner-phase-conflict-${label}`),
+    kind: 'operation',
+    source: 'new-task-identity-public-consumer',
+    locator: `planner-phase-conflict/${label}`,
+    scope: plannerScope,
+  });
+  const checkpointId = id('checkpoint', 'planner-phase-conflict-checkpoint');
+  const checkpoint: Checkpoint = {
+    id: checkpointId,
+    scope: plannerScope,
+    cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'succeeded',
+    summary: 'The single reply turn closed.',
+    recoveryStateRef: plannerEvidence('recovery'),
+    evidenceRefs: [plannerEvidence('checkpoint')],
+    next: { kind: 'continue', ref: 'planner:phase:conflict' },
+  };
+  const closure: TurnClosureReference = {
+    identity: {
+      turnId: 'planner-phase-conflict-turn',
+      workAssignmentRef: 'planner-phase-conflict-assignment',
+      taskRef: taskId,
+      scopeRef: plannerScope,
+      cycleRef: cycleId,
+      inputRevision: 1,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      runtimeBindingRef: 'planner-phase-conflict-runtime',
+      permissionRevision: 'planner-phase-conflict-permission',
+    },
+    checkpointId,
+    closureRef: 'planner-phase-conflict-closure',
+    summary: {
+      goal: { text: 'Reply with exactly: OK', evidenceRefs: [plannerEvidence('goal')] },
+      actions: { text: 'No tools were required.', evidenceRefs: [plannerEvidence('actions')] },
+      result: { text: 'Delivered exactly "OK".', evidenceRefs: [plannerEvidence('result')] },
+      expectedNextStep: { text: 'No further work.', evidenceRefs: [plannerEvidence('next')] },
+    },
+    recoveryStateRef: plannerEvidence('closure-recovery'),
+    closedAt: '2026-10-25T09:43:40.645Z',
+  };
+  const task: Task = {
+    id: taskId,
+    organId,
+    title: 'conflicting phase verification',
+    directive: 'Reply with exactly: OK',
+    directiveRevision: 1,
+    state: 'settling',
+    memoryScope: 'task',
+  };
+  const identity: TaskIdentityRecord = {
+    scope: { organId, taskId },
+    title: 'conflicting phase verification',
+    source: {
+      requirementId: `requirement:direct-task-create:${taskId.value}@1`,
+      inputRevision: 1,
+      draftId: `draft:direct-task-create:${taskId.value}@1`,
+      draftRevisionVersion: 1,
+      draftRevisionHash: `sha256:${'a'.repeat(64)}`,
+      confirmationRef: `confirmation:direct-task-create:${taskId.value}@1`,
+    },
+    journalCommitRef: 'jsonl:task-identity:planner-phase-conflict',
+  };
+  const plannerIncarnation: TaskRuntimeIncarnation = {
+    runtimeId: 'planner-phase-conflict-runtime',
+    generation: 1,
+    agentInstanceId: 'planner-phase-conflict-instance',
+    roleId: 'orchestration',
+    taskId,
+    assignmentId: 'planner-phase-conflict-assignment',
+    executionEpoch: 1,
+  };
+  const plannerInput = {
+    task,
+    closure,
+    refinedResults: [],
+    priorPlan: null,
+    identity,
+    allocation: { operationId, cycleId, executionEpoch: plannerIncarnation.executionEpoch },
+  };
+  const duty = deriveClosedTurnPlannerDuty(plannerInput, checkpointCommitRef);
+  const preparedCall = {
+    duty,
+    invocationId: 'planner-phase-conflict-invocation',
+    execution: {
+      runtimeId: plannerIncarnation.runtimeId,
+      taskId,
+      operationId,
+      organId,
+      cycleId,
+      executionEpoch: plannerIncarnation.executionEpoch,
+    } satisfies ProviderExecutionIdentityRef,
+    scope: plannerScope,
+    assignmentId: plannerIncarnation.assignmentId,
+    incarnation: plannerIncarnation,
+    lease: {
+      leaseId: 'planner-phase-conflict-lease',
+      runtimeId: plannerIncarnation.runtimeId,
+      generation: plannerIncarnation.generation,
+      incarnation: plannerIncarnation,
+      executionEpoch: plannerIncarnation.executionEpoch,
+      ownerId: 'planner-phase-conflict-pool',
+      assignmentId: plannerIncarnation.assignmentId,
+      capabilities: ['provider.execution'],
+    },
+    decision: {
+      action: 'spawn' as const,
+      ownerId: 'planner-phase-conflict-pool',
+      condition: 'orchestration.runtime.capacity',
+      nextAction: { kind: 'continue' as const, ref: plannerIncarnation.runtimeId },
+      reason: 'planner phase conflict capacity is available',
+      runtimeId: plannerIncarnation.runtimeId,
+    },
+    grantCommitRef: { commitId: 'planner-phase-conflict-grant-commit', journalSeq: 2, recordDigest: `sha256:${'2'.repeat(64)}` },
+    admissionCommitRef: { commitId: 'planner-phase-conflict-admission-commit', journalSeq: 3, recordDigest: `sha256:${'3'.repeat(64)}` },
+    checkpoint: { checkpoint, previous: null, commitRef: checkpointCommitRef },
+    preparationCommitRef: { commitId: 'planner-phase-conflict-preparation-commit', journalSeq: 4, recordDigest: `sha256:${'4'.repeat(64)}` },
+  };
+  const conflictingSnapshot: TaskPlanSnapshot = {
+    title: 'Conflicting phase verification',
+    summary: 'The node declares a phase that does not claim it.',
+    completeness: { scope: 'whole-task', status: 'complete' },
+    acceptanceCriteria: [{ criterionId: 'ac-1', description: 'The reply is exactly the literal token OK.' }],
+    nodes: [
+      { nodeId: 'n1', kind: 'verification', title: 'Confirm required reply', intent: 'Establish the required reply.', definition: { expectedReply: 'OK' }, phaseId: 'p2' },
+    ],
+    phases: [{ phaseId: 'p1', title: 'Terminal verification', memberNodeIds: ['n1'] }],
+    relations: [],
+  };
+  const plannerPort = new FakeReplayExecutionRuntimePort({
+    binding,
+    replay: [
+      {
+        kind: 'output',
+        state: 'output',
+        summary: JSON.stringify({
+          decision: 'complete',
+          snapshot: conflictingSnapshot,
+          reasonText: 'The committed closure confirms the reply was delivered.',
+        }),
+      },
+      { kind: 'terminal', state: 'succeeded', summary: 'planner phase conflict succeeded', terminalState: 'succeeded' },
+    ],
+    stepDelayMs: 1,
+  });
+  const planner = createIndependentTurnPlanner({
+    prepareAgentProvider: async (selection): Promise<AgentProviderComposition> => ({
+      roleId: selection.roleId,
+      provider: {
+        source: 'rcc',
+        provider: 'rcc',
+        binding: binding.bindingId,
+        protocol: 'responses',
+        model: binding.modelRef,
+        route: 'planner-phase-conflict-route',
+        baseUrl: 'http://127.0.0.1:4444',
+      },
+      source: 'rcc',
+      binding,
+      port: plannerPort,
+    }),
+    now: () => new Date('2026-10-25T09:44:00.000Z'),
+  });
+  await assert.rejects(
+    () => planner.plan({ ...plannerInput, preparedCall }),
+    (error: unknown) => error instanceof Error
+      && error.message === 'task plan node n1 phaseId does not match phase membership',
+  );
+});
+
+/**
+ * Component failure basis for this focused consumer.
+ *
  * Failure mode: a validated `source: 'http'` binding whose real probe is the
  * honest `unknown` with `continue -> http.start` still fails Task admission,
  * because the readiness gate drops the source-aware requestability and the Task
