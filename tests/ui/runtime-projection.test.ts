@@ -284,6 +284,67 @@ test('runtime task list groups only exact committed lineage under one visible wo
   });
 });
 
+test('a root with its own failure or operation keeps its own facts over a waiting child', () => {
+  const parentTaskId = id('task', 'task-own-execution-root');
+  const childTaskId = id('task', 'task-own-execution-child');
+  const parent: RuntimeTaskSnapshotInput = {
+    ...runtimeTask('failed', 41),
+    taskId: parentTaskId,
+    title: '自身执行失败的父任务',
+    state: 'blocked',
+    currentState: '文件路径缺失，等待人工处理',
+    operationId: 'ui-operation-11',
+    executionEpoch: 1,
+    controlTarget: { projectKey: 'project-own-execution', mode: 'fake' },
+    error: {
+      code: 'runtime.execution.failure', ownerId: 'runtime', message: 'file.list missing path',
+      retryable: false, nextAction: 'restore the missing path',
+    },
+    updatedAt: '2026-10-24T15:00:00.000Z',
+  };
+  const child: RuntimeTaskSnapshotInput = {
+    ...runtimeTask('created', 42),
+    taskId: childTaskId,
+    title: '计划执行子任务',
+    state: 'waiting',
+    currentState: '等待执行准入',
+    executionLineage: {
+      parentTaskId,
+      subscriptionId: 'subscription-own-execution',
+      occurrenceId: 'occurrence-own-execution',
+    },
+    updatedAt: '2026-10-24T16:00:00.000Z',
+  };
+
+  for (const childState of ['waiting', 'succeeded'] as const) {
+    const list = projectRuntimeTaskList({ mode: 'fake', tasks: [parent, { ...child, state: childState }] });
+    assert.deepEqual(list.waiting.map((row) => row.taskId.value), [parentTaskId.value],
+      `root blocked fact must stay in waiting when the child is ${childState}`);
+    const rootRow = list.waiting[0] as GroupedRuntimeTaskRow;
+    assert.equal(rootRow.state, 'blocked');
+    assert.equal(rootRow.stateLabel, '受阻');
+    assert.equal(rootRow.currentState, '文件路径缺失，等待人工处理');
+    assert.equal(rootRow.executionState, undefined);
+    assert.equal(rootRow.currentExecutionTaskId, undefined);
+    assert.equal(rootRow.error?.code, 'runtime.execution.failure');
+    assert.equal(rootRow.controlTarget?.projectKey, 'project-own-execution');
+    assert.equal(rootRow.executions?.length, 1);
+    assert.equal(rootRow.executions?.[0]?.taskId.value, childTaskId.value);
+  }
+
+  // A pure plan anchor still delegates its execution facts to the child.
+  const anchor: RuntimeTaskSnapshotInput = {
+    ...runtimeTask('created', 43),
+    taskId: parentTaskId,
+    title: '纯计划锚点父任务',
+  };
+  const proxy = projectRuntimeTaskList({ mode: 'fake', tasks: [anchor, { ...child, state: 'succeeded' }] })
+    .completed[0] as GroupedRuntimeTaskRow;
+  assert.equal(proxy.currentExecutionTaskId?.value, childTaskId.value);
+  assert.equal(proxy.executionState, 'succeeded');
+  assert.equal(proxy.stateLabel, '执行已完成');
+});
+
 test('runtime task rows retain existing terminal actions and result facts', () => {
   const completed = {
     ...runtimeTask('succeeded', 9),

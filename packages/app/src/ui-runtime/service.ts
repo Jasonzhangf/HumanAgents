@@ -4487,12 +4487,14 @@ export class UiRuntimeService {
     }
     return await Promise.all(snapshots.map(async (snapshot) => {
       const relation = lineage.get(snapshot.taskId.value);
-      if (relation === undefined) return snapshot;
       const target = liveSource === undefined ? undefined
         : await this.verifyControllableTaskTarget(snapshot.taskId, liveSource.projectKey, this.mode);
       const controlTarget = target === undefined ? undefined : { projectKey: target.projectKey, mode: this.options.mode };
-      return { ...snapshot, executionLineage: relation,
-        ...(controlTarget === undefined ? {} : { controlTarget }) };
+      return {
+        ...snapshot,
+        ...(relation === undefined ? {} : { executionLineage: relation }),
+        ...(controlTarget === undefined ? {} : { controlTarget }),
+      };
     }));
   }
 
