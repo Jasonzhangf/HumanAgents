@@ -1189,6 +1189,7 @@ async function textOnlyResponsesUpstream(input: {
           normalizedInput: rawInput,
           knownFacts: [],
           decisionRefs: [],
+          taskFlowKind: 'long-running',
           proposal: {
             revision: 1,
             intent: 'create',
@@ -2081,7 +2082,8 @@ async function runHeldColdConsumer(input: {
       '--ui-root', join(fixture.root, 'ui'),
     ], {
       cwd: fixture.workspace,
-      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_OPTIONS')),
+      env: Object.fromEntries(Object.entries(process.env)
+        .filter(([key]) => key !== 'NODE_OPTIONS' && key !== 'NODE_TEST_CONTEXT')),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const resumedPid = resumed.pid;
@@ -3176,7 +3178,6 @@ if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer
           scope: 'M3 public two-cycle production composition evidence',
           constraints: ['Use the confirmed dynamic task flow without a fixed role chain'],
           deliverables: ['Two independent Planner payloads and public plan history'],
-          taskFlow,
         }),
       },
     );

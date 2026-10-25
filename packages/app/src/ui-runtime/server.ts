@@ -2005,7 +2005,6 @@ async function handleRequest(
       const result = await service.stop(taskId);
       writeJson(response, 202, {
         ...result,
-        principalOwner: accessControl.readProductPrincipalOwner(),
         ...(targetScope === undefined ? {} : { targetScope }),
       });
       return;
