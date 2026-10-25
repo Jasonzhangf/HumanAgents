@@ -466,7 +466,12 @@ function contentDeltaUnit(
     const index = typeof record.index === 'number' ? record.index : 0;
     const delta = optionalRecord(record.delta);
     const deltaType = delta && typeof delta.type === 'string' ? delta.type : undefined;
-    if (deltaType === 'input_json_delta') return { kind: 'tool-arguments', key: `tool-arguments:block:${index}` };
+    if (deltaType === 'input_json_delta' || deltaType === 'signature_delta') {
+      // A reasoning signature is as bounded as the tool arguments: the model
+      // emits one digest per reasoning block, not an unbounded stream, so the
+      // same no-progress budget applies.
+      return { kind: 'tool-arguments', key: `tool-arguments:block:${index}` };
+    }
     if (deltaType === 'text_delta' || deltaType === 'thinking_delta') return { kind: 'content', key: `content:block:${index}` };
     return undefined;
   }
