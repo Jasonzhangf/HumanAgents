@@ -17,7 +17,15 @@ import {
   type SupervisorStartupDeclaration,
 } from './supervisor.js';
 
-const DEFAULT_HANDOFF_TIMEOUT_MS = 30_000;
+// The replacement ready timeout is a backstop against a replacement that never
+// becomes ready, not a scheduling guarantee for a slow-but-working start.
+// Production evidence: daemon restart 0.1.0041 (requestId
+// b2d81e08-291c-4012-addc-660747abcfb1) needed about 65 s from replacement spawn
+// to readiness, while the previous 30 s bound fired first and falsely recorded
+// `restart.failure` for a replacement that then completed. 120 s covers that
+// measured cold start with ~1.85x headroom and stays a backstop; the lease's
+// completedAt/failure marker remains the authoritative outcome.
+const DEFAULT_HANDOFF_TIMEOUT_MS = 120_000;
 const DEFAULT_HANDOFF_POLL_INTERVAL_MS = 25;
 type ChildProcessLike = ReturnType<typeof spawn>;
 const spawnFailures = new WeakMap<ChildProcessLike, Error>();

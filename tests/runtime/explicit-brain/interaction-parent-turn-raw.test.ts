@@ -1938,3 +1938,149 @@ test('parent reconciliation reserves terminal output for complete non-tool leave
     await cleanup();
   }
 });
+
+// Failure basis: production turn explicit-interpret-0d94c7e7 has one committed
+// `owner-reconciliation` (mode continue, effectiveExecutionEpoch 2) whose new
+// epoch then died with only reasoning deltas and unsettled requests. Every
+// closure lane refused it: abandonment holds on any reconciliation, execution
+// failure holds on any reconciliation, and the durable codec rejects the append
+// for the same reason. The turn therefore stays pending forever and every later
+// input in the scope is refused with "requires its exact prior input".
+// Impact: one crash permanently wedges explicit intake for a whole scope.
+// Cost: one local Journal-backed public consumer, no daemon and no Provider.
+test('parent raw owner closes the active epoch of a reconciled turn that died without terminal output', async () => {
+  const { parentJournal, journalFile, sink, rawContent, cleanup } = await fixture();
+  try {
+    const initialInput = await writeAsset(sink, 'reconciled-dead-input', 'bounded question');
+    const firstOwner: OccurrenceExecutionOwner = {
+      daemonLeaseId: 'reconciled-dead-lease-1', daemonGeneration: 31, processStartToken: 'reconciled-dead-process-1',
+    };
+    const secondOwner: OccurrenceExecutionOwner = {
+      daemonLeaseId: 'reconciled-dead-lease-2', daemonGeneration: 33, processStartToken: 'reconciled-dead-process-2',
+    };
+    const ownerAt = (epoch: number, executionOwner: OccurrenceExecutionOwner) => createInteractionParentTurnRawOwner({
+      turn, execution: { ...execution, executionEpoch: epoch }, executionOwner,
+      scope, initialInput, providerBinding: parentProviderBinding,
+      journal: new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile)), rawContent,
+    });
+    const ownerOne = ownerAt(1, firstOwner);
+    await ownerOne.openTurnInput();
+    const reqOne = requestRecord('reconciled-dead-1');
+    await ownerOne.registerRequest({ execution, record: { ...reqOne, phase: 'dispatching' } });
+    await ownerOne.registerRequest({ execution, record: { ...reqOne, phase: 'dispatched' } });
+    const reasoningOne = await writeAsset(sink, 'reconciled-dead-reasoning-1', 'partial reasoning');
+    await ownerOne.acceptRawFact({ execution, scope, request: reqOne.request, producerSeq: 1,
+      fact: { kind: 'content', channel: 'reasoning-summary', update: 'full',
+        contentUnitId: 'reconciled-dead-reasoning-1', content: reasoningOne, complete: false } });
+
+    // The previous owner is provably gone, so the continuation lane opens epoch 2.
+    const ownerTwo = ownerAt(2, secondOwner);
+    const reconciled = await ownerTwo.reconcileTurnOwner({
+      previousOwner: firstOwner, replacementOwner: secondOwner,
+      isCommittedReplacement: true, reconciledAt: committedAt,
+    });
+    assert.equal(reconciled.fact.mode, 'continue');
+    assert.equal(reconciled.fact.effectiveExecutionEpoch, 2);
+    await ownerTwo.openTurnInput();
+    const executionTwo = { ...execution, executionEpoch: 2 };
+    const reqTwo = requestRecord('reconciled-dead-2');
+    await ownerTwo.registerRequest({ execution: executionTwo, record: { ...reqTwo, phase: 'dispatching' } });
+    await ownerTwo.registerRequest({ execution: executionTwo, record: { ...reqTwo, phase: 'dispatched' } });
+    const reasoningTwo = await writeAsset(sink, 'reconciled-dead-reasoning-2', 'partial reasoning in the continued epoch');
+    await ownerTwo.acceptRawFact({ execution: executionTwo, scope, request: reqTwo.request, producerSeq: 1,
+      fact: { kind: 'content', channel: 'reasoning-summary', update: 'full',
+        contentUnitId: 'reconciled-dead-reasoning-2', content: reasoningTwo, complete: false } });
+
+    // The discontinued epoch can never deliver: this is the honest closure the
+    // production turn never got.
+    const eligibility = await ownerTwo.readExecutionFailureEligibility();
+    assert.equal(eligibility.closable, true,
+      `a dead continued epoch must be closable, held: ${(eligibility as { heldReason?: string }).heldReason ?? ''}`);
+    const failure = await ownerTwo.closeFailedEpoch({ failedAt: committedAt });
+    assert.equal(failure.fact.execution.executionEpoch, 2,
+      'the closure records the epoch that actually died, never the turn input epoch');
+
+    const snapshot = await parentJournal.readTurnSnapshot(turn);
+    assert.equal(snapshot.executionFailure?.fact.execution.executionEpoch, 2);
+    assert.equal(snapshot.resourceClose, null, 'the closure never fabricates a provider close');
+    assert.deepEqual(snapshot.providerSettlements, [], 'the closure never fabricates a settlement');
+    assert.equal(snapshot.abandonment, null, 'abandonment is the wrong lane for a reconciled turn');
+    assert.deepEqual(snapshot.ownerReconciliations.map((entry) => entry.fact.effectiveExecutionEpoch), [2],
+      'the committed reconciliation is never rewritten');
+    // Frozen after the closure: the dead epoch cannot accept late raw history.
+    await assert.rejects(ownerTwo.acceptRawFact({ execution: executionTwo, scope, request: reqTwo.request,
+      producerSeq: 2, fact: { kind: 'content', channel: 'reasoning-summary', update: 'full',
+        contentUnitId: 'late', content: reasoningTwo, complete: false } }), /epoch failure/);
+  } finally {
+    await cleanup();
+  }
+});
+
+// Failure basis: the blanket reconciliation hold must not become a generic
+// "close anything" bypass. A reconciled turn whose continued epoch still
+// produced a real terminal output keeps its deliverable answer, and a turn with
+// an unknown tool side effect keeps that side effect open.
+test('parent raw owner still refuses to close a reconciled epoch that can deliver or hides a side effect', async () => {
+  const { parentJournal, journalFile, sink, rawContent, cleanup } = await fixture();
+  try {
+    const initialInput = await writeAsset(sink, 'reconciled-hold-input', 'bounded question');
+    const firstOwner: OccurrenceExecutionOwner = {
+      daemonLeaseId: 'reconciled-hold-lease-1', daemonGeneration: 41, processStartToken: 'reconciled-hold-process-1',
+    };
+    const secondOwner: OccurrenceExecutionOwner = {
+      daemonLeaseId: 'reconciled-hold-lease-2', daemonGeneration: 42, processStartToken: 'reconciled-hold-process-2',
+    };
+    const ownerAt = (epoch: number, executionOwner: OccurrenceExecutionOwner) => createInteractionParentTurnRawOwner({
+      turn, execution: { ...execution, executionEpoch: epoch }, executionOwner,
+      scope, initialInput, providerBinding: parentProviderBinding,
+      journal: new JsonlInteractionParentTurnJournal(new JsonlOrganJournal(journalFile)), rawContent,
+    });
+    const ownerOne = ownerAt(1, firstOwner);
+    await ownerOne.openTurnInput();
+    const reqOne = requestRecord('reconciled-hold-1');
+    await ownerOne.registerRequest({ execution, record: { ...reqOne, phase: 'dispatching' } });
+    await ownerOne.registerRequest({ execution, record: { ...reqOne, phase: 'dispatched' } });
+    const reasoningOne = await writeAsset(sink, 'reconciled-hold-reasoning', 'partial reasoning');
+    await ownerOne.acceptRawFact({ execution, scope, request: reqOne.request, producerSeq: 1,
+      fact: { kind: 'content', channel: 'reasoning-summary', update: 'full',
+        contentUnitId: 'reconciled-hold-reasoning', content: reasoningOne, complete: false } });
+    const ownerTwo = ownerAt(2, secondOwner);
+    await ownerTwo.reconcileTurnOwner({
+      previousOwner: firstOwner, replacementOwner: secondOwner,
+      isCommittedReplacement: true, reconciledAt: committedAt,
+    });
+    await ownerTwo.openTurnInput();
+    const executionTwo = { ...execution, executionEpoch: 2 };
+    const reqTwo = requestRecord('reconciled-hold-2');
+    await ownerTwo.registerRequest({ execution: executionTwo, record: { ...reqTwo, phase: 'dispatching' } });
+    await ownerTwo.registerRequest({ execution: executionTwo, record: { ...reqTwo, phase: 'waiting' } });
+    // A real terminal output in the continued epoch stays deliverable.
+    const answer = await writeAsset(sink, 'reconciled-hold-answer', 'Recovered answer');
+    await ownerTwo.acceptRawFact({ execution: executionTwo, scope, request: reqTwo.request, producerSeq: 1,
+      fact: { kind: 'content', channel: 'assistant-text', contentUnitId: 'reconciled-hold-answer',
+        content: answer, update: 'full', complete: true } });
+    await ownerTwo.acceptRawFact({ execution: executionTwo, scope, request: reqTwo.request, producerSeq: 2,
+      fact: { kind: 'request-complete', terminal: 'completed' } });
+    await ownerTwo.registerRequest({ execution: executionTwo, record: { ...reqTwo, phase: 'settled' } });
+    const held = await ownerTwo.readExecutionFailureEligibility();
+    assert.equal(held.closable, false, 'a continued epoch with a deliverable answer is never closed as failed');
+    await assert.rejects(ownerTwo.closeFailedEpoch({ failedAt: committedAt }), /cannot be closed as failed/);
+
+    // An unpaired tool call in the continued epoch hides a physical side effect.
+    const toolReq = requestRecord('reconciled-hold-3', reqTwo.request.requestId);
+    await ownerTwo.registerRequest({ execution: executionTwo, record: { ...toolReq, phase: 'dispatching' } });
+    await ownerTwo.registerRequest({ execution: executionTwo, record: { ...toolReq, phase: 'waiting' } });
+    const toolArguments = await writeAsset(sink, 'reconciled-hold-arguments', '{}');
+    await ownerTwo.acceptRawFact({ execution: executionTwo, scope, request: toolReq.request, producerSeq: 3,
+      fact: { kind: 'tool-call', contentUnitId: 'reconciled-hold-call',
+        call: { callId: 'reconciled-hold-call', toolId: 'write_file', arguments: {}, continuationRef: 'reconciled-hold-continuation' },
+        rawArguments: toolArguments, complete: true } });
+    const heldTool = await ownerTwo.readExecutionFailureEligibility();
+    assert.equal(heldTool.closable, false, 'an unknown tool side effect is never closed as a failed epoch');
+    const preserved = await parentJournal.readTurnSnapshot(turn);
+    assert.equal(preserved.executionFailure, null);
+    assert.equal(preserved.resourceClose, null);
+  } finally {
+    await cleanup();
+  }
+});

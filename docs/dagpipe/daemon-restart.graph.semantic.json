@@ -3,12 +3,12 @@
   "labels":{
     "validate_request":"核对正式重启请求、旧 owner、规范化 workspace 与控制根启动声明；普通 serve 缺少 restart marker 不得进入替换路径",
     "record_transition":"记录本次重启责任、typed requestId、前一 owner 身份与声明 target；该 transition 是 replacement 的唯一授权来源",
-    "spawn_replacement":"启动正式替换进程并携带一次性 --restart-request <recorded-request-id> 标记绑定既有 transition；标记不是持久 startup option，不写入业务 payload",
+    "spawn_replacement":"启动正式替换进程并携带一次性 --restart-request <recorded-request-id> 标记绑定既有 transition；标记不是持久 startup option，不写入业务 payload；ready 等待只是 backstop，默认值按实测冷启动约 65s 取 120s，不凭猜测定界",
     "classify_previous":"区分已关闭、仍运行与已退出的旧 owner；停旧 owner 前先匹配 pending restart request、旧 leaseId/generation/processStartToken 与声明 target",
     "resolve_previous":"按实际状态取得真实关闭回执或保留未验证恢复责任；缺失 marker 按普通启动处理，无效或陈旧 marker 显式失败，不回退 takeover",
     "commit_generation":"在同一 guard 内再次复核 marker、身份与竞争 owner 后提交新 daemon generation；不持久化 marker、不旋转产品 session generation",
     "start_stages":"启动既有服务阶段；失败时收拢本次资源并保留原错",
-    "publish_ready":"发布服务就绪，不推断业务收拢完成",
+    "publish_ready":"发布服务就绪，不推断业务收拢完成；替换就绪是本次重启的权威结果，覆盖启动期间写入的 caller-side 超时，marker 不得同时携带 failure 与 completedAt",
     "restart_result":"返回成功或明确失败及真实旧关闭状态；保留产品凭证、独立 session 与未过期 pending challenge"
   }
 }
