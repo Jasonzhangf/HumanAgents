@@ -16,16 +16,19 @@ import {
   type InteractionHelperResultFields,
   type InteractionDecision,
   type ProviderBinding,
+  type ProviderError,
+  type ProviderToolCall,
   type ProviderCloseResult,
   type ProviderSettlement,
   type OccurrenceExecutionOwner,
   type RequirementIntent,
+  type ScopeRef,
   type TaskFlowBinding,
   type TaskFlowKind,
   TASK_FLOW_DEFINITION_VERSION,
   TASK_FLOW_KINDS,
 } from '../../contracts/src/index.js';
-import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
+import { ProviderAgentDriver, type ProviderToolExecutionResult } from '../../adapters/provider/src/index.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
 import { prepareScopeSemanticHistory } from '../../runtime/src/context/interaction-semantic-context.js';
 import { loadBuiltinPromptSegments, type AgentPromptSegment } from '../../agent-templates/src/index.js';
@@ -53,6 +56,7 @@ import {
 import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
 import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 import { readSupervisorTerminationReceipts, type SupervisorLease } from './supervisor/supervisor.js';
+import { AGENT_ROLES } from '../../config/src/index.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
@@ -259,6 +263,146 @@ function stringArray(record: Record<string, unknown>, field: string): readonly s
     throw new ExplicitBrainOperationalToolError('unsupported-tool', `requirement proposal ${field} must be a string array`);
   }
   return value;
+}
+
+/**
+ * Model-supplied helper arguments are untrusted input. A malformed argument is
+ * the model's mistake to correct, so the tool executor turns it into a typed
+ * failed tool result that keeps the call paired instead of throwing. This only
+ * covers the argument shape; a real dispatch or acceptance failure keeps its
+ * own error path.
+ */
+class ExplicitBrainToolArgumentError extends Error {}
+
+type ParsedHelperToolArguments =
+  | {
+      readonly toolId: 'dispatch_helper';
+      readonly selection: { readonly roleId: string; readonly configuredAgentId?: string };
+      readonly assignmentFields: InteractionHelperAssignmentFields;
+      readonly inputs: BusinessPayload;
+      readonly evidenceRefs: readonly EvidenceRef[];
+      readonly checkpointDescription: string;
+    }
+  | {
+      readonly toolId: 'accept_helper';
+      readonly helperCallId: string;
+      readonly refinedText: string;
+      readonly acceptanceRef: string;
+      readonly evidenceRefs: readonly EvidenceRef[];
+    };
+
+function parseHelperObject(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ExplicitBrainToolArgumentError(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseHelperString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ExplicitBrainToolArgumentError(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function parseHelperEvidenceRefs(value: unknown): readonly EvidenceRef[] {
+  if (!Array.isArray(value)) {
+    throw new ExplicitBrainToolArgumentError('evidenceRefs must be an array of scoped evidence references with an evidenceId');
+  }
+  return value.map((entry, index) => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new ExplicitBrainToolArgumentError(`evidenceRefs[${index}] must be an object carrying an evidenceId`);
+    }
+    const evidenceId = (entry as Record<string, unknown>).evidenceId;
+    if (evidenceId === null || typeof evidenceId !== 'object' || Array.isArray(evidenceId)
+      || typeof (evidenceId as Record<string, unknown>).value !== 'string') {
+      throw new ExplicitBrainToolArgumentError(
+        `evidenceRefs[${index}].evidenceId must be a scoped id object with a string value`,
+      );
+    }
+    try {
+      assertEvidenceRef(entry as EvidenceRef);
+    } catch (error) {
+      throw new ExplicitBrainToolArgumentError(
+        `evidenceRefs[${index}].evidenceId or evidence reference fields are invalid: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return entry as EvidenceRef;
+  });
+}
+
+function parseHelperToolArguments(call: ProviderToolCall): ParsedHelperToolArguments {
+  const args = call.arguments as Record<string, unknown>;
+  const evidenceRefs = parseHelperEvidenceRefs(args.evidenceRefs);
+  if (call.toolId === 'dispatch_helper') {
+    const selection = parseHelperObject(args.selection, 'dispatch_helper selection');
+    const { roleId, configuredAgentId } = selection;
+    if (typeof roleId !== 'string' || !(AGENT_ROLES as readonly string[]).includes(roleId)) {
+      throw new ExplicitBrainToolArgumentError(
+        `dispatch_helper selection.roleId must be one of ${AGENT_ROLES.join(', ')}`,
+      );
+    }
+    if (configuredAgentId !== undefined && typeof configuredAgentId !== 'string') {
+      throw new ExplicitBrainToolArgumentError('dispatch_helper selection.configuredAgentId must be a string when present');
+    }
+    const assignmentFields = parseHelperObject(args.assignmentFields, 'dispatch_helper assignmentFields');
+    const inputs = parseHelperObject(args.inputs, 'dispatch_helper inputs');
+    const objective = parseHelperString(assignmentFields.objective, 'dispatch_helper assignmentFields.objective');
+    const successCriteria = assignmentFields.successCriteria;
+    if (!Array.isArray(successCriteria) || !successCriteria.every((entry) => typeof entry === 'string' && entry.trim())) {
+      throw new ExplicitBrainToolArgumentError('dispatch_helper assignmentFields.successCriteria must be an array of non-empty strings');
+    }
+    return {
+      toolId: 'dispatch_helper',
+      selection: { roleId, ...(configuredAgentId === undefined ? {} : { configuredAgentId }) },
+      assignmentFields: assignmentFields as unknown as InteractionHelperAssignmentFields,
+      inputs: inputs as BusinessPayload,
+      evidenceRefs,
+      checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${successCriteria.join('; ')}. Owner acceptance is pending.`,
+    };
+  }
+  return {
+    toolId: 'accept_helper',
+    helperCallId: parseHelperString(args.helperCallId, 'accept_helper helperCallId'),
+    refinedText: parseHelperString(args.refinedText, 'accept_helper refinedText'),
+    acceptanceRef: parseHelperString(args.acceptanceRef, 'accept_helper acceptanceRef'),
+    evidenceRefs,
+  };
+}
+
+async function invalidHelperToolResult(input: {
+  readonly call: ProviderToolCall;
+  readonly scope: ScopeRef;
+  readonly rawEvidence: ProviderEvidenceSink;
+  readonly message: string;
+}): Promise<ProviderToolExecutionResult> {
+  const evidenceRef = await input.rawEvidence.write({
+    scope: input.scope,
+    kind: 'tool',
+    type: 'tool-argument-invalid',
+    locator: `explicit-brain/tool-argument-invalid/${input.call.callId}`,
+    content: input.message,
+  });
+  const evidenceRefs = [evidenceRef];
+  const error: ProviderError = {
+    errorId: `explicit-brain-tool-argument-invalid-${input.call.callId}`,
+    code: 'tool.argument.invalid',
+    category: 'validation',
+    phase: 'tool',
+    message: input.message,
+    ownerId: 'humanagent.runtime.explicit-brain',
+    retryable: 'retryable',
+    attention: 'foreground',
+    evidenceRefs,
+    nextAction: { kind: 'continue', ref: input.call.toolId },
+  };
+  return {
+    output: JSON.stringify({ status: 'failed', code: 'tool.argument.invalid', message: input.message, recoverable: true }),
+    outputRefs: [],
+    evidenceRefs,
+    status: 'failed',
+    error,
+  };
 }
 
 function parseTaskFlowKind(value: unknown): TaskFlowKind | undefined {
@@ -1093,26 +1237,24 @@ export function createProviderExplicitBrainInterpreter(input: {
           ],
           executeTool: {
             async execute({ call }) {
-              const args = call.arguments;
-              if (!Array.isArray(args.evidenceRefs)) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'helper evidenceRefs must be an array');
-              const evidenceRefs = args.evidenceRefs.map((ref) => { const evidence = ref as unknown as EvidenceRef; assertEvidenceRef(evidence); return evidence; });
+              if (call.toolId !== 'dispatch_helper' && call.toolId !== 'accept_helper') {
+                throw new ExplicitBrainOperationalToolError('unsupported-tool', `unknown interaction tool ${call.toolId}`);
+              }
+              let parsed: ParsedHelperToolArguments;
+              try {
+                parsed = parseHelperToolArguments(call);
+              } catch (error) {
+                if (!(error instanceof ExplicitBrainToolArgumentError)) throw error;
+                return invalidHelperToolResult({ call, scope, rawEvidence: input.rawEvidence, message: error.message });
+              }
               let result: unknown;
-              if (call.toolId === 'dispatch_helper') {
-                const selection = args.selection as { roleId?: unknown; configuredAgentId?: unknown } | undefined;
-                if (!selection || typeof selection.roleId !== 'string'
-                  || (selection.configuredAgentId !== undefined && typeof selection.configuredAgentId !== 'string')
-                  || !args.assignmentFields || !args.inputs || !Array.isArray(args.evidenceRefs)) {
-                  throw new ExplicitBrainOperationalToolError('unsupported-tool', 'invalid dispatch_helper arguments');
-                }
-                const assignmentFields = args.assignmentFields as Record<string, unknown>;
-                const objective = nonEmptyString(assignmentFields, 'objective');
-                const successCriteria = stringArray(assignmentFields, 'successCriteria');
+              if (parsed.toolId === 'dispatch_helper') {
                 result = await helpers.dispatchHelper({
-                  selection: { roleId: selection.roleId, ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }) },
-                  assignmentFields: args.assignmentFields as unknown as InteractionHelperAssignmentFields,
-                  inputs: args.inputs as BusinessPayload,
-                  evidenceRefs,
-                  checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${successCriteria.join('; ')}. Owner acceptance is pending.`,
+                  selection: parsed.selection,
+                  assignmentFields: parsed.assignmentFields,
+                  inputs: parsed.inputs,
+                  evidenceRefs: parsed.evidenceRefs,
+                  checkpointDescription: parsed.checkpointDescription,
                   conclude: ({ events }) => {
                     const raw = events.filter((event) => event.kind === 'provider.output')
                       .map((event) => ('summary' in event ? event.summary : '')).join('');
@@ -1129,20 +1271,14 @@ export function createProviderExplicitBrainInterpreter(input: {
                     };
                   },
                 });
-              } else if (call.toolId === 'accept_helper') {
-                const helperCallId = nonEmptyString(args, 'helperCallId');
-                const refinedText = nonEmptyString(args, 'refinedText');
-                const acceptanceRef = nonEmptyString(args, 'acceptanceRef');
-                if (!Array.isArray(args.evidenceRefs)) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'accept_helper evidenceRefs must be an array');
+              } else {
                 const refinedResult = {
-                  ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'accepted-helper', locator: helperCallId, content: refinedText }),
+                  ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'accepted-helper', locator: parsed.helperCallId, content: parsed.refinedText }),
                   view: { kind: 'utf8-text' as const },
                 };
-                result = await helpers.acceptHelper({ helperCallId, refinedResult, acceptanceRef,
-                  checkpointDescription: refinedText,
-                  acceptedBy: 'humanagent.runtime.explicit-brain', evidenceRefs });
-              } else {
-                throw new ExplicitBrainOperationalToolError('unsupported-tool', `unknown interaction tool ${call.toolId}`);
+                result = await helpers.acceptHelper({ helperCallId: parsed.helperCallId, refinedResult, acceptanceRef: parsed.acceptanceRef,
+                  checkpointDescription: parsed.refinedText,
+                  acceptedBy: 'humanagent.runtime.explicit-brain', evidenceRefs: parsed.evidenceRefs });
               }
               return { output: JSON.stringify(result), outputRefs: [], evidenceRefs: [] };
             },
