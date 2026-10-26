@@ -27,7 +27,7 @@
       ]
     },
     "executionContract": {
-      "callee": "humanagent-serve-task@2",
+      "callee": "humanagent-serve-task@3",
       "entry": "persisted_execution_plan",
       "exit": "task_terminal_projection",
       "executeNode": "execute_occurrence_task",
