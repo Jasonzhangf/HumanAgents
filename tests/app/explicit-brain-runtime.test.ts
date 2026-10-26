@@ -286,7 +286,7 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
      * request stream a partial answer and stay open while a second input is
      * handled, which a single buffered array cannot express.
      */
-    stream?: (wire: any) => AsyncIterable<unknown>; evidence?: typeof parentEvidence }) {
+    stream?: (wire: any, signal?: AbortSignal) => AsyncIterable<unknown>; evidence?: typeof parentEvidence }) {
     const evidence = options.evidence ?? parentEvidence;
     const transport = new V3ProviderHttpTransport<T>({
       binding: options.binding, baseUrl: 'http://recorded.test', source: 'http', evidence,
@@ -297,7 +297,7 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
           const wire = JSON.parse(init.body!);
           if (options.stream) {
             yield frame({ type: 'response.created', response: { id: 'recorded' } });
-            for await (const next of options.stream(wire)) yield frame(next);
+            for await (const next of options.stream(wire, init.signal ?? undefined)) yield frame(next);
             yield frame({ type: 'response.completed', response: { id: 'recorded' } });
             return;
           }
@@ -322,6 +322,168 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
  * prefix a busy journal leaves behind. Every other read and write is the real
  * journal, so the test observes the production shape instead of a mock.
  */
+// Continuous deltas are activity but never a completed unit. The actual
+// transport must be aborted before iterator teardown; a wrapper-only timeout
+// would leave this producer running. See astra-stream-plan section 7.
+for (const stopMode of ['accepted', 'rejected'] as const) {
+test(`explicit request budget stops and drains a continuously producing request (${stopMode})`, async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'explicit-budget', providerId: 'explicit-budget', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'controlled',
+    configDigest: 'sha256:budget', capabilityDigest: 'sha256:budget',
+  };
+  let produced = 0;
+  let drained = false;
+  let aborted = false;
+  const order: string[] = [];
+  const port = new RecordedParentPort({ binding, replay: [], stepDelayMs: 0,
+    async *stream(_wire, signal) {
+      try {
+        // Finite safety ceiling lets the old implementation fail without
+        // leaving a permanent fixture producer behind.
+        for (let index = 0; index < 100 && !signal?.aborted; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          produced += 1;
+          yield { type: 'response.reasoning_summary_text.delta', item_id: 'reasoning', delta: 'still thinking' };
+        }
+      } finally { aborted = signal?.aborted === true; drained = true; order.push('drained'); }
+    },
+  });
+  let acquired: Parameters<typeof port.start>[0] | undefined;
+  const start = port.start.bind(port);
+  port.start = async (request) => { acquired = request; return start(request); };
+  const stop = port.requestStop.bind(port);
+  port.requestStop = async (request) => {
+    order.push('stop');
+    if (stopMode === 'rejected') return { ...request, status: 'rejected', receivedAt: new Date().toISOString(),
+      evidenceRefs: [], ownerId: 'test', nextAction: { kind: 'wait' } };
+    return stop(request);
+  };
+  const settle = port.settle.bind(port);
+  port.settle = async (request) => { order.push('settle'); return settle(request); };
+  const close = port.close.bind(port);
+  port.close = async (request) => { order.push('close'); return close(request); };
+  const budgetStart = Date.now();
+  const options = {
+    ...deps, turnHelperJournal: deps.helperJournal, binding,
+    // Advance the injected budget only with actual fixture partials. Slow
+    // filesystem registration cannot accidentally turn this into a zero-fact
+    // startup timeout instead of the continuous-delta failure under test.
+    clock: { now: () => new Date(budgetStart + produced * 10).toISOString() },
+    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+    executionBudget: { maxSilentDurationMs: 200, noProgressAtMs: 60, maxTurnDurationMs: 1000 },
+    prepareAgentProvider: async (): Promise<AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>> => ({
+      roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'budget', baseUrl: binding.endpointRef },
+    }),
+  };
+  const interpreter = createProviderExplicitBrainInterpreter(options);
+  try {
+  await assert.rejects(() => interpreter.interpret({ interactionId: 'budget', inputRevision: 1,
+    sourceRef: 'ui:budget', rawInput: 'hello', clarifications: [], taskCandidates: [] }),
+  /no completed content unit/);
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const turns = await deps.parentJournal.readScopeOpenedTurns(scope);
+  const snapshot = await deps.parentJournal.readTurnSnapshot(turns[0]!.fact.turn);
+  assert.ok(snapshot.acceptedFacts.length > 0, 'partial facts make false failed-epoch closure observable');
+  if (stopMode === 'rejected') {
+    assert.equal(aborted, false);
+    assert.equal(snapshot.resourceClose, null);
+    assert.equal((await deps.parentJournal.readScopeExecutionFailures(scope)).length, 0);
+    assert.equal(await deps.helperJournal.readSemanticCheckpointExact(turns[0]!.fact.turn), null);
+    return;
+  }
+  assert.equal(aborted, true);
+  assert.equal(drained, true);
+  assert.equal(snapshot.resourceClose?.fact.result.state, 'closed');
+  assert.equal((await deps.parentJournal.readScopeExecutionFailures(scope)).length, 1,
+    'only a stopped, drained, released and eligible epoch is discharged');
+  assert.equal(await deps.helperJournal.readSemanticCheckpointExact(turns[0]!.fact.turn), null);
+  assert.ok(produced < 100);
+  assert.deepEqual(order, ['stop', 'drained', 'settle', 'close']);
+  const before = produced;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(produced, before, 'the producer really stopped');
+  } finally {
+    if (stopMode === 'rejected' && acquired !== undefined) {
+      await stop({ ...acquired, reason: 'fixture cleanup', ownerId: 'test' });
+      // This is fixture-only cleanup after the recovery assertions. Transport
+      // settlement waits for its observed abort before releasing the resource.
+      await settle(acquired);
+      await close(binding);
+    }
+  }
+});
+}
+
+// A start receipt can acquire the resource and then fail identity validation.
+// Probability unknown; losing that resource or falsely closing its epoch is
+// high impact. These three short real-journal cases cover successful cleanup,
+// rejected stop and thrown stop without introducing a second driver mock.
+for (const stopMode of ['accepted', 'rejected', 'throws'] as const) {
+test(`explicit acquired execution failure preserves stop responsibility (${stopMode})`, async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: `acquired-${stopMode}`, providerId: 'acquired', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'controlled',
+    configDigest: 'sha256:acquired', capabilityDigest: 'sha256:acquired',
+  };
+  const port = new RecordedParentPort({ binding, replay: [], stepDelayMs: 0 });
+  const start = port.start.bind(port);
+  const stop = port.requestStop.bind(port);
+  let acquired: Parameters<typeof port.start>[0] | undefined;
+  let stops = 0;
+  let closed = false;
+  port.start = async (request) => {
+    acquired = request;
+    const receipt = await start(request);
+    return { ...receipt, runtimeId: 'invalid-start-receipt' };
+  };
+  port.requestStop = async (request) => {
+    stops += 1;
+    assert.equal(request.runtimeId, acquired?.runtimeId);
+    assert.equal(request.executionEpoch, acquired?.executionEpoch);
+    if (stopMode === 'throws') throw new Error('controlled stop failed');
+    if (stopMode === 'rejected') return { ...request, status: 'rejected', receivedAt: new Date().toISOString(),
+      evidenceRefs: [], ownerId: 'test', nextAction: { kind: 'wait' } };
+    return stop(request);
+  };
+  const close = port.close.bind(port);
+  port.close = async (request) => { const receipt = await close(request); closed = receipt.state === 'closed'; return receipt; };
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, turnHelperJournal: deps.helperJournal, binding,
+    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'acquired', baseUrl: binding.endpointRef } }),
+  });
+  try {
+    await assert.rejects(() => interpreter.interpret({ interactionId: `acquired-${stopMode}`, inputRevision: 1,
+      sourceRef: 'ui:acquired', rawInput: 'hello', clarifications: [], taskCandidates: [] }),
+    /provider start receipt/);
+    assert.equal(stops, 1, 'submit did acquire an execution even though it never returned');
+    const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+    const failures = await deps.parentJournal.readScopeExecutionFailures(scope);
+    assert.equal(failures.length, 0, 'zero-fact continuation or unresolved stop retains its original recovery lane');
+    const turns = await deps.parentJournal.readScopeOpenedTurns(scope);
+    const snapshot = await deps.parentJournal.readTurnSnapshot(turns[0]!.fact.turn);
+    assert.equal(snapshot.resourceClose !== null, stopMode === 'accepted');
+    assert.equal(closed, stopMode === 'accepted');
+    assert.equal(await deps.helperJournal.readSemanticCheckpointExact(turns[0]!.fact.turn), null);
+  } finally {
+    // Only this fixture's still-active resource is released. The assertions
+    // above describe product cleanup before fixture teardown.
+    if (!closed && acquired !== undefined) {
+      await stop({ ...acquired, reason: 'fixture cleanup', ownerId: 'test' });
+      await port.settle(acquired);
+      await close(binding);
+    }
+  }
+});
+}
+
 class RejectedAcceptanceJournal implements InteractionParentTurnRawJournalPort, InteractionParentOpenedTurnScopeReadPort {
   private accepted = 0;
   constructor(
@@ -2671,6 +2833,9 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
         await firstMayFinish;
         yield { type: 'response.output_text.done', item_id: 'text-live', text: firstAnswer };
       } });
+    let stops = 0;
+    const stop = port.requestStop.bind(port);
+    port.requestStop = async (request) => { stops += 1; return stop(request); };
     const interpreter = createProviderExplicitBrainInterpreter({
       organId: scope.organId, interactionScopeId: scope.interactionScopeId,
       parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
@@ -2711,6 +2876,7 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
     assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
       'an overlapping input never freezes the streaming turn');
     assert.equal(providerRequests, 1, 'the refused input never dispatches a Provider request');
+    assert.equal(stops, 0, 'rejecting the second input must not stop the first');
     assert.equal((await parentJournal.readScopeOpenedTurns(scope)).length, 1,
       'the refused input never opens a second turn');
 
@@ -2718,6 +2884,7 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
     releaseFirst();
     const served = await live;
     assert.equal(served.kind, 'requirement');
+    assert.equal(stops, 0, 'the legal first stream finishes without cancellation');
     const finalSnapshot = await parentJournal.readTurnSnapshot(liveTurn);
     assert.equal(finalSnapshot.abandonment, null);
     assert.ok(finalSnapshot.acceptedFacts.some(({ fact }) =>
@@ -2732,18 +2899,11 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
     await rm(root, { recursive: true, force: true });
   }
 });
-test('provider explicit brain interpreter keeps the intake usable after an interpret failure whose provider close also fails', async () => {
-  // Failure basis: one interpret batch whose Provider stream broke with the
-  // journal briefly rejecting the next durable raw fact. The owner process
-  // settled, closed and threw, but the old catch lane threw the close error
-  // immediately, so no durable terminal fact was ever written for the epoch it
-  // had just opened. The turn stayed "pending" forever and every later input in
-  // the scope was refused because the live lease cannot prove its own stream is
-  // dead: the whole explicit intake froze until a daemon restart. Impact: a
-  // single transient failure bricks intake. Cost: one real lease, one failing
-  // recorded Provider stream and one healthy replay on the existing JSONL
-  // consumer. Probability: any transient raw-acceptance or socket failure on
-  // the intake stream.
+test('provider explicit brain interpreter retains recovery after an interpret failure whose provider close also fails', async () => {
+  // A rejected durable raw fact makes drain/settlement fail and physical close
+  // remain pending. The old catch nevertheless closed the epoch. Impact: lost
+  // recovery responsibility. Cost: one lease and recorded stream. Probability:
+  // any durable acceptance failure while an execution still owns resources.
   const root = join(parentFixtureRoot, `intake-failure-${randomUUID()}`);
   await mkdir(root, { recursive: true });
   const binding: ProviderBinding = {
@@ -2781,17 +2941,6 @@ test('provider explicit brain interpreter keeps the intake usable after an inter
         model: binding.modelRef, route: 'intake-failure', baseUrl: binding.endpointRef },
       binding, port: failingPort,
     };
-    const healthyPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence, respond: async () => [
-      { type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
-        kind: 'answer', normalizedInput: '4 加 4 等于几？', knownFacts: [], answer: '8', decisionRefs: [],
-      }) },
-    ] });
-    const healthyComposition: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef> = {
-      roleId: 'interaction' as const, source: 'http' as const,
-      provider: { source: 'http' as const, provider: 'http' as const, binding: binding.bindingId, protocol: 'responses',
-        model: binding.modelRef, route: 'intake-failure-ok', baseUrl: binding.endpointRef },
-      binding, port: healthyPort,
-    };
     const interpreter = createProviderExplicitBrainInterpreter({
       organId: scope.organId, interactionScopeId: scope.interactionScopeId,
       parentJournal: parentWithRejection, checkpointJournal: helperJournal, helperJournal,
@@ -2802,19 +2951,12 @@ test('provider explicit brain interpreter keeps the intake usable after an inter
       lease,
       prepareAgentProvider: async () => {
         prepared += 1;
-        return prepared === 1 ? failingComposition : healthyComposition;
+        if (prepared !== 1) throw new Error('unresolved recovery must block another provider');
+        return failingComposition;
       },
     });
-    // The committed record kind is new in this change, so the durable read is
-    // probed instead of assumed: against the pre-fix build the record cannot
-    // exist at all, which is exactly the red state this test reports.
-    const readExecutionFailures = async (): Promise<number> => {
-      const reader = parentJournal as unknown as {
-        readonly readScopeExecutionFailures?: (input: typeof scope) => Promise<readonly unknown[]>;
-      };
-      if (reader.readScopeExecutionFailures === undefined) return 0;
-      return (await reader.readScopeExecutionFailures(scope)).length;
-    };
+    const readExecutionFailures = async (): Promise<number> =>
+      (await parentJournal.readScopeExecutionFailures(scope)).length;
     const failedRequest = {
       interactionId: 'interaction-intake-failure', inputRevision: 1, sourceRef: 'ui:intake-failure',
       rawInput: '4 加 4 等于几？', clarifications: [], taskCandidates: [],
@@ -2826,22 +2968,17 @@ test('provider explicit brain interpreter keeps the intake usable after an inter
       (error: unknown) => error instanceof AggregateError
         && error.message.includes('provider raw fact was rejected by durable acceptance'),
     );
-    assert.equal(await readExecutionFailures(), 1,
-      'the failed epoch is durably closed by its own fact');
-    // Without the fix this next input is refused with "the committed execution
-    // owner is still the current active lease owner; a live Provider stream is
-    // not an interrupted crash": the turn stayed pending forever.
+    assert.equal(await readExecutionFailures(), 0,
+      'failed drain and resource close cannot discharge recovery responsibility');
+    // A later input must not replace the live owner's unresolved execution.
     const nextRequest = {
       interactionId: 'interaction-after-intake-failure', inputRevision: 1, sourceRef: 'ui:after-intake-failure',
       rawInput: '4 加 4 等于几？', clarifications: [], taskCandidates: [],
     };
-    const second = await interpreter.interpret(nextRequest);
-    assert.equal(second.kind, 'answer');
-    if (second.kind !== 'answer') throw new Error('expected an answer');
-    assert.equal(second.answer, '8');
-    assert.equal(prepared, 2, 'the second interpret drives its own fresh provider');
-    assert.equal(await readExecutionFailures(), 1, 'the closure is written exactly once');
-    assert.ok((await parentJournal.readScopeOpenedTurns(scope)).length >= 2);
+    await assert.rejects(() => interpreter.interpret(nextRequest), /current active lease owner/);
+    assert.equal(prepared, 1, 'the second interpret cannot replace unresolved execution');
+    assert.equal(await readExecutionFailures(), 0);
+    assert.equal((await parentJournal.readScopeOpenedTurns(scope)).length, 1);
   } finally {
     await lease?.release();
     await rm(root, { recursive: true, force: true });

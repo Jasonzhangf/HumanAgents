@@ -29,7 +29,9 @@ import {
   TASK_FLOW_KINDS,
   validateInteractionHelperAssignmentFields,
 } from '../../contracts/src/index.js';
-import { ProviderAgentDriver, type ProviderToolExecutionResult } from '../../adapters/provider/src/index.js';
+import { ProviderAgentDriver, type ProviderAgentEvent, type ProviderToolExecutionResult } from '../../adapters/provider/src/index.js';
+import { BudgetedProviderObservations, DEFAULT_UI_EXECUTION_EVENT_BUDGET } from '../../runtime/src/ui-runtime/execution-budget.js';
+import type { AgentIoEventBudget } from '../../runtime/src/agent-io/types.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
 import { prepareScopeSemanticHistory } from '../../runtime/src/context/interaction-semantic-context.js';
 import { loadBuiltinPromptSegments, type AgentPromptSegment } from '../../agent-templates/src/index.js';
@@ -683,6 +685,7 @@ async function holdsDispatchedHelper(
 }
 
 export function createProviderExplicitBrainInterpreter(input: {
+  readonly executionBudget?: Partial<AgentIoEventBudget>;
   readonly lease?: SupervisorLease | (() => SupervisorLease | undefined);
   readonly port?: ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>;
   readonly organId: OrganId;
@@ -1165,8 +1168,11 @@ export function createProviderExplicitBrainInterpreter(input: {
       // this batch's own epoch is bound to it, never to a newer reconciliation.
       let openedExecutionOwner: OccurrenceExecutionOwner | null = null;
       let committedInput = false;
-      let submitted = false;
+      let observationDrained = false;
       let settleAttempted = false;
+      let observations: BudgetedProviderObservations<ProviderAgentEvent<InteractionParentProviderExecutionIdentityRef>> | undefined;
+      const operationId = continuation?.fact.execution.operationId ?? id('operation', `explicit-interpret-${identity}`);
+      const execution = { runtimeId, organId: input.organId, operationId, executionEpoch, interactionTurn: turn };
       /**
        * Set only when this exact batch produced a durable terminal output that
        * no decision can be parsed from. Every other failure keeps its own
@@ -1181,8 +1187,6 @@ export function createProviderExplicitBrainInterpreter(input: {
             .some((key) => turnProviderBinding[key] !== continuation.fact.providerBinding![key]))) {
           throw new Error('interaction parent continuation requires the original full provider binding on an owned composition');
         }
-        const operationId = continuation?.fact.execution.operationId ?? id('operation', `explicit-interpret-${identity}`);
-        const execution = { runtimeId, organId: input.organId, operationId, executionEpoch, interactionTurn: turn };
         const scope = continuation?.fact.scope ?? { organId: input.organId, operationId };
         const initialInput = continuation?.fact.initialInput ?? {
           ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(effectiveRequest) }),
@@ -1235,6 +1239,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           registerRequest: (registration) => createdOwner.registerRequest(registration),
           acceptRawFact: (envelope) => createdOwner.acceptRawFact(envelope),
           requestContext: createdOwner.requestContext,
+          onRequestLifecycle: (event) => observations?.noteLifecycle(event),
           tools: [
             { toolId: 'dispatch_helper', description: 'Dispatch independent bounded helper work. Return is not acceptance. Include the required structured helper result contract in the bounded inputs.', inputSchema: {
               type: 'object', properties: {
@@ -1302,6 +1307,11 @@ export function createProviderExplicitBrainInterpreter(input: {
             },
           },
         });
+        observations = new BudgetedProviderObservations(
+          driver.observe({ runtimeId })[Symbol.asyncIterator](),
+          { ...DEFAULT_UI_EXECUTION_EVENT_BUDGET, ...input.executionBudget },
+          () => new Date(input.clock.now()).getTime(),
+        );
         await driver.start({ ...execution, assignmentId: `explicit-interpret-${identity}` });
         await driver.submit({
           ...execution,
@@ -1309,9 +1319,13 @@ export function createProviderExplicitBrainInterpreter(input: {
           assignmentId: `explicit-interpret-${identity}`,
           payload: {},
         });
-        submitted = true;
-        for await (const event of driver.observe({ runtimeId })) {
-          if (event.terminalState !== undefined) break;
+        while (true) {
+          const exhausted = observations.exhausted();
+          if (exhausted !== undefined) throw new Error(`interaction request budget exhausted: ${exhausted}`);
+          const step = await observations.next();
+          if (step.kind === 'deadline') continue;
+          if (step.step.done) { observationDrained = true; break; }
+          observations.note(step.step.value.providerEvent);
         }
         settleAttempted = true;
         const closure = await driver.settle({ runtimeId, executionEpoch });
@@ -1354,24 +1368,69 @@ export function createProviderExplicitBrainInterpreter(input: {
         };
         retained = live;
       } catch (error) {
-        let failure = error;
-        if (submitted && !settleAttempted && driver !== undefined) {
-          settleAttempted = true;
+        let failure: unknown = error;
+        const cleanupFailures: unknown[] = [];
+        // Only this local driver can own this execution. In particular, submit
+        // can throw after start acquired a resource but before returning to us.
+        let executionReleased = driver?.hasAcquiredExecution() !== true;
+        const priorSettlement = driver?.settlement();
+        if (observationDrained && priorSettlement !== undefined
+          && priorSettlement.state !== 'waiting' && priorSettlement.state !== 'unknown'
+          && priorSettlement.resourceRelease.state === 'released') executionReleased = true;
+        if (driver?.hasAcquiredExecution() && !executionReleased && !settleAttempted) {
+          let stopped = false;
+          let stopRejected = false;
+          let stopError: unknown;
           try {
+            const receipt = await driver.requestStop(execution);
+            stopped = receipt.requested;
+            stopRejected = !stopped;
+          } catch (error) {
+            stopError = error;
+          }
+          let drained = false;
+          // Never queue iterator.return ahead of the abort that releases its
+          // pending next. Budget wrapper close is not producer drain evidence.
+          if (stopped) {
+            try {
+              await driver.closeProductionAndDrain({ execution, boundaryId: `explicit-failure-${identity}` });
+              drained = true;
+            } catch (drainError) {
+              cleanupFailures.push(drainError);
+            }
+          }
+          try {
+            // A previous waiting/unknown or failed settle predates this stop.
+            // Read the real post-stop settlement before deciding release.
             await driver.settle({ runtimeId, executionEpoch });
+            const settlement = driver.settlement();
+            const released = settlement !== undefined
+              && settlement.state !== 'waiting' && settlement.state !== 'unknown'
+              && settlement.resourceRelease.state === 'released';
+            // A rejected stop can mean the provider already reached its own
+            // terminal. The real post-stop settlement, not the stop receipt,
+            // decides whether this execution is released.
+            executionReleased = released && (stopped ? drained : true);
+            if (stopError !== undefined) cleanupFailures.push(stopError);
+            if (!executionReleased) {
+              if (stopRejected) cleanupFailures.push(new Error('interaction provider stop was rejected'));
+              cleanupFailures.push(new Error('interaction execution stop/drain/settlement is incomplete'));
+            }
           } catch (settleError) {
-            failure = new AggregateError([failure, settleError], 'interaction observation and settlement failed');
+            failure = new AggregateError(
+              [failure, settleError, ...(stopError === undefined ? [] : [stopError])],
+              'interaction observation and settlement failed',
+            );
           }
         }
-        // Every cleanup step below runs even when an earlier one fails. A
-        // failed close used to throw away the only chance to record a durable
-        // terminal fact, so one broken stream left the whole interaction scope
-        // blocked until the daemon restarted.
-        const cleanupFailures: unknown[] = [];
+        // Attempt physical close even after a cleanup failure, but record only
+        // its real receipt and retain recovery until all release evidence exists.
+        let compositionClosed = owned === undefined;
         if (owned !== undefined) {
           let receipt: Awaited<ReturnType<typeof closeAgentProvider>> | undefined;
           try {
             receipt = await closeAgentProvider(owned, { returnReceipt: true });
+            compositionClosed = true;
           } catch (closeError) {
             cleanupFailures.push(closeError);
           }
@@ -1404,7 +1463,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           } catch (closeError) {
             cleanupFailures.push(closeError);
           }
-        } else if (owner !== undefined && committedInput) {
+        } else if (owner !== undefined && committedInput && executionReleased && compositionClosed) {
           // This batch failed before any terminal output, and this process owns
           // the stream that died, so it is the only party that can honestly
           // attest that this epoch can never deliver. A shape with its own
@@ -1440,6 +1499,8 @@ export function createProviderExplicitBrainInterpreter(input: {
           );
         }
         throw failure;
+      } finally {
+        await observations?.close();
       }
       return finish(live, effectiveRequest);
     },
