@@ -3912,6 +3912,139 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
   }
 });
 
+// Failure basis: the helper tool entry asserted EvidenceRef and roleId inside
+// tool execution, outside the model-correctable tool result shape. One invalid
+// model argument therefore threw a bare ContractError/TypeError: the interpret
+// call failed with a 500 and the turn kept a tool call without a committed
+// result. Impact: a single malformed helper argument bricks the interaction.
+// Cost: one recorded parent run with three rejected rounds and one valid retry.
+test('provider explicit brain returns invalid helper tool arguments to the model and completes after a valid retry', async () => {
+  const dependencies = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-helper-args', providerId: 'provider-helper-args', protocol: 'responses',
+    endpointRef: 'recorded://helper-args', modelRef: 'model-helper-args',
+    configDigest: 'sha256:helper-args-config', capabilityDigest: 'sha256:helper-args-capability',
+  };
+  const childBinding = { ...binding, bindingId: 'child-helper-args', modelRef: 'model-child-helper-args' };
+  const finalAnswer = `validated helper ${'answer body '.repeat(80)}`;
+  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'helper argument validation', knownFacts: [], answer: finalAnswer, decisionRefs: [] });
+  const assignmentFields = {
+    objective: 'verify helper argument validation', targetRefs: [], expectedOutputRefs: [],
+    successCriteria: ['return one bounded result'], failureCriteria: ['none'], incompleteCriteria: ['partial'],
+    requiredCapabilities: [], mergeGate: 'not-required',
+  };
+  const invalidCalls = ['invalid-evidence-id', 'missing-evidence-id', 'invalid-role'];
+  const dispatchCall = (callId: string, value: Readonly<Record<string, unknown>>) => ({
+    type: 'response.output_item.done', output_index: 1,
+    item: { type: 'function_call', call_id: callId, name: 'dispatch_helper', arguments: JSON.stringify(value) },
+  });
+  const wires: any[] = [];
+  const toolOutputs = new Map<string, any>();
+  const parent = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire) => {
+    wires.push(wire);
+    const results = wire.input.filter((item: any) => item.type === 'function_call_output');
+    for (const result of results) {
+      // The wire carries the accepted evidence footer after the JSON output;
+      // parse the tool result payload itself, not the footer decoration.
+      if (!toolOutputs.has(result.call_id)) toolOutputs.set(result.call_id, JSON.parse(String(result.output).split('\n[HumanAgent evidence refs]')[0]!));
+    }
+    if (results.length === 0) {
+      return [dispatchCall('invalid-evidence-id', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
+        inputs: { question: 'child-only-input' },
+        evidenceRefs: [{
+          evidenceId: { scope: 'evidence', value: '' }, kind: 'tool', source: 'parent',
+          locator: 'parent://invalid-evidence-id', scope: { organId: { scope: 'organ', value: 'explicit-test' } },
+        }],
+      })];
+    }
+    if (results.length === 1) {
+      return [dispatchCall('missing-evidence-id', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
+        inputs: { question: 'child-only-input' },
+        evidenceRefs: [{
+          kind: 'tool', source: 'parent', locator: 'parent://missing-evidence-id',
+          scope: { organId: { scope: 'organ', value: 'explicit-test' } },
+        }],
+      })];
+    }
+    if (results.length === 2) {
+      return [dispatchCall('invalid-role', {
+        selection: { roleId: 'reviewer' }, assignmentFields,
+        inputs: { question: 'child-only-input' }, evidenceRefs: [],
+      })];
+    }
+    if (results.length === 3) {
+      return [dispatchCall('valid-dispatch', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
+        inputs: { question: 'child-only-input' }, evidenceRefs: [],
+      })];
+    }
+    if (results.length === 4) {
+      const dispatched = toolOutputs.get('valid-dispatch');
+      assert.ok(dispatched?.identity?.helperCallId, 'the valid dispatch must return a helper identity');
+      return [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'accept-valid', name: 'accept_helper',
+        arguments: JSON.stringify({ helperCallId: dispatched.identity.helperCallId, refinedText: 'validated helper result', acceptanceRef: 'acceptance:helper-args', evidenceRefs: [] }) } }];
+    }
+    assert.equal(results.length, 5);
+    return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
+  } });
+  const starts: Parameters<typeof parent.start>[0][] = [];
+  const start = parent.start.bind(parent);
+  parent.start = async (input) => { starts.push(input); return start(input); };
+  const interpreter = createProviderExplicitBrainInterpreter({ ...dependencies, port: parent, binding,
+    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+    helperFactory: async ({ selection, assignment, execution }) => {
+      assert.deepEqual(selection, { roleId: 'review', configuredAgentId: 'independent-child' });
+      const child = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], respond: async () => [{
+        type: 'response.output_text.done', item_id: 'child',
+        text: JSON.stringify({ agentId: 'independent-child', producedArtifactRefs: [], producedArtifactDigests: [],
+          status: 'succeeded', summary: 'validated child summary', outputRefs: [], evidenceRefs: [], nextAction: 'wait', conditionRef: 'condition:validated' }),
+      }] });
+      return { binding: childBinding, driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({ port: child, binding: childBinding,
+        ...execution, organId: assignment.organId, helper: assignment, assignmentId: assignment.assignmentId,
+        scope: { organId: assignment.organId, operationId: execution.operationId }, inputRefs: [] }),
+      close: async () => { const receipt = await child.close(childBinding); assert.equal(receipt.state, 'closed'); } };
+    },
+  });
+  try {
+    const result = await interpreter.interpret({
+      interactionId: 'helper-args', inputRevision: 1, sourceRef: 'test:helper-args',
+      rawInput: 'helper argument validation', clarifications: [], taskCandidates: [],
+    });
+    assert.equal(result.kind, 'answer');
+    if (result.kind !== 'answer') throw new Error('expected the retried turn to answer');
+    assert.equal(result.answer, finalAnswer);
+    for (const callId of invalidCalls) {
+      const output = toolOutputs.get(callId);
+      assert.equal(output.status, 'failed', `${callId} must return a failed tool result`);
+      assert.equal(output.code, 'tool.argument.invalid');
+      assert.equal(output.recoverable, true);
+    }
+    assert.ok(String(toolOutputs.get('invalid-evidence-id').message).includes('evidenceId'));
+    assert.ok(String(toolOutputs.get('missing-evidence-id').message).includes('evidenceId'));
+    assert.ok(String(toolOutputs.get('invalid-role').message).includes('roleId'));
+    const turn = starts[0]!.interactionTurn;
+    const snapshot = await dependencies.parentJournal.readTurnSnapshot(turn);
+    const facts = snapshot.acceptedFacts.map(({ fact }) => fact.envelope.fact);
+    const resultCallIds = facts.flatMap((fact) => fact.kind === 'tool-result' ? [fact.callId] : []);
+    for (const callId of [...invalidCalls, 'valid-dispatch', 'accept-valid']) {
+      assert.ok(resultCallIds.includes(callId), `${callId} must have a committed tool result so the turn stays paired`);
+    }
+    for (const fact of facts) {
+      if (fact.kind !== 'tool-result' || !invalidCalls.includes(fact.callId)) continue;
+      assert.equal(fact.result.status, 'failed');
+      assert.equal(fact.result.error?.category, 'validation');
+      assert.equal(fact.result.error?.retryable, 'retryable');
+      assert.equal(fact.result.error?.nextAction.kind, 'continue');
+    }
+    assert.ok(await dependencies.checkpointJournal.readSemanticCheckpointExact(turn), 'the completed turn must still commit its semantic checkpoint');
+    assert.equal(wires.length, 6);
+  } finally {
+    const receipt = await parent.close(binding); assert.equal(receipt.state, 'closed');
+  }
+});
+
 test('provider explicit brain interpreter accepts the live requirement contract with intent owned by proposal', async () => {
   const binding: ProviderBinding = {
     bindingId: 'binding-explicit-live-requirement',
