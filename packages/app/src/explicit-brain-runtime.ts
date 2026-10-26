@@ -740,54 +740,50 @@ export function createProviderExplicitBrainInterpreter(input: {
           journal: input.parentJournal,
           rawContent: input.rawContent,
         });
-        // A committed owner reconciliation means the turn already continued
-        // into a newer physical epoch, so the recovery owner is the reconciled
-        // replacement owner, never the original turn-input owner. The lane is
-        // the active epoch's execution failure, not the abandonment lane: an
-        // abandonment fact must match the turn-input epoch, and it is that
-        // continued epoch (not epoch 1) which actually died.
-        const snapshot = await input.parentJournal.readTurnSnapshot(pendingTurn.fact.turn);
-        const latestReconciliation = snapshot.ownerReconciliations.at(-1);
-        if (latestReconciliation === undefined) {
-          const eligibility = await owner.readAbandonmentEligibility();
-          if (!eligibility.abandonable) {
-            throw refuse(`it cannot be discharged: ${eligibility.heldReason}`);
+        // One durable snapshot decides the lane. A committed owner
+        // reconciliation means the turn already continued into a newer
+        // physical epoch, so the recovery lane is that epoch's execution
+        // failure; abandonment is reserved for the unreconciled turn input.
+        const laneOf = async (snapshot: Awaited<ReturnType<typeof input.parentJournal.readTurnSnapshot>>) => {
+          const reconciliation = snapshot.ownerReconciliations.at(-1);
+          if (reconciliation === undefined) {
+            const eligibility = await owner.readAbandonmentEligibility();
+            return { reconciliation, heldReason: eligibility.abandonable ? undefined : eligibility.heldReason };
           }
-        } else {
           const eligibility = await owner.readExecutionFailureEligibility();
-          if (!eligibility.closable) {
-            throw refuse(`it cannot be discharged: ${eligibility.heldReason}`);
-          }
-        }
-        const discharge = async () => {
-          if (latestReconciliation === undefined) {
-            return owner.abandonInterruptedTurn({
-              reason: 'provider-interrupted-without-terminal-output',
-              abandonedAt: input.clock.now(),
-            });
-          }
-          return owner.closeFailedEpoch({ failedAt: input.clock.now() });
+          return { reconciliation, heldReason: eligibility.closable ? undefined : eligibility.heldReason };
         };
         if (activeLease === undefined) {
           // No authenticated lifecycle authority is configured, so nothing can
           // prove that the previous execution owner stopped writing. A
           // shape-only discharge would freeze a possibly live request, so hold
           // the turn and keep its recovery responsibility instead of writing an
-          // abandonment fact the record shape cannot justify.
+          // abandonment fact the record shape cannot justify. A shape that
+          // holds on its own still reports its own reason first: a closed turn,
+          // an unknown tool effect or a cancelled request is not a missing
+          // authority.
+          const shape = await laneOf(await input.parentJournal.readTurnSnapshot(pendingTurn.fact.turn));
+          if (shape.heldReason !== undefined) throw refuse(`it cannot be discharged: ${shape.heldReason}`);
           throw refuse('no authenticated supervisor lease authority is configured to prove the previous execution owner stopped');
         }
-        // The owner that must be proven stopped is the one currently owning the
-        // active epoch: the reconciled replacement owner when a reconciliation
-        // is committed, the original turn-input owner otherwise.
-        const activeOwner = latestReconciliation?.fact.replacementOwner ?? pendingTurn.fact.executionOwner;
-        // Authenticate the active owner, decide, and commit inside one
-        // lease-guard critical section. Level 1 refuses a live owner; level 2
-        // discharges only with the current lease record's durable termination
-        // receipt for that exact owner.
+        // Authenticate the active owner, decide the lane and commit inside one
+        // lease-guard critical section. Every durable read happens after the
+        // guard is held: a snapshot cached before it can already name an owner
+        // another request replaced, and closing that newer epoch as failed
+        // would terminate a live stream.
         await activeLease.withCurrentLeaseOwner(async (authenticatedCaller) => {
           // Read the freshest durable record inside the guard: the cached getter
           // could predate a concurrent takeover write.
           const current = await activeLease.refresh();
+          const snapshot = await input.parentJournal.readTurnSnapshot(pendingTurn.fact.turn);
+          const lane = await laneOf(snapshot);
+          const latestReconciliation = lane.reconciliation;
+          const activeOwner = latestReconciliation?.fact.replacementOwner
+            ?? snapshot.turnInput?.fact.executionOwner;
+          if (lane.heldReason !== undefined) throw refuse(`it cannot be discharged: ${lane.heldReason}`);
+          // Level 1 refuses a live owner; level 2 discharges only with the
+          // current lease record's durable termination receipt for that exact,
+          // freshly read owner.
           if (activeOwner !== undefined
             && authenticatedCaller.daemonLeaseId === activeOwner.daemonLeaseId
             && authenticatedCaller.daemonGeneration === activeOwner.daemonGeneration
@@ -815,7 +811,22 @@ export function createProviderExplicitBrainInterpreter(input: {
               + ` (committed generation ${activeOwner.daemonGeneration}, current generation ${current.generation}, ${window})`,
             );
           }
-          await discharge();
+          if (latestReconciliation === undefined) {
+            await owner.abandonInterruptedTurn({
+              reason: 'provider-interrupted-without-terminal-output',
+              abandonedAt: input.clock.now(),
+            });
+            return;
+          }
+          // The closure is bound to the exact epoch and owner authenticated in
+          // this guard, so a newer reconciliation is never closed instead.
+          await owner.closeFailedEpoch({
+            failedAt: input.clock.now(),
+            authenticated: {
+              executionEpoch: latestReconciliation.fact.effectiveExecutionEpoch,
+              executionOwner: latestReconciliation.fact.replacementOwner,
+            },
+          });
         });
       };
       // The live task list is rebuilt from the current coordinator on every
@@ -988,6 +999,9 @@ export function createProviderExplicitBrainInterpreter(input: {
       const turnProviderBinding = owned === undefined ? input.binding : owned.binding;
       let driver: ProviderAgentDriver<InteractionParentProviderExecutionIdentityRef> | undefined;
       let owner: InteractionParentTurnRawOwner | undefined;
+      // The exact execution owner this batch opened its epoch under. A close of
+      // this batch's own epoch is bound to it, never to a newer reconciliation.
+      let openedExecutionOwner: OccurrenceExecutionOwner | null = null;
       let committedInput = false;
       let submitted = false;
       let settleAttempted = false;
@@ -1020,6 +1034,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             instructions: async () => ({ text: interpreterPrompt(effectiveRequest, await loadPromptSegments()), toolSurface: 'intake-decision' }),
           });
           owner = createdOwner;
+          openedExecutionOwner = executionOwner ?? null;
           await createdOwner.openTurnInput();
           committedInput = true;
           return createdOwner;
@@ -1249,7 +1264,13 @@ export function createProviderExplicitBrainInterpreter(input: {
                 ? 'the durable helper turn read port is unavailable'
                 : await holdsDispatchedHelper(input.turnHelperJournal, owner.turn);
               if (heldReason === undefined) {
-                await owner.closeFailedEpoch({ failedAt: input.clock.now() });
+                await owner.closeFailedEpoch({
+                  failedAt: input.clock.now(),
+                  authenticated: {
+                    executionEpoch,
+                    executionOwner: openedExecutionOwner,
+                  },
+                });
               }
             }
           } catch (closeError) {

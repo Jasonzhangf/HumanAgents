@@ -542,6 +542,16 @@ export interface InteractionParentTurnRawOwner {
    */
   closeFailedEpoch(input: {
     readonly failedAt: string;
+    /**
+     * The physical epoch and execution owner the caller authenticated before
+     * attempting the closure. The closure is bound to exactly this epoch and
+     * owner, so a newer reconciliation or epoch opened by a concurrent request
+     * is refused instead of being closed as failed.
+     */
+    readonly authenticated: {
+      readonly executionEpoch: number;
+      readonly executionOwner: OccurrenceExecutionOwner | null;
+    };
   }): Promise<InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>>;
 }
 
@@ -751,6 +761,25 @@ function activeExecutionState(
 
 function ignoredRequests(snapshot: InteractionParentTurnSnapshot): readonly string[] {
   return [...new Set(snapshot.ownerReconciliations.flatMap((entry) => entry.fact.unsettledRequestIds))];
+}
+
+/**
+ * Whether the snapshot still names exactly the epoch and owner the caller
+ * authenticated. A missing owner is only equal to a missing owner: a turn that
+ * gained an owner is a different active epoch, never the one being closed.
+ */
+function sameAuthenticatedActiveState(
+  snapshot: InteractionParentTurnSnapshot,
+  authenticated: {
+    readonly executionEpoch: number;
+    readonly executionOwner: OccurrenceExecutionOwner | null;
+  },
+): boolean {
+  const active = activeExecutionState(snapshot);
+  if (active.execution.executionEpoch !== authenticated.executionEpoch) return false;
+  if (authenticated.executionOwner === null) return active.executionOwner === null;
+  return active.executionOwner !== null
+    && sameOccurrenceExecutionOwner(active.executionOwner, authenticated.executionOwner);
 }
 
 /**
@@ -1638,15 +1667,33 @@ export function createInteractionParentTurnRawOwner(
 
   async function commitExecutionFailure(input: {
     readonly failedAt: string;
+    readonly authenticated: {
+      readonly executionEpoch: number;
+      readonly executionOwner: OccurrenceExecutionOwner | null;
+    };
   }): Promise<InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>> {
     if (typeof input.failedAt !== 'string' || input.failedAt.trim() === '') {
       throw new ContractError('interaction parent epoch failure requires a failedAt timestamp');
+    }
+    if (!Number.isSafeInteger(input.authenticated.executionEpoch) || input.authenticated.executionEpoch < 1) {
+      throw new ContractError('interaction parent epoch failure requires a positive authenticated execution epoch');
+    }
+    if (input.authenticated.executionOwner !== null) {
+      validateOccurrenceExecutionOwner(input.authenticated.executionOwner);
     }
     const planSnapshot = await journal.readTurnSnapshot(turn);
     const existing = planSnapshot.executionFailure;
     // An exact retry reuses the first committed closure; a repeated failure
     // never writes a second fact and never conflicts with itself.
     if (existing !== null) return existing;
+    // The closure only ever targets the epoch and owner the caller
+    // authenticated. A stale read from before a concurrent reconciliation must
+    // never close the newest physical epoch.
+    if (!sameAuthenticatedActiveState(planSnapshot, input.authenticated)) {
+      throw new ContractError(
+        'interaction parent epoch failure requires the authenticated active epoch and owner; a newer reconciliation or epoch must never be closed',
+      );
+    }
     const eligibility = await executionFailureEligibility(planSnapshot);
     if (!eligibility.closable) {
       throw new ContractError(`interaction parent epoch cannot be closed as failed: ${eligibility.heldReason}`);
@@ -1668,6 +1715,11 @@ export function createInteractionParentTurnRawOwner(
     >(turn, (snapshot) => {
       const raced = snapshot.executionFailure;
       if (raced !== null) return { result: { kind: 'existing', committed: raced } };
+      if (!sameAuthenticatedActiveState(snapshot, input.authenticated)) {
+        throw new ContractError(
+          'interaction parent epoch failure requires the authenticated active epoch and owner; a newer reconciliation or epoch must never be closed',
+        );
+      }
       if (snapshotCommitFingerprint(snapshot) !== fingerprint) {
         throw new ContractError('interaction parent epoch failure conflicts with a concurrent durable write');
       }
@@ -2118,6 +2170,10 @@ export function createInteractionParentTurnRawOwner(
 
     closeFailedEpoch(input: {
       readonly failedAt: string;
+      readonly authenticated: {
+        readonly executionEpoch: number;
+        readonly executionOwner: OccurrenceExecutionOwner | null;
+      };
     }): Promise<InteractionParentCommittedFact<InteractionParentTurnExecutionFailureFact>> {
       return commitExecutionFailure(input);
     },

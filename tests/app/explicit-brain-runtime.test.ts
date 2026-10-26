@@ -40,7 +40,7 @@ import { FileCheckpointStore, UiRuntimeApiError, UiRuntimeJournal, UiRuntimeServ
 import type { UiRuntimeGrantExecutionReceipt } from '../../packages/app/src/ui-runtime/service.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/journal.js';
-import { acquireDaemonLease, readDaemonLease } from '../../packages/app/src/supervisor/index.js';
+import { acquireDaemonLease, readDaemonLease, type SupervisorLease } from '../../packages/app/src/supervisor/index.js';
 import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
@@ -201,6 +201,45 @@ async function acquireCrashedOwnerLease(root: string): Promise<{
     const paths = await resolveRuntimePaths({controlRoot: join(${JSON.stringify(root)}, 'control'), workspace: process.cwd()});
     await ensureControlLayout(paths);
     const lease = await acquireDaemonLease(paths);
+    const owner = await lease.withCurrentLeaseOwner(async (authenticated) => authenticated);
+    console.log(JSON.stringify({pid: process.pid, owner, leaseId: lease.record.leaseId, generation: lease.record.generation}));
+    process.exit(0); // deliberate crash boundary: the old owner never releases
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {stdio: ['ignore', 'pipe', 'pipe']});
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+  child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+  const exit = await new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+  assert.equal(exit, 0, stderr);
+  const receipt = JSON.parse(stdout.trim());
+  return {owner: receipt.owner, leaseId: receipt.leaseId, generation: receipt.generation};
+}
+
+/**
+ * Acquire a real lease generation inside a short-lived child process that
+ * exits without releasing, so the owner carries its own process start token.
+ * A later owner in this process is then a committed replacement of it, exactly
+ * like a real daemon that dies and is taken over by a different process.
+ */
+async function acquireCrashedTakeoverOwnerLease(root: string, reason: string): Promise<{
+  readonly owner: OccurrenceExecutionOwner;
+  readonly leaseId: string;
+  readonly generation: number;
+}> {
+  const moduleUrl = (path: string) => new URL(`../../packages/${path}`, import.meta.url).href;
+  const script = `
+    import { acquireDaemonLease } from ${JSON.stringify(moduleUrl('app/src/supervisor/index.js'))};
+    import { ensureControlLayout, resolveRuntimePaths } from ${JSON.stringify(moduleUrl('config/src/index.js'))};
+    import { join } from 'node:path';
+    const paths = await resolveRuntimePaths({controlRoot: join(${JSON.stringify(root)}, 'control'), workspace: process.cwd()});
+    await ensureControlLayout(paths);
+    const lease = await acquireDaemonLease(paths, {takeover: {
+      reason: ${JSON.stringify(reason)}, allowed: () => true,
+      stop: {gracefulTimeoutMs: 2000, pollIntervalMs: 20},
+    }});
     const owner = await lease.withCurrentLeaseOwner(async (authenticated) => authenticated);
     console.log(JSON.stringify({pid: process.pid, owner, leaseId: lease.record.leaseId, generation: lease.record.generation}));
     process.exit(0); // deliberate crash boundary: the old owner never releases
@@ -3125,6 +3164,241 @@ test('provider explicit brain interpreter closes the dead continued epoch of a r
     );
   } finally {
     await earlyLease?.release();
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: the discharge of an interrupted turn read its parent snapshot
+// and fixed the replacement owner before it entered the lease guard. A
+// discharge that waited there could authenticate the dead owner of epoch 2 and
+// then close whatever newer epoch a concurrent exact-input recovery had just
+// opened, recording a live epoch 3 as an execution failure. Impact: a real
+// Provider stream is terminated and its answer lost. Cost: four real lease
+// generations, one seeded reconciled epoch and one gated discharge. Probability:
+// a new input and the exact-input recovery arriving in that order on one scope.
+test('provider explicit brain interpreter never closes the epoch a concurrent recovery just opened', async () => {
+  const root = join(parentFixtureRoot, `guard-epoch-race-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-guard-epoch-race', providerId: 'provider-guard-epoch-race', protocol: 'responses',
+    endpointRef: 'recorded://guard-epoch-race', modelRef: 'model-guard-epoch-race',
+    configDigest: 'sha256:guard-epoch-race-config', capabilityDigest: 'sha256:guard-epoch-race-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:guard-epoch-race' };
+  const clock = { now: () => new Date().toISOString() };
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    // Generation 1 owns the turn input and dies. Generation 2 takes over in its
+    // own process, becomes the reconciled replacement owner of epoch 2, and
+    // then dies too: an owner from another process start is what makes the
+    // live generation a genuine committed replacement during recovery.
+    const firstCrash = await acquireCrashedOwnerLease(root);
+    assert.equal(firstCrash.generation, 1);
+    const secondCrash = await acquireCrashedTakeoverOwnerLease(root, 'guard epoch race epoch two owner');
+    assert.equal(secondCrash.generation, 2);
+    const secondOwner = secondCrash.owner;
+
+    const originalRequest = {
+      interactionId: 'interaction-guard-epoch-race', inputRevision: 1,
+      sourceRef: 'ui:guard-epoch-race', rawInput: '需要恢复的原始输入',
+      clarifications: [], taskCandidates: [],
+    };
+    const turn: InteractionTurnIdentity = {
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      interactionId: originalRequest.interactionId, inputRevision: 1, turnId: 'explicit-interpret-guard-epoch-race',
+    };
+    const operationScope = { organId: scope.organId, operationId: id('operation', 'op-guard-epoch-race') };
+    const execution = { runtimeId: turn.turnId, ...operationScope, executionEpoch: 1, interactionTurn: turn };
+    const initialInput = {
+      ref: await evidence.write({
+        scope: operationScope, kind: 'execution', type: 'initial-input', locator: turn.turnId,
+        content: JSON.stringify(originalRequest),
+      }),
+      view: { kind: 'utf8-text' as const },
+    };
+    const seedOwner = createInteractionParentTurnRawOwner({
+      turn, execution, scope: operationScope, initialInput, providerBinding: binding,
+      executionOwner: firstCrash.owner, journal: parentJournal, rawContent,
+    });
+    await seedOwner.openTurnInput();
+    const reqOne = { turnId: turn.turnId, requestId: 'guard-epoch-race-request-1' };
+    await seedOwner.registerRequest({ execution, record: { request: reqOne, scope: operationScope, phase: 'dispatching' } });
+    await seedOwner.registerRequest({ execution, record: { request: reqOne, scope: operationScope, phase: 'dispatched' } });
+    await seedOwner.acceptRawFact({ execution, scope: operationScope, request: reqOne, producerSeq: 1,
+      fact: { kind: 'content', channel: 'reasoning-summary', update: 'full',
+        contentUnitId: 'guard-epoch-race-reasoning-1',
+        content: { ref: await evidence.write({ scope: operationScope, kind: 'execution', type: 'reasoning',
+          locator: 'guard-epoch-race-reasoning-1', content: 'partial reasoning in the first epoch' }),
+        view: { kind: 'utf8-text' as const } }, complete: false } });
+
+    const continuedOwner = createInteractionParentTurnRawOwner({
+      turn, execution: { ...execution, executionEpoch: 2 }, scope: operationScope, initialInput,
+      providerBinding: binding, executionOwner: secondOwner, journal: parentJournal, rawContent,
+    });
+    const reconciled = await continuedOwner.reconcileTurnOwner({
+      previousOwner: firstCrash.owner, replacementOwner: secondOwner,
+      isCommittedReplacement: true, reconciledAt: clock.now(),
+    });
+    assert.equal(reconciled.fact.mode, 'continue');
+    assert.equal(reconciled.fact.effectiveExecutionEpoch, 2);
+    await continuedOwner.openTurnInput();
+    const executionTwo = { ...execution, executionEpoch: 2 };
+    const reqTwo = { turnId: turn.turnId, requestId: 'guard-epoch-race-request-2' };
+    await continuedOwner.registerRequest({ execution: executionTwo, record: { request: reqTwo, scope: operationScope, phase: 'dispatching' } });
+    await continuedOwner.registerRequest({ execution: executionTwo, record: { request: reqTwo, scope: operationScope, phase: 'dispatched' } });
+    await continuedOwner.acceptRawFact({ execution: executionTwo, scope: operationScope, request: reqTwo, producerSeq: 1,
+      fact: { kind: 'content', channel: 'reasoning-summary', update: 'full',
+        contentUnitId: 'guard-epoch-race-reasoning-2',
+        content: { ref: await evidence.write({ scope: operationScope, kind: 'execution', type: 'reasoning',
+          locator: 'guard-epoch-race-reasoning-2', content: 'partial reasoning in the continued epoch' }),
+        view: { kind: 'utf8-text' as const } }, complete: false } });
+
+    // Generation 2 is provably gone and generation 3 is the live owner, so the
+    // exact-input recovery can legally open epoch 3 under generation 3.
+    lease = await acquireDaemonLease(paths, { takeover: {
+      reason: 'guard epoch race final takeover', allowed: () => true,
+      stop: { gracefulTimeoutMs: 2_000, pollIntervalMs: 20 },
+    } });
+    assert.equal(lease.record.generation, 3);
+    assert.equal(lease.record.takeover?.previousGeneration, 2);
+    assert.equal(lease.record.takeover?.termination, 'already-dead');
+    const liveLease = lease;
+
+    // The discharge request is paused just before it would enter the real lease
+    // guard; the exact-input recovery then wins the guard and opens epoch 3.
+    let releaseDischarge!: () => void;
+    const dischargeGate = new Promise<void>((resolve) => { releaseDischarge = resolve; });
+    let dischargeReachedGuard!: () => void;
+    const dischargeAtGuard = new Promise<void>((resolve) => { dischargeReachedGuard = resolve; });
+    let gated = false;
+    const gatedGuard: SupervisorLease['withCurrentLeaseOwner'] = async (operation) => {
+      if (!gated) {
+        gated = true;
+        dischargeReachedGuard();
+        await dischargeGate;
+      }
+      return liveLease.withCurrentLeaseOwner(operation);
+    };
+    const gatedLease: SupervisorLease = Object.assign(
+      Object.create(liveLease) as SupervisorLease,
+      { withCurrentLeaseOwner: gatedGuard },
+    );
+
+    const decision = JSON.stringify({
+      kind: 'requirement', normalizedInput: '竞态期间到达的新输入', knownFacts: [],
+      proposal: { revision: 1, intent: 'create', title: '竞态期间到达的新输入', objective: '竞态期间到达的新输入',
+        deliverable: '结果', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+      decisionRefs: [],
+    });
+    const dischargeInterpreter = createProviderExplicitBrainInterpreter({
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+      rawEvidence: evidence, rawContent, clock,
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease: gatedLease,
+      port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+        { kind: 'output', state: 'output', summary: decision },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ] }),
+    });
+    const dischargeOutcome = dischargeInterpreter.interpret({
+      ...originalRequest, interactionId: 'interaction-guard-epoch-race-next',
+      sourceRef: 'ui:guard-epoch-race-next', rawInput: '竞态期间到达的新输入',
+    }).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await Promise.race([dischargeAtGuard, dischargeOutcome.then((outcome) => {
+      throw new Error(`discharge finished before the guard: ${String((outcome as { error?: unknown }).error)}`);
+    })]);
+
+    // The exact prior input legally reconciles epoch 2 to the live owner and
+    // stays open mid-answer, exactly like a real recovery request.
+    let recoveryStarted!: () => void;
+    const recoveryStartedPromise = new Promise<void>((resolve) => { recoveryStarted = resolve; });
+    let releaseRecovery!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    const recoveryPort = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [],
+      stream: async function* () {
+        yield { type: 'response.output_text.delta', item_id: 'recovered-text', delta: '{"kind":' };
+        recoveryStarted();
+        await recoveryGate;
+        yield { type: 'response.output_text.done', item_id: 'recovered-text', text: JSON.stringify({
+          kind: 'answer', normalizedInput: originalRequest.rawInput, knownFacts: [],
+          answer: '恢复后的答案', decisionRefs: [],
+        }) };
+      } });
+    const recoveryInterpreter = createProviderExplicitBrainInterpreter({
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+      rawEvidence: evidence, rawContent, clock,
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease: liveLease,
+      prepareAgentProvider: async () => ({
+        roleId: 'interaction', source: 'http', binding, port: recoveryPort,
+        provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+          model: binding.modelRef, route: 'guard-epoch-race-recovery', baseUrl: binding.endpointRef },
+      }),
+    });
+    const recoveryOutcome = recoveryInterpreter.interpret(originalRequest).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await recoveryStartedPromise;
+    const openedWhileRecovering = await parentJournal.readTurnSnapshot(turn);
+    assert.deepEqual(openedWhileRecovering.ownerReconciliations.map((entry) => entry.fact.effectiveExecutionEpoch),
+      [2, 3], 'the concurrent recovery opened epoch 3 before the discharge proceeds');
+
+    // A now enters the lease guard. It must re-read the fresh epoch and refuse,
+    // never close the epoch the recovery just opened.
+    releaseDischarge();
+    const dischargeResult = await dischargeOutcome;
+    assert.equal(dischargeResult.ok, false,
+      'the late discharge must refuse instead of closing the live recovered epoch');
+    if (dischargeResult.ok) return;
+    const dischargeError = dischargeResult.error;
+    if (!(dischargeError instanceof Error)) {
+      throw new Error('the discharge refusal must carry an Error');
+    }
+    assert.match(dischargeError.message, /exact prior input/);
+    assert.match(dischargeError.message, /still the current active lease owner/);
+
+    const afterRefusal = await parentJournal.readTurnSnapshot(turn);
+    assert.equal(afterRefusal.executionFailure, null, 'the live recovered epoch is never closed as failed');
+    assert.equal(afterRefusal.abandonment, null, 'the reconciled turn is never abandoned');
+    assert.deepEqual(afterRefusal.providerSettlements, [], 'the refusal fabricates no settlement');
+    assert.equal(afterRefusal.resourceClose, null, 'the refusal fabricates no resource close');
+    assert.deepEqual(afterRefusal.ownerReconciliations.map((entry) => entry.fact.effectiveExecutionEpoch), [2, 3]);
+    assert.deepEqual(await parentJournal.readScopeExecutionFailures(scope), [],
+      'no epoch 3 execution failure is ever recorded for the active request');
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
+      'no epoch 3 abandonment is ever recorded for the active request');
+
+    // The recovered epoch still owns its raw history and finishes normally.
+    releaseRecovery();
+    const recoveryResult = await recoveryOutcome;
+    assert.equal(recoveryResult.ok, true, 'the recovered epoch can still append its facts and finish');
+    if (!recoveryResult.ok) return;
+    assert.equal(recoveryResult.value.kind, 'answer');
+    if (recoveryResult.value.kind !== 'answer') return;
+    assert.equal(recoveryResult.value.answer, '恢复后的答案');
+    const finalSnapshot = await parentJournal.readTurnSnapshot(turn);
+    assert.equal(finalSnapshot.executionFailure, null);
+    assert.deepEqual(finalSnapshot.ownerReconciliations.map((entry) => entry.fact.effectiveExecutionEpoch), [2, 3]);
+    assert.ok(finalSnapshot.acceptedFacts.some((entry) =>
+      entry.fact.envelope.execution.executionEpoch === 3 && entry.fact.envelope.fact.kind === 'request-complete'),
+    'the recovered epoch keeps its own terminal fact');
+    assert.ok(await helperJournal.readSemanticCheckpointExact(turn));
+  } finally {
     await lease?.release();
     await rm(root, { recursive: true, force: true });
   }
