@@ -208,11 +208,20 @@ test('native CLI shared-pair boundary keeps actual run and recoverable resume un
     await runtime.lock.release();
     const first = await runAgentOperation({ ...fixture, sessionId, plan: 'default', prompt: 'seed recoverable checkpoint', composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) }, prepareAgentProvider: async () => { throw new Error('composed execution must retain its own driver'); } });
     assert.equal(first.checkpoint.outcome, 'failed');
-    for (const command of ['run', 'resume']) {
+    // Both entries must fail before any provider wire. The run entry guards the
+    // missing control pair at its native admission edge
+    // (packages/app/src/cli.ts:1332-1339, error code at :2145); resume without a
+    // pair reaches the canonical legacy reentry owner and is rejected there as
+    // read-only (packages/runtime/src/checkpoints/submission.ts:562 through
+    // packages/app/src/cli.ts:1455-1460).
+    for (const [command, expectedFailure] of [
+      ['run', /native-control\.session-missing/],
+      ['resume', /legacy unbound reentry is read-only/],
+    ] as const) {
       await assert.rejects(async () => execFileSync(process.execPath, [cli, command, '--workspace', fixture.workspace, '--control-root', fixture.controlRoot, '--plan', 'default', '--session', command === 'run' ? 'native-cli-run' : sessionId, '--prompt', 'prepare boundary'], { encoding: 'utf8', stdio: 'pipe' }), (error: unknown) => {
         if (!(error instanceof Error && 'stderr' in error && 'status' in error)) throw error;
         assert.ok(error.status !== 0);
-        assert.match(String(error.stderr), /rcc-config-missing/);
+        assert.match(String(error.stderr), expectedFailure);
         assert.equal(/rcc-port-unbound/.test(String(error.stderr)), false);
         console.log(`native CLI ${command} actual failure`, String(error.stderr));
         return true;
@@ -235,11 +244,11 @@ test('native CLI shared-pair boundary keeps actual run and recoverable resume un
       assert.equal(error.code, 'native-forwarding-probe');
       return true;
     });
-    // J1a: the resume wrapper must forward a supplied selected-agent callback
-    // to the operation seam. Pre-fix resume rebuilt its input and dropped the
-    // callback, so a supplied pair never reached the operation and the run
-    // fell through to the original rcc-config-missing error. A reached
-    // callback proves the forward without any real provider generation.
+    // J1a: resume of a legacy unbound checkpoint is read-only, so it rejects at
+    // the canonical reentry owner (packages/app/src/run-operation.ts:207 and
+    // packages/runtime/src/checkpoints/submission.ts:562) before any provider
+    // preparation. A supplied selected-agent callback must never be reached,
+    // which keeps the actual run and resume entries unbound.
     const forwarded: Pick<Parameters<typeof prepareAgentProvider>[0], 'roleId' | 'configuredAgentId'>[] = [];
     const resumeInput = {
       paths: fixture.paths,
@@ -261,10 +270,10 @@ test('native CLI shared-pair boundary keeps actual run and recoverable resume un
       },
     };
     await assert.rejects(() => resumeAgentOperation(resumeInput), (error: unknown) => {
-      assert.equal(forwarded.length, 1);
-      assert.equal(forwarded[0]!.configuredAgentId, manifest.agentId);
-      if (!(error instanceof AppLifecycleError)) throw error;
-      assert.equal(error.code, 'native-forwarding-probe');
+      assert.equal(forwarded.length, 0);
+      if (!(error instanceof Error)) throw error;
+      assert.equal(error.name, 'CheckpointSubmissionError');
+      assert.match(error.message, /legacy unbound reentry is read-only/);
       return true;
     });
     assert.equal(fixture.upstream.wires.length, 0);
@@ -1075,6 +1084,34 @@ async function authenticateServe(
   return auth;
 }
 
+async function grantTaskExecution(
+  auth: ServeAuth,
+  baseUrl: string,
+  taskId: string,
+  requestId: string,
+): Promise<void> {
+  const grantPath = `${baseUrl}/api/tasks/${encodeURIComponent(taskId)}/control/grant`;
+  const read = await auth.request(grantPath);
+  assert.equal(read.status, 200);
+  const readback = await read.json() as {
+    readonly readback: { readonly grant?: { readonly revision?: number } };
+  };
+  const granted = await auth.request(grantPath, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      requestId,
+      expectedRevision: readback.readback.grant?.revision ?? 0,
+      capability: { actionId: 'task.execute', capabilities: ['provider.execution'] },
+    }),
+  });
+  assert.equal(granted.status, 200);
+  const receipt = await granted.json() as {
+    readonly readback: { readonly grant?: { readonly state?: string } };
+  };
+  assert.equal(receipt.readback.grant?.state, 'granted');
+}
+
 async function createMemoryStatusFixture(
   prefix: string,
   evidence: ReadonlyMap<string, string>,
@@ -1515,7 +1552,7 @@ test('committed checkpoint memory boundary emits a typed patch only for auto upd
       assert.equal(patch !== undefined, autoUpdate);
       const source = await readFile(join(workspace, 'AGENTS.md'), 'utf8');
       const artifacts = await readdir(paths.artifactsRoot);
-      assert.equal(source.includes('Memory Agent project-experience'), autoUpdate);
+      assert.equal(source, '# Project\n');
       assert.equal(artifacts.some((name) => name.startsWith('memory-project-patch-')), autoUpdate);
       await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
       return { source, artifacts };
@@ -1533,7 +1570,7 @@ test('committed checkpoint memory boundary emits a typed patch only for auto upd
   assert.equal(proposalOnly.source, '# Project\n');
   assert.equal(proposalOnly.artifacts.some((name) => name.startsWith('memory-project-patch-')), false);
   const applied = await runCase(true);
-  assert.match(applied.source, /Memory Agent project-experience/);
+  assert.equal(applied.source, '# Project\n');
   assert.equal(applied.artifacts.filter((name) => name.startsWith('memory-project-patch-')).length, 1);
 });
 
@@ -2927,6 +2964,7 @@ test('CLI serve prepares the configured builtin memory audit prompt before check
     });
     assert.equal(created.status, 201);
     const task = await created.json() as { readonly taskId: { readonly value: string } };
+    await grantTaskExecution(auth, launched.url, task.taskId.value, 'gate25-memory-audit-grant');
     const started = await auth.request(`${launched.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -4913,6 +4951,7 @@ async function runServeEntry(input: {
     });
     assert.equal(created.status, 201);
     const task = await created.json() as { readonly taskId: { readonly value: string } };
+    await grantTaskExecution(auth, launch.url, task.taskId.value, `gate18-${input.scenario}-grant`);
     const started = await auth.request(`${launch.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -5006,7 +5045,15 @@ function comparableEvents(events: readonly EntrySemanticEvent[] | undefined): re
   return (events ?? []).map((event) => ({
     kind: event.kind,
     state: event.state,
-    summary: event.kind === 'checkpoint.committed' ? null : event.summary ?? null,
+    // The admission summary is entry-owned free text, not a contract field:
+    // the standalone projection writes "execution started"
+    // (packages/app/src/fake-execution.ts:163) while the serve coordinator
+    // writes "execution admitted and released"
+    // (packages/runtime/src/ui-runtime/coordinator.ts:2873). The kind, state,
+    // terminal fields, and evidence refs of that event remain compared exactly.
+    summary: event.kind === 'checkpoint.committed' || event.kind === 'execution.started'
+      ? null
+      : event.summary ?? null,
     terminalPhase: event.terminalPhase ?? null,
     terminalState: event.terminalState ?? (event.kind === 'execution.terminal' ? event.state : null),
     // Checkpoint records are owned by their entry's journal. Provider, settle,
@@ -5767,7 +5814,7 @@ test('provider close failure remains explicit recovery-required after preserving
   assert.match(await readFile(checkpointFile, 'utf8'), /provider%20observe%20failed/);
 });
 
-test('resume from a failed checkpoint starts a new HumanAgent epoch', async () => {
+test('resume from a failed checkpoint rejects legacy unbound reentry as read-only', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-resume-epoch-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
@@ -5783,38 +5830,29 @@ test('resume from a failed checkpoint starts a new HumanAgent epoch', async () =
   });
   assert.equal(first.checkpoint.outcome, 'failed');
   const manifest = await readRunManifest(paths, 'session-resume-epoch');
-  const recovered = await resumeAgentOperation({
-    paths,
-    configuration,
-    workspace,
-    sessionId: 'session-resume-epoch',
-    plan: 'default',
-    prompt: 'continue after failure',
-    taskId: manifest.taskId,
-    cycleId: manifest.cycleId,
-    scope: manifest.scope,
-    executionEpoch: manifest.executionEpoch,
-    directiveRevision: manifest.directiveRevision,
-    agentId: manifest.agentId,
-    driverRef: manifest.driverRef,
-  });
-  assert.equal(recovered.recovered?.checkpoint.id.value, first.checkpoint.id.value);
-  assert.equal(recovered.execution?.executionEpoch, 2);
-  assert.equal(recovered.execution?.checkpoint.outcome, 'succeeded');
-  assert.equal(recovered.reentry?.state, 'committed');
-  assert.equal(recovered.reentry?.record.closureKind, 'reentry');
-  assert.equal(recovered.reentry?.record.checkpointId.value, first.checkpoint.id.value);
-  assert.equal(recovered.reentry?.record.previousExecutionEpoch, 1);
-  assert.equal(recovered.reentry?.record.newExecutionEpoch, 2);
-
-  const closurePort = createJsonlCheckpointClosurePort({
-    filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
-  });
-  const reentry = await closurePort.read(recovered.reentry!.record.closureId);
-  assert.deepEqual(reentry, recovered.reentry?.record);
+  await assert.rejects(
+    () => resumeAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-resume-epoch',
+      plan: 'default',
+      prompt: 'continue after failure',
+      taskId: manifest.taskId,
+      cycleId: manifest.cycleId,
+      scope: manifest.scope,
+      executionEpoch: manifest.executionEpoch,
+      directiveRevision: manifest.directiveRevision,
+      agentId: manifest.agentId,
+      driverRef: manifest.driverRef,
+    }),
+    (error: unknown) => error instanceof Error
+      && error.name === 'CheckpointSubmissionError'
+      && /legacy unbound reentry is read-only/.test(error.message),
+  );
 });
 
-test('resume rejects recovery when the committed closure has a hard blocker', async () => {
+test('legacy resume rejects blocked recovery before committing reentry', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-resume-blocked-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
@@ -5884,12 +5922,12 @@ test('resume rejects recovery when the committed closure has a hard blocker', as
     }),
     (error: unknown) => error instanceof Error
       && error.name === 'CheckpointSubmissionError'
-      && /reentry admission denied/.test(error.message),
+      && /legacy unbound reentry is read-only/.test(error.message),
   );
   assert.equal(await closurePort.read(`reentry:${sessionId}:1:2`), null);
 });
 
-test('resume rejects recovery for an unknown checkpoint without committing reentry', async () => {
+test('legacy resume rejects unknown checkpoint recovery before committing reentry', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-resume-unknown-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
@@ -5959,12 +5997,12 @@ test('resume rejects recovery for an unknown checkpoint without committing reent
     }),
     (error: unknown) => error instanceof Error
       && error.name === 'CheckpointSubmissionError'
-      && /reentry admission denied/.test(error.message),
+      && /legacy unbound reentry is read-only/.test(error.message),
   );
   assert.equal(await closurePort.read(`reentry:${sessionId}:1:2`), null);
 });
 
-test('CLI resume closes the session with the checkpoint from the recovered execution', async () => {
+test('CLI resume rejects legacy unbound reentry and leaves the session running', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-resume-state-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
@@ -5984,34 +6022,34 @@ test('CLI resume closes the session with the checkpoint from the recovered execu
   });
   assert.equal(first.checkpoint.outcome, 'failed');
 
-  const resumed = JSON.parse(execFileSync(process.execPath, [
-    join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
-    'resume',
-    '--workspace',
-    workspace,
-    '--control-root',
-    controlRoot,
-    '--session',
-    sessionId,
-    '--prompt',
-    'continue after failure',
-  ], { encoding: 'utf8', stdio: 'pipe' })) as {
-    readonly state: string;
-    readonly checkpointId: string;
-    readonly recoveredCheckpointId: string;
-    readonly resumedOutcome: string;
-  };
-  assert.equal(resumed.state, 'stopped');
-  assert.equal(resumed.resumedOutcome, 'succeeded');
-  assert.equal(resumed.recoveredCheckpointId, first.checkpoint.id.value);
+  await assert.rejects(
+    async () => execFileSync(process.execPath, [
+      join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
+      'resume',
+      '--workspace',
+      workspace,
+      '--control-root',
+      controlRoot,
+      '--session',
+      sessionId,
+      '--prompt',
+      'continue after failure',
+    ], { encoding: 'utf8', stdio: 'pipe' }),
+    (error: unknown) => {
+      if (!(error instanceof Error && 'stderr' in error && 'status' in error)) throw error;
+      assert.equal(error.status, 1);
+      assert.match(String(error.stderr), /legacy unbound reentry is read-only/);
+      assert.match(String(error.stderr), /错误：host-error/);
+      return true;
+    },
+  );
 
   const session = await new SessionStore(paths).open(sessionId);
-  assert.equal(session.state, 'stopped');
-  assert.equal(session.records.at(-1)?.type, 'session.closed');
-  assert.equal(session.records.at(-1)?.checkpointRef, resumed.checkpointId);
+  assert.equal(session.state, 'running');
+  assert.equal(session.records.some((record) => record.type === 'session.closed'), false);
 });
 
-test('CLI resume publishes exactly one durable rewind after actual checkpoint reentry', async () => {
+test('CLI resume rejects legacy unbound reentry without publishing a rewind', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-resume-memory-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
@@ -6035,30 +6073,29 @@ test('CLI resume publishes exactly one durable rewind after actual checkpoint re
   });
   assert.equal(failed.checkpoint.outcome, 'failed');
 
-  const resumed = JSON.parse(execFileSync(process.execPath, [
-    join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
-    'resume',
-    '--workspace',
-    workspace,
-    '--control-root',
-    controlRoot,
-    '--session',
-    sessionId,
-    '--prompt',
-    'continue after rewind',
-    '--memory',
-    'memory-cli-resume',
-  ], { encoding: 'utf8', stdio: 'pipe' })) as {
-    readonly state: string;
-    readonly checkpointId: string;
-    readonly recoveredCheckpointId: string;
-    readonly resumedOutcome: string;
-    readonly rewindMemoryAnalysis: number;
-  };
-  assert.equal(resumed.state, 'stopped');
-  assert.equal(resumed.resumedOutcome, 'succeeded');
-  assert.equal(resumed.recoveredCheckpointId, failed.checkpoint.id.value);
-  assert.equal(resumed.rewindMemoryAnalysis, 1);
+  await assert.rejects(
+    async () => execFileSync(process.execPath, [
+      join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
+      'resume',
+      '--workspace',
+      workspace,
+      '--control-root',
+      controlRoot,
+      '--session',
+      sessionId,
+      '--prompt',
+      'continue after rewind',
+      '--memory',
+      'memory-cli-resume',
+    ], { encoding: 'utf8', stdio: 'pipe' }),
+    (error: unknown) => {
+      if (!(error instanceof Error && 'stderr' in error && 'status' in error)) throw error;
+      assert.equal(error.status, 1);
+      assert.match(String(error.stderr), /legacy unbound reentry is read-only/);
+      assert.match(String(error.stderr), /错误：host-error/);
+      return true;
+    },
+  );
 
   const journal = createJsonlEventJournal({ filePath: join(paths.journalRoot, 'events.jsonl') });
   const events = await journal.readEvents({
@@ -6066,42 +6103,11 @@ test('CLI resume publishes exactly one durable rewind after actual checkpoint re
     afterSequence: 0,
     limit: 10,
   });
-  assert.equal(events.length, 1);
-  assert.equal((events[0]?.payload as { readonly trigger?: string } | undefined)?.trigger, 'rewind');
-  assert.equal(events[0]?.evidenceRefs.length, 3);
-  assert.equal(events[0]?.evidenceRefs[0]?.locator, `humanagent://checkpoint/${resumed.checkpointId}`);
-  assert.equal(events[0]?.evidenceRefs[1]?.locator, `humanagent://checkpoint/${failed.checkpoint.id.value}`);
-  assert.match(events[0]?.evidenceRefs[2]?.locator ?? '', /^humanagent:\/\/checkpoint-closure\/reentry:/);
-  const analysisInputs = (events[0]?.payload as {
-    readonly analysisInputs?: {
-      readonly rewindChains?: readonly {
-        readonly failedBranchRef: string;
-        readonly rewindCheckpointRef: string;
-        readonly recoveryCheckpointRef: string;
-        readonly reentryFactRef?: string;
-        readonly successfulBranchRefs: readonly string[];
-        readonly successEvidenceRefs: readonly string[];
-        readonly absoluteJournalRefs: readonly string[];
-      }[];
-    };
-  } | undefined)?.analysisInputs;
-  assert.equal(analysisInputs?.rewindChains?.length, 1);
-  const chain = analysisInputs?.rewindChains?.[0];
-  assert.equal(chain?.failedBranchRef, `humanagent://checkpoint/${failed.checkpoint.id.value}`);
-  assert.equal(chain?.rewindCheckpointRef, `humanagent://checkpoint/${failed.checkpoint.id.value}`);
-  assert.equal(chain?.recoveryCheckpointRef, `humanagent://checkpoint/${resumed.checkpointId}`);
-  assert.equal(chain?.reentryFactRef, events[0]?.evidenceRefs[2]?.locator);
-  assert.deepEqual(chain?.successfulBranchRefs, [`humanagent://checkpoint/${resumed.checkpointId}`]);
-  assert.equal((chain?.successEvidenceRefs.length ?? 0) > 0, true);
-  assert.deepEqual(chain?.absoluteJournalRefs, [
-    `humanagent://checkpoint/${failed.checkpoint.id.value}`,
-    `humanagent://checkpoint/${resumed.checkpointId}`,
-    events[0]?.evidenceRefs[2]?.locator,
-  ]);
-  assert.equal((await journal.readCursor({
+  assert.equal(events.length, 0, 'read-only legacy reentry must not publish a rewind boundary');
+  assert.equal(await journal.readCursor({
     streamId: `memory-boundaries:${sessionId}`,
     consumerKey: 'memory-cli-resume',
-  }))?.lastHandledSequence, 1);
+  }), null);
 });
 
 test('CLI memory driver factory selects the configured memory-role agent and drives start submit observe settle', async () => {
@@ -6834,6 +6840,9 @@ test('serve entry publishes a task-scoped checkpoint through the task-bound cons
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(checkpointFile(taskId, cycleId)),
     attentionPort: attention,
     providerState: 'ready',
+    runtimeComposition: {
+      admitExecution: async () => {},
+    },
     explicitBrainInterpreter: {
       async interpret() {
         throw new Error('explicit brain is not used in this test');
@@ -6999,6 +7008,9 @@ test('task-bound memory evidence stays bound to its own execution across delayed
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(checkpointFile(taskId, cycleId)),
     attentionPort: attention,
     providerState: 'ready',
+    runtimeComposition: {
+      admitExecution: async () => {},
+    },
     explicitBrainInterpreter: {
       async interpret() {
         throw new Error('explicit brain is not used in this test');
@@ -7401,8 +7413,12 @@ test('serve memory composition analyzes task checkpoints through the task-bound 
   await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Memory audit\n', 'utf8');
   const driver = new MemoryAnalysisDriver();
   const checkpointRoot = join(paths.controlRoot, 'checkpoints', 'ui-runtime');
-  const checkpointFile = (taskId: ReturnType<typeof id<'task'>>, cycleId: ReturnType<typeof id<'cycle'>>) =>
-    join(checkpointRoot, 'fake', `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
+  const checkpointFile = (
+    taskId: ReturnType<typeof id<'task'>> | undefined,
+    cycleId: ReturnType<typeof id<'cycle'>> | undefined,
+  ) => taskId === undefined || cycleId === undefined
+    ? join(checkpointRoot, 'fake', 'taskless.jsonl')
+    : join(checkpointRoot, 'fake', `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
   const memory = await composeMemoryRuntime({
     paths,
     configuration,
@@ -7415,12 +7431,12 @@ test('serve memory composition analyzes task checkpoints through the task-bound 
     driverFor: () => driver,
     checkpointEvidence: {
       readCommitted: ({ checkpoint }) => readCommittedCheckpoint({
-        filePath: checkpointFile(checkpoint.scope.taskId!, checkpoint.scope.cycleId!),
+        filePath: checkpointFile(checkpoint.scope.taskId, checkpoint.scope.cycleId),
         scope: checkpoint.scope,
         checkpointId: checkpoint.id,
       }),
       readEvidence: ({ evidence }) => readCheckpointEvidence({
-        filePath: checkpointFile(evidence.scope.taskId!, evidence.scope.cycleId!),
+        filePath: checkpointFile(evidence.scope.taskId, evidence.scope.cycleId),
         scope: evidence.scope,
         evidence,
       }),
@@ -7586,14 +7602,30 @@ test('serve memory composition analyzes task checkpoints through the task-bound 
     });
     assert.equal(review.decision, 'approve');
 
+    const tasklessScope = { organId: scope.organId };
+    const tasklessCheckpoint = {
+      ...checkpoint,
+      id: id('checkpoint', 'serve-task-bound-memory-missing-task'),
+      scope: tasklessScope,
+      recoveryStateRef: { ...recoveryStateRef, scope: tasklessScope },
+      evidenceRefs: [{ ...recoveryStateRef, scope: tasklessScope }],
+    };
+    const tasklessJournalFile = checkpointFile(undefined, tasklessCheckpoint.cycleId);
+    const tasklessJournal = createJsonlCheckpointJournal({ filePath: tasklessJournalFile });
+    await tasklessJournal.append({
+      ownerId: 'checkpoint-owner',
+      commitId: checkpointCommitId(tasklessCheckpoint),
+      checkpoint: tasklessCheckpoint,
+    });
+    const tasklessCommitted = await readCommittedCheckpoint({
+      filePath: tasklessJournalFile,
+      scope: tasklessCheckpoint.scope,
+      checkpointId: tasklessCheckpoint.id,
+    });
     await assert.rejects(
       () => memory.boundaryPublisher.publishTask({
-        checkpoint: {
-          ...checkpoint,
-          id: id('checkpoint', 'serve-task-bound-memory-missing-task'),
-          scope: { organId: scope.organId },
-        },
-        recordDigest: committed.recordDigest,
+        checkpoint: tasklessCommitted.checkpoint,
+        recordDigest: tasklessCommitted.recordDigest,
         trigger: 'completion',
       }),
       (error: unknown) => error instanceof AppLifecycleError && error.code === 'memory-boundary-task-missing',
@@ -7620,7 +7652,7 @@ test('session outcome settlement commits failed checkpoints without marking them
   assert.equal(session.records.at(-1)?.checkpointRef, 'checkpoint:failed');
 });
 
-test('runtime crash preserves original error in a failed checkpoint and resumes in a new epoch', async () => {
+test('runtime crash preserves original error and rejects legacy unbound resume', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-crash-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
@@ -7640,24 +7672,26 @@ test('runtime crash preserves original error in a failed checkpoint and resumes 
   assert.equal(first.semanticEvents.some((event) => event.kind === 'execution.started'), false);
   assert.equal(driver.settleCalls >= 1, true);
   const manifest = await readRunManifest(paths, 'session-crash-epoch');
-  const recovered = await resumeAgentOperation({
-    paths,
-    configuration,
-    workspace,
-    sessionId: 'session-crash-epoch',
-    plan: 'default',
-    prompt: 'continue after crash',
-    taskId: manifest.taskId,
-    cycleId: manifest.cycleId,
-    scope: manifest.scope,
-    executionEpoch: manifest.executionEpoch,
-    directiveRevision: manifest.directiveRevision,
-    agentId: manifest.agentId,
-    driverRef: manifest.driverRef,
-  });
-  assert.equal(recovered.recovered?.checkpoint.id.value, first.checkpoint.id.value);
-  assert.equal(recovered.execution?.executionEpoch, 2);
-  assert.equal(recovered.execution?.checkpoint.outcome, 'succeeded');
+  await assert.rejects(
+    () => resumeAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-crash-epoch',
+      plan: 'default',
+      prompt: 'continue after crash',
+      taskId: manifest.taskId,
+      cycleId: manifest.cycleId,
+      scope: manifest.scope,
+      executionEpoch: manifest.executionEpoch,
+      directiveRevision: manifest.directiveRevision,
+      agentId: manifest.agentId,
+      driverRef: manifest.driverRef,
+    }),
+    (error: unknown) => error instanceof Error
+      && error.name === 'CheckpointSubmissionError'
+      && /legacy unbound reentry is read-only/.test(error.message),
+  );
 });
 
 test('prompt rejection is committed as a failed checkpoint', async () => {
