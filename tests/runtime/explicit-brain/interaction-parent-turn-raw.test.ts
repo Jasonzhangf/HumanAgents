@@ -1996,7 +1996,23 @@ test('parent raw owner closes the active epoch of a reconciled turn that died wi
     const eligibility = await ownerTwo.readExecutionFailureEligibility();
     assert.equal(eligibility.closable, true,
       `a dead continued epoch must be closable, held: ${(eligibility as { heldReason?: string }).heldReason ?? ''}`);
-    const failure = await ownerTwo.closeFailedEpoch({ failedAt: committedAt });
+    // A closure must target the epoch and owner the caller authenticated. The
+    // turn-input epoch 1 owner is already replaced by the committed epoch 2
+    // reconciliation, so closing under that stale authentication is refused
+    // instead of closing whichever epoch is newest.
+    await assert.rejects(
+      ownerTwo.closeFailedEpoch({
+        failedAt: committedAt,
+        authenticated: { executionEpoch: 1, executionOwner: firstOwner },
+      }),
+      /authenticated active epoch and owner/,
+    );
+    assert.equal((await parentJournal.readTurnSnapshot(turn)).executionFailure, null,
+      'a stale authentication never closes the active epoch');
+    const failure = await ownerTwo.closeFailedEpoch({
+      failedAt: committedAt,
+      authenticated: { executionEpoch: 2, executionOwner: secondOwner },
+    });
     assert.equal(failure.fact.execution.executionEpoch, 2,
       'the closure records the epoch that actually died, never the turn input epoch');
 
@@ -2064,7 +2080,10 @@ test('parent raw owner still refuses to close a reconciled epoch that can delive
     await ownerTwo.registerRequest({ execution: executionTwo, record: { ...reqTwo, phase: 'settled' } });
     const held = await ownerTwo.readExecutionFailureEligibility();
     assert.equal(held.closable, false, 'a continued epoch with a deliverable answer is never closed as failed');
-    await assert.rejects(ownerTwo.closeFailedEpoch({ failedAt: committedAt }), /cannot be closed as failed/);
+    await assert.rejects(ownerTwo.closeFailedEpoch({
+      failedAt: committedAt,
+      authenticated: { executionEpoch: 2, executionOwner: secondOwner },
+    }), /cannot be closed as failed/);
 
     // An unpaired tool call in the continued epoch hides a physical side effect.
     const toolReq = requestRecord('reconciled-hold-3', reqTwo.request.requestId);
