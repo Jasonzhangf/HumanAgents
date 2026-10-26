@@ -1,5 +1,6 @@
 {
   "graph": "humanagent-explicit-semantic-turn",
+  "requestLifetimeOwner": { "budget": "packages/runtime/src/ui-runtime/execution-budget.ts", "composition": "packages/app/src/explicit-brain-runtime.ts", "wiring": "packages/app/src/ui-runtime/index.ts", "contract": "route 使用同一请求预算；return 仅在精确执行真实停止及收拢且原有守卫允许后记录失败关闭，失败不授予跨执行取消或伪造成功的权限。" },
   "operator": {
     "operator": "humanagent-explicit-semantic-turn",
     "operator_version": "1"

@@ -839,11 +839,15 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       }
       // A committed provider settlement already owns the close receipt, so a
       // failed epoch must never double-record it. A committed owner
-      // reconciliation is allowed: a `continue` reconciliation only opened the
-      // next physical epoch, and that continued epoch's own failure is exactly
-      // the shape this fact records. A `terminal-output` reconciliation is
-      // rejected below by the real terminal-output checks (request-complete /
-      // complete assistant-text), which stay in force here.
+      // reconciliation is allowed here: a `continue` reconciliation only opened
+      // the next physical epoch, and that continued epoch's own failure is
+      // exactly the shape this fact records. This decoder cannot tell the
+      // reconciliation modes apart by fact shape alone, and it does not try:
+      // keeping a `terminal-output` epoch away from a failure fact is the
+      // runtime eligibility boundary's job. What this decoder enforces is the
+      // narrower shape rule below, which holds for every mode: an epoch that
+      // already carries a terminal output of its own (request-complete, or a
+      // complete assistant-text) must never be recorded as failed.
       if (providerSettlements.length > 0) {
         throw new JournalIntegrityError(
           'interaction parent epoch failure requires a turn without a provider settlement',

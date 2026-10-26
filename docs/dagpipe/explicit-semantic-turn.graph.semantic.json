@@ -17,6 +17,7 @@
   },
   "contracts": {
     "inputs": "一次用户提交携带 interactionId、inputRevision、本次输入和可用前序语义。",
+    "requestLifetime": "每个真实模型请求独立计时，工具等待不计入前次请求。持续片段不冒充完成单元。只停止本次已取得的执行；新请求被拒不影响原请求，页面断线不新增业务取消。停止、观察结束、结算和物理关闭各保留真实证据；任何必需证据缺失时保留失败与恢复责任，不伪造完成。",
     "outputs": "一次返回携带本次交互业务结果或既有复杂需求派发结果，并保持单入口、单出口。",
     "ablation": "assemble、route、outcome、history、return 均有独立产品责任；本图未删除节点，物理删除数为 0。",
     "identityBoundary": "父轮次使用中立 interaction-parent execution identity（runtimeId、organId、operationId、executionEpoch、interactionTurn）；不伪造 taskId 或 cycleId，也不把身份镜像到业务 payload 或 metadata。",

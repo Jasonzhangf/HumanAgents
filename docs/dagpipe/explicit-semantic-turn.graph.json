@@ -15,6 +15,7 @@
     ],
     "designStatus": "USER-REQUIREMENT-DESIGN",
     "implementationStatus": "UNVERIFIED",
+    "requestLifetimeContract": "route 复用 runtime 唯一 Provider 请求预算：每次 typed dispatch 开窗，等待工具或 helper 时关窗，delta 只计活动；保持 adapter 的字节静默规则与既有预算默认值。本次已取得 execution 后失败或预算耗尽，先对局部持有的 runtimeId/operationId/executionEpoch 请求 stop，再取得真实 producer drain、settle 与 close 证据；只有停止已证实且既有 failure eligibility/helper 守卫允许时才能关闭失败 epoch。未取得执行的拒绝不得停止其他活请求；HTTP 断线不自动取消业务；停止或收拢失败保留原错和恢复责任。控制信息不进入业务 payload，不伪造 Task 或 checkpoint。",
     "bindingBoundary": "现有 ownerPath 为真实责任入口；interaction-parent-turn-raw.ts 与 interaction-parent-turn-journal.ts 已存在。closed Provider epoch 不等于 logical turn complete；零 acceptedFacts 的 failed 请求在 epoch 真实 closed 后可同 turn 新 epoch 重入。不声明 Operator 已注册或整体已验收。",
     "outcomeBoundary": "返回 ExplicitBrainInterpretation（answer/clarification/status-query/requirement）或显式错误；requirement 结果可携带可缺省 taskFlow 与独立结构化 title，answer 等非任务结果不得伪造任务类型；dispatch 返回不自动采纳，只有 accept 产生 owner-accepted。",
     "classificationContract": "taskFlow 只由显式 Brain 根据当前完整输入输出，形状复用现有 TaskFlowBinding { kind: TaskFlowKind; definitionVersion: 1 }；用户 selector、executionPolicy、固定 single/once 默认值和任务标题都不是分类来源。无法可靠分类时保持缺省，不生成 unknown 伪分类。",

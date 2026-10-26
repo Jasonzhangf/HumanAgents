@@ -40,7 +40,7 @@ import { FileCheckpointStore, UiRuntimeApiError, UiRuntimeJournal, UiRuntimeServ
 import type { UiRuntimeGrantExecutionReceipt } from '../../packages/app/src/ui-runtime/service.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/journal.js';
-import { acquireDaemonLease, readDaemonLease } from '../../packages/app/src/supervisor/index.js';
+import { acquireDaemonLease, readDaemonLease, type SupervisorLease } from '../../packages/app/src/supervisor/index.js';
 import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
@@ -218,6 +218,45 @@ async function acquireCrashedOwnerLease(root: string): Promise<{
   return {owner: receipt.owner, leaseId: receipt.leaseId, generation: receipt.generation};
 }
 
+/**
+ * Acquire a real lease generation inside a short-lived child process that
+ * exits without releasing, so the owner carries its own process start token.
+ * A later owner in this process is then a committed replacement of it, exactly
+ * like a real daemon that dies and is taken over by a different process.
+ */
+async function acquireCrashedTakeoverOwnerLease(root: string, reason: string): Promise<{
+  readonly owner: OccurrenceExecutionOwner;
+  readonly leaseId: string;
+  readonly generation: number;
+}> {
+  const moduleUrl = (path: string) => new URL(`../../packages/${path}`, import.meta.url).href;
+  const script = `
+    import { acquireDaemonLease } from ${JSON.stringify(moduleUrl('app/src/supervisor/index.js'))};
+    import { ensureControlLayout, resolveRuntimePaths } from ${JSON.stringify(moduleUrl('config/src/index.js'))};
+    import { join } from 'node:path';
+    const paths = await resolveRuntimePaths({controlRoot: join(${JSON.stringify(root)}, 'control'), workspace: process.cwd()});
+    await ensureControlLayout(paths);
+    const lease = await acquireDaemonLease(paths, {takeover: {
+      reason: ${JSON.stringify(reason)}, allowed: () => true,
+      stop: {gracefulTimeoutMs: 2000, pollIntervalMs: 20},
+    }});
+    const owner = await lease.withCurrentLeaseOwner(async (authenticated) => authenticated);
+    console.log(JSON.stringify({pid: process.pid, owner, leaseId: lease.record.leaseId, generation: lease.record.generation}));
+    process.exit(0); // deliberate crash boundary: the old owner never releases
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {stdio: ['ignore', 'pipe', 'pipe']});
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+  child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+  const exit = await new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+  assert.equal(exit, 0, stderr);
+  const receipt = JSON.parse(stdout.trim());
+  return {owner: receipt.owner, leaseId: receipt.leaseId, generation: receipt.generation};
+}
+
 async function acquireTerminatedOwnerLease(root: string): Promise<{
   readonly lease: Awaited<ReturnType<typeof acquireDaemonLease>>;
   readonly previousOwner: OccurrenceExecutionOwner;
@@ -247,7 +286,7 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
      * request stream a partial answer and stay open while a second input is
      * handled, which a single buffered array cannot express.
      */
-    stream?: (wire: any) => AsyncIterable<unknown>; evidence?: typeof parentEvidence }) {
+    stream?: (wire: any, signal?: AbortSignal) => AsyncIterable<unknown>; evidence?: typeof parentEvidence }) {
     const evidence = options.evidence ?? parentEvidence;
     const transport = new V3ProviderHttpTransport<T>({
       binding: options.binding, baseUrl: 'http://recorded.test', source: 'http', evidence,
@@ -258,7 +297,7 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
           const wire = JSON.parse(init.body!);
           if (options.stream) {
             yield frame({ type: 'response.created', response: { id: 'recorded' } });
-            for await (const next of options.stream(wire)) yield frame(next);
+            for await (const next of options.stream(wire, init.signal ?? undefined)) yield frame(next);
             yield frame({ type: 'response.completed', response: { id: 'recorded' } });
             return;
           }
@@ -283,6 +322,168 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
  * prefix a busy journal leaves behind. Every other read and write is the real
  * journal, so the test observes the production shape instead of a mock.
  */
+// Continuous deltas are activity but never a completed unit. The actual
+// transport must be aborted before iterator teardown; a wrapper-only timeout
+// would leave this producer running. See astra-stream-plan section 7.
+for (const stopMode of ['accepted', 'rejected'] as const) {
+test(`explicit request budget stops and drains a continuously producing request (${stopMode})`, async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'explicit-budget', providerId: 'explicit-budget', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'controlled',
+    configDigest: 'sha256:budget', capabilityDigest: 'sha256:budget',
+  };
+  let produced = 0;
+  let drained = false;
+  let aborted = false;
+  const order: string[] = [];
+  const port = new RecordedParentPort({ binding, replay: [], stepDelayMs: 0,
+    async *stream(_wire, signal) {
+      try {
+        // Finite safety ceiling lets the old implementation fail without
+        // leaving a permanent fixture producer behind.
+        for (let index = 0; index < 100 && !signal?.aborted; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          produced += 1;
+          yield { type: 'response.reasoning_summary_text.delta', item_id: 'reasoning', delta: 'still thinking' };
+        }
+      } finally { aborted = signal?.aborted === true; drained = true; order.push('drained'); }
+    },
+  });
+  let acquired: Parameters<typeof port.start>[0] | undefined;
+  const start = port.start.bind(port);
+  port.start = async (request) => { acquired = request; return start(request); };
+  const stop = port.requestStop.bind(port);
+  port.requestStop = async (request) => {
+    order.push('stop');
+    if (stopMode === 'rejected') return { ...request, status: 'rejected', receivedAt: new Date().toISOString(),
+      evidenceRefs: [], ownerId: 'test', nextAction: { kind: 'wait' } };
+    return stop(request);
+  };
+  const settle = port.settle.bind(port);
+  port.settle = async (request) => { order.push('settle'); return settle(request); };
+  const close = port.close.bind(port);
+  port.close = async (request) => { order.push('close'); return close(request); };
+  const budgetStart = Date.now();
+  const options = {
+    ...deps, turnHelperJournal: deps.helperJournal, binding,
+    // Advance the injected budget only with actual fixture partials. Slow
+    // filesystem registration cannot accidentally turn this into a zero-fact
+    // startup timeout instead of the continuous-delta failure under test.
+    clock: { now: () => new Date(budgetStart + produced * 10).toISOString() },
+    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+    executionBudget: { maxSilentDurationMs: 200, noProgressAtMs: 60, maxTurnDurationMs: 1000 },
+    prepareAgentProvider: async (): Promise<AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>> => ({
+      roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'budget', baseUrl: binding.endpointRef },
+    }),
+  };
+  const interpreter = createProviderExplicitBrainInterpreter(options);
+  try {
+  await assert.rejects(() => interpreter.interpret({ interactionId: 'budget', inputRevision: 1,
+    sourceRef: 'ui:budget', rawInput: 'hello', clarifications: [], taskCandidates: [] }),
+  /no completed content unit/);
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const turns = await deps.parentJournal.readScopeOpenedTurns(scope);
+  const snapshot = await deps.parentJournal.readTurnSnapshot(turns[0]!.fact.turn);
+  assert.ok(snapshot.acceptedFacts.length > 0, 'partial facts make false failed-epoch closure observable');
+  if (stopMode === 'rejected') {
+    assert.equal(aborted, false);
+    assert.equal(snapshot.resourceClose, null);
+    assert.equal((await deps.parentJournal.readScopeExecutionFailures(scope)).length, 0);
+    assert.equal(await deps.helperJournal.readSemanticCheckpointExact(turns[0]!.fact.turn), null);
+    return;
+  }
+  assert.equal(aborted, true);
+  assert.equal(drained, true);
+  assert.equal(snapshot.resourceClose?.fact.result.state, 'closed');
+  assert.equal((await deps.parentJournal.readScopeExecutionFailures(scope)).length, 1,
+    'only a stopped, drained, released and eligible epoch is discharged');
+  assert.equal(await deps.helperJournal.readSemanticCheckpointExact(turns[0]!.fact.turn), null);
+  assert.ok(produced < 100);
+  assert.deepEqual(order, ['stop', 'drained', 'settle', 'close']);
+  const before = produced;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(produced, before, 'the producer really stopped');
+  } finally {
+    if (stopMode === 'rejected' && acquired !== undefined) {
+      await stop({ ...acquired, reason: 'fixture cleanup', ownerId: 'test' });
+      // This is fixture-only cleanup after the recovery assertions. Transport
+      // settlement waits for its observed abort before releasing the resource.
+      await settle(acquired);
+      await close(binding);
+    }
+  }
+});
+}
+
+// A start receipt can acquire the resource and then fail identity validation.
+// Probability unknown; losing that resource or falsely closing its epoch is
+// high impact. These three short real-journal cases cover successful cleanup,
+// rejected stop and thrown stop without introducing a second driver mock.
+for (const stopMode of ['accepted', 'rejected', 'throws'] as const) {
+test(`explicit acquired execution failure preserves stop responsibility (${stopMode})`, async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: `acquired-${stopMode}`, providerId: 'acquired', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'controlled',
+    configDigest: 'sha256:acquired', capabilityDigest: 'sha256:acquired',
+  };
+  const port = new RecordedParentPort({ binding, replay: [], stepDelayMs: 0 });
+  const start = port.start.bind(port);
+  const stop = port.requestStop.bind(port);
+  let acquired: Parameters<typeof port.start>[0] | undefined;
+  let stops = 0;
+  let closed = false;
+  port.start = async (request) => {
+    acquired = request;
+    const receipt = await start(request);
+    return { ...receipt, runtimeId: 'invalid-start-receipt' };
+  };
+  port.requestStop = async (request) => {
+    stops += 1;
+    assert.equal(request.runtimeId, acquired?.runtimeId);
+    assert.equal(request.executionEpoch, acquired?.executionEpoch);
+    if (stopMode === 'throws') throw new Error('controlled stop failed');
+    if (stopMode === 'rejected') return { ...request, status: 'rejected', receivedAt: new Date().toISOString(),
+      evidenceRefs: [], ownerId: 'test', nextAction: { kind: 'wait' } };
+    return stop(request);
+  };
+  const close = port.close.bind(port);
+  port.close = async (request) => { const receipt = await close(request); closed = receipt.state === 'closed'; return receipt; };
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, turnHelperJournal: deps.helperJournal, binding,
+    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'acquired', baseUrl: binding.endpointRef } }),
+  });
+  try {
+    await assert.rejects(() => interpreter.interpret({ interactionId: `acquired-${stopMode}`, inputRevision: 1,
+      sourceRef: 'ui:acquired', rawInput: 'hello', clarifications: [], taskCandidates: [] }),
+    /provider start receipt/);
+    assert.equal(stops, 1, 'submit did acquire an execution even though it never returned');
+    const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+    const failures = await deps.parentJournal.readScopeExecutionFailures(scope);
+    assert.equal(failures.length, 0, 'zero-fact continuation or unresolved stop retains its original recovery lane');
+    const turns = await deps.parentJournal.readScopeOpenedTurns(scope);
+    const snapshot = await deps.parentJournal.readTurnSnapshot(turns[0]!.fact.turn);
+    assert.equal(snapshot.resourceClose !== null, stopMode === 'accepted');
+    assert.equal(closed, stopMode === 'accepted');
+    assert.equal(await deps.helperJournal.readSemanticCheckpointExact(turns[0]!.fact.turn), null);
+  } finally {
+    // Only this fixture's still-active resource is released. The assertions
+    // above describe product cleanup before fixture teardown.
+    if (!closed && acquired !== undefined) {
+      await stop({ ...acquired, reason: 'fixture cleanup', ownerId: 'test' });
+      await port.settle(acquired);
+      await close(binding);
+    }
+  }
+});
+}
+
 class RejectedAcceptanceJournal implements InteractionParentTurnRawJournalPort, InteractionParentOpenedTurnScopeReadPort {
   private accepted = 0;
   constructor(
@@ -2632,6 +2833,9 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
         await firstMayFinish;
         yield { type: 'response.output_text.done', item_id: 'text-live', text: firstAnswer };
       } });
+    let stops = 0;
+    const stop = port.requestStop.bind(port);
+    port.requestStop = async (request) => { stops += 1; return stop(request); };
     const interpreter = createProviderExplicitBrainInterpreter({
       organId: scope.organId, interactionScopeId: scope.interactionScopeId,
       parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
@@ -2672,6 +2876,7 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
     assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
       'an overlapping input never freezes the streaming turn');
     assert.equal(providerRequests, 1, 'the refused input never dispatches a Provider request');
+    assert.equal(stops, 0, 'rejecting the second input must not stop the first');
     assert.equal((await parentJournal.readScopeOpenedTurns(scope)).length, 1,
       'the refused input never opens a second turn');
 
@@ -2679,6 +2884,7 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
     releaseFirst();
     const served = await live;
     assert.equal(served.kind, 'requirement');
+    assert.equal(stops, 0, 'the legal first stream finishes without cancellation');
     const finalSnapshot = await parentJournal.readTurnSnapshot(liveTurn);
     assert.equal(finalSnapshot.abandonment, null);
     assert.ok(finalSnapshot.acceptedFacts.some(({ fact }) =>
@@ -2693,18 +2899,11 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
     await rm(root, { recursive: true, force: true });
   }
 });
-test('provider explicit brain interpreter keeps the intake usable after an interpret failure whose provider close also fails', async () => {
-  // Failure basis: one interpret batch whose Provider stream broke with the
-  // journal briefly rejecting the next durable raw fact. The owner process
-  // settled, closed and threw, but the old catch lane threw the close error
-  // immediately, so no durable terminal fact was ever written for the epoch it
-  // had just opened. The turn stayed "pending" forever and every later input in
-  // the scope was refused because the live lease cannot prove its own stream is
-  // dead: the whole explicit intake froze until a daemon restart. Impact: a
-  // single transient failure bricks intake. Cost: one real lease, one failing
-  // recorded Provider stream and one healthy replay on the existing JSONL
-  // consumer. Probability: any transient raw-acceptance or socket failure on
-  // the intake stream.
+test('provider explicit brain interpreter retains recovery after an interpret failure whose provider close also fails', async () => {
+  // A rejected durable raw fact makes drain/settlement fail and physical close
+  // remain pending. The old catch nevertheless closed the epoch. Impact: lost
+  // recovery responsibility. Cost: one lease and recorded stream. Probability:
+  // any durable acceptance failure while an execution still owns resources.
   const root = join(parentFixtureRoot, `intake-failure-${randomUUID()}`);
   await mkdir(root, { recursive: true });
   const binding: ProviderBinding = {
@@ -2742,17 +2941,6 @@ test('provider explicit brain interpreter keeps the intake usable after an inter
         model: binding.modelRef, route: 'intake-failure', baseUrl: binding.endpointRef },
       binding, port: failingPort,
     };
-    const healthyPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence, respond: async () => [
-      { type: 'response.output_text.done', item_id: 'final', text: JSON.stringify({
-        kind: 'answer', normalizedInput: '4 加 4 等于几？', knownFacts: [], answer: '8', decisionRefs: [],
-      }) },
-    ] });
-    const healthyComposition: AgentProviderComposition<InteractionParentProviderExecutionIdentityRef> = {
-      roleId: 'interaction' as const, source: 'http' as const,
-      provider: { source: 'http' as const, provider: 'http' as const, binding: binding.bindingId, protocol: 'responses',
-        model: binding.modelRef, route: 'intake-failure-ok', baseUrl: binding.endpointRef },
-      binding, port: healthyPort,
-    };
     const interpreter = createProviderExplicitBrainInterpreter({
       organId: scope.organId, interactionScopeId: scope.interactionScopeId,
       parentJournal: parentWithRejection, checkpointJournal: helperJournal, helperJournal,
@@ -2763,19 +2951,12 @@ test('provider explicit brain interpreter keeps the intake usable after an inter
       lease,
       prepareAgentProvider: async () => {
         prepared += 1;
-        return prepared === 1 ? failingComposition : healthyComposition;
+        if (prepared !== 1) throw new Error('unresolved recovery must block another provider');
+        return failingComposition;
       },
     });
-    // The committed record kind is new in this change, so the durable read is
-    // probed instead of assumed: against the pre-fix build the record cannot
-    // exist at all, which is exactly the red state this test reports.
-    const readExecutionFailures = async (): Promise<number> => {
-      const reader = parentJournal as unknown as {
-        readonly readScopeExecutionFailures?: (input: typeof scope) => Promise<readonly unknown[]>;
-      };
-      if (reader.readScopeExecutionFailures === undefined) return 0;
-      return (await reader.readScopeExecutionFailures(scope)).length;
-    };
+    const readExecutionFailures = async (): Promise<number> =>
+      (await parentJournal.readScopeExecutionFailures(scope)).length;
     const failedRequest = {
       interactionId: 'interaction-intake-failure', inputRevision: 1, sourceRef: 'ui:intake-failure',
       rawInput: '4 加 4 等于几？', clarifications: [], taskCandidates: [],
@@ -2787,22 +2968,17 @@ test('provider explicit brain interpreter keeps the intake usable after an inter
       (error: unknown) => error instanceof AggregateError
         && error.message.includes('provider raw fact was rejected by durable acceptance'),
     );
-    assert.equal(await readExecutionFailures(), 1,
-      'the failed epoch is durably closed by its own fact');
-    // Without the fix this next input is refused with "the committed execution
-    // owner is still the current active lease owner; a live Provider stream is
-    // not an interrupted crash": the turn stayed pending forever.
+    assert.equal(await readExecutionFailures(), 0,
+      'failed drain and resource close cannot discharge recovery responsibility');
+    // A later input must not replace the live owner's unresolved execution.
     const nextRequest = {
       interactionId: 'interaction-after-intake-failure', inputRevision: 1, sourceRef: 'ui:after-intake-failure',
       rawInput: '4 加 4 等于几？', clarifications: [], taskCandidates: [],
     };
-    const second = await interpreter.interpret(nextRequest);
-    assert.equal(second.kind, 'answer');
-    if (second.kind !== 'answer') throw new Error('expected an answer');
-    assert.equal(second.answer, '8');
-    assert.equal(prepared, 2, 'the second interpret drives its own fresh provider');
-    assert.equal(await readExecutionFailures(), 1, 'the closure is written exactly once');
-    assert.ok((await parentJournal.readScopeOpenedTurns(scope)).length >= 2);
+    await assert.rejects(() => interpreter.interpret(nextRequest), /current active lease owner/);
+    assert.equal(prepared, 1, 'the second interpret cannot replace unresolved execution');
+    assert.equal(await readExecutionFailures(), 0);
+    assert.equal((await parentJournal.readScopeOpenedTurns(scope)).length, 1);
   } finally {
     await lease?.release();
     await rm(root, { recursive: true, force: true });
@@ -3125,6 +3301,241 @@ test('provider explicit brain interpreter closes the dead continued epoch of a r
     );
   } finally {
     await earlyLease?.release();
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: the discharge of an interrupted turn read its parent snapshot
+// and fixed the replacement owner before it entered the lease guard. A
+// discharge that waited there could authenticate the dead owner of epoch 2 and
+// then close whatever newer epoch a concurrent exact-input recovery had just
+// opened, recording a live epoch 3 as an execution failure. Impact: a real
+// Provider stream is terminated and its answer lost. Cost: four real lease
+// generations, one seeded reconciled epoch and one gated discharge. Probability:
+// a new input and the exact-input recovery arriving in that order on one scope.
+test('provider explicit brain interpreter never closes the epoch a concurrent recovery just opened', async () => {
+  const root = join(parentFixtureRoot, `guard-epoch-race-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-guard-epoch-race', providerId: 'provider-guard-epoch-race', protocol: 'responses',
+    endpointRef: 'recorded://guard-epoch-race', modelRef: 'model-guard-epoch-race',
+    configDigest: 'sha256:guard-epoch-race-config', capabilityDigest: 'sha256:guard-epoch-race-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:guard-epoch-race' };
+  const clock = { now: () => new Date().toISOString() };
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    // Generation 1 owns the turn input and dies. Generation 2 takes over in its
+    // own process, becomes the reconciled replacement owner of epoch 2, and
+    // then dies too: an owner from another process start is what makes the
+    // live generation a genuine committed replacement during recovery.
+    const firstCrash = await acquireCrashedOwnerLease(root);
+    assert.equal(firstCrash.generation, 1);
+    const secondCrash = await acquireCrashedTakeoverOwnerLease(root, 'guard epoch race epoch two owner');
+    assert.equal(secondCrash.generation, 2);
+    const secondOwner = secondCrash.owner;
+
+    const originalRequest = {
+      interactionId: 'interaction-guard-epoch-race', inputRevision: 1,
+      sourceRef: 'ui:guard-epoch-race', rawInput: '需要恢复的原始输入',
+      clarifications: [], taskCandidates: [],
+    };
+    const turn: InteractionTurnIdentity = {
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      interactionId: originalRequest.interactionId, inputRevision: 1, turnId: 'explicit-interpret-guard-epoch-race',
+    };
+    const operationScope = { organId: scope.organId, operationId: id('operation', 'op-guard-epoch-race') };
+    const execution = { runtimeId: turn.turnId, ...operationScope, executionEpoch: 1, interactionTurn: turn };
+    const initialInput = {
+      ref: await evidence.write({
+        scope: operationScope, kind: 'execution', type: 'initial-input', locator: turn.turnId,
+        content: JSON.stringify(originalRequest),
+      }),
+      view: { kind: 'utf8-text' as const },
+    };
+    const seedOwner = createInteractionParentTurnRawOwner({
+      turn, execution, scope: operationScope, initialInput, providerBinding: binding,
+      executionOwner: firstCrash.owner, journal: parentJournal, rawContent,
+    });
+    await seedOwner.openTurnInput();
+    const reqOne = { turnId: turn.turnId, requestId: 'guard-epoch-race-request-1' };
+    await seedOwner.registerRequest({ execution, record: { request: reqOne, scope: operationScope, phase: 'dispatching' } });
+    await seedOwner.registerRequest({ execution, record: { request: reqOne, scope: operationScope, phase: 'dispatched' } });
+    await seedOwner.acceptRawFact({ execution, scope: operationScope, request: reqOne, producerSeq: 1,
+      fact: { kind: 'content', channel: 'reasoning-summary', update: 'full',
+        contentUnitId: 'guard-epoch-race-reasoning-1',
+        content: { ref: await evidence.write({ scope: operationScope, kind: 'execution', type: 'reasoning',
+          locator: 'guard-epoch-race-reasoning-1', content: 'partial reasoning in the first epoch' }),
+        view: { kind: 'utf8-text' as const } }, complete: false } });
+
+    const continuedOwner = createInteractionParentTurnRawOwner({
+      turn, execution: { ...execution, executionEpoch: 2 }, scope: operationScope, initialInput,
+      providerBinding: binding, executionOwner: secondOwner, journal: parentJournal, rawContent,
+    });
+    const reconciled = await continuedOwner.reconcileTurnOwner({
+      previousOwner: firstCrash.owner, replacementOwner: secondOwner,
+      isCommittedReplacement: true, reconciledAt: clock.now(),
+    });
+    assert.equal(reconciled.fact.mode, 'continue');
+    assert.equal(reconciled.fact.effectiveExecutionEpoch, 2);
+    await continuedOwner.openTurnInput();
+    const executionTwo = { ...execution, executionEpoch: 2 };
+    const reqTwo = { turnId: turn.turnId, requestId: 'guard-epoch-race-request-2' };
+    await continuedOwner.registerRequest({ execution: executionTwo, record: { request: reqTwo, scope: operationScope, phase: 'dispatching' } });
+    await continuedOwner.registerRequest({ execution: executionTwo, record: { request: reqTwo, scope: operationScope, phase: 'dispatched' } });
+    await continuedOwner.acceptRawFact({ execution: executionTwo, scope: operationScope, request: reqTwo, producerSeq: 1,
+      fact: { kind: 'content', channel: 'reasoning-summary', update: 'full',
+        contentUnitId: 'guard-epoch-race-reasoning-2',
+        content: { ref: await evidence.write({ scope: operationScope, kind: 'execution', type: 'reasoning',
+          locator: 'guard-epoch-race-reasoning-2', content: 'partial reasoning in the continued epoch' }),
+        view: { kind: 'utf8-text' as const } }, complete: false } });
+
+    // Generation 2 is provably gone and generation 3 is the live owner, so the
+    // exact-input recovery can legally open epoch 3 under generation 3.
+    lease = await acquireDaemonLease(paths, { takeover: {
+      reason: 'guard epoch race final takeover', allowed: () => true,
+      stop: { gracefulTimeoutMs: 2_000, pollIntervalMs: 20 },
+    } });
+    assert.equal(lease.record.generation, 3);
+    assert.equal(lease.record.takeover?.previousGeneration, 2);
+    assert.equal(lease.record.takeover?.termination, 'already-dead');
+    const liveLease = lease;
+
+    // The discharge request is paused just before it would enter the real lease
+    // guard; the exact-input recovery then wins the guard and opens epoch 3.
+    let releaseDischarge!: () => void;
+    const dischargeGate = new Promise<void>((resolve) => { releaseDischarge = resolve; });
+    let dischargeReachedGuard!: () => void;
+    const dischargeAtGuard = new Promise<void>((resolve) => { dischargeReachedGuard = resolve; });
+    let gated = false;
+    const gatedGuard: SupervisorLease['withCurrentLeaseOwner'] = async (operation) => {
+      if (!gated) {
+        gated = true;
+        dischargeReachedGuard();
+        await dischargeGate;
+      }
+      return liveLease.withCurrentLeaseOwner(operation);
+    };
+    const gatedLease: SupervisorLease = Object.assign(
+      Object.create(liveLease) as SupervisorLease,
+      { withCurrentLeaseOwner: gatedGuard },
+    );
+
+    const decision = JSON.stringify({
+      kind: 'requirement', normalizedInput: '竞态期间到达的新输入', knownFacts: [],
+      proposal: { revision: 1, intent: 'create', title: '竞态期间到达的新输入', objective: '竞态期间到达的新输入',
+        deliverable: '结果', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+      decisionRefs: [],
+    });
+    const dischargeInterpreter = createProviderExplicitBrainInterpreter({
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+      rawEvidence: evidence, rawContent, clock,
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease: gatedLease,
+      port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+        { kind: 'output', state: 'output', summary: decision },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ] }),
+    });
+    const dischargeOutcome = dischargeInterpreter.interpret({
+      ...originalRequest, interactionId: 'interaction-guard-epoch-race-next',
+      sourceRef: 'ui:guard-epoch-race-next', rawInput: '竞态期间到达的新输入',
+    }).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await Promise.race([dischargeAtGuard, dischargeOutcome.then((outcome) => {
+      throw new Error(`discharge finished before the guard: ${String((outcome as { error?: unknown }).error)}`);
+    })]);
+
+    // The exact prior input legally reconciles epoch 2 to the live owner and
+    // stays open mid-answer, exactly like a real recovery request.
+    let recoveryStarted!: () => void;
+    const recoveryStartedPromise = new Promise<void>((resolve) => { recoveryStarted = resolve; });
+    let releaseRecovery!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    const recoveryPort = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [],
+      stream: async function* () {
+        yield { type: 'response.output_text.delta', item_id: 'recovered-text', delta: '{"kind":' };
+        recoveryStarted();
+        await recoveryGate;
+        yield { type: 'response.output_text.done', item_id: 'recovered-text', text: JSON.stringify({
+          kind: 'answer', normalizedInput: originalRequest.rawInput, knownFacts: [],
+          answer: '恢复后的答案', decisionRefs: [],
+        }) };
+      } });
+    const recoveryInterpreter = createProviderExplicitBrainInterpreter({
+      organId: scope.organId, interactionScopeId: scope.interactionScopeId,
+      parentJournal, checkpointJournal: helperJournal, helperJournal, turnHelperJournal: helperJournal,
+      rawEvidence: evidence, rawContent, clock,
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease: liveLease,
+      prepareAgentProvider: async () => ({
+        roleId: 'interaction', source: 'http', binding, port: recoveryPort,
+        provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+          model: binding.modelRef, route: 'guard-epoch-race-recovery', baseUrl: binding.endpointRef },
+      }),
+    });
+    const recoveryOutcome = recoveryInterpreter.interpret(originalRequest).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await recoveryStartedPromise;
+    const openedWhileRecovering = await parentJournal.readTurnSnapshot(turn);
+    assert.deepEqual(openedWhileRecovering.ownerReconciliations.map((entry) => entry.fact.effectiveExecutionEpoch),
+      [2, 3], 'the concurrent recovery opened epoch 3 before the discharge proceeds');
+
+    // A now enters the lease guard. It must re-read the fresh epoch and refuse,
+    // never close the epoch the recovery just opened.
+    releaseDischarge();
+    const dischargeResult = await dischargeOutcome;
+    assert.equal(dischargeResult.ok, false,
+      'the late discharge must refuse instead of closing the live recovered epoch');
+    if (dischargeResult.ok) return;
+    const dischargeError = dischargeResult.error;
+    if (!(dischargeError instanceof Error)) {
+      throw new Error('the discharge refusal must carry an Error');
+    }
+    assert.match(dischargeError.message, /exact prior input/);
+    assert.match(dischargeError.message, /still the current active lease owner/);
+
+    const afterRefusal = await parentJournal.readTurnSnapshot(turn);
+    assert.equal(afterRefusal.executionFailure, null, 'the live recovered epoch is never closed as failed');
+    assert.equal(afterRefusal.abandonment, null, 'the reconciled turn is never abandoned');
+    assert.deepEqual(afterRefusal.providerSettlements, [], 'the refusal fabricates no settlement');
+    assert.equal(afterRefusal.resourceClose, null, 'the refusal fabricates no resource close');
+    assert.deepEqual(afterRefusal.ownerReconciliations.map((entry) => entry.fact.effectiveExecutionEpoch), [2, 3]);
+    assert.deepEqual(await parentJournal.readScopeExecutionFailures(scope), [],
+      'no epoch 3 execution failure is ever recorded for the active request');
+    assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
+      'no epoch 3 abandonment is ever recorded for the active request');
+
+    // The recovered epoch still owns its raw history and finishes normally.
+    releaseRecovery();
+    const recoveryResult = await recoveryOutcome;
+    assert.equal(recoveryResult.ok, true, 'the recovered epoch can still append its facts and finish');
+    if (!recoveryResult.ok) return;
+    assert.equal(recoveryResult.value.kind, 'answer');
+    if (recoveryResult.value.kind !== 'answer') return;
+    assert.equal(recoveryResult.value.answer, '恢复后的答案');
+    const finalSnapshot = await parentJournal.readTurnSnapshot(turn);
+    assert.equal(finalSnapshot.executionFailure, null);
+    assert.deepEqual(finalSnapshot.ownerReconciliations.map((entry) => entry.fact.effectiveExecutionEpoch), [2, 3]);
+    assert.ok(finalSnapshot.acceptedFacts.some((entry) =>
+      entry.fact.envelope.execution.executionEpoch === 3 && entry.fact.envelope.fact.kind === 'request-complete'),
+    'the recovered epoch keeps its own terminal fact');
+    assert.ok(await helperJournal.readSemanticCheckpointExact(turn));
+  } finally {
     await lease?.release();
     await rm(root, { recursive: true, force: true });
   }
@@ -3633,6 +4044,283 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
       const expected = wires[2].input.find((item: any) => item.type === 'function_call_output' && item.call_id === tool.callId);
       assert.equal(new TextDecoder().decode(await dependencies.rawContent.read({ scope: fact.envelope.scope, content: tool.rawOutput })), expected.output);
     }
+  } finally {
+    const receipt = await parent.close(binding); assert.equal(receipt.state, 'closed');
+  }
+});
+
+// Failure basis: the helper tool entry asserted EvidenceRef and roleId inside
+// tool execution, outside the model-correctable tool result shape. One invalid
+// model argument therefore threw a bare ContractError/TypeError: the interpret
+// call failed with a 500 and the turn kept a tool call without a committed
+// result. Impact: a single malformed helper argument bricks the interaction.
+// Cost: one recorded parent run with three rejected rounds and one valid retry.
+test('provider explicit brain returns invalid helper tool arguments to the model and completes after a valid retry', async () => {
+  const dependencies = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-helper-args', providerId: 'provider-helper-args', protocol: 'responses',
+    endpointRef: 'recorded://helper-args', modelRef: 'model-helper-args',
+    configDigest: 'sha256:helper-args-config', capabilityDigest: 'sha256:helper-args-capability',
+  };
+  const childBinding = { ...binding, bindingId: 'child-helper-args', modelRef: 'model-child-helper-args' };
+  const finalAnswer = `validated helper ${'answer body '.repeat(80)}`;
+  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'helper argument validation', knownFacts: [], answer: finalAnswer, decisionRefs: [] });
+  const assignmentFields = {
+    objective: 'verify helper argument validation', targetRefs: [], expectedOutputRefs: [],
+    successCriteria: ['return one bounded result'], failureCriteria: ['none'], incompleteCriteria: ['partial'],
+    requiredCapabilities: [], mergeGate: 'not-required',
+  };
+  const invalidCalls = ['invalid-evidence-id', 'missing-evidence-id', 'invalid-role'];
+  const dispatchCall = (callId: string, value: Readonly<Record<string, unknown>>) => ({
+    type: 'response.output_item.done', output_index: 1,
+    item: { type: 'function_call', call_id: callId, name: 'dispatch_helper', arguments: JSON.stringify(value) },
+  });
+  const wires: any[] = [];
+  const toolOutputs = new Map<string, any>();
+  const parent = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire) => {
+    wires.push(wire);
+    const results = wire.input.filter((item: any) => item.type === 'function_call_output');
+    for (const result of results) {
+      // The wire carries the accepted evidence footer after the JSON output;
+      // parse the tool result payload itself, not the footer decoration.
+      if (!toolOutputs.has(result.call_id)) toolOutputs.set(result.call_id, JSON.parse(String(result.output).split('\n[HumanAgent evidence refs]')[0]!));
+    }
+    if (results.length === 0) {
+      return [dispatchCall('invalid-evidence-id', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
+        inputs: { question: 'child-only-input' },
+        evidenceRefs: [{
+          evidenceId: { scope: 'evidence', value: '' }, kind: 'tool', source: 'parent',
+          locator: 'parent://invalid-evidence-id', scope: { organId: { scope: 'organ', value: 'explicit-test' } },
+        }],
+      })];
+    }
+    if (results.length === 1) {
+      return [dispatchCall('missing-evidence-id', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
+        inputs: { question: 'child-only-input' },
+        evidenceRefs: [{
+          kind: 'tool', source: 'parent', locator: 'parent://missing-evidence-id',
+          scope: { organId: { scope: 'organ', value: 'explicit-test' } },
+        }],
+      })];
+    }
+    if (results.length === 2) {
+      return [dispatchCall('invalid-role', {
+        selection: { roleId: 'reviewer' }, assignmentFields,
+        inputs: { question: 'child-only-input' }, evidenceRefs: [],
+      })];
+    }
+    if (results.length === 3) {
+      return [dispatchCall('valid-dispatch', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
+        inputs: { question: 'child-only-input' }, evidenceRefs: [],
+      })];
+    }
+    if (results.length === 4) {
+      const dispatched = toolOutputs.get('valid-dispatch');
+      assert.ok(dispatched?.identity?.helperCallId, 'the valid dispatch must return a helper identity');
+      return [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'accept-valid', name: 'accept_helper',
+        arguments: JSON.stringify({ helperCallId: dispatched.identity.helperCallId, refinedText: 'validated helper result', acceptanceRef: 'acceptance:helper-args', evidenceRefs: [] }) } }];
+    }
+    assert.equal(results.length, 5);
+    return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
+  } });
+  const starts: Parameters<typeof parent.start>[0][] = [];
+  const start = parent.start.bind(parent);
+  parent.start = async (input) => { starts.push(input); return start(input); };
+  const interpreter = createProviderExplicitBrainInterpreter({ ...dependencies, port: parent, binding,
+    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+    helperFactory: async ({ selection, assignment, execution }) => {
+      assert.deepEqual(selection, { roleId: 'review', configuredAgentId: 'independent-child' });
+      const child = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], respond: async () => [{
+        type: 'response.output_text.done', item_id: 'child',
+        text: JSON.stringify({ agentId: 'independent-child', producedArtifactRefs: [], producedArtifactDigests: [],
+          status: 'succeeded', summary: 'validated child summary', outputRefs: [], evidenceRefs: [], nextAction: 'wait', conditionRef: 'condition:validated' }),
+      }] });
+      return { binding: childBinding, driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({ port: child, binding: childBinding,
+        ...execution, organId: assignment.organId, helper: assignment, assignmentId: assignment.assignmentId,
+        scope: { organId: assignment.organId, operationId: execution.operationId }, inputRefs: [] }),
+      close: async () => { const receipt = await child.close(childBinding); assert.equal(receipt.state, 'closed'); } };
+    },
+  });
+  try {
+    const result = await interpreter.interpret({
+      interactionId: 'helper-args', inputRevision: 1, sourceRef: 'test:helper-args',
+      rawInput: 'helper argument validation', clarifications: [], taskCandidates: [],
+    });
+    assert.equal(result.kind, 'answer');
+    if (result.kind !== 'answer') throw new Error('expected the retried turn to answer');
+    assert.equal(result.answer, finalAnswer);
+    for (const callId of invalidCalls) {
+      const output = toolOutputs.get(callId);
+      assert.equal(output.status, 'failed', `${callId} must return a failed tool result`);
+      assert.equal(output.code, 'tool.argument.invalid');
+      assert.equal(output.recoverable, true);
+    }
+    assert.ok(String(toolOutputs.get('invalid-evidence-id').message).includes('evidenceId'));
+    assert.ok(String(toolOutputs.get('missing-evidence-id').message).includes('evidenceId'));
+    assert.ok(String(toolOutputs.get('invalid-role').message).includes('roleId'));
+    const turn = starts[0]!.interactionTurn;
+    const snapshot = await dependencies.parentJournal.readTurnSnapshot(turn);
+    const facts = snapshot.acceptedFacts.map(({ fact }) => fact.envelope.fact);
+    const resultCallIds = facts.flatMap((fact) => fact.kind === 'tool-result' ? [fact.callId] : []);
+    for (const callId of [...invalidCalls, 'valid-dispatch', 'accept-valid']) {
+      assert.ok(resultCallIds.includes(callId), `${callId} must have a committed tool result so the turn stays paired`);
+    }
+    for (const fact of facts) {
+      if (fact.kind !== 'tool-result' || !invalidCalls.includes(fact.callId)) continue;
+      assert.equal(fact.result.status, 'failed');
+      assert.equal(fact.result.error?.category, 'validation');
+      assert.equal(fact.result.error?.retryable, 'retryable');
+      assert.equal(fact.result.error?.nextAction.kind, 'continue');
+    }
+    assert.ok(await dependencies.checkpointJournal.readSemanticCheckpointExact(turn), 'the completed turn must still commit its semantic checkpoint');
+    assert.equal(wires.length, 6);
+  } finally {
+    const receipt = await parent.close(binding); assert.equal(receipt.state, 'closed');
+  }
+});
+
+// Failure basis: the tool entry validated assignmentFields but then forwarded
+// the raw model record. The runtime allocates the helper identity and then
+// spreads those fields into the assignment, so a model-supplied attempt or
+// assignmentId overrode the runtime identity after the factory had acquired a
+// provider. The identity validator then failed with a bare ContractError and
+// the tool call stayed unpaired. Impact: one extra control key strands the
+// interaction and poisons the helper identity. Cost: one recorded parent run
+// with two rejected rounds and one extra-key dispatch that must keep the
+// runtime identity.
+test('provider explicit brain decodes only assignment business fields before dispatch', async () => {
+  const dependencies = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-assignment-fields', providerId: 'provider-assignment-fields', protocol: 'responses',
+    endpointRef: 'recorded://assignment-fields', modelRef: 'model-assignment-fields',
+    configDigest: 'sha256:assignment-fields-config', capabilityDigest: 'sha256:assignment-fields-capability',
+  };
+  const childBinding = { ...binding, bindingId: 'child-assignment-fields', modelRef: 'model-child-assignment-fields' };
+  const finalAnswer = `assignment fields ${'answer body '.repeat(80)}`;
+  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'helper assignment fields', knownFacts: [], answer: finalAnswer, decisionRefs: [] });
+  const assignmentFields = {
+    objective: 'verify helper assignment fields', targetRefs: [], expectedOutputRefs: [],
+    successCriteria: ['return one bounded result'], failureCriteria: ['none'], incompleteCriteria: ['partial'],
+    requiredCapabilities: [], mergeGate: 'not-required',
+  };
+  const invalidCalls = ['empty-success-criteria', 'missing-merge-gate'];
+  const dispatchCall = (callId: string, value: Readonly<Record<string, unknown>>) => ({
+    type: 'response.output_item.done', output_index: 1,
+    item: { type: 'function_call', call_id: callId, name: 'dispatch_helper', arguments: JSON.stringify(value) },
+  });
+  const wires: any[] = [];
+  const toolOutputs = new Map<string, any>();
+  let factoryCalls = 0;
+  const parent = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire) => {
+    wires.push(wire);
+    const results = wire.input.filter((item: any) => item.type === 'function_call_output');
+    for (const result of results) {
+      if (!toolOutputs.has(result.call_id)) toolOutputs.set(result.call_id, JSON.parse(String(result.output).split('\n[HumanAgent evidence refs]')[0]!));
+    }
+    if (results.length === 0) {
+      return [dispatchCall('empty-success-criteria', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' },
+        assignmentFields: { ...assignmentFields, successCriteria: [] },
+        inputs: { question: 'child-only-input' }, evidenceRefs: [],
+      })];
+    }
+    if (results.length === 1) {
+      assert.equal(factoryCalls, 0, 'an empty successCriteria must fail before the helper factory is acquired');
+      const withoutMergeGate: Record<string, unknown> = { ...assignmentFields };
+      delete withoutMergeGate.mergeGate;
+      return [dispatchCall('missing-merge-gate', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' },
+        assignmentFields: withoutMergeGate,
+        inputs: { question: 'child-only-input' }, evidenceRefs: [],
+      })];
+    }
+    if (results.length === 2) {
+      assert.equal(factoryCalls, 0, 'a missing mergeGate must fail before the helper factory is acquired');
+      return [dispatchCall('extra-control-keys', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' },
+        assignmentFields: {
+          ...assignmentFields,
+          attempt: 0,
+          assignmentId: 'model-supplied-assignment',
+          helperCallId: 'model-supplied-call',
+          parentTurnId: 'model-supplied-turn',
+        },
+        inputs: { question: 'child-only-input' }, evidenceRefs: [],
+      })];
+    }
+    if (results.length === 3) {
+      const dispatched = toolOutputs.get('extra-control-keys');
+      assert.ok(dispatched?.identity?.helperCallId, 'the valid dispatch must return a helper identity');
+      return [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'accept-valid', name: 'accept_helper',
+        arguments: JSON.stringify({ helperCallId: dispatched.identity.helperCallId, refinedText: 'validated assignment fields', acceptanceRef: 'acceptance:assignment-fields', evidenceRefs: [] }) } }];
+    }
+    assert.equal(results.length, 4);
+    return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
+  } });
+  const starts: Parameters<typeof parent.start>[0][] = [];
+  const start = parent.start.bind(parent);
+  parent.start = async (input) => { starts.push(input); return start(input); };
+  const interpreter = createProviderExplicitBrainInterpreter({ ...dependencies, port: parent, binding,
+    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+    helperFactory: async ({ selection, assignment, execution }) => {
+      factoryCalls += 1;
+      assert.deepEqual(selection, { roleId: 'review', configuredAgentId: 'independent-child' });
+      const child = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], respond: async () => [{
+        type: 'response.output_text.done', item_id: 'child',
+        text: JSON.stringify({ agentId: 'independent-child', producedArtifactRefs: [], producedArtifactDigests: [],
+          status: 'succeeded', summary: 'validated child summary', outputRefs: [], evidenceRefs: [], nextAction: 'wait', conditionRef: 'condition:validated' }),
+      }] });
+      return { binding: childBinding, driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({ port: child, binding: childBinding,
+        ...execution, organId: assignment.organId, helper: assignment, assignmentId: assignment.assignmentId,
+        scope: { organId: assignment.organId, operationId: execution.operationId }, inputRefs: [] }),
+      close: async () => { const receipt = await child.close(childBinding); assert.equal(receipt.state, 'closed'); } };
+    },
+  });
+  try {
+    const result = await interpreter.interpret({
+      interactionId: 'assignment-fields', inputRevision: 1, sourceRef: 'test:assignment-fields',
+      rawInput: 'helper assignment fields', clarifications: [], taskCandidates: [],
+    });
+    assert.equal(result.kind, 'answer');
+    if (result.kind !== 'answer') throw new Error('expected the retried turn to answer');
+    assert.equal(result.answer, finalAnswer);
+    assert.equal(factoryCalls, 1, 'only the valid dispatch may acquire a helper factory');
+    for (const callId of invalidCalls) {
+      const output = toolOutputs.get(callId);
+      assert.equal(output.status, 'failed', `${callId} must return a failed tool result`);
+      assert.equal(output.code, 'tool.argument.invalid');
+      assert.equal(output.recoverable, true);
+    }
+    // The runtime-allocated identity must survive the decoded business fields.
+    const extraKeys = toolOutputs.get('extra-control-keys');
+    assert.ok(extraKeys?.identity?.helperCallId, 'the decoded dispatch must still return a helper identity');
+    const turnPrefix = `${starts[0]!.interactionTurn.turnId}-helper-`;
+    assert.ok(String(extraKeys.identity.assignmentId).startsWith(turnPrefix), 'the assignment id must stay runtime-allocated');
+    assert.ok(String(extraKeys.identity.helperCallId).startsWith(turnPrefix), 'the helper call id must stay runtime-allocated');
+    assert.equal(extraKeys.identity.attempt, 1, 'the attempt must stay runtime-allocated');
+    assert.equal(extraKeys.identity.parentTurnId, starts[0]!.interactionTurn.turnId, 'the parent turn must stay runtime-allocated');
+    assert.equal(toolOutputs.get('extra-control-keys').result.status, 'succeeded', 'the decoded business fields must still dispatch a real helper');
+    assert.ok(String(toolOutputs.get('empty-success-criteria').message).includes('successCriteria'));
+    assert.ok(String(toolOutputs.get('missing-merge-gate').message).includes('mergeGate'));
+    const turn = starts[0]!.interactionTurn;
+    const snapshot = await dependencies.parentJournal.readTurnSnapshot(turn);
+    const facts = snapshot.acceptedFacts.map(({ fact }) => fact.envelope.fact);
+    const resultCallIds = facts.flatMap((fact) => fact.kind === 'tool-result' ? [fact.callId] : []);
+    for (const callId of [...invalidCalls, 'extra-control-keys', 'accept-valid']) {
+      assert.ok(resultCallIds.includes(callId), `${callId} must have a committed tool result so the turn stays paired`);
+    }
+    for (const fact of facts) {
+      if (fact.kind !== 'tool-result' || !invalidCalls.includes(fact.callId)) continue;
+      assert.equal(fact.result.status, 'failed');
+      assert.equal(fact.result.error?.category, 'validation');
+      assert.equal(fact.result.error?.retryable, 'retryable');
+      assert.equal(fact.result.error?.nextAction.kind, 'continue');
+    }
+    assert.ok(await dependencies.checkpointJournal.readSemanticCheckpointExact(turn), 'the completed turn must still commit its semantic checkpoint');
+    assert.equal(wires.length, 5);
   } finally {
     const receipt = await parent.close(binding); assert.equal(receipt.state, 'closed');
   }

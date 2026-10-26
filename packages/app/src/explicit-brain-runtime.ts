@@ -16,16 +16,22 @@ import {
   type InteractionHelperResultFields,
   type InteractionDecision,
   type ProviderBinding,
+  type ProviderError,
+  type ProviderToolCall,
   type ProviderCloseResult,
   type ProviderSettlement,
   type OccurrenceExecutionOwner,
   type RequirementIntent,
+  type ScopeRef,
   type TaskFlowBinding,
   type TaskFlowKind,
   TASK_FLOW_DEFINITION_VERSION,
   TASK_FLOW_KINDS,
+  validateInteractionHelperAssignmentFields,
 } from '../../contracts/src/index.js';
-import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
+import { ProviderAgentDriver, type ProviderAgentEvent, type ProviderToolExecutionResult } from '../../adapters/provider/src/index.js';
+import { BudgetedProviderObservations, DEFAULT_UI_EXECUTION_EVENT_BUDGET } from '../../runtime/src/ui-runtime/execution-budget.js';
+import type { AgentIoEventBudget } from '../../runtime/src/agent-io/types.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
 import { prepareScopeSemanticHistory } from '../../runtime/src/context/interaction-semantic-context.js';
 import { loadBuiltinPromptSegments, type AgentPromptSegment } from '../../agent-templates/src/index.js';
@@ -53,6 +59,7 @@ import {
 import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
 import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 import { readSupervisorTerminationReceipts, type SupervisorLease } from './supervisor/supervisor.js';
+import { AGENT_ROLES } from '../../config/src/index.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
@@ -259,6 +266,163 @@ function stringArray(record: Record<string, unknown>, field: string): readonly s
     throw new ExplicitBrainOperationalToolError('unsupported-tool', `requirement proposal ${field} must be a string array`);
   }
   return value;
+}
+
+/**
+ * Model-supplied helper arguments are untrusted input. A malformed argument is
+ * the model's mistake to correct, so the tool executor turns it into a typed
+ * failed tool result that keeps the call paired instead of throwing. This only
+ * covers the argument shape; a real dispatch or acceptance failure keeps its
+ * own error path.
+ */
+class ExplicitBrainToolArgumentError extends Error {}
+
+type ParsedHelperToolArguments =
+  | {
+      readonly toolId: 'dispatch_helper';
+      readonly selection: { readonly roleId: string; readonly configuredAgentId?: string };
+      readonly assignmentFields: InteractionHelperAssignmentFields;
+      readonly inputs: BusinessPayload;
+      readonly evidenceRefs: readonly EvidenceRef[];
+      readonly checkpointDescription: string;
+    }
+  | {
+      readonly toolId: 'accept_helper';
+      readonly helperCallId: string;
+      readonly refinedText: string;
+      readonly acceptanceRef: string;
+      readonly evidenceRefs: readonly EvidenceRef[];
+    };
+
+function parseHelperObject(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ExplicitBrainToolArgumentError(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseHelperString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ExplicitBrainToolArgumentError(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function parseHelperEvidenceRefs(value: unknown): readonly EvidenceRef[] {
+  if (!Array.isArray(value)) {
+    throw new ExplicitBrainToolArgumentError('evidenceRefs must be an array of scoped evidence references with an evidenceId');
+  }
+  return value.map((entry, index) => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new ExplicitBrainToolArgumentError(`evidenceRefs[${index}] must be an object carrying an evidenceId`);
+    }
+    const evidenceId = (entry as Record<string, unknown>).evidenceId;
+    if (evidenceId === null || typeof evidenceId !== 'object' || Array.isArray(evidenceId)
+      || typeof (evidenceId as Record<string, unknown>).value !== 'string') {
+      throw new ExplicitBrainToolArgumentError(
+        `evidenceRefs[${index}].evidenceId must be a scoped id object with a string value`,
+      );
+    }
+    try {
+      assertEvidenceRef(entry as EvidenceRef);
+    } catch (error) {
+      throw new ExplicitBrainToolArgumentError(
+        `evidenceRefs[${index}].evidenceId or evidence reference fields are invalid: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return entry as EvidenceRef;
+  });
+}
+
+function parseHelperToolArguments(call: ProviderToolCall): ParsedHelperToolArguments {
+  const args = call.arguments as Record<string, unknown>;
+  const evidenceRefs = parseHelperEvidenceRefs(args.evidenceRefs);
+  if (call.toolId === 'dispatch_helper') {
+    const selection = parseHelperObject(args.selection, 'dispatch_helper selection');
+    const { roleId, configuredAgentId } = selection;
+    if (typeof roleId !== 'string' || !(AGENT_ROLES as readonly string[]).includes(roleId)) {
+      throw new ExplicitBrainToolArgumentError(
+        `dispatch_helper selection.roleId must be one of ${AGENT_ROLES.join(', ')}`,
+      );
+    }
+    if (configuredAgentId !== undefined && typeof configuredAgentId !== 'string') {
+      throw new ExplicitBrainToolArgumentError('dispatch_helper selection.configuredAgentId must be a string when present');
+    }
+    const assignmentFieldsInput = parseHelperObject(args.assignmentFields, 'dispatch_helper assignmentFields');
+    const inputs = parseHelperObject(args.inputs, 'dispatch_helper inputs');
+    const objective = parseHelperString(assignmentFieldsInput.objective, 'dispatch_helper assignmentFields.objective');
+    try {
+      validateInteractionHelperAssignmentFields(assignmentFieldsInput as unknown as InteractionHelperAssignmentFields);
+    } catch (error) {
+      throw new ExplicitBrainToolArgumentError(
+        `dispatch_helper assignmentFields are invalid: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    // Decode exactly the contract business fields. The runtime allocates the
+    // helper identity and then spreads these fields into the assignment, so
+    // forwarding the raw model record would let an extra attempt or
+    // assignmentId override that identity after the factory was acquired.
+    const assignmentFields: InteractionHelperAssignmentFields = {
+      objective: assignmentFieldsInput.objective as string,
+      targetRefs: assignmentFieldsInput.targetRefs as readonly string[],
+      expectedOutputRefs: assignmentFieldsInput.expectedOutputRefs as readonly string[],
+      successCriteria: assignmentFieldsInput.successCriteria as readonly string[],
+      failureCriteria: assignmentFieldsInput.failureCriteria as readonly string[],
+      incompleteCriteria: assignmentFieldsInput.incompleteCriteria as readonly string[],
+      requiredCapabilities: assignmentFieldsInput.requiredCapabilities as readonly string[],
+      mergeGate: assignmentFieldsInput.mergeGate as 'required' | 'not-required',
+    };
+    return {
+      toolId: 'dispatch_helper',
+      selection: { roleId, ...(configuredAgentId === undefined ? {} : { configuredAgentId }) },
+      assignmentFields,
+      inputs: inputs as BusinessPayload,
+      evidenceRefs,
+      checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${assignmentFields.successCriteria.join('; ')}. Owner acceptance is pending.`,
+    };
+  }
+  return {
+    toolId: 'accept_helper',
+    helperCallId: parseHelperString(args.helperCallId, 'accept_helper helperCallId'),
+    refinedText: parseHelperString(args.refinedText, 'accept_helper refinedText'),
+    acceptanceRef: parseHelperString(args.acceptanceRef, 'accept_helper acceptanceRef'),
+    evidenceRefs,
+  };
+}
+
+async function invalidHelperToolResult(input: {
+  readonly call: ProviderToolCall;
+  readonly scope: ScopeRef;
+  readonly rawEvidence: ProviderEvidenceSink;
+  readonly message: string;
+}): Promise<ProviderToolExecutionResult> {
+  const evidenceRef = await input.rawEvidence.write({
+    scope: input.scope,
+    kind: 'tool',
+    type: 'tool-argument-invalid',
+    locator: `explicit-brain/tool-argument-invalid/${input.call.callId}`,
+    content: input.message,
+  });
+  const evidenceRefs = [evidenceRef];
+  const error: ProviderError = {
+    errorId: `explicit-brain-tool-argument-invalid-${input.call.callId}`,
+    code: 'tool.argument.invalid',
+    category: 'validation',
+    phase: 'tool',
+    message: input.message,
+    ownerId: 'humanagent.runtime.explicit-brain',
+    retryable: 'retryable',
+    attention: 'foreground',
+    evidenceRefs,
+    nextAction: { kind: 'continue', ref: input.call.toolId },
+  };
+  return {
+    output: JSON.stringify({ status: 'failed', code: 'tool.argument.invalid', message: input.message, recoverable: true }),
+    outputRefs: [],
+    evidenceRefs,
+    status: 'failed',
+    error,
+  };
 }
 
 function parseTaskFlowKind(value: unknown): TaskFlowKind | undefined {
@@ -521,6 +685,7 @@ async function holdsDispatchedHelper(
 }
 
 export function createProviderExplicitBrainInterpreter(input: {
+  readonly executionBudget?: Partial<AgentIoEventBudget>;
   readonly lease?: SupervisorLease | (() => SupervisorLease | undefined);
   readonly port?: ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>;
   readonly organId: OrganId;
@@ -740,54 +905,50 @@ export function createProviderExplicitBrainInterpreter(input: {
           journal: input.parentJournal,
           rawContent: input.rawContent,
         });
-        // A committed owner reconciliation means the turn already continued
-        // into a newer physical epoch, so the recovery owner is the reconciled
-        // replacement owner, never the original turn-input owner. The lane is
-        // the active epoch's execution failure, not the abandonment lane: an
-        // abandonment fact must match the turn-input epoch, and it is that
-        // continued epoch (not epoch 1) which actually died.
-        const snapshot = await input.parentJournal.readTurnSnapshot(pendingTurn.fact.turn);
-        const latestReconciliation = snapshot.ownerReconciliations.at(-1);
-        if (latestReconciliation === undefined) {
-          const eligibility = await owner.readAbandonmentEligibility();
-          if (!eligibility.abandonable) {
-            throw refuse(`it cannot be discharged: ${eligibility.heldReason}`);
+        // One durable snapshot decides the lane. A committed owner
+        // reconciliation means the turn already continued into a newer
+        // physical epoch, so the recovery lane is that epoch's execution
+        // failure; abandonment is reserved for the unreconciled turn input.
+        const laneOf = async (snapshot: Awaited<ReturnType<typeof input.parentJournal.readTurnSnapshot>>) => {
+          const reconciliation = snapshot.ownerReconciliations.at(-1);
+          if (reconciliation === undefined) {
+            const eligibility = await owner.readAbandonmentEligibility();
+            return { reconciliation, heldReason: eligibility.abandonable ? undefined : eligibility.heldReason };
           }
-        } else {
           const eligibility = await owner.readExecutionFailureEligibility();
-          if (!eligibility.closable) {
-            throw refuse(`it cannot be discharged: ${eligibility.heldReason}`);
-          }
-        }
-        const discharge = async () => {
-          if (latestReconciliation === undefined) {
-            return owner.abandonInterruptedTurn({
-              reason: 'provider-interrupted-without-terminal-output',
-              abandonedAt: input.clock.now(),
-            });
-          }
-          return owner.closeFailedEpoch({ failedAt: input.clock.now() });
+          return { reconciliation, heldReason: eligibility.closable ? undefined : eligibility.heldReason };
         };
         if (activeLease === undefined) {
           // No authenticated lifecycle authority is configured, so nothing can
           // prove that the previous execution owner stopped writing. A
           // shape-only discharge would freeze a possibly live request, so hold
           // the turn and keep its recovery responsibility instead of writing an
-          // abandonment fact the record shape cannot justify.
+          // abandonment fact the record shape cannot justify. A shape that
+          // holds on its own still reports its own reason first: a closed turn,
+          // an unknown tool effect or a cancelled request is not a missing
+          // authority.
+          const shape = await laneOf(await input.parentJournal.readTurnSnapshot(pendingTurn.fact.turn));
+          if (shape.heldReason !== undefined) throw refuse(`it cannot be discharged: ${shape.heldReason}`);
           throw refuse('no authenticated supervisor lease authority is configured to prove the previous execution owner stopped');
         }
-        // The owner that must be proven stopped is the one currently owning the
-        // active epoch: the reconciled replacement owner when a reconciliation
-        // is committed, the original turn-input owner otherwise.
-        const activeOwner = latestReconciliation?.fact.replacementOwner ?? pendingTurn.fact.executionOwner;
-        // Authenticate the active owner, decide, and commit inside one
-        // lease-guard critical section. Level 1 refuses a live owner; level 2
-        // discharges only with the current lease record's durable termination
-        // receipt for that exact owner.
+        // Authenticate the active owner, decide the lane and commit inside one
+        // lease-guard critical section. Every durable read happens after the
+        // guard is held: a snapshot cached before it can already name an owner
+        // another request replaced, and closing that newer epoch as failed
+        // would terminate a live stream.
         await activeLease.withCurrentLeaseOwner(async (authenticatedCaller) => {
           // Read the freshest durable record inside the guard: the cached getter
           // could predate a concurrent takeover write.
           const current = await activeLease.refresh();
+          const snapshot = await input.parentJournal.readTurnSnapshot(pendingTurn.fact.turn);
+          const lane = await laneOf(snapshot);
+          const latestReconciliation = lane.reconciliation;
+          const activeOwner = latestReconciliation?.fact.replacementOwner
+            ?? snapshot.turnInput?.fact.executionOwner;
+          if (lane.heldReason !== undefined) throw refuse(`it cannot be discharged: ${lane.heldReason}`);
+          // Level 1 refuses a live owner; level 2 discharges only with the
+          // current lease record's durable termination receipt for that exact,
+          // freshly read owner.
           if (activeOwner !== undefined
             && authenticatedCaller.daemonLeaseId === activeOwner.daemonLeaseId
             && authenticatedCaller.daemonGeneration === activeOwner.daemonGeneration
@@ -815,7 +976,22 @@ export function createProviderExplicitBrainInterpreter(input: {
               + ` (committed generation ${activeOwner.daemonGeneration}, current generation ${current.generation}, ${window})`,
             );
           }
-          await discharge();
+          if (latestReconciliation === undefined) {
+            await owner.abandonInterruptedTurn({
+              reason: 'provider-interrupted-without-terminal-output',
+              abandonedAt: input.clock.now(),
+            });
+            return;
+          }
+          // The closure is bound to the exact epoch and owner authenticated in
+          // this guard, so a newer reconciliation is never closed instead.
+          await owner.closeFailedEpoch({
+            failedAt: input.clock.now(),
+            authenticated: {
+              executionEpoch: latestReconciliation.fact.effectiveExecutionEpoch,
+              executionOwner: latestReconciliation.fact.replacementOwner,
+            },
+          });
         });
       };
       // The live task list is rebuilt from the current coordinator on every
@@ -988,9 +1164,15 @@ export function createProviderExplicitBrainInterpreter(input: {
       const turnProviderBinding = owned === undefined ? input.binding : owned.binding;
       let driver: ProviderAgentDriver<InteractionParentProviderExecutionIdentityRef> | undefined;
       let owner: InteractionParentTurnRawOwner | undefined;
+      // The exact execution owner this batch opened its epoch under. A close of
+      // this batch's own epoch is bound to it, never to a newer reconciliation.
+      let openedExecutionOwner: OccurrenceExecutionOwner | null = null;
       let committedInput = false;
-      let submitted = false;
+      let observationDrained = false;
       let settleAttempted = false;
+      let observations: BudgetedProviderObservations<ProviderAgentEvent<InteractionParentProviderExecutionIdentityRef>> | undefined;
+      const operationId = continuation?.fact.execution.operationId ?? id('operation', `explicit-interpret-${identity}`);
+      const execution = { runtimeId, organId: input.organId, operationId, executionEpoch, interactionTurn: turn };
       /**
        * Set only when this exact batch produced a durable terminal output that
        * no decision can be parsed from. Every other failure keeps its own
@@ -1005,8 +1187,6 @@ export function createProviderExplicitBrainInterpreter(input: {
             .some((key) => turnProviderBinding[key] !== continuation.fact.providerBinding![key]))) {
           throw new Error('interaction parent continuation requires the original full provider binding on an owned composition');
         }
-        const operationId = continuation?.fact.execution.operationId ?? id('operation', `explicit-interpret-${identity}`);
-        const execution = { runtimeId, organId: input.organId, operationId, executionEpoch, interactionTurn: turn };
         const scope = continuation?.fact.scope ?? { organId: input.organId, operationId };
         const initialInput = continuation?.fact.initialInput ?? {
           ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'initial-input', locator: turn.turnId, content: JSON.stringify(effectiveRequest) }),
@@ -1020,6 +1200,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             instructions: async () => ({ text: interpreterPrompt(effectiveRequest, await loadPromptSegments()), toolSurface: 'intake-decision' }),
           });
           owner = createdOwner;
+          openedExecutionOwner = executionOwner ?? null;
           await createdOwner.openTurnInput();
           committedInput = true;
           return createdOwner;
@@ -1058,6 +1239,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           registerRequest: (registration) => createdOwner.registerRequest(registration),
           acceptRawFact: (envelope) => createdOwner.acceptRawFact(envelope),
           requestContext: createdOwner.requestContext,
+          onRequestLifecycle: (event) => observations?.noteLifecycle(event),
           tools: [
             { toolId: 'dispatch_helper', description: 'Dispatch independent bounded helper work. Return is not acceptance. Include the required structured helper result contract in the bounded inputs.', inputSchema: {
               type: 'object', properties: {
@@ -1078,26 +1260,24 @@ export function createProviderExplicitBrainInterpreter(input: {
           ],
           executeTool: {
             async execute({ call }) {
-              const args = call.arguments;
-              if (!Array.isArray(args.evidenceRefs)) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'helper evidenceRefs must be an array');
-              const evidenceRefs = args.evidenceRefs.map((ref) => { const evidence = ref as unknown as EvidenceRef; assertEvidenceRef(evidence); return evidence; });
+              if (call.toolId !== 'dispatch_helper' && call.toolId !== 'accept_helper') {
+                throw new ExplicitBrainOperationalToolError('unsupported-tool', `unknown interaction tool ${call.toolId}`);
+              }
+              let parsed: ParsedHelperToolArguments;
+              try {
+                parsed = parseHelperToolArguments(call);
+              } catch (error) {
+                if (!(error instanceof ExplicitBrainToolArgumentError)) throw error;
+                return invalidHelperToolResult({ call, scope, rawEvidence: input.rawEvidence, message: error.message });
+              }
               let result: unknown;
-              if (call.toolId === 'dispatch_helper') {
-                const selection = args.selection as { roleId?: unknown; configuredAgentId?: unknown } | undefined;
-                if (!selection || typeof selection.roleId !== 'string'
-                  || (selection.configuredAgentId !== undefined && typeof selection.configuredAgentId !== 'string')
-                  || !args.assignmentFields || !args.inputs || !Array.isArray(args.evidenceRefs)) {
-                  throw new ExplicitBrainOperationalToolError('unsupported-tool', 'invalid dispatch_helper arguments');
-                }
-                const assignmentFields = args.assignmentFields as Record<string, unknown>;
-                const objective = nonEmptyString(assignmentFields, 'objective');
-                const successCriteria = stringArray(assignmentFields, 'successCriteria');
+              if (parsed.toolId === 'dispatch_helper') {
                 result = await helpers.dispatchHelper({
-                  selection: { roleId: selection.roleId, ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }) },
-                  assignmentFields: args.assignmentFields as unknown as InteractionHelperAssignmentFields,
-                  inputs: args.inputs as BusinessPayload,
-                  evidenceRefs,
-                  checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${successCriteria.join('; ')}. Owner acceptance is pending.`,
+                  selection: parsed.selection,
+                  assignmentFields: parsed.assignmentFields,
+                  inputs: parsed.inputs,
+                  evidenceRefs: parsed.evidenceRefs,
+                  checkpointDescription: parsed.checkpointDescription,
                   conclude: ({ events }) => {
                     const raw = events.filter((event) => event.kind === 'provider.output')
                       .map((event) => ('summary' in event ? event.summary : '')).join('');
@@ -1114,25 +1294,24 @@ export function createProviderExplicitBrainInterpreter(input: {
                     };
                   },
                 });
-              } else if (call.toolId === 'accept_helper') {
-                const helperCallId = nonEmptyString(args, 'helperCallId');
-                const refinedText = nonEmptyString(args, 'refinedText');
-                const acceptanceRef = nonEmptyString(args, 'acceptanceRef');
-                if (!Array.isArray(args.evidenceRefs)) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'accept_helper evidenceRefs must be an array');
+              } else {
                 const refinedResult = {
-                  ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'accepted-helper', locator: helperCallId, content: refinedText }),
+                  ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'accepted-helper', locator: parsed.helperCallId, content: parsed.refinedText }),
                   view: { kind: 'utf8-text' as const },
                 };
-                result = await helpers.acceptHelper({ helperCallId, refinedResult, acceptanceRef,
-                  checkpointDescription: refinedText,
-                  acceptedBy: 'humanagent.runtime.explicit-brain', evidenceRefs });
-              } else {
-                throw new ExplicitBrainOperationalToolError('unsupported-tool', `unknown interaction tool ${call.toolId}`);
+                result = await helpers.acceptHelper({ helperCallId: parsed.helperCallId, refinedResult, acceptanceRef: parsed.acceptanceRef,
+                  checkpointDescription: parsed.refinedText,
+                  acceptedBy: 'humanagent.runtime.explicit-brain', evidenceRefs: parsed.evidenceRefs });
               }
               return { output: JSON.stringify(result), outputRefs: [], evidenceRefs: [] };
             },
           },
         });
+        observations = new BudgetedProviderObservations(
+          driver.observe({ runtimeId })[Symbol.asyncIterator](),
+          { ...DEFAULT_UI_EXECUTION_EVENT_BUDGET, ...input.executionBudget },
+          () => new Date(input.clock.now()).getTime(),
+        );
         await driver.start({ ...execution, assignmentId: `explicit-interpret-${identity}` });
         await driver.submit({
           ...execution,
@@ -1140,9 +1319,13 @@ export function createProviderExplicitBrainInterpreter(input: {
           assignmentId: `explicit-interpret-${identity}`,
           payload: {},
         });
-        submitted = true;
-        for await (const event of driver.observe({ runtimeId })) {
-          if (event.terminalState !== undefined) break;
+        while (true) {
+          const exhausted = observations.exhausted();
+          if (exhausted !== undefined) throw new Error(`interaction request budget exhausted: ${exhausted}`);
+          const step = await observations.next();
+          if (step.kind === 'deadline') continue;
+          if (step.step.done) { observationDrained = true; break; }
+          observations.note(step.step.value.providerEvent);
         }
         settleAttempted = true;
         const closure = await driver.settle({ runtimeId, executionEpoch });
@@ -1185,24 +1368,69 @@ export function createProviderExplicitBrainInterpreter(input: {
         };
         retained = live;
       } catch (error) {
-        let failure = error;
-        if (submitted && !settleAttempted && driver !== undefined) {
-          settleAttempted = true;
+        let failure: unknown = error;
+        const cleanupFailures: unknown[] = [];
+        // Only this local driver can own this execution. In particular, submit
+        // can throw after start acquired a resource but before returning to us.
+        let executionReleased = driver?.hasAcquiredExecution() !== true;
+        const priorSettlement = driver?.settlement();
+        if (observationDrained && priorSettlement !== undefined
+          && priorSettlement.state !== 'waiting' && priorSettlement.state !== 'unknown'
+          && priorSettlement.resourceRelease.state === 'released') executionReleased = true;
+        if (driver?.hasAcquiredExecution() && !executionReleased && !settleAttempted) {
+          let stopped = false;
+          let stopRejected = false;
+          let stopError: unknown;
           try {
+            const receipt = await driver.requestStop(execution);
+            stopped = receipt.requested;
+            stopRejected = !stopped;
+          } catch (error) {
+            stopError = error;
+          }
+          let drained = false;
+          // Never queue iterator.return ahead of the abort that releases its
+          // pending next. Budget wrapper close is not producer drain evidence.
+          if (stopped) {
+            try {
+              await driver.closeProductionAndDrain({ execution, boundaryId: `explicit-failure-${identity}` });
+              drained = true;
+            } catch (drainError) {
+              cleanupFailures.push(drainError);
+            }
+          }
+          try {
+            // A previous waiting/unknown or failed settle predates this stop.
+            // Read the real post-stop settlement before deciding release.
             await driver.settle({ runtimeId, executionEpoch });
+            const settlement = driver.settlement();
+            const released = settlement !== undefined
+              && settlement.state !== 'waiting' && settlement.state !== 'unknown'
+              && settlement.resourceRelease.state === 'released';
+            // A rejected stop can mean the provider already reached its own
+            // terminal. The real post-stop settlement, not the stop receipt,
+            // decides whether this execution is released.
+            executionReleased = released && (stopped ? drained : true);
+            if (stopError !== undefined) cleanupFailures.push(stopError);
+            if (!executionReleased) {
+              if (stopRejected) cleanupFailures.push(new Error('interaction provider stop was rejected'));
+              cleanupFailures.push(new Error('interaction execution stop/drain/settlement is incomplete'));
+            }
           } catch (settleError) {
-            failure = new AggregateError([failure, settleError], 'interaction observation and settlement failed');
+            failure = new AggregateError(
+              [failure, settleError, ...(stopError === undefined ? [] : [stopError])],
+              'interaction observation and settlement failed',
+            );
           }
         }
-        // Every cleanup step below runs even when an earlier one fails. A
-        // failed close used to throw away the only chance to record a durable
-        // terminal fact, so one broken stream left the whole interaction scope
-        // blocked until the daemon restarted.
-        const cleanupFailures: unknown[] = [];
+        // Attempt physical close even after a cleanup failure, but record only
+        // its real receipt and retain recovery until all release evidence exists.
+        let compositionClosed = owned === undefined;
         if (owned !== undefined) {
           let receipt: Awaited<ReturnType<typeof closeAgentProvider>> | undefined;
           try {
             receipt = await closeAgentProvider(owned, { returnReceipt: true });
+            compositionClosed = true;
           } catch (closeError) {
             cleanupFailures.push(closeError);
           }
@@ -1235,7 +1463,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           } catch (closeError) {
             cleanupFailures.push(closeError);
           }
-        } else if (owner !== undefined && committedInput) {
+        } else if (owner !== undefined && committedInput && executionReleased && compositionClosed) {
           // This batch failed before any terminal output, and this process owns
           // the stream that died, so it is the only party that can honestly
           // attest that this epoch can never deliver. A shape with its own
@@ -1249,7 +1477,13 @@ export function createProviderExplicitBrainInterpreter(input: {
                 ? 'the durable helper turn read port is unavailable'
                 : await holdsDispatchedHelper(input.turnHelperJournal, owner.turn);
               if (heldReason === undefined) {
-                await owner.closeFailedEpoch({ failedAt: input.clock.now() });
+                await owner.closeFailedEpoch({
+                  failedAt: input.clock.now(),
+                  authenticated: {
+                    executionEpoch,
+                    executionOwner: openedExecutionOwner,
+                  },
+                });
               }
             }
           } catch (closeError) {
@@ -1265,6 +1499,8 @@ export function createProviderExplicitBrainInterpreter(input: {
           );
         }
         throw failure;
+      } finally {
+        await observations?.close();
       }
       return finish(live, effectiveRequest);
     },

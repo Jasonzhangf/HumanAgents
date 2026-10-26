@@ -440,6 +440,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     const rawEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(options.evidenceRoot));
     const helperJournal = new JsonlInteractionHelperJournal(taskControlJournal);
     return createProviderExplicitBrainInterpreter({
+      ...(options.executionBudget === undefined ? {} : { executionBudget: options.executionBudget }),
       lease: resolveLease,
       binding: options.binding, templateRoot, organId: options.organId,
       interactionScopeId,
