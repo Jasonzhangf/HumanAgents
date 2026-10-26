@@ -48,6 +48,10 @@ test('release bump preserves the split npm and HumanAgent version sources', asyn
   execFileSync(node, ['scripts/bump-release-version.mjs', '--project-root', root], {
     cwd: repositoryRoot.pathname,
     encoding: 'utf8',
+    // The fixture bumps its own version sources and must not inherit an outer
+    // build's release version; the outer chain sets HUMANAGENT_RELEASE_VERSION
+    // for every gate it runs.
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'HUMANAGENT_RELEASE_VERSION')),
   });
 
   const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
