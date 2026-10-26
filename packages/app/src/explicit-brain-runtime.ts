@@ -27,6 +27,7 @@ import {
   type TaskFlowKind,
   TASK_FLOW_DEFINITION_VERSION,
   TASK_FLOW_KINDS,
+  validateInteractionHelperAssignmentFields,
 } from '../../contracts/src/index.js';
 import { ProviderAgentDriver, type ProviderToolExecutionResult } from '../../adapters/provider/src/index.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
@@ -348,9 +349,12 @@ function parseHelperToolArguments(call: ProviderToolCall): ParsedHelperToolArgum
     const assignmentFields = parseHelperObject(args.assignmentFields, 'dispatch_helper assignmentFields');
     const inputs = parseHelperObject(args.inputs, 'dispatch_helper inputs');
     const objective = parseHelperString(assignmentFields.objective, 'dispatch_helper assignmentFields.objective');
-    const successCriteria = assignmentFields.successCriteria;
-    if (!Array.isArray(successCriteria) || !successCriteria.every((entry) => typeof entry === 'string' && entry.trim())) {
-      throw new ExplicitBrainToolArgumentError('dispatch_helper assignmentFields.successCriteria must be an array of non-empty strings');
+    try {
+      validateInteractionHelperAssignmentFields(assignmentFields as unknown as InteractionHelperAssignmentFields);
+    } catch (error) {
+      throw new ExplicitBrainToolArgumentError(
+        `dispatch_helper assignmentFields are invalid: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     return {
       toolId: 'dispatch_helper',
@@ -358,7 +362,7 @@ function parseHelperToolArguments(call: ProviderToolCall): ParsedHelperToolArgum
       assignmentFields: assignmentFields as unknown as InteractionHelperAssignmentFields,
       inputs: inputs as BusinessPayload,
       evidenceRefs,
-      checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${successCriteria.join('; ')}. Owner acceptance is pending.`,
+      checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${(assignmentFields.successCriteria as string[]).join('; ')}. Owner acceptance is pending.`,
     };
   }
   return {

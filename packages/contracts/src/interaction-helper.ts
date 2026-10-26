@@ -343,6 +343,16 @@ export function validateInteractionHelperIncarnation(
 
 export function validateInteractionHelperAssignment(input: InteractionHelperAssignment): void {
   validateInteractionHelperIdentity(input);
+  validateInteractionHelperAssignmentFields(input);
+}
+
+/**
+ * The assignment-field rules without the runtime-allocated identity. Callers
+ * that only hold model-supplied fields can reject an invalid assignment before
+ * the runtime allocates an identity or a provider binding, using the same rules
+ * as the durable assignment contract.
+ */
+export function validateInteractionHelperAssignmentFields(input: InteractionHelperAssignmentFields): void {
   assertNonEmptyString(input.objective, 'helper assignment objective');
   assertStringArray(input.targetRefs, 'helper assignment targetRefs');
   assertStringArray(input.expectedOutputRefs, 'helper assignment expectedOutputRefs');
