@@ -346,23 +346,37 @@ function parseHelperToolArguments(call: ProviderToolCall): ParsedHelperToolArgum
     if (configuredAgentId !== undefined && typeof configuredAgentId !== 'string') {
       throw new ExplicitBrainToolArgumentError('dispatch_helper selection.configuredAgentId must be a string when present');
     }
-    const assignmentFields = parseHelperObject(args.assignmentFields, 'dispatch_helper assignmentFields');
+    const assignmentFieldsInput = parseHelperObject(args.assignmentFields, 'dispatch_helper assignmentFields');
     const inputs = parseHelperObject(args.inputs, 'dispatch_helper inputs');
-    const objective = parseHelperString(assignmentFields.objective, 'dispatch_helper assignmentFields.objective');
+    const objective = parseHelperString(assignmentFieldsInput.objective, 'dispatch_helper assignmentFields.objective');
     try {
-      validateInteractionHelperAssignmentFields(assignmentFields as unknown as InteractionHelperAssignmentFields);
+      validateInteractionHelperAssignmentFields(assignmentFieldsInput as unknown as InteractionHelperAssignmentFields);
     } catch (error) {
       throw new ExplicitBrainToolArgumentError(
         `dispatch_helper assignmentFields are invalid: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    // Decode exactly the contract business fields. The runtime allocates the
+    // helper identity and then spreads these fields into the assignment, so
+    // forwarding the raw model record would let an extra attempt or
+    // assignmentId override that identity after the factory was acquired.
+    const assignmentFields: InteractionHelperAssignmentFields = {
+      objective: assignmentFieldsInput.objective as string,
+      targetRefs: assignmentFieldsInput.targetRefs as readonly string[],
+      expectedOutputRefs: assignmentFieldsInput.expectedOutputRefs as readonly string[],
+      successCriteria: assignmentFieldsInput.successCriteria as readonly string[],
+      failureCriteria: assignmentFieldsInput.failureCriteria as readonly string[],
+      incompleteCriteria: assignmentFieldsInput.incompleteCriteria as readonly string[],
+      requiredCapabilities: assignmentFieldsInput.requiredCapabilities as readonly string[],
+      mergeGate: assignmentFieldsInput.mergeGate as 'required' | 'not-required',
+    };
     return {
       toolId: 'dispatch_helper',
       selection: { roleId, ...(configuredAgentId === undefined ? {} : { configuredAgentId }) },
-      assignmentFields: assignmentFields as unknown as InteractionHelperAssignmentFields,
+      assignmentFields,
       inputs: inputs as BusinessPayload,
       evidenceRefs,
-      checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${(assignmentFields.successCriteria as string[]).join('; ')}. Owner acceptance is pending.`,
+      checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${assignmentFields.successCriteria.join('; ')}. Owner acceptance is pending.`,
     };
   }
   return {

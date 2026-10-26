@@ -4045,14 +4045,16 @@ test('provider explicit brain returns invalid helper tool arguments to the model
   }
 });
 
-// Failure basis: the tool entry only checked objective and each successCriteria
-// entry, so an empty successCriteria or a missing mergeGate still passed the
-// tool entry and failed inside the helper assignment contract only after the
-// factory had already acquired a provider. That bare ContractError left the
-// tool call unpaired and wedged the turn. Impact: one malformed assignment
-// argument strands the interaction. Cost: one recorded parent run with two
-// rejected rounds and one valid retry.
-test('provider explicit brain rejects incomplete helper assignment fields before the helper factory', async () => {
+// Failure basis: the tool entry validated assignmentFields but then forwarded
+// the raw model record. The runtime allocates the helper identity and then
+// spreads those fields into the assignment, so a model-supplied attempt or
+// assignmentId overrode the runtime identity after the factory had acquired a
+// provider. The identity validator then failed with a bare ContractError and
+// the tool call stayed unpaired. Impact: one extra control key strands the
+// interaction and poisons the helper identity. Cost: one recorded parent run
+// with two rejected rounds and one extra-key dispatch that must keep the
+// runtime identity.
+test('provider explicit brain decodes only assignment business fields before dispatch', async () => {
   const dependencies = parentDependencies();
   const binding: ProviderBinding = {
     bindingId: 'binding-assignment-fields', providerId: 'provider-assignment-fields', protocol: 'responses',
@@ -4100,13 +4102,20 @@ test('provider explicit brain rejects incomplete helper assignment fields before
     }
     if (results.length === 2) {
       assert.equal(factoryCalls, 0, 'a missing mergeGate must fail before the helper factory is acquired');
-      return [dispatchCall('valid-dispatch', {
-        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
+      return [dispatchCall('extra-control-keys', {
+        selection: { roleId: 'review', configuredAgentId: 'independent-child' },
+        assignmentFields: {
+          ...assignmentFields,
+          attempt: 0,
+          assignmentId: 'model-supplied-assignment',
+          helperCallId: 'model-supplied-call',
+          parentTurnId: 'model-supplied-turn',
+        },
         inputs: { question: 'child-only-input' }, evidenceRefs: [],
       })];
     }
     if (results.length === 3) {
-      const dispatched = toolOutputs.get('valid-dispatch');
+      const dispatched = toolOutputs.get('extra-control-keys');
       assert.ok(dispatched?.identity?.helperCallId, 'the valid dispatch must return a helper identity');
       return [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'accept-valid', name: 'accept_helper',
         arguments: JSON.stringify({ helperCallId: dispatched.identity.helperCallId, refinedText: 'validated assignment fields', acceptanceRef: 'acceptance:assignment-fields', evidenceRefs: [] }) } }];
@@ -4148,13 +4157,22 @@ test('provider explicit brain rejects incomplete helper assignment fields before
       assert.equal(output.code, 'tool.argument.invalid');
       assert.equal(output.recoverable, true);
     }
+    // The runtime-allocated identity must survive the decoded business fields.
+    const extraKeys = toolOutputs.get('extra-control-keys');
+    assert.ok(extraKeys?.identity?.helperCallId, 'the decoded dispatch must still return a helper identity');
+    const turnPrefix = `${starts[0]!.interactionTurn.turnId}-helper-`;
+    assert.ok(String(extraKeys.identity.assignmentId).startsWith(turnPrefix), 'the assignment id must stay runtime-allocated');
+    assert.ok(String(extraKeys.identity.helperCallId).startsWith(turnPrefix), 'the helper call id must stay runtime-allocated');
+    assert.equal(extraKeys.identity.attempt, 1, 'the attempt must stay runtime-allocated');
+    assert.equal(extraKeys.identity.parentTurnId, starts[0]!.interactionTurn.turnId, 'the parent turn must stay runtime-allocated');
+    assert.equal(toolOutputs.get('extra-control-keys').result.status, 'succeeded', 'the decoded business fields must still dispatch a real helper');
     assert.ok(String(toolOutputs.get('empty-success-criteria').message).includes('successCriteria'));
     assert.ok(String(toolOutputs.get('missing-merge-gate').message).includes('mergeGate'));
     const turn = starts[0]!.interactionTurn;
     const snapshot = await dependencies.parentJournal.readTurnSnapshot(turn);
     const facts = snapshot.acceptedFacts.map(({ fact }) => fact.envelope.fact);
     const resultCallIds = facts.flatMap((fact) => fact.kind === 'tool-result' ? [fact.callId] : []);
-    for (const callId of [...invalidCalls, 'valid-dispatch', 'accept-valid']) {
+    for (const callId of [...invalidCalls, 'extra-control-keys', 'accept-valid']) {
       assert.ok(resultCallIds.includes(callId), `${callId} must have a committed tool result so the turn stays paired`);
     }
     for (const fact of facts) {
