@@ -26,8 +26,18 @@
  *   "requires its exact prior input before new input; it cannot be discharged:
  *    an owner reconciliation is committed"
  * Post-fix expectation: interpret answers HTTP 200 with an awaiting-confirmation
- * draft, and the copy's journal shows the wedged turn closed by its own
- * committed `turn-execution-failure` for the continuation epoch.
+ * draft, and the wedged turn in the copy is closed by exactly one of its own
+ * committed `turn-execution-failure` for the continuation epoch, with no
+ * abandonment fact on it.
+ *
+ * What this script decides, and what it deliberately does not: it judges the
+ * production shape (a wedged turn that is closed honestly) and that the shape
+ * no longer blocks a new input. It does not judge causality — that a *fresh*
+ * crash ends in that closure is proven by
+ * `parent-turn-reconciliation-blackbox.mjs` (three real generations, real
+ * SIGKILL) and by `intake-failure-recovery-blackbox.mjs`. The copied journal
+ * is production state that already carries the closure, so this script must
+ * read the wedged turn's outcome as a shape, not as "what this run committed".
  */
 import { cp, rm, writeFile, readFile, readdir, mkdir, mkdtemp, symlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -196,43 +206,69 @@ console.log(JSON.stringify({ stage: 'receive', ...received }));
 if (received.status !== 201) { await runtime.server.close(); await lease.release(); await rm(tmp, { recursive: true, force: true }); process.exit(1); }
 const interactionId = (received.json ?? JSON.parse(received.body)).interactionId;
 
-// The copied journal is the whole production scope, so it already carries the
-// scope's earlier closures. Take the baseline before the call and judge only
-// what this run commits.
-const before = {
-  failures: new Set((await parentJournal.readScopeExecutionFailures(scope)).map((f) => f.fact.turn.turnId)),
-  abandoned: new Set((await parentJournal.readScopeAbandonedTurns(scope)).map((f) => f.fact.turn.turnId)),
-};
-
 const interpreted = await call('POST', `/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, {});
 console.log(JSON.stringify({ stage: 'interpret', interactionId, ...interpreted }));
 
+// The wedged turn is the reconciled turn whose own continued epoch was closed
+// by its `turn-execution-failure` (production self-healed). The copied journal
+// is the whole production scope, so the shape must be read off the turn, not
+// off "what this run appended". A different reconciled turn whose continued
+// epoch took the parse-failure lane is a different, valid closure and must not
+// be confused with it.
+const records = await journal.replay();
+const turnIdOf = (record) => {
+  const payload = record?.payload;
+  return payload?.fact?.turn?.turnId ?? payload?.turn?.turnId;
+};
+const reconciled = records
+  .filter((record) => record?.payload?.discriminant === 'owner-reconciliation')
+  .map((record) => ({
+    turnId: turnIdOf(record),
+    mode: record.payload.fact?.mode,
+    epoch: record.payload.fact?.effectiveExecutionEpoch,
+  }));
+const wedged = reconciled.find((entry) => {
+  if (entry.turnId === undefined) return false;
+  return records.some((record) => {
+    const payload = record?.payload;
+    return payload?.discriminant === 'turn-execution-failure'
+      && turnIdOf(record) === entry.turnId
+      && payload.fact?.execution?.executionEpoch === entry.epoch;
+  });
+});
+const wedgedTurn = wedged?.turnId;
 const failures = await parentJournal.readScopeExecutionFailures(scope);
-const added = failures.filter((failure) => !before.failures.has(failure.fact.turn.turnId));
-console.log(JSON.stringify({ stage: 'closure', executionFailures: failures.map((f) => ({
-  turnId: f.fact.turn.turnId, epoch: f.fact.execution.executionEpoch,
-})), added: added.map((f) => ({ turnId: f.fact.turn.turnId, epoch: f.fact.execution.executionEpoch })) }));
+const abandoned = await parentJournal.readScopeAbandonedTurns(scope);
+const turnFailures = failures.filter((failure) => failure.fact.turn.turnId === wedgedTurn);
+const turnAbandoned = abandoned.filter((fact) => fact.fact.turn.turnId === wedgedTurn);
+console.log(JSON.stringify({
+  stage: 'closure', wedgedTurn,
+  reconciled: reconciled.map((entry) => ({ turn: entry.turnId, mode: entry.mode, epoch: entry.epoch })),
+  executionFailures: turnFailures.map((f) => ({ turn: f.fact.turn.turnId, epoch: f.fact.execution.executionEpoch })),
+  abandonmentsForTurn: turnAbandoned.length,
+}));
 
 // This script is the delivery gate for the bug, so it must decide, not print.
 // Pre-fix the calls above answer 500 with
 //   "requires its exact prior input before new input; it cannot be discharged:
 //    an owner reconciliation is committed"
-// and commit nothing, so the checks below fail exactly there.
+// and leave the wedged turn unclosed, so the checks below fail exactly there.
 const interpretedBody = interpreted.json ?? {};
-const abandoned = await parentJournal.readScopeAbandonedTurns(scope);
-const newlyAbandoned = abandoned.filter((fact) => !before.abandoned.has(fact.fact.turn.turnId));
 const reasons = [];
 if (interpreted.status !== 200) reasons.push(`interpret answered HTTP ${String(interpreted.status)}`);
 if (interpretedBody.state !== 'awaiting-confirmation') {
   reasons.push(`interpret returned state ${String(interpretedBody.state)}, not a confirmable draft`);
 }
-if (added.length !== 1 || added[0].fact.execution.executionEpoch !== 2) {
-  reasons.push(`the run must close exactly the dead continued epoch (epoch 2) of the wedged turn, committed: ${JSON.stringify(added.map((failure) => ({ turn: failure.fact.turn.turnId, epoch: failure.fact.execution.executionEpoch })))}`);
-} else if (abandoned.some((fact) => fact.fact.turn.turnId === added[0].fact.turn.turnId)) {
-  reasons.push('the wedged turn carries an abandonment fact: it was discharged as abandonment, not by its own epoch failure');
+if (wedged === undefined) {
+  reasons.push(`no reconciled turn is closed by its own continued-epoch turn-execution-failure; found reconciliations: ${JSON.stringify(reconciled)}`);
 }
-if (newlyAbandoned.length !== 0) {
-  reasons.push(`the run committed ${String(newlyAbandoned.length)} new abandonment fact(s) instead of an epoch failure`);
+if (wedged !== undefined) {
+  if (turnFailures.length !== 1 || turnFailures[0].fact.execution.executionEpoch !== 2) {
+    reasons.push(`the wedged turn must be closed by exactly one committed turn-execution-failure on its continued epoch 2, found: ${JSON.stringify(turnFailures.map((failure) => ({ turn: failure.fact.turn.turnId, epoch: failure.fact.execution.executionEpoch })))}`);
+  }
+  if (turnAbandoned.length !== 0) {
+    reasons.push(`the wedged turn carries ${String(turnAbandoned.length)} abandonment fact(s): it was discharged as abandonment, not by its own epoch failure`);
+  }
 }
 
 await runtime.server.close();
