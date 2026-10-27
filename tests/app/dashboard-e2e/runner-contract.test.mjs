@@ -55,9 +55,11 @@ import {
 } from './lib/binding.mjs';
 import {
   assessSettlement,
+  isCheckpointJournalFile,
   journalPathFor,
   journalRootFor,
   manifestsIdentical,
+  readJournalStrict,
   readToolOutputReports,
   workspaceManifest,
 } from './lib/journal.mjs';
@@ -66,6 +68,7 @@ import {
   captureDashboardEvidence,
   describeDraftStage,
   openTaskDashboard,
+  probeDashboardLiveSse,
   readDashboardProbe,
   readObservationDom,
   startServeForAttempt,
@@ -1221,6 +1224,100 @@ test('installed-attach journal lookup uses the formal config-derived project roo
   const selected = await journalPathFor(binding);
   assert.equal(selected, formalJournal);
   assert.notEqual(selected, attemptJournal);
+});
+
+test('checkpoint discovery includes the canonical task-control journal of the same mode root', async () => {
+  const controlRoot = await makeTempRoot('checkpoint-control-journal');
+  const journalRoot = join(controlRoot, 'checkpoints', 'ui-runtime', 'rcc');
+  const uiPath = join(journalRoot, 'ui-runtime-journal.jsonl');
+  const controlPath = join(journalRoot, 'task-control.jsonl');
+  await writeOutcomeFixture(journalRoot, 'control', {
+    uiFile: 'ui-runtime-journal.jsonl',
+    checkpointFile: 'task-control.jsonl',
+  });
+  const binding = {
+    serviceMode: 'candidate',
+    taskId: CONTRACT_TASK,
+    cycleId: CONTRACT_CYCLE,
+    controlRoot,
+    projectKey: 'contract-project',
+    runtimePaths: {
+      projectRoot: controlRoot,
+      projectKey: 'contract-project',
+      controlRoot,
+    },
+  };
+
+  const selected = await journalPathFor(binding);
+  assert.equal(selected, uiPath);
+  assert.ok(
+    binding.journalPaths.includes(controlPath),
+    'journalPaths must carry the canonical task-control.jsonl checkpoint journal',
+  );
+  assert.equal(isCheckpointJournalFile(controlPath), true);
+
+  const read = await readJournalStrict(binding.journalPaths, { repoPath: REPO });
+  assert.equal(read.ok, true);
+  assert.equal(read.checkpointRecords.length, 1);
+  assert.equal(read.checkpointRecords[0].checkpoint.scope.taskId.value, CONTRACT_TASK.value);
+  assert.equal(read.checkpointRecords[0].checkpoint.scope.cycleId.value, CONTRACT_CYCLE.value);
+});
+
+test('live SSE probe restores routing and offline mode when the interruption wait fails', async () => {
+  const makeFakes = (options = {}) => {
+    const calls = [];
+    const page = {
+      async addInitScript() { calls.push('addInitScript'); },
+      async goto() { calls.push('goto'); },
+      async waitForSelector() { calls.push('waitForSelector'); },
+      async evaluate() { calls.push('evaluate'); return {}; },
+      async route(pattern) { calls.push(`route:${pattern}`); },
+      async unroute(pattern) {
+        calls.push(`unroute:${pattern}`);
+        if (options.unrouteFails) throw new Error('injected unroute failure');
+      },
+    };
+    const context = {
+      async setOffline(value) { calls.push(`setOffline:${value}`); },
+    };
+    const binding = {
+      taskId: CONTRACT_TASK,
+      serveBaseUrl: 'http://127.0.0.1:1',
+      browser: { page, context },
+    };
+    const waitForDom = async (_page, label) => {
+      calls.push(`waitForDom:${label}`);
+      if (label.startsWith('interrupted freshness')) throw new Error('injected interruption wait failure');
+      return { freshness: '实时连接已建立', pageStatus: 'connected', dashboardReads: 0, sseRecorded: [] };
+    };
+    return { calls, binding, waitForDom };
+  };
+  const routePattern = '**/api/tasks/**/dashboard';
+
+  const probe = makeFakes();
+  await assert.rejects(
+    probeDashboardLiveSse(probe.binding, { waitForDom: probe.waitForDom }),
+    /injected interruption wait failure/,
+  );
+  assert.ok(probe.calls.includes(`route:${routePattern}`), 'the projection route is installed before the interruption');
+  assert.ok(probe.calls.includes('setOffline:true'), 'the context goes offline for the interruption');
+  assert.ok(probe.calls.includes(`unroute:${routePattern}`), 'the projection route is removed even when the wait fails');
+  assert.ok(probe.calls.includes('setOffline:false'), 'the context returns online even when the wait fails');
+  assert.ok(
+    probe.calls.indexOf('setOffline:false') > probe.calls.indexOf(`unroute:${routePattern}`),
+    'routing is restored before the context returns online',
+  );
+
+  // A failing restoration must not replace the original probe error.
+  const failingRestore = makeFakes({ unrouteFails: true });
+  await assert.rejects(
+    probeDashboardLiveSse(failingRestore.binding, { waitForDom: failingRestore.waitForDom }),
+    /injected interruption wait failure/,
+  );
+  assert.ok(
+    failingRestore.calls.includes('setOffline:false'),
+    'offline mode is restored even when unroute fails',
+  );
 });
 
 test('retention reports pending recovery acceptance without a receipt', async () => {

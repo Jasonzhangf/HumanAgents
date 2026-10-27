@@ -28,6 +28,7 @@ import { taskIdValue } from './binding.mjs';
 const KIND_PREFIX = (kind) => String(kind ?? '').split(' · ')[0];
 const RUNNER_REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const CHECKPOINT_FILE_NAME = /^task-[^\s]+-cycle-[^\s]+\.jsonl$/;
+const CONTROL_CHECKPOINT_FILE_NAME = 'task-control.jsonl';
 const OPERATION_LOCATOR = /^operation\/([^/]+)\/checkpoint$/;
 const CHECKPOINT_RECOVERY_LOCATOR = /^operation\/([^/]+)\/checkpoint-recovery$/;
 
@@ -83,8 +84,10 @@ export async function journalPathFor(binding) {
   const checkpointPrefix = `task-${taskValue}-cycle-`;
   const checkpointName = cycleId ? `${checkpointPrefix}${idValue(cycleId)}.jsonl` : null;
   let checkpointFiles = [];
+  let controlCheckpointFile = null;
   try {
-    checkpointFiles = (await readdir(journalRoot, { withFileTypes: true }))
+    const entries = await readdir(journalRoot, { withFileTypes: true });
+    checkpointFiles = entries
       .filter((entry) => (
         entry.isFile()
         && (checkpointName ? entry.name === checkpointName : entry.name.startsWith(checkpointPrefix))
@@ -92,6 +95,9 @@ export async function journalPathFor(binding) {
       ))
       .map((entry) => join(journalRoot, entry.name))
       .sort();
+    if (entries.some((entry) => entry.isFile() && entry.name === CONTROL_CHECKPOINT_FILE_NAME)) {
+      controlCheckpointFile = join(journalRoot, CONTROL_CHECKPOINT_FILE_NAME);
+    }
   } catch {
     checkpointFiles = [];
   }
@@ -101,7 +107,7 @@ export async function journalPathFor(binding) {
     throw new Error(`no same-project ui-runtime-journal.jsonl at ${exact}: ${error.message}`);
   }
   binding.journalPath = exact;
-  binding.journalPaths = [exact, ...checkpointFiles];
+  binding.journalPaths = [exact, ...(controlCheckpointFile ? [controlCheckpointFile] : []), ...checkpointFiles];
   return exact;
 }
 
@@ -136,7 +142,8 @@ export async function readJournalEvents(journalPath) {
 
 /** The authoritative checkpoint journal files the config-derived path resolver listed. */
 export function isCheckpointJournalFile(path) {
-  return CHECKPOINT_FILE_NAME.test(basename(String(path ?? '')));
+  const name = basename(String(path ?? ''));
+  return CHECKPOINT_FILE_NAME.test(name) || name === CONTROL_CHECKPOINT_FILE_NAME;
 }
 
 function parseLooseJournal(text, path) {

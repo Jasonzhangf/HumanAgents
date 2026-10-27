@@ -1329,6 +1329,7 @@ export async function readSseEvents(binding, timeoutMs = 15_000) {
  */
 export async function probeDashboardLiveSse(binding, options = {}) {
   const { page, context } = binding.browser;
+  const waitDom = options.waitForDom ?? waitForDom;
   const base = binding.serveBaseUrl;
   const dashboardUrl = `${base}/task-dashboard.html?task=${encodeURIComponent(taskIdValue(binding.taskId))}`;
   await page.addInitScript(() => {
@@ -1380,7 +1381,7 @@ export async function probeDashboardLiveSse(binding, options = {}) {
     };
   });
 
-  const connected = await waitForDom(page, 'live freshness connected', async () => {
+  const connected = await waitDom(page, 'live freshness connected', async () => {
     const state = await readState();
     return state.freshness.includes('实时连接已建立') ? state : null;
   }, options.connectedTimeoutMs ?? 90_000, 500);
@@ -1388,23 +1389,37 @@ export async function probeDashboardLiveSse(binding, options = {}) {
   const failProjectionReads = async (route) => {
     await route.abort('failed');
   };
-  await page.route('**/api/tasks/**/dashboard', failProjectionReads);
-  await context.setOffline(true);
-  const broken = await waitForDom(page, 'interrupted freshness shows 已断开 without task failure', async () => {
-    const state = await readState();
-    const disconnected = state.freshness.includes('实时连接已断开');
-    const noFakeFailure = state.stateChip !== '失败' && !state.actionStatus.includes('执行失败');
-    const failedReadVisible = state.pageStatusRole === 'status'
-      && state.pageStatus.trim() !== ''
-      && state.pageStatus !== connected.pageStatus
-      && !state.pageStatus.includes('任务投影已同步');
-    const projectionReadAttempted = state.dashboardReads > connected.dashboardReads;
-    return disconnected && noFakeFailure && failedReadVisible && projectionReadAttempted ? state : null;
-  }, options.brokenTimeoutMs ?? 60_000, 500);
-
-  await page.unroute('**/api/tasks/**/dashboard', failProjectionReads);
-  await context.setOffline(false);
-  const recovered = await waitForDom(page, 'freshness restored after reconnect', async () => {
+  const routePattern = '**/api/tasks/**/dashboard';
+  let broken;
+  let restoreError = null;
+  try {
+    await page.route(routePattern, failProjectionReads);
+    await context.setOffline(true);
+    broken = await waitDom(page, 'interrupted freshness shows 已断开 without task failure', async () => {
+      const state = await readState();
+      const disconnected = state.freshness.includes('实时连接已断开');
+      const noFakeFailure = state.stateChip !== '失败' && !state.actionStatus.includes('执行失败');
+      const failedReadVisible = state.pageStatusRole === 'status'
+        && state.pageStatus.trim() !== ''
+        && state.pageStatus !== connected.pageStatus
+        && !state.pageStatus.includes('任务投影已同步');
+      const projectionReadAttempted = state.dashboardReads > connected.dashboardReads;
+      return disconnected && noFakeFailure && failedReadVisible && projectionReadAttempted ? state : null;
+    }, options.brokenTimeoutMs ?? 60_000, 500);
+  } finally {
+    try {
+      await page.unroute(routePattern, failProjectionReads);
+    } catch (error) {
+      restoreError = error;
+    }
+    try {
+      await context.setOffline(false);
+    } catch (error) {
+      restoreError ??= error;
+    }
+  }
+  if (restoreError) throw restoreError;
+  const recovered = await waitDom(page, 'freshness restored after reconnect', async () => {
     const state = await readState();
     const liveOrSettled = state.freshness.includes('实时连接已建立') || state.freshness.includes('已收拢');
     return liveOrSettled ? state : null;
