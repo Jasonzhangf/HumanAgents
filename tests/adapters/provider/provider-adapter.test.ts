@@ -687,6 +687,41 @@ test('responses codec maps reasoning summary wire events as model evidence', asy
   }
 });
 
+test('responses codec derives reasoning identity when reasoning events omit item_id', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const reader = providerRawContentReader(context.evidence);
+  const readContent = async (fact: Extract<ProviderRawFact, { kind: 'content' }>): Promise<string> =>
+    new TextDecoder().decode(await reader.read({ scope: operationScope, content: fact.content }));
+
+  const delta = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_summary_text.delta',
+    output_index: 2,
+    summary_index: 3,
+    delta: 'itemless reasoning delta',
+  } as unknown as ProviderWireEvent, context);
+  const deltaFact = contentFactOf(delta.rawFacts);
+  assert.equal(delta.events[0].kind, 'model');
+  assert.equal(deltaFact.channel, 'reasoning-summary');
+  assert.equal(deltaFact.update, 'delta');
+  assert.equal(deltaFact.contentUnitId, 'responses:reasoning-summary:reasoning-2-3');
+  assert.equal(await readContent(deltaFact), 'itemless reasoning delta');
+
+  const done = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_text.done',
+    output_index: 4,
+    item: { id: 'nested-reasoning-item' },
+    text: 'nested reasoning text',
+  } as unknown as ProviderWireEvent, context);
+  const doneFact = contentFactOf(done.rawFacts);
+  assert.equal(doneFact.channel, 'reasoning-text');
+  assert.equal(doneFact.update, 'full');
+  assert.equal(doneFact.contentUnitId, 'responses:reasoning-text:nested-reasoning-item');
+  assert.equal(await readContent(doneFact), 'nested reasoning text');
+});
+
 test('responses codec gives every visible model event a semantic summary', async () => {
   const codec = new ResponsesProviderCodec();
   const context = codecContext();

@@ -351,8 +351,14 @@ function parseHelperToolArguments(call: ProviderToolCall): ParsedHelperToolArgum
     const assignmentFieldsInput = parseHelperObject(args.assignmentFields, 'dispatch_helper assignmentFields');
     const inputs = parseHelperObject(args.inputs, 'dispatch_helper inputs');
     const objective = parseHelperString(assignmentFieldsInput.objective, 'dispatch_helper assignmentFields.objective');
+    // requiredCapabilities is an internal assignment field. It stays off the
+    // wire schema because RCC rejects it anywhere in the request, so derive it
+    // from the selected role when the model omits it.
+    const normalizedAssignmentFields = assignmentFieldsInput.requiredCapabilities === undefined
+      ? { ...assignmentFieldsInput, requiredCapabilities: [roleId] }
+      : assignmentFieldsInput;
     try {
-      validateInteractionHelperAssignmentFields(assignmentFieldsInput as unknown as InteractionHelperAssignmentFields);
+      validateInteractionHelperAssignmentFields(normalizedAssignmentFields as unknown as InteractionHelperAssignmentFields);
     } catch (error) {
       throw new ExplicitBrainToolArgumentError(
         `dispatch_helper assignmentFields are invalid: ${error instanceof Error ? error.message : String(error)}`,
@@ -369,7 +375,7 @@ function parseHelperToolArguments(call: ProviderToolCall): ParsedHelperToolArgum
       successCriteria: assignmentFieldsInput.successCriteria as readonly string[],
       failureCriteria: assignmentFieldsInput.failureCriteria as readonly string[],
       incompleteCriteria: assignmentFieldsInput.incompleteCriteria as readonly string[],
-      requiredCapabilities: assignmentFieldsInput.requiredCapabilities as readonly string[],
+      requiredCapabilities: normalizedAssignmentFields.requiredCapabilities as readonly string[],
       mergeGate: assignmentFieldsInput.mergeGate as 'required' | 'not-required',
     };
     return {
@@ -1250,8 +1256,8 @@ export function createProviderExplicitBrainInterpreter(input: {
                     expectedOutputRefs: { type: 'array', items: { type: 'string' } },
                     successCriteria: { type: 'array', items: { type: 'string' } },
                     failureCriteria: { type: 'array', items: { type: 'string' } }, incompleteCriteria: { type: 'array', items: { type: 'string' } },
-                    requiredCapabilities: { type: 'array', items: { type: 'string' } }, mergeGate: { type: 'string', enum: ['required', 'not-required'] },
-                  }, required: ['objective', 'targetRefs', 'expectedOutputRefs', 'successCriteria', 'failureCriteria', 'incompleteCriteria', 'requiredCapabilities', 'mergeGate'],
+                    mergeGate: { type: 'string', enum: ['required', 'not-required'] },
+                  }, required: ['objective', 'targetRefs', 'expectedOutputRefs', 'successCriteria', 'failureCriteria', 'incompleteCriteria', 'mergeGate'],
                 },
                 inputs: { type: 'object' }, evidenceRefs: { type: 'array', items: { type: 'object' } },
               }, required: ['selection', 'assignmentFields', 'inputs', 'evidenceRefs'],
