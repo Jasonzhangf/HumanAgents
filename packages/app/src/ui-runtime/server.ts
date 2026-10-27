@@ -1457,7 +1457,7 @@ async function handleRequest(
         ...(requestKind === undefined ? {} : { requestKind }),
         ...(body.workspace === undefined ? {} : { workspaceRequest: requireString(body, 'workspace') }),
       }, inputRevision);
-      writeJson(response, 201, { interactionId });
+      writeJson(response, 201, { interactionId, occurredAt });
       return;
     }
     if (path === '/api/explicit/decision' && method === 'POST') {
@@ -1536,6 +1536,16 @@ async function handleRequest(
     const explicitInteraction = /^\/api\/explicit\/interactions\/([^/]+)$/.exec(path);
     if (explicitInteraction && method === 'GET') {
       writeJson(response, 200, await service.inspectExplicitInteraction(decodeURIComponent(explicitInteraction[1]!)));
+      return;
+    }
+    const explicitInteractionEvents = /^\/api\/explicit\/interactions\/([^/]+)\/events$/.exec(path);
+    if (explicitInteractionEvents && method === 'GET') {
+      const interactionId = decodeURIComponent(explicitInteractionEvents[1]!);
+      const { session } = await resolveSession(accessControl, request, response);
+      if (isClosing()) {
+        throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
+      }
+      await streamExplicitSteps(request, response, service, interactionId, session, accessControl, sseRegistry);
       return;
     }
     const explicitRejection = /^\/api\/explicit\/interactions\/([^/]+)\/reject$/.exec(path);
@@ -2057,6 +2067,17 @@ async function handleRequest(
       streamEvents(request, response, service, operationId, session, accessControl, sseRegistry);
       return;
     }
+    const taskEvents = /^\/api\/tasks\/([^/]+)\/events$/.exec(path);
+    if (taskEvents && method === 'GET') {
+      const taskId = id('task', decodeURIComponent(taskEvents[1]!));
+      service.taskDetail(taskId);
+      const { session } = await resolveSession(accessControl, request, response);
+      if (isClosing()) {
+        throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
+      }
+      streamTaskEvents(request, response, service, taskId, session, accessControl, sseRegistry);
+      return;
+    }
     const executionMemoryContext = /^\/api\/executions\/([^/]+)\/memory-context$/.exec(path);
     if (executionMemoryContext && method === 'GET') {
       const operationId = id('operation', decodeURIComponent(executionMemoryContext[1]!));
@@ -2190,6 +2211,106 @@ function streamEvents(
   });
 }
 
+function streamTaskEvents(
+  request: IncomingMessage,
+  response: ServerResponse,
+  service: UiRuntimeService,
+  taskId: TaskId,
+  session: AccessSession,
+  accessControl: AccessControlService,
+  registry: ReturnType<typeof createSseRegistry>,
+): void {
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let closed = false;
+  let eventWrites = Promise.resolve();
+  let resolveEnded!: () => void;
+  const ended = new Promise<void>((resolve) => { resolveEnded = resolve; });
+  let entry: ActiveSse;
+  const closeStream = (reason: SseCloseReason): Promise<void> => {
+    if (closed) return ended;
+    closed = true;
+    if (heartbeat) clearInterval(heartbeat);
+    unsubscribe?.();
+    if (!response.writableEnded) {
+      if (reason === 'server.shutdown') {
+        response.write('event: server.shutdown\ndata: {"reason":"server.shutdown"}\n\n');
+      } else if (reason === 'auth.invalidated') {
+        response.write('event: auth.invalidated\ndata: {"code":"auth.session.invalid"}\n\n');
+      }
+      response.end(() => resolveEnded());
+    } else {
+      resolveEnded();
+    }
+    registry.delete(entry);
+    return ended;
+  };
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+  });
+  entry = { response, session, close: closeStream };
+  registry.add(entry);
+  const validateStreamSession = async (): Promise<void> => {
+    let currentGeneration: number;
+    try {
+      currentGeneration = await accessControl.readPersistedGeneration();
+    } catch {
+      await closeStream('auth.unavailable');
+      return;
+    }
+    if (session.sessionGeneration !== currentGeneration || accessControl.isExpired(session)) {
+      await closeStream('auth.invalidated');
+    }
+  };
+  registry.scheduleAuthRevalidation(accessControl);
+  try {
+    const lastEventId = request.headers['last-event-id'];
+    const subscription = service.subscribeTaskEvents(
+      taskId,
+      typeof lastEventId === 'string' ? lastEventId : undefined,
+      (event) => {
+        if (closed) return;
+        eventWrites = eventWrites.then(async () => {
+          if (closed) return;
+          try {
+            await validateStreamSession();
+            if (closed) return;
+            writeSse(response, event);
+            if (event.kind === 'execution.terminal' && event.terminalPhase === 'final') await closeStream('terminal');
+          } catch {
+            await closeStream('write-failure');
+          }
+        });
+      },
+    );
+    unsubscribe = subscription.unsubscribe;
+    for (const event of subscription.replay) writeSse(response, event);
+    if (subscription.replay.at(-1)?.terminalPhase === 'final') {
+      void closeStream('terminal');
+      return;
+    }
+    heartbeat = setInterval(() => {
+      void (async () => {
+        await validateStreamSession();
+        if (closed) return;
+        try {
+          response.write(': keep-alive\n\n');
+        } catch {
+          await closeStream('write-failure');
+        }
+      })();
+    }, 15000);
+  } catch (error) {
+    void closeStream('write-failure');
+    throw error;
+  }
+  response.once('close', () => {
+    void closeStream('client');
+  });
+}
+
 function streamSemanticObservation(
   request: IncomingMessage,
   response: ServerResponse,
@@ -2202,6 +2323,7 @@ function streamSemanticObservation(
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let closed = false;
   let eventWrites = Promise.resolve();
+  let unsubscribe: (() => void) | undefined;
   let resolveEnded!: () => void;
   const ended = new Promise<void>((resolve) => { resolveEnded = resolve; });
   let entry: ActiveSse;
@@ -2209,6 +2331,7 @@ function streamSemanticObservation(
     if (closed) return ended;
     closed = true;
     if (heartbeat) clearInterval(heartbeat);
+    unsubscribe?.();
     if (!response.writableEnded) {
       if (reason === 'server.shutdown') {
         response.write('event: server.shutdown\ndata: {"reason":"server.shutdown"}\n\n');
@@ -2270,6 +2393,102 @@ function streamSemanticObservation(
   response.once('close', () => {
     void closeStream('client');
   });
+}
+
+async function streamExplicitSteps(
+  request: IncomingMessage,
+  response: ServerResponse,
+  service: UiRuntimeService,
+  interactionId: string,
+  session: AccessSession,
+  accessControl: AccessControlService,
+  registry: ReturnType<typeof createSseRegistry>,
+): Promise<void> {
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let closed = false;
+  let eventWrites = Promise.resolve();
+  let resolveEnded!: () => void;
+  const ended = new Promise<void>((resolve) => { resolveEnded = resolve; });
+  let entry: ActiveSse;
+  const closeStream = (reason: SseCloseReason): Promise<void> => {
+    if (closed) return ended;
+    closed = true;
+    if (heartbeat) clearInterval(heartbeat);
+    unsubscribe?.();
+    if (!response.writableEnded) {
+      if (reason === 'server.shutdown') {
+        response.write('event: server.shutdown\ndata: {"reason":"server.shutdown"}\n\n');
+      } else if (reason === 'auth.invalidated') {
+        response.write('event: auth.invalidated\ndata: {"code":"auth.session.invalid"}\n\n');
+      }
+      response.end(() => resolveEnded());
+    } else {
+      resolveEnded();
+    }
+    registry.delete(entry);
+    return ended;
+  };
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+  });
+  entry = { response, session, close: closeStream };
+  registry.add(entry);
+  const validateStreamSession = async (): Promise<void> => {
+    let currentGeneration: number;
+    try {
+      currentGeneration = await accessControl.readPersistedGeneration();
+    } catch {
+      await closeStream('auth.unavailable');
+      return;
+    }
+    if (session.sessionGeneration !== currentGeneration || accessControl.isExpired(session)) {
+      await closeStream('auth.invalidated');
+    }
+  };
+  registry.scheduleAuthRevalidation(accessControl);
+  try {
+    const subscription = await service.subscribeExplicitSteps(interactionId, (step) => {
+      if (closed) return;
+      eventWrites = eventWrites.then(async () => {
+        if (closed) return;
+        try {
+          await validateStreamSession();
+          if (closed) return;
+          response.write(`id: explicit-step-${step.seq}\n`);
+          response.write('event: explicit.step\n');
+          response.write(`data: ${JSON.stringify(step)}\n\n`);
+        } catch {
+          await closeStream('write-failure');
+        }
+      });
+    });
+    unsubscribe = subscription.unsubscribe;
+    for (const step of subscription.replay) {
+      response.write(`id: explicit-step-${step.seq}\n`);
+      response.write('event: explicit.step\n');
+      response.write(`data: ${JSON.stringify(step)}\n\n`);
+    }
+    heartbeat = setInterval(() => {
+      void (async () => {
+        await validateStreamSession();
+        if (closed) return;
+        try {
+          response.write(': keep-alive\n\n');
+        } catch {
+          await closeStream('write-failure');
+        }
+      })();
+    }, 15000);
+    response.once('close', () => {
+      void closeStream('client');
+    });
+  } catch (error) {
+    void closeStream('write-failure');
+    throw error;
+  }
 }
 
 function streamFiniteSemanticObservation(

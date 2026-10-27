@@ -89,6 +89,8 @@ import {
   type ExplicitInput,
   type ExplicitInputWorkspace,
   type ExplicitIntakeState,
+  type ExplicitInteractionStep,
+  type ExplicitInteractionStepInput,
   type ExplicitInteractionSnapshot,
   type MatchResult,
   type Proposal,
@@ -2290,6 +2292,7 @@ export class UiRuntimeService {
   private readonly coordinator: RuntimeTaskCoordinator;
   private readonly requirementInbox = new RequirementInbox();
   private readonly explicitIntake = new ExplicitIntake();
+  private readonly explicitStepListeners = new Map<string, Set<(step: ExplicitInteractionStep) => void>>();
   private readonly confirmationLedger = new ConfirmationLedger();
   private readonly requirementSubmissions: RequirementSubmissionOwner;
   private readonly subscriptionControl?: SubscriptionControlPort;
@@ -5880,6 +5883,27 @@ export class UiRuntimeService {
     }
   }
 
+  /**
+   * Task-scoped SSE binding: map the task to its current operation and reuse
+   * the coordinator's replay-and-live subscription. A queued task has no
+   * operation yet, so it participates only once the coordinator allocates one.
+   */
+  subscribeTaskEvents(
+    taskId: TaskId,
+    lastEventId: string | undefined,
+    listener: (event: RuntimeSseEvent) => void,
+  ): { readonly replay: readonly RuntimeSseEvent[]; readonly unsubscribe: () => void } {
+    try {
+      const snapshot = this.coordinator.taskSnapshot(taskId);
+      if (snapshot.operationId === undefined) {
+        return { replay: [], unsubscribe: () => {} };
+      }
+      return this.coordinator.subscribeReplay(id('operation', snapshot.operationId), lastEventId, listener);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
   markDisconnected(): void {
     this.connected = false;
   }
@@ -6030,6 +6054,34 @@ export class UiRuntimeService {
     }
   }
 
+  /**
+   * Replay-and-live subscription for the explicit-brain step stream. The
+   * replay is the durable step list already recorded for this interaction;
+   * later real steps are pushed through the same listener. No timer or
+   * synthesized event enters this stream.
+   */
+  async subscribeExplicitSteps(
+    interactionId: string,
+    listener: (step: ExplicitInteractionStep) => void,
+  ): Promise<{ readonly replay: readonly ExplicitInteractionStep[]; readonly unsubscribe: () => void }> {
+    const snapshot = await this.explicitIntake.inspect(interactionId);
+    const listeners = this.explicitStepListeners.get(interactionId) ?? new Set();
+    listeners.add(listener);
+    this.explicitStepListeners.set(interactionId, listeners);
+    return {
+      replay: [...snapshot.steps],
+      unsubscribe: () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) this.explicitStepListeners.delete(interactionId);
+      },
+    };
+  }
+
+  private recordExplicitStep(interactionId: string, step: ExplicitInteractionStepInput): void {
+    const recorded = this.explicitIntake.recordStep(interactionId, step);
+    for (const listener of this.explicitStepListeners.get(interactionId) ?? []) listener(recorded);
+  }
+
   async readExplicitProviderSettlement(
     input: ExplicitProviderSettlementReadInput,
   ): Promise<InteractionParentCommittedFact<InteractionProviderSettlementReceipt>> {
@@ -6080,6 +6132,7 @@ export class UiRuntimeService {
         rawInput: snapshot.rawInput,
         clarifications: snapshot.clarifications ?? [],
         taskCandidates,
+        onStep: (step) => this.recordExplicitStep(snapshot.interactionId, step),
         ...(snapshot.workspace === undefined ? {} : {
           workspaceCwd: snapshot.workspace.workspaceCwd,
           projectKey: snapshot.workspace.projectKey,
@@ -6311,6 +6364,7 @@ export class UiRuntimeService {
           : `${snapshot.rawInput}\n\nUser correction: ${correction}`,
         clarifications: snapshot.clarifications ?? [],
         taskCandidates,
+        onStep: (step) => this.recordExplicitStep(snapshot.interactionId, step),
         ...(snapshot.workspace === undefined ? {} : {
           workspaceCwd: snapshot.workspace.workspaceCwd,
           projectKey: snapshot.workspace.projectKey,

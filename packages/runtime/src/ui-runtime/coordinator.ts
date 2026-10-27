@@ -110,6 +110,21 @@ import type { DispatchInput } from '../orchestration/types.js';
 import { resumeColdExecution, type ColdExecutionLifecycleBinding, type PreparedColdExecution,
   type RuntimeColdExecutionProducer, type RuntimeColdExecutionResumeRequest } from './cold-execution-resume.js';
 
+const STEP_OWNER = 'humanagent.runtime';
+type TaskStepPublisher = (input: { readonly state: string; readonly summary: string }) => void;
+const taskStepPublishers = new WeakMap<AgentRuntimePoolManager, TaskStepPublisher>();
+
+/**
+ * The App's closed-turn Planner receives the task's existing runtime pool. This
+ * read-only lookup lets that real Planner boundary publish its two observed
+ * steps through the pool's task owner without creating a second event bus.
+ */
+export function taskStepPublisherForPool(
+  pool: AgentRuntimePoolManager,
+): TaskStepPublisher | undefined {
+  return taskStepPublishers.get(pool);
+}
+
 export type RuntimeTaskError = {
   readonly code: string;
   readonly ownerId: string;
@@ -2352,10 +2367,63 @@ export class RuntimeTaskCoordinator {
       phase: event.phase,
       occurredAt: event.occurredAt,
     };
+    const operation = record.operationId === undefined ? undefined : this.operations.get(record.operationId.value);
+    const canPush = operation !== undefined
+      && !operation.events.some((entry) => entry.kind === 'execution.terminal' && entry.terminalPhase === 'final');
+    if (operation !== undefined && record.executionEpoch === operation.executionEpoch && canPush) {
+      this.pushEvent(record, operation, 'provider.model', event.phase,
+        this.providerRequestPhaseSummary(event.phase),
+        event.evidenceRefs,
+        STEP_OWNER,
+        false,
+        event.phase === 'failed' ? 'inspect provider failure' : undefined,
+        {
+          turn: {
+            turnId: event.turnId,
+            requestId: event.requestId,
+            ...(event.parentRequestId === undefined ? {} : { parentRequestId: event.parentRequestId }),
+            occurredAt: event.occurredAt,
+          },
+        });
+    }
     if (record.operationId?.value === event.operationId.value
       && record.executionEpoch === event.executionEpoch) {
       record.budgetObservation?.noteLifecycle(event);
     }
+  }
+
+  private providerRequestPhaseSummary(phase: ProviderRequestPhase): string {
+    switch (phase) {
+      case 'dispatching': return 'provider request dispatching';
+      case 'dispatched': return 'provider request dispatched';
+      case 'waiting': return 'provider request waiting';
+      case 'settled': return 'provider request settled';
+      case 'failed': return 'provider request failed';
+      case 'cancelled': return 'provider request cancelled';
+    }
+  }
+
+  /**
+   * Publish one real planner/child step on the task's current operation. This
+   * is a UI progress event derived from the closed-turn Planner owner; it
+   * never writes a control fact and never moves the task state.
+   */
+  publishTaskStep(
+    taskId: TaskId,
+    input: { readonly state: string; readonly summary: string },
+  ): void {
+    const record = this.requireTask(taskId);
+    const operation = record.operationId === undefined ? undefined : this.operations.get(record.operationId.value);
+    if (operation === undefined
+      || record.executionEpoch !== operation.executionEpoch
+      || operation.events.some((entry) => entry.kind === 'execution.terminal' && entry.terminalPhase === 'final')) return;
+    const latestModelState = [...operation.events].reverse()
+      .find((entry) => entry.kind === 'provider.model')?.state;
+    if (input.state.startsWith('planner.') && latestModelState === input.state) return;
+    this.pushEvent(record, operation, 'provider.model', input.state, input.summary,
+      [], STEP_OWNER, false, undefined, {
+        turn: { turnId: record.activeTurn?.admittedTurn.turnId },
+      });
   }
 
   /** Required native ingress, separate from best-effort UI lifecycle projection. */
@@ -3010,7 +3078,20 @@ export class RuntimeTaskCoordinator {
       previous: previousCheckpoint,
       recordDigest: committed.commitRef.recordDigest,
     });
+    // The closed-turn Planner is a real lifecycle owner inside align(). Publish
+    // its two observed boundaries on the same operation. These are UI steps
+    // derived from the actual call, never a second control fact.
+    this.publishTaskStep(record.taskId, {
+      state: 'planner.aligning',
+      summary: 'Closed turn planner alignment started',
+    });
     const advance = await standardTurn.align();
+    this.publishTaskStep(record.taskId, {
+      state: 'planner.aligned',
+      summary: advance.decision === undefined
+        ? `Closed turn planner aligned: ${advance.state}`
+        : `Closed turn planner aligned: ${advance.state}/${advance.decision}`,
+    });
     // The direct native lane owns its public result through the typed accepted
     // delivery. Commit and read it back through the same public-output owner
     // before the turn is accepted as succeeded, so a drain/empty turn can never
@@ -3583,7 +3664,9 @@ export class RuntimeTaskCoordinator {
 
   /** Return the actual Task assembly pool for the independent closed-turn Planner. */
   closedTurnPlannerPool(taskId: TaskId): AgentRuntimePoolManager {
-    return this.taskAssembly(taskId).runtimePool;
+    const pool = this.taskAssembly(taskId).runtimePool;
+    taskStepPublishers.set(pool, (input) => this.publishTaskStep(taskId, input));
+    return pool;
   }
 
   /** Observe only an already-instantiated pool; GET never creates an assembly. */
@@ -4170,10 +4253,38 @@ export class RuntimeTaskCoordinator {
   ): ChildCallPort {
     const coordinator = this;
     const store = this.options.checkpointStoreFor(record.taskId, scope.cycleId!);
+    const operation = record.operationId === undefined ? undefined : this.operations.get(record.operationId.value);
+    const canPushLive = operation !== undefined
+      && !operation.events.some((entry) => entry.kind === 'execution.terminal' && entry.terminalPhase === 'final');
+    const pushLifecycleStep = (state: string, summary: string, childCallId?: string): void => {
+      if (record.operationId === undefined || operation === undefined || !canPushLive) return;
+      this.pushEvent(
+        record,
+        operation,
+        'provider.model',
+        state,
+        summary,
+        [this.operationScopeEvidence(scope, state)],
+        STEP_OWNER,
+        false,
+        undefined,
+        {
+          turn: {
+            turnId: context.admittedTurn.turnId,
+            ...(childCallId === undefined ? {} : { requestId: childCallId }),
+          },
+        },
+      );
+    };
     return {
       async prepare(input: ChildCallPrepareInput): Promise<PreparedChildCall> {
         context.assertProductionOpen();
         const committed = await coordinator.commitChildCallCheckpoint(context, store, input);
+        pushLifecycleStep('child.prepared',
+          input.kind === 'execution'
+            ? `child execution ${input.invocationId} prepared`
+            : `child review ${input.invocationId} prepared`,
+          input.invocationId);
         await context.openChildInvocation({
           invocationId: input.invocationId,
           childTurnId: input.invocationId,
@@ -4187,6 +4298,11 @@ export class RuntimeTaskCoordinator {
       },
       async recordReturn(input: ChildCallReturnInput): Promise<void> {
         const refinedDelivery = await coordinator.storeRefinedDelivery(context, input);
+        pushLifecycleStep('child.returned',
+          input.kind === 'execution'
+            ? `child execution ${input.invocationId} returned`
+            : `child review ${input.invocationId} returned`,
+          input.invocationId);
         if (input.kind === 'execution') {
           await context.recordChildReturn({
             kind: 'execution',
@@ -4207,6 +4323,11 @@ export class RuntimeTaskCoordinator {
       },
       async recordAdoption(input: ChildCallAdoptionInput): Promise<void> {
         context.assertProductionOpen();
+        pushLifecycleStep('child.adopted',
+          input.kind === 'execution'
+            ? `child execution ${input.invocationId} adopted`
+            : `child review ${input.invocationId} adopted`,
+          input.invocationId);
         const delivery = context.entries().find((entry) => (
           !('envelope' in entry) && entry.invocationId === input.invocationId && entry.kind === input.kind
         ));
@@ -4220,6 +4341,9 @@ export class RuntimeTaskCoordinator {
       },
       async recordReviewCheckpoint(input: ChildCallReviewCheckpointInput): Promise<ChildCallReviewCheckpointReceipt> {
         const committed = await coordinator.commitReviewResultCheckpoint(context, store, input);
+        pushLifecycleStep('review.checkpointed',
+          `child review ${input.invocationId} result checkpointed`,
+          input.invocationId);
         await context.recordReviewCheckpoint(input.invocationId, committed.receipt.checkpointId.value);
         return { checkpointReceiptRef: committed.receipt.checkpointId.value };
       },

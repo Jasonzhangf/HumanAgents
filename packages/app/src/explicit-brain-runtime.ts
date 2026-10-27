@@ -57,6 +57,7 @@ import {
   type ExplicitBrainWorkspaceToolPort,
 } from '../../runtime/src/explicit-brain/index.js';
 import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
+import type { ExplicitInteractionStepInput } from '../../runtime/src/intake/explicit-intake.js';
 import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 import { readSupervisorTerminationReceipts, type SupervisorLease } from './supervisor/supervisor.js';
 import { AGENT_ROLES } from '../../config/src/index.js';
@@ -145,6 +146,12 @@ export interface ExplicitBrainInterpretationInput {
    */
   readonly workspaceCwd?: string;
   readonly projectKey?: string;
+  /**
+   * Optional live-step sink. The host records each real lifecycle step for the
+   * owning interaction; the interpreter never synthesizes a step just to make
+   * progress look alive.
+   */
+  readonly onStep?: (step: ExplicitInteractionStepInput) => void;
 }
 
 export type ExplicitBrainInterpretation =
@@ -831,6 +838,7 @@ export function createProviderExplicitBrainInterpreter(input: {
       }
       throw error;
     }
+    request.onStep?.({ kind: 'turn.completed', summary: 'Explicit turn completed', turnId: live.owner.turn.turnId });
     retained = undefined;
     return interpretation;
   };
@@ -1104,6 +1112,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             }
             await requireColdAnswerSettlement(finalParentOutput, interpretation);
             await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
+            effectiveRequest.onStep?.({ kind: 'turn.completed', summary: 'Explicit turn completed', turnId: pending.fact.turn.turnId });
             return interpretation;
           }
           const durableHelpers = await input.turnHelperJournal.readTurnHelpers(pending.fact.turn);
@@ -1139,6 +1148,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             }
             await requireColdAnswerSettlement(finalParentOutput, interpretation);
             await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
+            effectiveRequest.onStep?.({ kind: 'turn.completed', summary: 'Explicit turn completed', turnId: pending.fact.turn.turnId });
             return interpretation;
           }
           if (input.prepareAgentProvider === undefined) {
@@ -1177,6 +1187,8 @@ export function createProviderExplicitBrainInterpreter(input: {
       let observationDrained = false;
       let settleAttempted = false;
       let observations: BudgetedProviderObservations<ProviderAgentEvent<InteractionParentProviderExecutionIdentityRef>> | undefined;
+      let responseReasoningStepEmitted = false;
+      let responseStreamingStepEmitted = false;
       const operationId = continuation?.fact.execution.operationId ?? id('operation', `explicit-interpret-${identity}`);
       const execution = { runtimeId, organId: input.organId, operationId, executionEpoch, interactionTurn: turn };
       /**
@@ -1245,7 +1257,35 @@ export function createProviderExplicitBrainInterpreter(input: {
           registerRequest: (registration) => createdOwner.registerRequest(registration),
           acceptRawFact: (envelope) => createdOwner.acceptRawFact(envelope),
           requestContext: createdOwner.requestContext,
-          onRequestLifecycle: (event) => observations?.noteLifecycle(event),
+          onRequestLifecycle: (event) => {
+            observations?.noteLifecycle(event);
+            if (event.phase === 'dispatching' || event.phase === 'dispatched') {
+              responseReasoningStepEmitted = false;
+              responseStreamingStepEmitted = false;
+            }
+            if (event.phase === 'dispatching') {
+              request.onStep?.({
+                kind: 'request.dispatching',
+                summary: 'Dispatching request to the model',
+                turnId: event.turnId,
+                requestId: event.requestId,
+              });
+            } else if (event.phase === 'dispatched') {
+              request.onStep?.({
+                kind: 'request.dispatched',
+                summary: 'Model request dispatched',
+                turnId: event.turnId,
+                requestId: event.requestId,
+              });
+            } else if (event.phase === 'settled') {
+              request.onStep?.({
+                kind: 'request.settled',
+                summary: 'Model request settled',
+                turnId: event.turnId,
+                requestId: event.requestId,
+              });
+            }
+          },
           tools: [
             { toolId: 'dispatch_helper', description: 'Dispatch independent bounded helper work. Return is not acceptance. Include the required structured helper result contract in the bounded inputs.', inputSchema: {
               type: 'object', properties: {
@@ -1278,7 +1318,17 @@ export function createProviderExplicitBrainInterpreter(input: {
               }
               let result: unknown;
               if (parsed.toolId === 'dispatch_helper') {
-                result = await helpers.dispatchHelper({
+                request.onStep?.({
+                  kind: 'helper.dispatched',
+                  summary: `Dispatching helper ${parsed.selection.roleId}`,
+                  turnId: turn.turnId,
+                });
+                request.onStep?.({
+                  kind: 'helper.request',
+                  summary: `Helper ${parsed.selection.roleId} request started`,
+                  turnId: turn.turnId,
+                });
+                const dispatched = await helpers.dispatchHelper({
                   selection: parsed.selection,
                   assignmentFields: parsed.assignmentFields,
                   inputs: parsed.inputs,
@@ -1300,6 +1350,13 @@ export function createProviderExplicitBrainInterpreter(input: {
                     };
                   },
                 });
+                request.onStep?.({
+                  kind: 'helper.response',
+                  summary: `Helper ${dispatched.identity.helperCallId} returned`,
+                  turnId: dispatched.identity.parentTurnId,
+                  helperCallId: dispatched.identity.helperCallId,
+                });
+                result = dispatched;
               } else {
                 const refinedResult = {
                   ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'accepted-helper', locator: parsed.helperCallId, content: parsed.refinedText }),
@@ -1308,6 +1365,12 @@ export function createProviderExplicitBrainInterpreter(input: {
                 result = await helpers.acceptHelper({ helperCallId: parsed.helperCallId, refinedResult, acceptanceRef: parsed.acceptanceRef,
                   checkpointDescription: parsed.refinedText,
                   acceptedBy: 'humanagent.runtime.explicit-brain', evidenceRefs: parsed.evidenceRefs });
+                request.onStep?.({
+                  kind: 'helper.accepted',
+                  summary: `Helper ${parsed.helperCallId} accepted`,
+                  turnId: turn.turnId,
+                  helperCallId: parsed.helperCallId,
+                });
               }
               return { output: JSON.stringify(result), outputRefs: [], evidenceRefs: [] };
             },
@@ -1331,7 +1394,26 @@ export function createProviderExplicitBrainInterpreter(input: {
           const step = await observations.next();
           if (step.kind === 'deadline') continue;
           if (step.step.done) { observationDrained = true; break; }
-          observations.note(step.step.value.providerEvent);
+          const providerEvent = step.step.value.providerEvent;
+          observations.note(providerEvent);
+          if (!responseReasoningStepEmitted && providerEvent.kind === 'model') {
+            responseReasoningStepEmitted = true;
+            request.onStep?.({
+              kind: 'response.reasoning',
+              summary: providerEvent.summary ?? 'Model is reasoning',
+              ...(providerEvent.turnId === undefined ? {} : { turnId: providerEvent.turnId }),
+              ...(providerEvent.requestId === undefined ? {} : { requestId: providerEvent.requestId }),
+            });
+          }
+          if (!responseStreamingStepEmitted && providerEvent.kind === 'output') {
+            responseStreamingStepEmitted = true;
+            request.onStep?.({
+              kind: 'response.streaming',
+              summary: providerEvent.summary ?? 'Model is streaming output',
+              ...(providerEvent.turnId === undefined ? {} : { turnId: providerEvent.turnId }),
+              ...(providerEvent.requestId === undefined ? {} : { requestId: providerEvent.requestId }),
+            });
+          }
         }
         settleAttempted = true;
         const closure = await driver.settle({ runtimeId, executionEpoch });
