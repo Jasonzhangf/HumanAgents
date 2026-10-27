@@ -161,6 +161,167 @@ test('G HTTP source preserves protocol calls without RCC normalization', async (
   assert.equal([...httpCalls, ...anthropicCalls, ...rccCalls].some((call) => call.body?.includes('fixture-http-credential')), false);
 });
 
+test('RCC v3 Responses tool-arguments tail accepts one exact completed suffix without tool facts', async () => {
+  const adapterEvidence = recordingSink();
+  const argumentsJson = '{"path":"e2e-change-fixture/seed.txt"}';
+  const tail = 'change-fixture/seed.txt"}';
+  const built = adapter(async () => response(chunks([
+    frame('response.created', { response: { id: 'response-tool-tail' } }),
+    frame('response.output_item.added', {
+      output_index: 0,
+      item: { type: 'function_call', call_id: 'call-tool-tail', name: 'file_read', arguments: '' },
+    }),
+    frame('response.function_call_arguments.delta', { call_id: 'call-tool-tail', delta: argumentsJson }),
+    frame('response.function_call_arguments.done', { call_id: 'call-tool-tail', arguments: argumentsJson }),
+    frame('response.output_item.done', {
+      output_index: 0,
+      item: { type: 'function_call', call_id: 'call-tool-tail', name: 'file_read', arguments: argumentsJson },
+    }),
+    frame('response.function_call_arguments.delta', { delta: tail }),
+    frame('response.completed', { response: { id: 'response-tool-tail' } }),
+  ])), binding, new ResponsesProviderCodec(), 'rcc', {}, adapterEvidence.sink);
+  await built.adapter.start(startInput());
+  const rawFacts: Array<{ readonly kind: string; readonly contentUnitId?: string }> = [];
+  const observed = [];
+  for await (const event of built.adapter.observe({ ...execution, onRawFacts: async (facts) => {
+    for (const fact of facts) rawFacts.push({ kind: fact.kind, ...(fact.kind === 'content' ? { contentUnitId: fact.contentUnitId } : {}) });
+  } })) observed.push(event);
+
+  const toolEvents = observed.filter((event) => event.kind === 'tool');
+  assert.equal(toolEvents.length, 1);
+  assert.deepEqual(toolEvents[0]?.toolCall?.arguments, { path: 'e2e-change-fixture/seed.txt' });
+  assert.equal(observed.at(-1)?.terminalState, 'waiting');
+  assert.equal(rawFacts.filter((fact) => fact.kind === 'tool-call').length, 1);
+  assert.deepEqual(rawFacts.filter((fact) => fact.kind === 'content' || fact.kind === 'content-complete').map((fact) => fact.contentUnitId), [
+    'responses:tool-arguments:call-tool-tail',
+    'responses:tool-arguments:call-tool-tail',
+  ]);
+
+  const deltaEvents = observed.filter((event) => event.eventId.includes('response.function_call_arguments.delta'));
+  assert.equal(deltaEvents.length, 2);
+  const tailEvent = deltaEvents.at(-1);
+  assert.ok(tailEvent);
+  assert.equal(tailEvent.kind, 'model');
+  const tailEvidence = tailEvent.evidenceRefs[0];
+  assert.ok(tailEvidence);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(await adapterEvidence.read(tailEvidence))), {
+    type: 'response.function_call_arguments.delta',
+    delta: tail,
+  });
+});
+
+test('RCC v3 Responses tool-arguments tail rejects unidentified deltas and preserves their raw frames', async () => {
+  const cases: Array<{
+    readonly name: string;
+    readonly beforeTail: readonly string[];
+    readonly tail: Record<string, unknown>;
+    readonly code: 'missing.field' | 'protocol.duplicate-tail';
+  }> = [
+    {
+      name: 'without a completed candidate',
+      beforeTail: [],
+      tail: { delta: 'new arguments' },
+      code: 'missing.field',
+    },
+    {
+      name: 'when the completed arguments are not a suffix',
+      beforeTail: [
+        frame('response.function_call_arguments.done', { item_id: 'item-non-suffix', arguments: '{"path":"README.md"}' }),
+      ],
+      tail: { delta: 'other.md"}' },
+      code: 'protocol.duplicate-tail',
+    },
+    {
+      name: 'with an empty delta',
+      beforeTail: [
+        frame('response.function_call_arguments.done', { item_id: 'item-empty', arguments: '{"path":"README.md"}' }),
+      ],
+      tail: { delta: '' },
+      code: 'protocol.duplicate-tail',
+    },
+    {
+      name: 'on a second identical tail',
+      beforeTail: [
+        frame('response.function_call_arguments.done', { item_id: 'item-repeat', arguments: '{"path":"README.md"}' }),
+        frame('response.function_call_arguments.delta', { delta: 'README.md"}' }),
+      ],
+      tail: { delta: 'README.md"}' },
+      code: 'protocol.duplicate-tail',
+    },
+    {
+      name: 'after a new tool call opens',
+      beforeTail: [
+        frame('response.function_call_arguments.done', { item_id: 'item-new-tool', arguments: '{"path":"README.md"}' }),
+        frame('response.output_item.added', {
+          output_index: 1,
+          item: { type: 'function_call', call_id: 'call-new-tool', name: 'file_read', arguments: '' },
+        }),
+      ],
+      tail: { delta: 'README.md"}' },
+      code: 'missing.field',
+    },
+    {
+      name: 'after a new response round',
+      beforeTail: [
+        frame('response.function_call_arguments.done', { item_id: 'item-stale', arguments: '{"path":"README.md"}' }),
+        frame('response.created', { response: { id: 'response-new-round' } }),
+      ],
+      tail: { delta: 'README.md"}' },
+      code: 'missing.field',
+    },
+    {
+      name: 'while another tool argument stream is still open',
+      beforeTail: [
+        frame('response.output_item.added', {
+          output_index: 0,
+          item: { type: 'function_call', call_id: 'call-open', name: 'file_read', arguments: '' },
+        }),
+        frame('response.function_call_arguments.delta', { call_id: 'call-open', delta: '{"path":' }),
+        frame('response.output_item.added', {
+          output_index: 1,
+          item: { type: 'function_call', call_id: 'call-done', name: 'file_read', arguments: '' },
+        }),
+        frame('response.function_call_arguments.delta', { call_id: 'call-done', delta: '{"path":' }),
+        frame('response.function_call_arguments.done', { call_id: 'call-done', arguments: '{"path":"README.md"}' }),
+      ],
+      tail: { delta: 'README.md"}' },
+      code: 'protocol.duplicate-tail',
+    },
+  ];
+
+  for (const testCase of cases) {
+    const adapterEvidence = recordingSink();
+    const rawTail = { type: 'response.function_call_arguments.delta', ...testCase.tail };
+    const responseId = `response-${testCase.name}`;
+    const built = adapter(async () => response(chunks([
+      frame('response.created', { response: { id: responseId } }),
+      ...testCase.beforeTail,
+      frame('response.function_call_arguments.delta', testCase.tail),
+      frame('response.completed', { response: { id: responseId } }),
+    ])), binding, new ResponsesProviderCodec(), 'rcc', {}, adapterEvidence.sink);
+    await built.adapter.start(startInput());
+    const rawFacts: Array<{ readonly kind: string }> = [];
+    let evidenceRef: EvidenceRef | undefined;
+    await assert.rejects(async () => {
+      for await (const event of built.adapter.observe({ ...execution, onRawFacts: async (facts) => {
+        for (const fact of facts) rawFacts.push({ kind: fact.kind });
+      } })) void event;
+    }, (error: unknown) => {
+      assert.equal(error instanceof ProviderAdapterError, true, testCase.name);
+      assert.equal((error as ProviderAdapterError).providerError.code, testCase.code, testCase.name);
+      evidenceRef = (error as ProviderAdapterError).providerError.evidenceRefs[0];
+      assert.ok(evidenceRef, testCase.name);
+      return true;
+    });
+    assert.equal(rawFacts.filter((fact) => fact.kind === 'tool-call').length, 0, testCase.name);
+    assert.ok(evidenceRef, testCase.name);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(await adapterEvidence.read(evidenceRef))), rawTail, testCase.name);
+    const tailWrite = adapterEvidence.writes.find((write) => write.type === 'response.function_call_arguments.delta'
+      && JSON.stringify(write.content) === JSON.stringify(rawTail));
+    assert.ok(tailWrite, testCase.name);
+  }
+});
+
 test('RCC v3 Responses submit opens a second stream bound to the completed tool call', async () => {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const streams = [
@@ -448,6 +609,42 @@ function sink(): ProviderEvidenceSink {
   };
 }
 
+function recordingSink(): {
+  readonly sink: ProviderEvidenceSink;
+  readonly writes: ProviderEvidenceWrite[];
+  readonly read: (ref: EvidenceRef) => Promise<Uint8Array>;
+} {
+  const writes: ProviderEvidenceWrite[] = [];
+  const contentByRef = new Map<EvidenceRef, Uint8Array>();
+  return {
+    writes,
+    read: async (ref) => {
+      const content = contentByRef.get(ref);
+      if (!content) throw new Error(`missing evidence ${ref.locator}`);
+      return content;
+    },
+    sink: {
+      async write(input) {
+        const ref = {
+          evidenceId: id('evidence', `codec-write-${input.type}-${input.locator.replace(/[^A-Za-z0-9._-]/g, '-')}`),
+          kind: input.kind,
+          source: 'rcc-v3-transport-test',
+          locator: input.locator,
+          scope: input.scope,
+        };
+        writes.push(input);
+        contentByRef.set(ref, new TextEncoder().encode(typeof input.content === 'string' ? input.content : JSON.stringify(input.content)));
+        return ref;
+      },
+      async read(ref) {
+        const content = contentByRef.get(ref);
+        if (!content) throw new Error(`missing evidence ${ref.locator}`);
+        return content;
+      },
+    },
+  };
+}
+
 async function* chunks(values: readonly string[]): AsyncIterable<Uint8Array> {
   for (const value of values) yield new TextEncoder().encode(value);
 }
@@ -516,7 +713,14 @@ function anthropicAdapter(fetch: V3ProviderFetch) {
   return adapter(fetch, provider, new AnthropicProviderCodec(4096));
 }
 
-function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCodec = new ResponsesProviderCodec(), source: ProviderTransportSource = 'rcc', extra: { readonly credential?: string } = {}) {
+function adapter(
+  fetch: V3ProviderFetch,
+  provider = binding,
+  codec: ProviderCodec = new ResponsesProviderCodec(),
+  source: ProviderTransportSource = 'rcc',
+  extra: { readonly credential?: string } = {},
+  adapterEvidence: ProviderEvidenceSink = sink(),
+) {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const writes: ProviderEvidenceWrite[] = [];
   const contentByRef = new Map<EvidenceRef, Uint8Array>();
@@ -548,7 +752,7 @@ function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCode
     ...extra,
   };
   const transport = createV3ProviderHttpTransport(options);
-  return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), binding: provider, calls, writes, evidence: transportEvidence };
+  return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: adapterEvidence }), binding: provider, calls, writes, evidence: transportEvidence };
 }
 
 function openAIAdapter(fetch: V3ProviderFetch) {

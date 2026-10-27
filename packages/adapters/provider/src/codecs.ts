@@ -438,6 +438,19 @@ interface OpenAIChatPendingToolCall {
   readonly arguments: string;
 }
 
+/** Request-local Responses tool-argument stream. A stream stays open until its
+ *  arguments.done or output_item.done closes it, so an item-less argument delta
+ *  can only be a duplicate tail once no other argument stream is still open. */
+interface ResponsesToolArgumentRun {
+  closed: boolean;
+}
+
+interface CompletedResponsesToolArguments {
+  readonly callId: string;
+  readonly rawArgumentsJson: string;
+  duplicateTailConsumed: boolean;
+}
+
 /** Task-bound and taskless-helper requests share one codec/wire path. */
 type AnyProviderStartInput = ProviderStartInput<AnyProviderExecutionIdentityRef>;
 type AnyProviderSubmitInput = ProviderSubmitInput<AnyProviderExecutionIdentityRef>;
@@ -978,6 +991,92 @@ function asRecord(raw: ProviderWireEvent): Record<string, unknown> {
 
 export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireRequest> {
   readonly protocol = 'responses' as const;
+  private readonly toolArgumentRuns = new WeakMap<object, Map<string, ResponsesToolArgumentRun>>();
+  private readonly completedToolArguments = new WeakMap<object, CompletedResponsesToolArguments>();
+
+  private toolArgumentRunsFor<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+  ): Map<string, ResponsesToolArgumentRun> {
+    let runs = this.toolArgumentRuns.get(context);
+    if (runs === undefined) {
+      runs = new Map();
+      this.toolArgumentRuns.set(context, runs);
+    }
+    return runs;
+  }
+
+  private openToolArguments<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    identities: readonly string[],
+  ): void {
+    const runs = this.toolArgumentRunsFor(context);
+    const existing = identities.map((identity) => runs.get(identity)).find((run) => run !== undefined);
+    if (existing !== undefined) {
+      for (const identity of identities) runs.set(identity, existing);
+      existing.closed = false;
+      // Reopening a stream invalidates its previous completed window even when
+      // the identity is reused: the old tail can no longer be proven current.
+      this.completedToolArguments.delete(context);
+      return;
+    }
+    // A brand-new tool-argument stream invalidates the previous completed window:
+    // an item-less delta now has an ambiguous owner and must fail closed.
+    this.completedToolArguments.delete(context);
+    const run: ResponsesToolArgumentRun = { closed: false };
+    for (const identity of identities) runs.set(identity, run);
+  }
+
+  private closeToolArguments<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    identity: string,
+  ): void {
+    const runs = this.toolArgumentRunsFor(context);
+    const run = runs.get(identity);
+    if (run !== undefined) {
+      run.closed = true;
+      return;
+    }
+    // A completion for a stream the codec never saw is still a completed stream:
+    // it must not make the completed-arguments window look like an open stream.
+    runs.set(identity, { closed: true });
+  }
+
+  private rememberCompletedToolArguments<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    identity: string,
+    rawArgumentsJson: string,
+  ): void {
+    if (rawArgumentsJson.length === 0) return;
+    this.completedToolArguments.set(context, { callId: identity, rawArgumentsJson, duplicateTailConsumed: false });
+  }
+
+  private hasOpenToolArguments<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+  ): boolean {
+    for (const run of this.toolArgumentRunsFor(context).values()) {
+      if (!run.closed) return true;
+    }
+    return false;
+  }
+
+  private consumeToolArgumentsTail<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    delta: string,
+  ): string | undefined {
+    const completed = this.completedToolArguments.get(context);
+    if (completed === undefined || this.hasOpenToolArguments(context)) return undefined;
+    if (completed.duplicateTailConsumed) return undefined;
+    if (delta.length === 0 || !completed.rawArgumentsJson.endsWith(delta)) return undefined;
+    completed.duplicateTailConsumed = true;
+    return completed.callId;
+  }
+
+  private clearToolArguments<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+  ): void {
+    this.toolArgumentRuns.delete(context);
+    this.completedToolArguments.delete(context);
+  }
 
   encodeStart(input: AnyProviderStartInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
     return this.encodeRequest(binding, routeRef, input, input.payload);
@@ -1060,7 +1159,10 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'response.in_progress': {
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireStringOrGenerated(response, 'id', context.execution, raw.type, `rcc-response-${context.execution.executionEpoch}`);
-        if (raw.type === 'response.created') context.responsesStreamRound.count += 1;
+        if (raw.type === 'response.created') {
+          context.responsesStreamRound.count += 1;
+          this.clearToolArguments(context);
+        }
         context.responsesCurrentResponseId?.set('current', responseId);
         const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`, response)];
         if (responsesAdditionalRound(context)) {
@@ -1079,6 +1181,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const itemType = requireString(item, 'type', context.execution, raw.type);
         if (itemType === 'function_call') {
           const callId = requireString(item, 'call_id', context.execution, raw.type);
+          this.openToolArguments(context, [callId]);
           const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}/started`, item)];
           return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `tool/${callId}/started`), evidenceRefs)] };
         }
@@ -1231,6 +1334,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
           const wireName = requireString(item, 'name', context.execution, raw.type);
           const name = responsesToolId(wireName);
           const argumentsJson = requireStringValue(item, 'arguments', context.execution, raw.type);
+          this.closeToolArguments(context, callId);
           let args: unknown;
           try {
             args = JSON.parse(argumentsJson || '{}');
@@ -1423,8 +1527,58 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.function_call_arguments.delta': {
-        const itemId = requireToolEventIdentity(record, context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
+        const hasItemIdentity = typeof record.item_id === 'string' && record.item_id.trim() !== '';
+        const hasCallIdentity = typeof record.call_id === 'string' && record.call_id.trim() !== '';
+        const completedTailCallId = !hasItemIdentity && !hasCallIdentity
+          ? this.consumeToolArgumentsTail(context, delta)
+          : undefined;
+        if (completedTailCallId !== undefined) {
+          const frame = Object.fromEntries(Object.entries(record).filter(([key]) => key !== 'protocol'));
+          const evidenceRefs = [await captureEvidence(context, raw.type, `arguments/${completedTailCallId}/duplicate`, frame)];
+          return {
+            events: [modelEvent(
+              context.execution,
+              context.scope,
+              raw.type,
+              eventId(context, raw.type, `arguments/${completedTailCallId}/duplicate`),
+              evidenceRefs,
+            )],
+          };
+        }
+        const unknownIdentity = !hasItemIdentity && !hasCallIdentity;
+        if (unknownIdentity) {
+          const frame = Object.fromEntries(Object.entries(record).filter(([key]) => key !== 'protocol'));
+          const evidenceRefs = [await captureEvidence(context, raw.type, 'arguments/unidentified', frame)];
+          const completed = this.completedToolArguments.get(context);
+          if (completed === undefined) {
+            throw new ProviderAdapterError({
+              code: 'missing.field',
+              category: 'protocol',
+              phase: 'observe',
+              message: `${raw.type} event missing item_id or call_id`,
+              scope: context.execution,
+              evidenceRefs,
+            });
+          }
+          const reason = this.hasOpenToolArguments(context)
+            ? 'another tool argument stream is still open'
+            : delta.length === 0
+              ? 'delta is empty'
+              : !completed.rawArgumentsJson.endsWith(delta)
+                ? 'delta is not an exact suffix of the completed arguments'
+                : 'the completed arguments duplicate tail was already consumed';
+          throw new ProviderAdapterError({
+            code: 'protocol.duplicate-tail',
+            category: 'protocol',
+            phase: 'observe',
+            message: `${raw.type} event missing item_id or call_id and ${reason}`,
+            scope: context.execution,
+            evidenceRefs,
+          });
+        }
+        const itemId = requireToolEventIdentity(record, context.execution, raw.type);
+        this.openToolArguments(context, [itemId]);
         const evidenceRefs = [await captureEvidence(context, raw.type, `arguments/${itemId}`, delta)];
         return {
           events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `arguments/${itemId}`), evidenceRefs)],
@@ -1441,6 +1595,8 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const itemId = requireToolEventIdentity(record, context.execution, raw.type);
         const args = requireStringValue(record, 'arguments', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `arguments/${itemId}`, args)];
+        this.closeToolArguments(context, itemId);
+        this.rememberCompletedToolArguments(context, itemId, args);
         return {
           events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `arguments/${itemId}`), [artifactRef(raw.type, `arguments/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)],
           rawFacts: [contentFact({
@@ -1463,6 +1619,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`, reason)];
         const waitingForTool = raw.type === 'response.completed' && (context.responsesPendingToolCalls?.size ?? 0) > 0;
         context.responsesPendingToolCalls?.clear();
+        this.clearToolArguments(context);
         const next = raw.type === 'response.incomplete'
           ? { kind: 'wait' as const, ref: `provider-incomplete-${reason ?? 'unknown'}` }
           : waitingForTool
@@ -1485,6 +1642,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.failed': {
+        this.clearToolArguments(context);
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireString(response, 'id', context.execution, raw.type);
         const errorRecord = requireObject(response, 'error', context.execution, raw.type);
@@ -1501,6 +1659,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'error': {
+        this.clearToolArguments(context);
         const errorRecord = requireObject(record, 'error', context.execution, raw.type);
         const code = requireString(errorRecord, 'code', context.execution, raw.type);
         const message = requireString(errorRecord, 'message', context.execution, raw.type);
