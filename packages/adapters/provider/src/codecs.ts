@@ -977,6 +977,26 @@ function responsesReasoningLocator(itemId: string, record: Record<string, unknow
   return contentIndex === undefined ? itemId : `${itemId}:${contentIndex}`;
 }
 
+/**
+ * Reasoning stream events are model metadata, not tool calls. Some upstream
+ * Responses streams omit the top-level item_id while still identifying the
+ * item through item.id or output/summary indexes. Derive a stable local
+ * identity instead of aborting the stream. Tool-call identity stays fail-closed
+ * in the tool-argument branch.
+ */
+function resolveReasoningItemId(record: Record<string, unknown>): string {
+  const itemId = record.item_id;
+  if (typeof itemId === 'string' && itemId.trim() !== '') return itemId;
+  const item = record.item;
+  if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+    const nestedId = (item as Record<string, unknown>).id;
+    if (typeof nestedId === 'string' && nestedId.trim() !== '') return nestedId;
+  }
+  const outputIndex = typeof record.output_index === 'number' ? record.output_index : 0;
+  const summaryIndex = typeof record.summary_index === 'number' ? record.summary_index : 0;
+  return `reasoning-${outputIndex}-${summaryIndex}`;
+}
+
 function asRecord(raw: ProviderWireEvent): Record<string, unknown> {
   if (!raw || typeof raw !== 'object') {
     throw new ProviderAdapterError({
@@ -1435,7 +1455,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       }
       case 'response.reasoning_summary_part.added':
       case 'response.reasoning_summary_part.done': {
-        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const itemId = resolveReasoningItemId(record);
         const part = requireObject(record, 'part', context.execution, raw.type);
         const text = responsesReasoningSummaryText(part);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
@@ -1451,7 +1471,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.reasoning_summary_part.delta': {
-        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const itemId = resolveReasoningItemId(record);
         const delta = requireObject(record, 'delta', context.execution, raw.type);
         const text = responsesReasoningSummaryText(delta);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
@@ -1467,7 +1487,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.reasoning_summary_text.delta': {
-        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const itemId = resolveReasoningItemId(record);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, delta })];
         return {
@@ -1482,7 +1502,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.reasoning_summary_text.done': {
-        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const itemId = resolveReasoningItemId(record);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
         return {
@@ -1497,7 +1517,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.reasoning_text.delta': {
-        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const itemId = resolveReasoningItemId(record);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, delta })];
         return {
@@ -1512,7 +1532,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.reasoning_text.done': {
-        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const itemId = resolveReasoningItemId(record);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
         return {

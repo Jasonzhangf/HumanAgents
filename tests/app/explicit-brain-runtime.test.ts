@@ -314,6 +314,61 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
     super({ binding: options.binding, routeRef: 'recorded', codec: new ResponsesProviderCodec(), transport, evidence });
   }
 }
+
+test('explicit interaction wire tools omit runtime-only requiredCapabilities', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'explicit-wire-capabilities', providerId: 'explicit-wire-capabilities', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'controlled',
+    configDigest: 'sha256:wire-capabilities', capabilityDigest: 'sha256:wire-capabilities',
+  };
+  let toolsJson = '';
+  let requestBody = '';
+  const port = new RecordedParentPort({
+    binding, replay: [], stepDelayMs: 0,
+    respond: async (wire) => {
+      toolsJson = JSON.stringify(wire.tools);
+      requestBody = JSON.stringify(wire);
+      return [{
+        type: 'response.output_text.done',
+        item_id: 'final',
+        text: JSON.stringify({ kind: 'answer', normalizedInput: 'hello', knownFacts: [], answer: 'ok', decisionRefs: [] }),
+      }];
+    },
+  });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+  });
+
+  const result = await interpreter.interpret({
+    interactionId: 'interaction-wire-capabilities',
+    inputRevision: 1,
+    sourceRef: 'ui:wire-capabilities',
+    rawInput: 'hello',
+    clarifications: [],
+    taskCandidates: [],
+  });
+  assert.equal(result.kind, 'answer');
+  assert.match(toolsJson, /dispatch_helper/);
+  assert.equal(requestBody.includes('requiredCapabilities'), false);
+  const dispatchSchema = (JSON.parse(toolsJson) as Array<{
+    readonly name: string;
+    readonly parameters: {
+      readonly properties: {
+        readonly assignmentFields: {
+          readonly properties: Record<string, unknown>;
+          readonly required: readonly string[];
+        };
+      };
+    };
+  }>).find((tool) => tool.name === 'dispatch_helper');
+  assert.ok(dispatchSchema);
+  assert.equal('requiredCapabilities' in dispatchSchema!.parameters.properties.assignmentFields.properties, false);
+  assert.equal(dispatchSchema!.parameters.properties.assignmentFields.required.includes('requiredCapabilities'), false);
+});
+
 /**
  * A real JSONL parent journal whose Nth durable raw acceptance is rejected.
  *
@@ -3917,7 +3972,7 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
       { type: 'response.output_item.done', output_index: 1, item: { type: 'function_call', call_id: 'dispatch', name: 'dispatch_helper', arguments: JSON.stringify({
         selection: { roleId: 'review', configuredAgentId: 'independent-child' },
         assignmentFields: { objective: dispatchObjective, targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
-          acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: dispatchSuccessCriteria, failureCriteria: ['none'], incompleteCriteria: ['partial'], requiredCapabilities: [], mergeGate: 'not-required' },
+          acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: dispatchSuccessCriteria, failureCriteria: ['none'], incompleteCriteria: ['partial'], mergeGate: 'not-required' },
         inputs: { question: 'child-only-input' }, evidenceRefs: [],
       }) } },
     ];
@@ -4000,6 +4055,8 @@ test('neutral parent loops over exact raw tool pairs, with returned helper separ
     templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
     helperFactory: async ({ selection, assignment, execution }) => {
       assert.deepEqual(selection, { roleId: 'review', configuredAgentId: 'independent-child' });
+      assert.deepEqual(assignment.requiredCapabilities, ['review'],
+        'runtime must derive an omitted internal capability from the selected role');
       const child = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], respond: async (wire) => {
         assert.equal(wire.model, childBinding.modelRef);
         assert.ok(JSON.stringify(wire).includes('child-only-input'));
