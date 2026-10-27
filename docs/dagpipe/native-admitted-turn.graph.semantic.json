@@ -41,6 +41,14 @@
       "pendingFinding": "H-A2 P1 remains unimplemented and has not passed independent review; this graph records the required boundary only."
     },
     "rawToolResultBoundary": "Every current tool result remains raw evidence with its original status, failure, scope, completeness, truncation and result fields. Historical file.search report validation and the test-only deriveFileSearchObservation evidence remain historical source evidence. They are not a general qualification gate for the native 17-tool surface.",
+    "providerToolArgumentsIdentityBoundary": "Inside execute_one_child_turn, a Responses function_call_arguments.delta without both item_id and call_id may be accepted at most once, only when a single unambiguous completed arguments.done value exists in the current decode context and the delta is one non-empty exact suffix of that value. Acceptance emits the model event with the raw frame evidence only; it emits no argument content fact, no tool-call fact, no completion fact, and no new tool identity. Everything else stays fail-closed and preserves the full raw frame before rejecting. This boundary neither changes tool execution nor grants turn closure.",
+    "providerToolArgumentsIdentityTestBinding": {
+      "ownerPath": "packages/adapters/provider/src/codecs.ts",
+      "publicConsumerTest": "tests/adapters/provider/rcc-v3-transport.test.ts",
+      "testPattern": "Responses tool-arguments tail",
+      "coveredEdges": ["execute_one_child_turn -> collect_turn_facts"],
+      "coveredFailures": ["missing candidate", "exact unconsumed suffix accepted once", "non-suffix", "empty delta", "repeated suffix", "stale response or tool window", "parallel unfinished tool arguments"]
+    },
     "projectionAuthority": "UI projection journal replay can demonstrate observation readback only; it is not Organ Journal authority and does not prove authoritative recovery state.",
     "checkpointAndRawReleaseEligibility": "Current-turn raw bytes, semantic text, UI projection replay and model-authored summaries are evidence or semantic material only. None is checkpoint, recovery, closure, next-turn, reentry or raw-release authority. The checkpoint/control owner and five-phase coordinator retain those decisions. Raw remains retained until the complete durable turn receipt boundary is proven."
   }
