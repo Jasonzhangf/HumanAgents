@@ -1614,6 +1614,10 @@ async function handleRequest(
     const explicitConfirmation = /^\/api\/explicit\/interactions\/([^/]+)\/confirmation$/.exec(path);
     if (explicitConfirmation && method === 'POST') {
       const body = await readBody(request);
+      // The confirmed authority is the product principal the access-control
+      // root already verified. A client-supplied confirmedBy can never create
+      // execution authority or name a grant owner.
+      const confirmedBy = accessControl.readProductPrincipalOwner();
       const executionPolicy = optionalExecutionPolicy(body);
       const goal = optionalString(body, 'goal');
       const scope = optionalString(body, 'scope');
@@ -1630,7 +1634,7 @@ async function handleRequest(
         draftId: requireString(body, 'draftId'),
         inputRevision: requirePositiveInteger(body, 'inputRevision'),
         confirmationRef: requireString(body, 'confirmationRef'),
-        confirmedBy: requireString(body, 'confirmedBy'),
+        confirmedBy,
         confirmedAt: requireString(body, 'confirmedAt'),
         payloadRef: requireString(body, 'payloadRef'),
         ...(requestKind === undefined ? {} : { requestKind }),

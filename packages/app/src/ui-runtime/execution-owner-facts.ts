@@ -1,9 +1,11 @@
 import type {
+  Checkpoint,
   CompletionReadInput,
   CompletionRef,
   DurablePhaseOutcome,
   JournalCommitRef,
   ProviderExecutionIdentityRef,
+  ProviderSettleState,
   RecoveryHoldFacts,
   ScopeRef,
 } from '../../../contracts/src/index.js';
@@ -68,6 +70,43 @@ export interface ExecutionOwnerFactsInput {
   readonly checkpoints: ExecutionOwnerCheckpointPort;
   /** Full I5 context owner used to bind the closure context relation. */
   readonly fullContext: ContextHistoryPort;
+}
+
+export type StandardTurnClosingOutcomeInput =
+  | {
+      readonly source: 'retained';
+      readonly frozenOutcome: Checkpoint['outcome'];
+    }
+  | {
+      readonly source: 'live';
+      readonly status: ProviderSettleState;
+      readonly acceptedEnd: boolean;
+      readonly producerDrained: boolean;
+      readonly unreturnedCallRefs: readonly string[];
+      readonly unresolvedOperationRefs: readonly string[];
+      readonly permissionRevoked: boolean;
+      readonly hardBlockers: readonly string[];
+      readonly firstErrorRef?: string;
+    };
+
+/**
+ * Freeze the first standard-turn outcome from its actual owners.
+ *
+ * Historical frozen inputs are facts and must round-trip unchanged. A live
+ * close may become succeeded only after every recovery responsibility, grant
+ * and blocker check is clear.
+ */
+export function resolveStandardTurnClosingOutcome(
+  input: StandardTurnClosingOutcomeInput,
+): Checkpoint['outcome'] {
+  if (input.source === 'retained') return input.frozenOutcome;
+  if (!input.acceptedEnd || !input.producerDrained
+    || input.unreturnedCallRefs.length > 0 || input.unresolvedOperationRefs.length > 0) {
+    return 'unknown';
+  }
+  if (input.permissionRevoked || input.hardBlockers.length > 0) return 'blocked';
+  if (input.status !== 'succeeded') return input.status;
+  return input.firstErrorRef === undefined ? 'succeeded' : 'waiting';
 }
 
 function bindingOf(input: ExecutionOwnerFactsInput) {

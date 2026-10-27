@@ -69,6 +69,7 @@ import {
 } from '../../packages/runtime/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import type { CheckpointClosurePort } from '../../packages/runtime/src/checkpoints/ports.js';
+import type { TaskGrantPort } from '../../packages/runtime/src/admission/task-grant.js';
 import type { ClosureRecord } from '../../packages/runtime/src/checkpoints/closure.js';
 import { createHookRegistry, type AgentHookRegistry } from '../../packages/runtime/src/hooks/index.js';
 import {
@@ -84,6 +85,7 @@ import {
   type RuntimeTaskSnapshot,
 } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import type { RuntimeExecutionAllocation } from '../../packages/runtime/src/ui-runtime/coordinator.js';
+import { resolveStandardTurnClosingOutcome } from '../../packages/app/src/ui-runtime/execution-owner-facts.js';
 import {
   FileCheckpointStore,
   FakeReplayExecutionRuntimePort,
@@ -655,6 +657,7 @@ function serviceFor(
   closurePort?: CheckpointClosurePort,
   explicitBrainInterpreter?: ExplicitBrainInputInterpreter,
   explicitProviderSettlementRead?: ExplicitProviderSettlementReadPort,
+  taskGrantPort?: TaskGrantPort,
 ): UiRuntimeService {
   const runtimeJournal = journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   return new UiRuntimeService({
@@ -672,6 +675,7 @@ function serviceFor(
     ...(hookRegistry ? { hookRegistry } : {}),
     explicitBrainInterpreter: explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
     ...(explicitProviderSettlementRead ? { explicitProviderSettlementRead } : {}),
+    ...(taskGrantPort === undefined ? {} : { taskGrantPort }),
     runtimeComposition: { admitExecution: async () => {} },
   });
 }
@@ -1485,7 +1489,11 @@ function queuedDraftRow(list: ReturnType<UiRuntimeService['listTasks']>, draftId
 // Confirms one explicit requirement through the real service owner so FIFO
 // lifecycle tests share one deterministic producer instead of duplicating the
 // interaction state machine.
-async function confirmExplicitRequirementFor(service: UiRuntimeService, suffix: string): Promise<string> {
+async function confirmExplicitRequirementFor(
+  service: UiRuntimeService,
+  suffix: string,
+  targetTaskId?: TaskId,
+): Promise<string> {
   const interactionId = await service.receiveExplicitInput({
     sourceRef: `ui:${suffix}`,
     rawInput: `confirmed requirement ${suffix}`,
@@ -1494,12 +1502,14 @@ async function confirmExplicitRequirementFor(service: UiRuntimeService, suffix: 
   await service.beginExplicitMatching(interactionId);
   await service.recordExplicitMatch(interactionId, {
     normalizedInput: `confirmed requirement ${suffix}`,
-    matchedTasks: [],
+    matchedTasks: targetTaskId === undefined
+      ? []
+      : [{ taskId: targetTaskId, relation: 'current', status: 'waiting' }],
     knownFacts: [],
   });
   await service.proposeExplicitRequirement(interactionId, {
-    proposedIntent: 'create',
-    proposal: `create ${suffix} work`,
+    proposedIntent: targetTaskId === undefined ? 'create' : 'append',
+    proposal: `${targetTaskId === undefined ? 'create' : 'append'} ${suffix} work`,
   });
   const proposed = await service.inspectExplicitInteraction(interactionId);
   assert.ok(proposed.draft);
@@ -3307,6 +3317,39 @@ test('the queued backlog behind a blocked head is observable from the HTTP statu
   }
 });
 
+test('0045 3a first closing outcome preserves recovery facts and historical frozen outcomes', () => {
+  const live = {
+    source: 'live' as const,
+    status: 'succeeded' as const,
+    acceptedEnd: true,
+    producerDrained: true,
+    unreturnedCallRefs: [] as readonly string[],
+    unresolvedOperationRefs: [] as readonly string[],
+    permissionRevoked: false,
+    hardBlockers: [] as readonly string[],
+  };
+  assert.equal(resolveStandardTurnClosingOutcome(live), 'succeeded');
+  assert.equal(resolveStandardTurnClosingOutcome({
+    ...live,
+    unreturnedCallRefs: ['request:unreturned'],
+  }), 'unknown');
+  assert.equal(resolveStandardTurnClosingOutcome({
+    ...live,
+    unresolvedOperationRefs: ['operation:unresolved'],
+  }), 'unknown');
+  assert.equal(resolveStandardTurnClosingOutcome({ ...live, permissionRevoked: true }), 'blocked');
+  assert.equal(resolveStandardTurnClosingOutcome({ ...live, hardBlockers: ['blocker:hard'] }), 'blocked');
+  assert.equal(resolveStandardTurnClosingOutcome({ ...live, firstErrorRef: 'error:first' }), 'waiting');
+  assert.equal(resolveStandardTurnClosingOutcome({ ...live, status: 'failed' }), 'failed');
+  assert.equal(resolveStandardTurnClosingOutcome({ ...live, status: 'cancelled' }), 'cancelled');
+  assert.equal(resolveStandardTurnClosingOutcome({ ...live, acceptedEnd: false }), 'unknown');
+  assert.equal(resolveStandardTurnClosingOutcome({ ...live, producerDrained: false }), 'unknown');
+  assert.equal(resolveStandardTurnClosingOutcome({
+    source: 'retained',
+    frozenOutcome: 'waiting',
+  }), 'waiting', 'a historical frozen waiting close is never upgraded');
+});
+
 test('cross-turn preparation occupies budget and final completion wakes FIFO without charging manual grant wait', async () => {
   // Source gap: admission counts running/settling only and watches only the
   // first operation. Probability is unknown; impact is over-admission or a
@@ -3318,12 +3361,27 @@ test('cross-turn preparation occupies budget and final completion wakes FIFO wit
   const secondPreparing = new Promise<void>((resolve) => { secondEntered = resolve; });
   const grants = new JsonlTaskGrantJournal(new JsonlOrganJournal(join(root, 'grants.jsonl')));
   const journal = new UiRuntimeJournal(join(root, 'runtime.jsonl'));
+  // The coordinator reads the durable receipt relationship of every committed
+  // native closing checkpoint. The fixture therefore commits through the same
+  // native checkpoint owner the product uses, instead of a bare file store.
+  // Each task cycle owns its own checkpoint journal, exactly like the product
+  // layout, so every cycle's closing checkpoint is that chain's root.
+  const checkpointStores = new Map<string, ServiceExecutionCheckpointStore>();
+  const checkpointStore = (taskId: { value: string }, cycleId: { value: string }) => {
+    const filePath = join(root, `${taskId.value}-${cycleId.value}.jsonl`);
+    let store = checkpointStores.get(filePath);
+    if (store === undefined) {
+      store = new ServiceExecutionCheckpointStore(filePath, new JsonlOrganJournal(filePath), () => new Date());
+      checkpointStores.set(filePath, store);
+    }
+    return store;
+  };
   const factories: RuntimeExecutionAllocation[] = [];
   const phases = new Map<string, 'open' | 'aligned'>();
   const service = new UiRuntimeService({
     mode: 'fake', organId, binding,
     port: new FakeReplayExecutionRuntimePort({ binding }),
-    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `${taskId.value}-${cycleId.value}.jsonl`)),
+    checkpointStoreFor: checkpointStore,
     attentionPort: attentionPort(), providerState: 'ready', journal, closurePort: journal,
     memory: testMemory('project-ui-test'), maxConcurrentTasks: 1, taskGrantPort: grants,
     explicitBrainInterpreter: unusedExplicitBrainInterpreter,
@@ -3346,7 +3404,7 @@ test('cross-turn preparation occupies budget and final completion wakes FIFO wit
           taskRef: taskId, scopeRef: scope, cycleRef: scope.cycleId!, inputRevision: 1,
           directiveRevision: 1, executionEpoch, runtimeBindingRef: runtimeId, permissionRevision: '1' };
         const checkpoint: Checkpoint = { id: id('checkpoint', `cross-turn-${factories.length}`), scope,
-          cycleId: scope.cycleId!, seq: turn, previousCheckpointId: null, directiveRevision: 1,
+          cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1,
           executionEpoch, outcome: 'succeeded', summary: 'turn closed', recoveryStateRef: refs[0]!,
           evidenceRefs: refs, next: { kind: 'continue' } };
         const summary = { goal: { text: 'finish task', evidenceRefs: refs },
@@ -3369,8 +3427,21 @@ test('cross-turn preparation occupies budget and final completion wakes FIFO wit
           async close() { return { ...binding, state: 'closed', evidenceRefs: refs }; },
           standardTurn: {
             async acceptReviews() {},
-            async readCheckpoint() { return { checkpoint, previous: null,
-              commitRef: { commitId: `checkpoint-${executionEpoch}`, journalSeq: turn, recordDigest: 'sha256:fixture' } }; },
+            async readCheckpoint() {
+              // A closing checkpoint is only adoptable with its durable native
+              // receipt relationship, so the fixture commits the exact record
+              // through the same native owner the product uses.
+              const relationship = await checkpointStore(taskId, scope.cycleId!).commitNativeCheckpoint({
+                ownerId: 'humanagent.test-fixture',
+                checkpoint,
+                timeAuthority: { source: 'harness', owner: 'runtime-checkpoint-control-owner',
+                  authorityRef: `fixture:${checkpoint.id.value}`,
+                  sampleCommittedAt: async () => '2026-10-17T00:00:00.000Z' },
+              });
+              return { checkpoint, previous: null,
+                commitRef: { commitId: relationship.receipt.commitIdentity,
+                  journalSeq: relationship.journalSeq, recordDigest: relationship.recordDigest } };
+            },
             async align() { phases.set(taskId.value, 'aligned'); return { advanced: continues, state: continues ? 'advancing' : 'terminal', reason: 'aligned', decision, alignment,
               admission: { state: 'closed', decision, alignment, closure: { identity, checkpointId: checkpoint.id,
                 closureRef: 'closure:test', summary, recoveryStateRef: refs[0]!, closedAt: '2026-10-17T00:00:00.000Z' } } }; },
@@ -3394,10 +3465,19 @@ test('cross-turn preparation occupies budget and final completion wakes FIFO wit
     }) },
   });
   try {
-    await confirmExplicitRequirementFor(service, 'manual-grant-wait');
+    const manualTarget = service.createTask({ title: 'manual grant wait' });
+    await confirmExplicitRequirementFor(service, 'manual-grant-wait', manualTarget.taskId);
     const manual = await service.dispatchNextExplicitRequirement();
-    assert.equal(service.taskDetail(manual.taskId).state, 'waiting');
-    assert.equal(factories.length, 0, 'manual grant wait must not create a driver');
+    assert.equal(manual.taskId.value, manualTarget.taskId.value);
+    // A confirmed create now binds its verified execution grant, so the only
+    // remaining ungranted requirement is an existing-task change. It stays a
+    // queued draft against its idle target: no operation is allocated and no
+    // driver is created, so it never charges the single task slot.
+    assert.equal(service.listTasks().draft.some((row) => row.taskId.value === manualTarget.taskId.value
+      && row.requirementAdmission === 'queued'), true,
+    'the ungranted change stays a queued draft on its exact target');
+    assert.equal(service.taskDetail(manual.taskId).state, 'ready');
+    assert.equal(factories.length, 0, 'a confirmed requirement that never starts must not create a driver');
     for (const draft of [2, 3]) {
       const taskId = id('task', `ui-task-implicit-draft-${draft}`);
       await grants.grant({ requestId: `grant-${draft}`, taskId, owner: 'human:operator', expectedRevision: 0,
@@ -3426,7 +3506,10 @@ test('cross-turn preparation occupies budget and final completion wakes FIFO wit
     assert.ok(service.listTasks().completed.some((task) => task.taskId.value === a.taskId.value));
     assert.equal((await service.inspectExplicitInteraction(bInteraction)).state, 'dispatched');
     assert.ok(service.listTasks().completed.some((task) => task.taskId.value === 'ui-task-implicit-draft-3'));
-    assert.equal(service.taskDetail(manual.taskId).state, 'waiting');
+    assert.equal(service.taskDetail(manual.taskId).state, 'ready');
+    assert.equal(service.listTasks().draft.some((row) => row.taskId.value === manualTarget.taskId.value
+      && row.requirementAdmission === 'queued'), true,
+    'the ungranted change never starts while the granted creates use the slot');
   } finally {
     releaseSecond();
     await service.quiesceImplicitConsumption();
@@ -3594,6 +3677,15 @@ test('confirmed requirement is HTTP-observable as queued before the implicit con
       payloadRef: 'asset://requirements/http-queued-window',
     });
     assert.equal(confirmation.status, 200);
+    const access = runtimeAccessControl.get(runtime);
+    if (access === undefined) throw new Error('the HTTP fixture must retain its access-control owner');
+    const confirmedInteraction = await runtime.service.inspectExplicitInteraction(interactionId) as {
+      readonly confirmation?: { readonly confirmedBy: string };
+    };
+    assert.equal(confirmedInteraction.confirmation?.confirmedBy, access.readProductPrincipalOwner(),
+      'the confirmation route binds the verified product principal');
+    assert.equal(confirmedInteraction.confirmation?.confirmedBy === 'human:operator', false,
+      'a client-supplied confirmedBy is ignored');
 
     const statusResponse = await fetch(`${runtime.server.url}/api/runtime/status`);
     const status = await statusResponse.json() as ReturnType<UiRuntimeService['status']>;
@@ -4035,6 +4127,9 @@ test('explicit brain confirmation is the only path from input to FIFO execution'
 test('typed existing-task-change fails closed on a missing or mismatched target and submits only the exact target', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-existing-change-'));
   const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 });
+  const grantJournal = new JsonlTaskGrantJournal(
+    new JsonlOrganJournal(join(root, 'fake', 'task-grants.jsonl')),
+  );
   let matchedTaskId = '';
   const service = serviceFor(root, port, 'fake', 'ready', undefined, undefined, undefined, undefined, {
     async interpret(input) {
@@ -4058,7 +4153,7 @@ test('typed existing-task-change fails closed on a missing or mismatched target 
         decisionRefs: [],
       };
     },
-  });
+  }, undefined, grantJournal);
   const target = service.createTask({ title: 'existing change target' });
   matchedTaskId = target.taskId.value;
 
@@ -4159,6 +4254,9 @@ test('typed existing-task-change fails closed on a missing or mismatched target 
   });
   assert.equal(receipt.requirement.status, 'submitted');
   assert.equal(service.listTasks().counts.total, tasksBefore + 1, 'the exact change is queued as one visible draft row');
+  const changeGrant = await grantJournal.readTaskGrant(target.taskId);
+  assert.equal(changeGrant.grant, null,
+    'an existing-task change never binds a new execution grant: task-scoped authority stays untouched');
   assert.equal(port.startPayloads.length, 0, 'confirmation alone must not dispatch the queued change');
 
   const replay = await service.confirmExplicitRequirement({
@@ -4178,6 +4276,33 @@ test('typed existing-task-change fails closed on a missing or mismatched target 
   assert.equal(replay.requirement.status, 'duplicate');
   assert.equal(service.listTasks().counts.total, tasksBefore + 1, 'replay must not append a second queued requirement');
   assert.equal(port.startPayloads.length, 0, 'replay must not dispatch the queued change');
+});
+
+test('confirmed new-task create binds the verified principal execution grant and starts once', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-create-grant-'));
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 });
+  const grantJournal = new JsonlTaskGrantJournal(
+    new JsonlOrganJournal(join(root, 'fake', 'task-grants.jsonl')),
+  );
+  const service = serviceFor(root, port, 'fake', 'ready', undefined, undefined, undefined, undefined,
+    undefined, undefined, grantJournal);
+  try {
+    await confirmExplicitRequirementFor(service, 'create-auto-grant');
+    const dispatched = await service.dispatchNextExplicitRequirement();
+    const grant = await grantJournal.readTaskGrant(dispatched.taskId);
+    assert.equal(grant.grant?.state, 'granted',
+      'the single explicit confirmation binds the task-scoped execution grant');
+    assert.equal(grant.grant?.owner, 'human:operator',
+      'the auto grant belongs to the confirmed principal, never the runtime');
+    assert.equal(grant.grant?.capability.actionId, TASK_EXECUTION_ACTION_ID);
+    assert.deepEqual(grant.grant?.capability.capabilities, [TASK_EXECUTION_CAPABILITY]);
+    assert.equal(grant.grant?.capability.scope.taskId?.value, dispatched.taskId.value);
+    await waitFor(() => assert.equal(service.taskDashboard(dispatched.taskId).state, 'succeeded'));
+    assert.equal(port.startPayloads.length, 1, 'the granted create starts its execution exactly once');
+  } finally {
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('public semantic observation preserves typed scope and reports unsupported source coverage', async () => {
@@ -6854,7 +6979,7 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
         payloadRef: 'asset://requirements/http-dispatch',
       }),
     });
-    assert.equal(confirmationResponse.status, 200);
+    assert.equal(confirmationResponse.status, 200, await confirmationResponse.clone().text());
     // Grant the exact confirmed requirement's queued task before the 100ms FIFO
     // visibility window drains it, so implicit admission succeeds on the same
     // task identity that the confirmation response just created.

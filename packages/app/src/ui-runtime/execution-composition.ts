@@ -127,7 +127,10 @@ import {
 } from './standard-turn-control.js';
 import { ADVERTISED_STANDARD_TURN_END_TOOL, createStandardTurnEndWireExecutor, isStandardTurnEndCall } from './standard-turn-composition.js';
 import type { StandardTurnEndCommand } from '../../../contracts/src/standard-turn-end.js';
-import { createExecutionOwnerReaders } from './execution-owner-facts.js';
+import {
+  createExecutionOwnerReaders,
+  resolveStandardTurnClosingOutcome,
+} from './execution-owner-facts.js';
 import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/operation-completion.js';
 import type { RuntimeTaskCurrentStatePort, RuntimeTaskCurrentStateFactsPort } from '../../../runtime/src/ui-runtime/current-state.js';
 import { JsonlTaskPlanRevisionJournal } from '../../../adapters/jsonl/src/task-plan-revisions.js';
@@ -966,7 +969,13 @@ export function createDefaultExecutionComposition(input: {
       let saveIntent: NativeSaveIntent | undefined = retainedIntent;
       let closingCheckpoint: import('../../../contracts/src/index.js').Checkpoint | undefined = retainedIntent?.checkpoint.checkpoint;
       let closingInput: import('../../../runtime/src/agent-loop/runtime.js').CloseTurnInput | undefined;
+      // A frozen historical close is authoritative: its review order may never
+      // be rewritten. A live close is only frozen once its completed dispatch
+      // review receipts have been accepted.
+      let closingFrozen = retainedIntent !== undefined;
+      let closingCommitted = false;
       let acceptedReviewRefs: readonly import('../../../contracts/src/index.js').JournalCommitRef[] = retainedIntent ? loop.retainedTurnClose()!.reviewCommitRefs : [];
+      let committedReviewRefs: readonly import('../../../contracts/src/index.js').JournalCommitRef[] = acceptedReviewRefs;
       let native: ReturnType<typeof createNativeExecution> | ReturnType<typeof createNativeBoundaryContinuation>;
       const owners = retainedIntent ? undefined : createExecutionOwnerReaders({ admitted: nativeAdmission!,
         execution: { ...physical, taskId: allocation.taskId, operationId: allocation.operationId },
@@ -1012,7 +1021,12 @@ export function createDefaultExecutionComposition(input: {
       if (retainedIntent) {
         const frozen = loop.retainedTurnClose();
         if (!frozen) missing('historical lifecycle has no restored frozen candidate');
-        closingInput = { ...frozen.inputs, reviewCommitRefs: frozen.reviewCommitRefs,
+        closingInput = { ...frozen.inputs,
+          outcome: resolveStandardTurnClosingOutcome({
+            source: 'retained',
+            frozenOutcome: frozen.inputs.outcome,
+          }),
+          reviewCommitRefs: frozen.reviewCommitRefs,
           ...(frozen.bound ? { prepareCheckpointClosure: (checkpoint: import('../../../contracts/src/index.js').Checkpoint) =>
             native.prepareTurnClosure(checkpoint, boundaryId, frozen.inputs.source) } : {}) };
       }
@@ -1032,13 +1046,20 @@ export function createDefaultExecutionComposition(input: {
           status, occurredAt: input.now().toISOString(), evidenceRefs } });
       }
       async function closeCanonicalTurn() {
+        if (closingCommitted) return;
+        closingFrozen = true;
         if (!closingInput) missing('native close has no drained frozen standard-end input');
-        const close = await loop.closeTurn(closingInput);
+        // Use the latest accepted ordered review receipts for the atomic cut.
+        // Acceptance happens after settle() and before this first close; the
+        // frozen checkpoint and closure must carry that exact list.
+        committedReviewRefs = acceptedReviewRefs;
+        const close = await loop.closeTurn({ ...closingInput, reviewCommitRefs: acceptedReviewRefs });
         await input.publishCurrentTurnState(allocation.taskId);
         if (close.state !== 'closed-awaiting-planner-alignment') missing(`canonical turn closure retains recovery: ${close.firstErrorRef}`);
         if (!closingCheckpoint || canonicalJsonStringify(closingCheckpoint) !== canonicalJsonStringify(close.checkpoint)) {
           missing('canonical close returned a different or unprepared closing checkpoint');
         }
+        closingCommitted = true;
         return close;
       }
       async function saveBoundary() {
@@ -1181,7 +1202,7 @@ export function createDefaultExecutionComposition(input: {
           const providerClose = await closeOwnedProvider();
           if (providerClose.state !== 'closed') missing('actual execution Provider must close before Planner');
         }
-        if (!sameReviewCommitRefs(closingInput?.reviewCommitRefs, acceptedReviewRefs)) {
+        if (!sameReviewCommitRefs(committedReviewRefs, acceptedReviewRefs)) {
           throw new AppLifecycleError('execution.review-order.after-native-close',
             'completed dispatch reviews remain outside the already frozen native turn closure',
             'Runtime orchestration dispatch owner must accept ordered review receipts before the native close cut',
@@ -1367,16 +1388,25 @@ export function createDefaultExecutionComposition(input: {
           async acceptReviews(refs) {
             const distinct = distinctReviewCommitRefs(refs);
             if (distinct.length !== refs.length) missing('dispatch accepted duplicate review receipts');
-            if (closingInput && !sameReviewCommitRefs(acceptedReviewRefs, refs)) {
-              acceptedReviewRefs = structuredClone(distinct);
+            if (closingCommitted) {
               throw new AppLifecycleError('execution.review-order.after-native-close',
-                'orchestration dispatch returned completed review receipts after execution settle/saveBoundary froze and committed the native turn closure',
+                'orchestration dispatch returned completed review receipts after the native turn closure was committed',
                 'Runtime orchestration dispatch owner must accept review receipts before the native close cut; retain completed reviews without mutating the closure',
+                'runtime.orchestration.dispatch');
+            }
+            if (closingFrozen) {
+              throw new AppLifecycleError('execution.review-order.after-native-frozen',
+                'orchestration dispatch returned completed review receipts after the native turn closure was frozen',
+                'Runtime orchestration dispatch owner must accept review receipts before freezing the native close candidate',
                 'runtime.orchestration.dispatch');
             }
             acceptedReviewRefs = structuredClone(distinct);
           },
           async readCheckpoint() {
+            // The dispatch owner accepts its completed review receipts before
+            // this read. The first read is what cuts and commits the atomic
+            // closing checkpoint through the canonical close path.
+            if (!closingCommitted) await saveBoundary();
             if (!closingCheckpoint) missing('standard turn has no frozen canonical closing checkpoint');
             const committed = await checkpoints.readCommitted(closingCheckpoint.scope, closingCheckpoint.id);
             if (!committed) missing('standard turn canonical closing checkpoint is not committed');
@@ -1503,6 +1533,9 @@ export function createDefaultExecutionComposition(input: {
           if (!contextRef) missing('canonical turn closure has no actual full-context commit');
           const facts = await owners!.readClosureFacts(contextRef);
           if (!facts) missing('canonical turn closure owner facts are unknown');
+          const current = await input.currentState.read({ organId: allocation.scope.organId, taskId: allocation.taskId });
+          if (current.state !== 'known') missing('canonical turn closure has no authoritative current Task');
+          const firstErrorRef = current.value.processing.firstErrorRef;
           closingInput ??= { summary: structuredClone(acceptedEnd.summary), reviewCommitRefs: acceptedReviewRefs,
             prepareCheckpointClosure: async (checkpoint) => {
               if (closingCheckpoint && canonicalJsonStringify(closingCheckpoint) !== canonicalJsonStringify(checkpoint)) {
@@ -1511,12 +1544,23 @@ export function createDefaultExecutionComposition(input: {
               closingCheckpoint = structuredClone(checkpoint);
               return native.prepareTurnClosure(checkpoint, boundaryId, closingInput!.source);
             },
-            outcome: facts.unresolvedOperationRefs.length > 0 ? 'unknown'
-              : facts.permission.revoked || facts.hardBlockers.length > 0 ? 'blocked' : 'waiting', source: 'agent-tool',
+            outcome: resolveStandardTurnClosingOutcome({
+              source: 'live',
+              // The parent controller lifecycle above already maps a raw
+              // stopped settle to cancelled. The closing fact uses the same
+              // status so the checkpoint never claims a different end.
+              status,
+              acceptedEnd: true,
+              producerDrained: true,
+              unreturnedCallRefs: facts.unreturnedCallRefs,
+              unresolvedOperationRefs: facts.unresolvedOperationRefs,
+              permissionRevoked: facts.permission.revoked,
+              hardBlockers: facts.hardBlockers,
+              ...(firstErrorRef === undefined ? {} : { firstErrorRef }),
+            }), source: 'agent-tool',
             permissionRevoked: facts.permission.revoked, hardBlockers: facts.hardBlockers,
             recovery: { contextRef: contextRef.commitId, unfinishedRef: admittedTurn.recoveryStateRef,
               unreturnedCallRefs: [...facts.unreturnedCallRefs], unresolvedOperationRefs: [...facts.unresolvedOperationRefs] } };
-          await saveBoundary();
           return { state: outcome, evidenceRefs: settled.evidenceRefs };
         },
         close() {

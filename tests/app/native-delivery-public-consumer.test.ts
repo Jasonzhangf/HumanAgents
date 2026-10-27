@@ -3211,39 +3211,27 @@ if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer
             && (source as Record<string, unknown>).requirementId === requirementId;
         });
       },
-      (candidate) => candidate !== undefined && candidate.state === 'waiting',
-      'the confirmed public Task did not reach the prepared waiting state',
+      (candidate) => candidate !== undefined
+        && (candidate.state === 'waiting' || candidate.state === 'running' || candidate.state === 'succeeded'),
+      'the confirmed public Task did not reach its released execution',
     );
     if (task === undefined) throw new Error('the confirmed public Task row is absent');
     assert.deepEqual(task.taskFlow, taskFlow);
     const taskId = id('task', requireText(requireRecord(task.taskId, 'the public Task ID').value,
       'the public Task ID value'));
 
-    assert.equal(task.state, 'waiting', 'confirmation retains the prepared task until a verified grant');
-    const grantRequestId = 'm3-public-long-running-grant';
-    const grantResponse = await fetch(
-      `${serve.origin}/api/tasks/${encodeURIComponent(taskId.value)}/control/grant`
-        + `?projectKey=${encodeURIComponent(projectKey)}&mode=rcc`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', cookie, accept: 'application/json' },
-        body: JSON.stringify({
-          requestId: grantRequestId,
-          expectedRevision: 0,
-          capability: { actionId: 'task.execute', capabilities: ['provider.execution'] },
-        }),
-      },
-    );
-    const grantText = await grantResponse.text();
-    assert.equal(grantResponse.status, 200, grantText);
-    const grant = requireRecord(JSON.parse(grantText), 'the public task grant receipt');
-    assert.equal(requireRecord(grant.readback, 'the public grant readback').grant === undefined
-      ? undefined : requireRecord(requireRecord(grant.readback, 'the public grant readback').grant,
-        'the public grant').state, 'granted');
-    const execution = requireRecord(grant.execution, 'the public grant execution receipt');
-    assert.equal(execution.state, 'released', JSON.stringify(grant));
-    const operationId = requireText(requireRecord(execution.selector, 'the public execution selector').operationId,
-      'the released execution operation ID');
+    // A genuine new-task create is the user's single explicit confirmation:
+    // the service binds the verified principal's default provider.execution
+    // grant and releases the execution without a second manual grant.
+    const callerPrincipal = await access.verifyProductPrincipal(cookie);
+    assert.equal(callerPrincipal.state, 'valid');
+    if (callerPrincipal.state !== 'valid') throw new Error('the fixture caller principal is unavailable');
+    const autoGrant = await new JsonlTaskGrantJournal(fixture.journal).readTaskGrant(taskId);
+    assert.equal(autoGrant.grant?.state, 'granted', 'the confirmed create binds a granted execution authority');
+    assert.equal(autoGrant.grant?.owner, callerPrincipal.principal.owner,
+      'the auto-grant is owned by the verified product principal, never a client field');
+    assert.equal(autoGrant.grant?.capability.actionId, 'task.execute');
+    assert.deepEqual(autoGrant.grant?.capability.capabilities, ['provider.execution']);
 
     const finalDashboard = await waitFor(
       async () => {
@@ -3260,6 +3248,7 @@ if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer
       'the public serve did not complete both execution cycles',
       60_000,
     );
+    const operationId = requireText(finalDashboard.operationId, 'the released execution operation ID');
     assert.equal(finalDashboard.output, EXACT_BODY);
     const posts = fixture.upstream.wires.filter((wire) => wire.method === 'POST');
     const planners = posts.filter((wire) => plannerPayload(wire.body) !== undefined);
@@ -3379,7 +3368,7 @@ if (!coldConsumerMode) test('native two-cycle dynamic review public CLI consumer
     assert.deepEqual(await readFile(fixture.layout.preparedJournalPath), preparedBefore);
     assert.equal(fixture.upstream.wires.filter((wire) => wire.method === 'POST').length, posts.length);
     console.log('M3 public two-cycle evidence', JSON.stringify({ fixture: fixture.root, interactionId, requirementId,
-      taskId: taskId.value, grantRequestId, operationId, readerPid: serve.pid,
+      taskId: taskId.value, operationId, readerPid: serve.pid,
       plannerTaskFlows: [first.taskFlow, second.taskFlow], plannerPriorSequences: [first.priorPlan, second.priorPlan],
       cycles: bindings.map((entry) => entry.binding.scope.cycleId), operations: [...operations],
       revisions: revisions.map((entry) => ({ revisionId: entry.revisionId, sequence: entry.sequence, summary: entry.snapshot.summary })),
@@ -4419,6 +4408,8 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
     const intentRecord = verified.records.find((record) => record.payload?.['type'] === 'native-save-intent');
     if (!intentRecord) throw new Error('text-only delivery must commit its native save intent');
     const intent = (intentRecord.payload?.['intent'] as { readonly completeIntent: NativeSaveIntent }).completeIntent;
+    assert.equal(intent.checkpoint.checkpoint.outcome, 'succeeded',
+      'the first frozen native closing checkpoint uses the accepted successful turn facts');
     assert.equal(intent.closure.source, 'agent-tool', 'native intent preserves the accepted tool source');
     const closurePort = createJsonlCheckpointClosurePort({ filePath: fixture.layout.organJournalPath, journal: fixture.journal });
     const closure = await closurePort.read(intent.closure.closureId);
@@ -4621,14 +4612,14 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
       'the publication watermark is the committed record itself');
 
     // The same operation also commits a typed Task current-state after the
-    // waiting closing checkpoint. The read uses the same canonical Journal
+    // succeeded closing checkpoint. The read uses the same canonical Journal
     // reader the serialization owner already owns, so this is the exact
     // committed fact, not an event or metadata inference.
     const journalBytesBeforePublicGet = await readFile(fixture.layout.organJournalPath);
     const currentStateJournal = createJsonlRuntimeTaskCurrentStateJournal({ journal: fixture.journal });
     const currentState = await currentStateJournal.read(endCall.entry.envelope.scope as ScopeRef);
     assert.equal(currentState.state, 'known',
-      'the same operation committed a typed Task current-state after the waiting closing checkpoint');
+      'the same operation committed a typed Task current-state after the succeeded closing checkpoint');
     if (currentState.state !== 'known') throw new Error('the typed Task current-state is absent');
     assert.equal(currentState.value.task.id.value, retained.taskId.value,
       'the committed current-state belongs to the same retained task');
@@ -4678,9 +4669,9 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
       assert.equal(dashboard.state, receiptState,
         `the served GET must serve the same Task state the CLI receipt reports; got ${JSON.stringify(dashboard.state)}`);
       assert.equal(dashboard.state, 'succeeded',
-        'the public GET projects the accepted terminal task state, not the waiting closing checkpoint');
-      assert.equal(dashboard.checkpoint?.outcome, 'waiting',
-        'the original waiting closing checkpoint stays intact behind the terminal task state');
+        'the public GET projects the accepted terminal task state, not the closing checkpoint');
+      assert.equal(dashboard.checkpoint?.outcome, 'succeeded',
+        'a drained, accepted, granted standard turn commits a succeeded closing checkpoint');
       const journalBytesAfterPublicGet = await readFile(fixture.layout.organJournalPath);
       assert.equal(journalBytesAfterPublicGet.length, journalBytesBeforePublicGet.length,
         'the public GET writes no canonical Journal bytes');

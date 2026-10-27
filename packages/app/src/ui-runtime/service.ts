@@ -159,6 +159,7 @@ import type {
   CommittedTaskCheckpointReentryReceipt,
   CommittedTaskContextCorrectionReceipt,
 } from './reentry-current-facts.js';
+import { TASK_EXECUTION_ACTION_ID } from './task-control.js';
 import type { OrchestrationManager } from '../../../runtime/src/orchestration/manager.js';
 import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
 import { TaskPlanRevisionConsumer } from '../../../runtime/src/orchestration/task-plan-revisions.js';
@@ -7179,6 +7180,28 @@ export class UiRuntimeService {
     // typed final receipt and receive no fabricated identity.
     if (!isTaskInputUpdate && consumed.intent === 'create') {
       await this.establishNewTaskIdentity(consumed, task.taskId);
+    }
+    // A genuine new-task create is the user's single explicit confirmation.
+    // When the real task-scoped grant authority is bound and this task has no
+    // durable grant yet, bind the verified principal's default execution grant
+    // so the confirmed create can auto-start. Existing-task append/change and
+    // every already-granted task keep the existing grant decision untouched.
+    if (!isTaskInputUpdate && consumed.intent === 'create' && this.options.taskGrantPort !== undefined) {
+      const readback = await this.options.taskGrantPort.readTaskGrant(task.taskId);
+      if (readback.grant === null || readback.grant.state !== 'granted') {
+        const scope: ScopeRef = { organId: this.options.organId, taskId: task.taskId };
+        await this.options.taskGrantPort.grant({
+          requestId: `confirmation:${consumed.requirementId}:${task.taskId.value}`,
+          taskId: task.taskId,
+          owner: consumed.confirmedBy,
+          capability: {
+            actionId: TASK_EXECUTION_ACTION_ID,
+            capabilities: [PROVIDER_EXECUTION_CAPABILITY],
+            scope,
+          },
+          expectedRevision: readback.grant === null ? 0 : readback.grant.revision,
+        });
+      }
     }
     // Confirmation only confirms intent. Execution auto-starts only when the
     // bound task-scoped grant already authorizes the verified origin; otherwise
