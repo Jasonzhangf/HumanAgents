@@ -7188,7 +7188,7 @@ export class UiRuntimeService {
     // every already-granted task keep the existing grant decision untouched.
     if (!isTaskInputUpdate && consumed.intent === 'create' && this.options.taskGrantPort !== undefined) {
       const readback = await this.options.taskGrantPort.readTaskGrant(task.taskId);
-      if (readback.grant === null || readback.grant.state !== 'granted') {
+      if (readback.grant === null) {
         const scope: ScopeRef = { organId: this.options.organId, taskId: task.taskId };
         await this.options.taskGrantPort.grant({
           requestId: `confirmation:${consumed.requirementId}:${task.taskId.value}`,
@@ -7199,7 +7199,7 @@ export class UiRuntimeService {
             capabilities: [PROVIDER_EXECUTION_CAPABILITY],
             scope,
           },
-          expectedRevision: readback.grant === null ? 0 : readback.grant.revision,
+          expectedRevision: 0,
         });
       }
     }
