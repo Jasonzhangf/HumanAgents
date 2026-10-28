@@ -680,15 +680,42 @@ async function* parseSse(
   }
 }
 
-function responsesPayload(request: ResponsesWireRequest): Record<string, unknown> {
+/**
+ * Responses wire body. RCC V3 (source === 'rcc') lifts the top-level
+ * `instructions` into a `role: "system"` message, and the upstream provider
+ * behind 4444 overrides that system prompt with its own. The intake/tooling
+ * contract therefore never reaches the model. Fold the instructions into the
+ * first `role: "user"` input message so it survives the upstream system-prompt
+ * override. The `http` source (direct OpenAI-style endpoint) keeps the original
+ * top-level `instructions` because that transport does not re-classify it.
+ */
+type ResponsesWireMessageOut = { type: 'message'; role: 'user' | 'assistant' | 'system'; content: Array<{ type: 'input_text'; text: string }> };
+type ResponsesWireItemOut =
+  | ResponsesWireMessageOut
+  | { type: 'function_call'; call_id: string; name: string; arguments: string }
+  | { type: 'function_call_output'; call_id: string; output: string };
+
+function responsesPayload(request: ResponsesWireRequest, source: ProviderTransportSource = 'rcc'): Record<string, unknown> {
+  const wireInput: ResponsesWireItemOut[] = request.input.map((item) => item.type === 'message'
+    ? { type: 'message' as const, role: item.role, content: [{ type: 'input_text' as const, text: item.content }] }
+    : item.type === 'function_call'
+      ? { type: 'function_call' as const, call_id: item.call_id, name: item.name, arguments: item.arguments }
+      : { type: 'function_call_output' as const, call_id: item.call_id, output: item.output });
+  if (source === 'rcc' && request.instructions.length > 0) {
+    const firstUserIndex = wireInput.findIndex((item) => item.type === 'message' && item.role === 'user');
+    if (firstUserIndex < 0) {
+      wireInput.unshift({ type: 'message', role: 'user', content: [{ type: 'input_text', text: request.instructions }] });
+    } else {
+      const userItem = wireInput[firstUserIndex];
+      if (userItem.type !== 'message') throw new TypeError('first user index did not resolve to a message');
+      const existing = userItem.content.map((part) => part.text).join('');
+      wireInput[firstUserIndex] = { ...userItem, content: [{ type: 'input_text', text: `${request.instructions}\n\n${existing}` }] };
+    }
+  }
   return {
     model: request.model,
     instructions: request.instructions,
-    input: request.input.map((item) => item.type === 'message'
-      ? { type: 'message', role: item.role, content: [{ type: 'input_text', text: item.content }] }
-      : item.type === 'function_call'
-        ? { type: 'function_call', call_id: item.call_id, name: item.name, arguments: item.arguments }
-        : { type: 'function_call_output', call_id: item.call_id, output: item.output }),
+    input: wireInput,
     ...(request.tools ? {
       tools: request.tools.map((tool) => ({
         type: 'function',
@@ -721,8 +748,8 @@ function openAIChatPayload(request: OpenAIChatWireRequest): Record<string, unkno
   };
 }
 
-function requestPayload(request: ProviderWireRequest): Record<string, unknown> {
-  if (request.protocol === 'responses') return responsesPayload(request);
+function requestPayload(request: ProviderWireRequest, source: ProviderTransportSource = 'rcc'): Record<string, unknown> {
+  if (request.protocol === 'responses') return responsesPayload(request, source);
   if (request.protocol === 'openai') return openAIChatPayload(request);
   return anthropicPayload(request);
 }
@@ -1456,7 +1483,7 @@ export class RccV3ProviderTransport<
         headers.authorization = `Bearer ${this.credential}`;
       }
     }
-    const body = JSON.stringify(requestPayload(request));
+    const body = JSON.stringify(requestPayload(request, this.source));
     const response = await this.fetcher(urlFor(this.options.baseUrl, endpointPath(protocol)), {
       method: 'POST',
       headers,

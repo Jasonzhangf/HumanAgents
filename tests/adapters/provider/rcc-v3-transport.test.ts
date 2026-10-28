@@ -377,7 +377,7 @@ test('RCC v3 Responses submit opens a second stream bound to the completed tool 
   assert.equal(first.tools[0].name, 'file_read');
   assert.equal(second.previous_response_id, undefined);
   assert.deepEqual(second.input, [
-    { type: 'message', role: 'user', content: [{ type: 'input_text', text: JSON.stringify({ toolResultRef: 'asset://provider-tool/output/call-readme' }) }] },
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: `${second.instructions}\n\n${JSON.stringify({ toolResultRef: 'asset://provider-tool/output/call-readme' })}` }] },
     { type: 'function_call', call_id: 'call-readme', name: 'file_read', arguments: JSON.stringify({ path: 'README.md' }) },
     { type: 'function_call_output', call_id: 'call-readme', output: JSON.stringify({ path: 'README.md', content: 'REAL_FILE_CONTENT' }) },
   ]);
@@ -2133,4 +2133,51 @@ test('RCC v3 observe keeps a normal long content stream alive', async () => {
   assert.equal(observed.filter((type) => type === 'response.output_text.delta').length, 200);
   const settled = await built.transport.settle(execution);
   assert.equal(settled.state, 'succeeded');
+});
+
+test('RCC source merges top-level instructions into the first user message', async () => {
+  const seen: Array<{ url: string; body: unknown }> = [];
+  const built = adapter(async (url, init) => {
+    seen.push({ url: String(url), body: JSON.parse(String(init.body)) });
+    return response(chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-merge' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-merge' } })}\n\n`,
+    ]));
+  }, binding, new ResponsesProviderCodec(), 'rcc');
+  const instructions = '# Explicit intake decision output JSON contract';
+  await built.adapter.start({
+    ...startInput(),
+    instructions: { toolSurface: 'task-execution', text: instructions } as unknown as never,
+    tools: [{ toolId: 'web.search', description: 'search the web', inputSchema: { type: 'object' } }],
+  });
+  const first = seen[0].body as { instructions?: string; input: Array<{ type: string; role?: string; content: Array<{ type: string; text: string }> }> };
+  assert.ok((first.instructions ?? '').length > 0, 'rcc request carries non-empty wire instructions');
+  const rccInstructions = first.instructions ?? '';
+  const firstUser = first.input.find((item) => item.type === 'message' && item.role === 'user');
+  assert.ok(firstUser, 'wire body must carry a user message');
+  const merged = firstUser!.content[0].text;
+  assert.ok(merged.startsWith(`${rccInstructions}\n\n`), 'instructions must be folded ahead of the business input');
+  assert.ok(merged.includes('summarize the failing build log'), 'business input must be retained after the instructions');
+});
+
+test('HTTP source keeps the top-level instructions without folding into input', async () => {
+  const seen: Array<{ url: string; body: unknown }> = [];
+  const built = adapter(async (url, init) => {
+    seen.push({ url: String(url), body: JSON.parse(String(init.body)) });
+    return response(chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-http-merge' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-http-merge' } })}\n\n`,
+    ]));
+  }, binding, new ResponsesProviderCodec(), 'http', { credential: 'fixture-http-credential' });
+  const instructions = '# Explicit intake decision output JSON contract';
+  await built.adapter.start({
+    ...startInput(),
+    instructions: { toolSurface: 'task-execution', text: instructions } as unknown as never,
+    tools: [{ toolId: 'web.search', description: 'search the web', inputSchema: { type: 'object' } }],
+  });
+  const first = seen[0].body as { instructions?: string; input: Array<{ type: string; role?: string; content: Array<{ type: string; text: string }> }> };
+  assert.ok((first.instructions ?? '').length > 0, 'http source preserves non-empty top-level instructions');
+  const firstUser = first.input.find((item) => item.type === 'message' && item.role === 'user');
+  assert.ok(firstUser, 'wire body must carry a user message');
+  assert.equal(firstUser!.content[0].text, JSON.stringify({ prompt: 'summarize the failing build log' }), 'http source must not fold instructions into input');
 });
