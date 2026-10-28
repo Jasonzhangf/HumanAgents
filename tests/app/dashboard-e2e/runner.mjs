@@ -488,6 +488,11 @@ export async function runScenario(scenario, options = {}) {
   if (!cleanupCompleted) {
     missingEvidence.push(`cleanup: ${cleanupReason ?? 'cleanup did not complete'}`);
   }
+  if (binding.executionIdentityDisposition?.kind === 'unresolved') {
+    missingEvidence.push(
+      `execution identity: ${binding.executionIdentityDisposition.reason ?? 'operation.started not resolved'}`,
+    );
+  }
   const visibleMissingEvidence = [...new Set(missingEvidence)];
 
   if (!deviation && !settlement.settled) {
@@ -501,6 +506,13 @@ export async function runScenario(scenario, options = {}) {
       stage: `${scenario}_cleanup`,
       error: cleanupReason ?? 'cleanup did not complete',
       raw: JSON.stringify(binding.cleanup ?? null).slice(0, 2000),
+    };
+  }
+  if (!deviation && binding.executionIdentityDisposition?.kind === 'unresolved') {
+    deviation = {
+      stage: 'execution_identity',
+      error: binding.executionIdentityDisposition.reason ?? 'operation.started not resolved',
+      raw: JSON.stringify(binding.executionIdentityDisposition).slice(0, 2000),
     };
   }
 

@@ -55,6 +55,7 @@ import {
 } from './lib/binding.mjs';
 import {
   assessSettlement,
+  executionTaskFromRecords,
   isCheckpointJournalFile,
   journalPathFor,
   journalRootFor,
@@ -71,6 +72,7 @@ import {
   probeDashboardLiveSse,
   readDashboardProbe,
   readObservationDom,
+  resolveExecutionTaskId,
   startServeForAttempt,
   submitDirectiveAndConfirmDraft,
   taskScopedNavigation,
@@ -3514,6 +3516,63 @@ test('every task URL consumer projects string and typed task identities to the s
       assert.ok(typedUrls.includes(target), `${name}: expected ${target} for the typed identity in ${JSON.stringify(typedUrls)}`);
     }
   }
+});
+
+/**
+ * A confirmed submission can create both a draft placeholder and the scheduled
+ * task that later holds the verified `operation.started`. The runner must bind
+ * its dashboard/observation/settlement identity to the latter, never to the
+ * draft placeholder that has no execution facts.
+ */
+test('draft and scheduled tasks coexist: execution identity comes only from operation.started', () => {
+  const draft = { scope: 'task', value: 'ui-task-implicit-draft-2' };
+  const execution = { scope: 'task', value: 'scheduled-task-665227213af5adf02045' };
+  const operation = { scope: 'operation', value: 'scheduled-operation-665227213af5adf02045' };
+  const cycle = { scope: 'cycle', value: 'ui-cycle-1' };
+  const records = [
+    { kind: 'task.created', taskId: draft, title: 'implicit draft placeholder' },
+    { kind: 'task.created', taskId: execution, title: '计划执行 subscription:requirement:draft-2:2::1::1' },
+    {
+      kind: 'operation.started',
+      taskId: execution,
+      operationId: operation,
+      cycleId: cycle,
+      executionEpoch: 1,
+      startedAt: '2026-10-28T05:22:20.996Z',
+    },
+  ];
+  const resolved = executionTaskFromRecords(records);
+  assert.equal(resolved.ok, true);
+  assert.deepEqual(resolved.identity.taskId, execution);
+  assert.deepEqual(resolved.identity.operationId, operation);
+  assert.equal(resolved.identity.executionEpoch, 1);
+
+  const binding = { taskId: draft, executionTaskId: resolved.identity.taskId };
+  assert.deepEqual(resolveExecutionTaskId(binding), execution);
+
+  // A journal can already hold an older operation.started. The submission time
+  // is a preference that drops that older identity; without it the same history
+  // is ambiguous instead of silently choosing one task.
+  const olderStart = {
+    kind: 'operation.started',
+    taskId: { scope: 'task', value: 'scheduled-task-older' },
+    operationId: { scope: 'operation', value: 'scheduled-operation-older' },
+    cycleId: cycle,
+    executionEpoch: 1,
+    startedAt: '2026-10-28T05:10:00.000Z',
+  };
+  const history = [records[0], records[1], olderStart, records[2]];
+  const chosen = executionTaskFromRecords(history, { notBefore: '2026-10-28T05:20:00.000Z' });
+  assert.equal(chosen.ok, true);
+  assert.deepEqual(chosen.identity.taskId, execution);
+  assert.equal(executionTaskFromRecords(history).ok, false);
+});
+
+test('a draft-only journal never becomes an execution task', () => {
+  const draft = { scope: 'task', value: 'ui-task-implicit-draft-2' };
+  const resolved = executionTaskFromRecords([{ kind: 'task.created', taskId: draft, title: 'draft' }]);
+  assert.equal(resolved.ok, false);
+  assert.match(resolved.reason, /no verified operation\.started/);
 });
 
 /**

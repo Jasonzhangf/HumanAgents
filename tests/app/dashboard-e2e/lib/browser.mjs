@@ -15,13 +15,18 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createAttemptAuth } from './auth.mjs';
 import { taskIdValue } from './binding.mjs';
+import {
+  executionJournalPathFor,
+  executionTaskFromRecords,
+  readJournalStrict,
+} from './journal.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_PATH = resolve(__dirname, '..', '..', '..', '..');
@@ -934,6 +939,7 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
   const base = binding.serveBaseUrl;
   const maxClarifications = options.maxClarifications ?? 3;
   const clarificationAnswer = options.clarificationAnswer ?? 'Do not clarify. Proceed directly with the tools available in the workspace and finish.';
+  binding.submissionStartedAt = binding.submissionStartedAt ?? new Date().toISOString();
 
   await openEntryPage(binding);
   if ((binding.entry ?? 'dashboard') === 'homepage') {
@@ -1107,6 +1113,89 @@ export function resolveExecutionTaskId(binding) {
 }
 
 /**
+ * Bind the attempt to the task that really starts an operation. A confirmed
+ * submission can create a draft placeholder before its scheduled occurrence is
+ * durable, and the Dashboard board may list that placeholder as the newest task.
+ * The verified `operation.started` record is the only task that may be used for
+ * dashboard, observation and settlement identity.
+ *
+ * This stays best-effort: if no verified operation has started within the wait,
+ * the disposition is recorded and existing consumers keep their previous
+ * draft-based fallback, so a genuinely blocked precondition still reports its
+ * real downstream failure instead of being hidden behind a new wait error.
+ */
+export async function ensureExecutionTaskIdentity(binding, options = {}) {
+  if (binding.executionTaskId) return binding.executionTaskId;
+  let journalPath;
+  try {
+    journalPath = executionJournalPathFor(binding);
+  } catch (error) {
+    binding.executionIdentityDisposition = { kind: 'skipped', reason: error.message };
+    return null;
+  }
+  // Identity is read from the journal the serve writes. A contract/fake binding
+  // has no such journal, so an absent file is a skip, not a 90 second wait.
+  try {
+    await access(journalPath);
+  } catch {
+    binding.executionIdentityDisposition = {
+      kind: 'skipped',
+      journalPath,
+      reason: 'ui-runtime journal is not present; no verified execution identity can be read',
+    };
+    return null;
+  }
+  const timeoutMs = Number(
+    options.executionIdentityTimeoutMs
+    ?? process.env.E2E_EXECUTION_IDENTITY_TIMEOUT_MS
+    ?? 90_000,
+  );
+  const notBefore = options.notBefore ?? binding.submissionStartedAt ?? null;
+  let lastReason = null;
+  try {
+    const identity = await waitForDom(
+      binding.browser?.page ?? {},
+      'verified operation.started execution task',
+      async () => {
+        const read = await readJournalStrict([journalPath], { repoPath: options.repoPath ?? binding.repoPath });
+        if (!read.ok) {
+          lastReason = read.error;
+          return null;
+        }
+        const resolved = executionTaskFromRecords(read.records, { notBefore });
+        if (!resolved.ok) {
+          lastReason = resolved.reason;
+          return null;
+        }
+        return resolved.identity;
+      },
+      timeoutMs,
+    );
+    binding.executionTaskId = identity.taskId;
+    binding.operationId = binding.operationId ?? identity.operationId;
+    binding.cycleId = binding.cycleId ?? identity.cycleId;
+    binding.executionEpoch = binding.executionEpoch ?? identity.executionEpoch;
+    binding.executionIdentityDisposition = {
+      kind: 'resolved',
+      source: 'operation.started',
+      journalPath,
+      identity,
+      resolvedAt: new Date().toISOString(),
+    };
+    return binding.executionTaskId;
+  } catch (error) {
+    binding.executionIdentityDisposition = {
+      kind: 'unresolved',
+      journalPath,
+      reason: error instanceof Error ? error.message : String(error),
+      lastReadReason: lastReason,
+      waitedMs: timeoutMs,
+    };
+    return null;
+  }
+}
+
+/**
  * Resolve the exact task identities this submission owns before any grant is
  * approved. The business anchor plus its listed executions are the only tasks
  * this attempt may approve; a pending decision naming any other task belongs to
@@ -1253,6 +1342,7 @@ export async function approvePendingTaskGrant(binding, options = {}) {
 /** Open the per-task dashboard and wait for the task to be nonterminal-running. */
 export async function openTaskDashboard(binding, options = {}) {
   const { page } = binding.browser;
+  await ensureExecutionTaskIdentity(binding, options);
   const taskId = resolveExecutionTaskId(binding);
   // Carry task/projectKey/mode (taskFocusHref contract) so the served product
   // never falls into the legacy unscoped error page.
@@ -1279,6 +1369,7 @@ export async function openTaskDashboard(binding, options = {}) {
 /** Wait for the task runtime terminal state and return the dashboard probe. */
 export async function waitForTerminal(binding, options = {}) {
   const { page } = binding.browser;
+  await ensureExecutionTaskIdentity(binding, options);
   // A task-scoped grant keeps the business anchor and moves real execution onto
   // its released occurrence; the anchor never reaches a terminal, so the wait
   // must follow the execution identity this attempt really owns.
@@ -1297,6 +1388,7 @@ export async function waitForTerminal(binding, options = {}) {
 
 /** Read the newest execution terminal record from the authoritative journal. */
 export async function readDashboardProbe(binding) {
+  await ensureExecutionTaskIdentity(binding);
   const taskId = resolveExecutionTaskId(binding);
   return jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/dashboard`, {}, binding.auth);
 }
@@ -1337,6 +1429,7 @@ export async function captureDashboardEvidence(binding) {
 export async function readTaskDashboardDom(binding, options = {}) {
   const { page } = binding.browser;
   if (options.navigate !== false) {
+    await ensureExecutionTaskIdentity(binding, options);
     const taskId = resolveExecutionTaskId(binding);
     const projectKey = binding.projectKey ?? binding.runtimePaths?.projectKey ?? binding.journalProjectKey ?? null;
     const params = new URLSearchParams({ task: taskIdValue(taskId) });
@@ -1385,8 +1478,9 @@ export async function readTaskDashboardDom(binding, options = {}) {
  */
 export async function readObservationDom(binding) {
   const { page } = binding.browser;
+  await ensureExecutionTaskIdentity(binding);
   await page.goto(`${binding.serveBaseUrl}/observation.html?task=${encodeURIComponent(taskIdValue(resolveExecutionTaskId(binding)))}`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('.flow-node', { timeout: 30_000 });
+  await page.waitForSelector('.flow-node', { timeout: 30_000, state: 'attached' });
   return page.evaluate(() => ({
     nodeIds: [...document.querySelectorAll('.flow-node')].map((card) => card.dataset.nodeId ?? ''),
     metaChip: document.querySelector('.observation-meta .state-chip')?.textContent?.trim() ?? null,
@@ -1400,7 +1494,7 @@ export async function readObservationDom(binding) {
 export async function readTaskListDom(binding) {
   const { page } = binding.browser;
   await page.goto(`${binding.serveBaseUrl}/tasks.html`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('[data-task-groups]', { timeout: 30_000 });
+  await page.waitForSelector('[data-task-groups]', { timeout: 30_000, state: 'attached' });
   return page.evaluate(() => ({
     groupTitles: [...document.querySelectorAll('[data-task-groups] h2')].map((node) => node.textContent?.trim() ?? ''),
     links: [...document.querySelectorAll('[data-task-groups] a')].map((link) => ({

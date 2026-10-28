@@ -124,6 +124,19 @@ export function journalRootFor(binding, mode = 'rcc') {
   return join(projectRoot, 'checkpoints', 'ui-runtime', mode);
 }
 
+/**
+ * The project-scoped ui-runtime journal, resolved without a task id. The task
+ * identity itself lives inside this file, so identity resolution cannot read
+ * the task id from the binding first.
+ */
+export function executionJournalPathFor(binding) {
+  const root = journalRootFor(binding, binding.journalMode ?? 'rcc');
+  if (!root) {
+    throw new Error('executionJournalPathFor requires config-derived projectRoot and projectKey');
+  }
+  return join(root, 'ui-runtime-journal.jsonl');
+}
+
 /** Parse a JSONL journal into records, keeping file order. */
 export async function readJournalEvents(journalPath) {
   const text = await readFile(journalPath, 'utf8');
@@ -439,6 +452,59 @@ export function executionIdentityFromRecords(records, binding) {
       operationId: record.operationId ?? null,
       executionEpoch: record.executionEpoch ?? null,
       scope: record.scope ?? null,
+    },
+  };
+}
+
+/**
+ * The verified `operation.started` record is the only source of the task that
+ * really executes an attempt. A confirmed submission can also create a draft
+ * placeholder task, and that placeholder never starts an operation, so it must
+ * never be taken as the attempt's execution task.
+ */
+export function executionTaskFromRecords(records, options = {}) {
+  const owned = options.ownedTaskIds
+    ? new Set(options.ownedTaskIds.map((value) => String(idValue(value))))
+    : null;
+  const notBefore = typeof options.notBefore === 'string' ? options.notBefore : null;
+  const candidates = records.filter((record) => {
+    if (record?.kind !== 'operation.started') return false;
+    if (record.taskId === null || record.taskId === undefined) return false;
+    if (owned && !owned.has(String(idValue(record.taskId)))) return false;
+    return true;
+  });
+  if (candidates.length === 0) {
+    return { ok: false, reason: 'no verified operation.started record names an execution task' };
+  }
+  // A candidate-mode attempt owns its own control root, so the time window only
+  // helps to drop older identities when the journal already holds one. It is not
+  // a hard filter: a synthetic or replayed journal can carry historical stamps.
+  const recent = notBefore
+    ? candidates.filter((record) => typeof record.startedAt !== 'string' || record.startedAt >= notBefore)
+    : candidates;
+  const pool = recent.length > 0 ? recent : candidates;
+  const namedTasks = new Set(pool.map((record) => String(idValue(record.taskId))));
+  if (namedTasks.size > 1) {
+    return {
+      ok: false,
+      reason: `ambiguous verified operation.started records name ${namedTasks.size} tasks: ${[...namedTasks].join(', ')}`,
+    };
+  }
+  const record = pool[pool.length - 1];
+  if (!record.operationId || !Number.isSafeInteger(record.executionEpoch) || record.executionEpoch <= 0) {
+    return {
+      ok: false,
+      reason: 'verified operation.started execution identity is incomplete: operationId and a positive executionEpoch are required',
+    };
+  }
+  return {
+    ok: true,
+    identity: {
+      taskId: record.taskId,
+      operationId: record.operationId,
+      cycleId: record.cycleId ?? null,
+      executionEpoch: record.executionEpoch,
+      startedAt: record.startedAt ?? null,
     },
   };
 }
