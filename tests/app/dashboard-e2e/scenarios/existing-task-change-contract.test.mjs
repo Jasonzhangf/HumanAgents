@@ -44,6 +44,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import {
+  CHANGE_FIXTURE_PATH,
   CONFIRM_SELECTOR,
   INTAKE_SELECTOR,
   INTERACTION_PATH,
@@ -57,7 +58,7 @@ import {
   refreshChangeJournalPaths,
   runExistingTaskChangeScenario,
 } from './existing-task-change.mjs';
-import { assertEntryInputStage } from '../lib/browser.mjs';
+import { assertEntryInputStage, waitForProductFocusRead } from '../lib/browser.mjs';
 import {
   assessSettlement,
   executionIdentityFromRecords,
@@ -176,6 +177,23 @@ function validObservation(overrides = {}) {
       dashboardOperationId: `ui-operation-implicit-${DRAFT_ID}`,
     },
     journalFacts: { toolRounds: 1, requestStarts: 2, checkpoints: 1, terminal: 'succeeded' },
+    dashboardProbe: {
+      operationId: `ui-operation-implicit-${DRAFT_ID}`,
+      state: 'succeeded',
+      publicOutput: {
+        state: 'committed',
+        commits: [{ text: `The exact matching file path is ${CHANGE_FIXTURE_PATH}.` }],
+      },
+    },
+    productFocus: {
+      found: true,
+      state: 'ready',
+      sessionText: `**The exact matching file path is ${CHANGE_FIXTURE_PATH}**`,
+      visible: true,
+      hasFailure: false,
+      failureText: null,
+      timedOut: false,
+    },
     terminal: {
       state: 'succeeded',
       rendered: {
@@ -233,6 +251,18 @@ function fakeBrowser(dom) {
     },
   };
   return binding;
+}
+
+function sequencedBrowser(observations) {
+  let calls = 0;
+  const binding = {
+    browser: {
+      page: {
+        evaluate: async () => observations[Math.min(calls++, observations.length - 1)],
+      },
+    },
+  };
+  return { binding, calls: () => calls };
 }
 
 function validInputStageDom(overrides = {}) {
@@ -386,6 +416,113 @@ test('the task state and the Journal terminal must prove the change settled', ()
   expectProblem({ terminal: { rendered: { facts: [{ label: '当前状态', value: '运行中' }] } } }, /当前状态="运行中"/);
   expectProblem({ terminal: { rendered: { facts: [{ label: 'Checkpoint', value: '本任务尚无 checkpoint' }] } } }, /expected a committed succeeded checkpoint/);
   expectProblem({ terminal: { rendered: { facts: [{ label: '输入', value: '{"goal":"seed-marker"}' }] } } }, /did not show the confirmed revision as the current input/);
+});
+
+test('the receipt must capture a committed dashboard read-back proving the changed fixture', () => {
+  expectProblem({ dashboardProbe: null }, /change dashboard read-back was not captured/);
+  expectProblem({ dashboardProbe: { error: 'socket closed' } }, /change dashboard read-back failed: socket closed/);
+  expectProblem({ dashboardProbe: { publicOutput: null } }, /dashboard read-back returned no public output/);
+  expectProblem({ dashboardProbe: { publicOutput: { state: 'pending' } } }, /change public output was not committed: state="pending"/);
+  expectProblem({ dashboardProbe: { publicOutput: { state: 'committed', commits: 'not-an-array' } } }, /public output commits were malformed/);
+  expectProblem({ dashboardProbe: { publicOutput: { state: 'committed', commits: [] } } }, /committed change public output has no commits/);
+  expectProblem({
+    dashboardProbe: { publicOutput: { state: 'committed', commits: [{ text: 'e2e-change-fixture/seed.txt' }] } },
+  }, /did not reference the changed fixture e2e-change-fixture\/change.txt/);
+});
+
+test('the rendered product focus must prove the changed fixture body and fail closed otherwise', () => {
+  expectProblem({ productFocus: null }, /product focus read-back was not captured/);
+  expectProblem({ productFocus: { found: false } }, /product focus center was not rendered on the change task dashboard/);
+  expectProblem({ productFocus: { timedOut: true, state: 'pending' } }, /product focus read timed out before proving e2e-change-fixture\/change.txt/);
+  expectProblem({ productFocus: { hasFailure: true, failureText: 'product-output.read.failed' } }, /read the committed result as a failure/);
+  expectProblem({ productFocus: { state: 'pending', timedOut: false } }, /did not reach a ready state: state="pending"/);
+  expectProblem({ productFocus: { visible: false } }, /product focus session was not visible/);
+  expectProblem({ productFocus: { sessionText: '' } }, /product focus session text was empty/);
+  expectProblem({ productFocus: { sessionText: 'e2e-change-fixture/seed.txt' } }, /did not render the changed fixture e2e-change-fixture\/change.txt/);
+});
+
+test('product focus polling ignores a ready seed body until the changed body renders', async () => {
+  const seed = {
+    found: true,
+    state: 'ready',
+    sessionText: 'The exact matching file path is e2e-change-fixture/seed.txt.',
+    visible: true,
+    hasFailure: false,
+    failureText: null,
+  };
+  const changed = {
+    ...seed,
+    sessionText: `The exact matching file path is ${CHANGE_FIXTURE_PATH}.`,
+  };
+  const { binding, calls } = sequencedBrowser([seed, changed]);
+
+  const productFocus = await waitForProductFocusRead(binding, {
+    requiredSessionText: CHANGE_FIXTURE_PATH,
+    timeoutMs: 2_000,
+  });
+
+  assert.equal(calls(), 2, 'the ready seed body must not terminate the wait');
+  assert.equal(productFocus.state, 'ready');
+  assert.equal(productFocus.sessionText, changed.sessionText);
+  assert.equal(productFocus.timedOut, false);
+  assert.deepEqual(changeObservationProblems(validObservation({ productFocus })), []);
+});
+
+test('product focus polling returns an output failure immediately and keeps it incomplete', async () => {
+  const failure = {
+    found: true,
+    state: 'ready',
+    sessionText: null,
+    visible: false,
+    hasFailure: true,
+    failureText: 'product-output.read.failed',
+  };
+  const lateChanged = {
+    found: true,
+    state: 'ready',
+    sessionText: `The exact matching file path is ${CHANGE_FIXTURE_PATH}.`,
+    visible: true,
+    hasFailure: false,
+    failureText: null,
+  };
+  const { binding, calls } = sequencedBrowser([failure, lateChanged]);
+
+  const productFocus = await waitForProductFocusRead(binding, {
+    requiredSessionText: CHANGE_FIXTURE_PATH,
+    timeoutMs: 2_000,
+  });
+
+  assert.equal(calls(), 1, 'an output failure must terminate the wait immediately');
+  assert.equal(productFocus.hasFailure, true);
+  assert.match(
+    changeObservationProblems(validObservation({ productFocus })).join('\n'),
+    /read the committed result as a failure: "product-output\.read\.failed"/,
+  );
+});
+
+test('a product focus timeout retains the last observation and remains incomplete', async () => {
+  const seed = {
+    found: true,
+    state: 'ready',
+    sessionText: 'The exact matching file path is e2e-change-fixture/seed.txt.',
+    visible: true,
+    hasFailure: false,
+    failureText: null,
+  };
+  const { binding } = sequencedBrowser([seed]);
+
+  const productFocus = await waitForProductFocusRead(binding, {
+    requiredSessionText: CHANGE_FIXTURE_PATH,
+    timeoutMs: 1,
+  });
+
+  assert.equal(productFocus.timedOut, true);
+  assert.equal(productFocus.state, 'ready');
+  assert.equal(productFocus.sessionText, seed.sessionText);
+  assert.match(
+    changeObservationProblems(validObservation({ productFocus })).join('\n'),
+    /product focus read timed out before proving e2e-change-fixture\/change\.txt/,
+  );
 });
 
 test('an unreachable provider (no execution cycle) can never become a green observation', () => {

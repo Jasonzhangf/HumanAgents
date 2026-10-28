@@ -28,6 +28,8 @@
  *     appended to the task's input revision state and is consumed by a new
  *     execution cycle whose input carries the confirmed revision;
  *   - the task state updates and the Journal holds the new execution's terminal.
+ *   - the receipt captures the committed public-output read-back and the
+ *     rendered product focus body that prove the changed fixture path.
  *   - the settlement proof reads the change execution's own checkpoint: the file
  *     list is re-resolved after the change terminal, so a checkpoint committed
  *     after dispatch is included and the seed cycle's file is never borrowed.
@@ -47,6 +49,7 @@ import {
   sleep,
   submitDirectiveAndConfirmDraft,
   waitForDom,
+  waitForProductFocusRead,
   waitForTerminal,
 } from '../lib/browser.mjs';
 import { taskIdValue } from '../lib/binding.mjs';
@@ -69,6 +72,9 @@ export const UNSAVED_EDIT_REFUSAL = 'ui.existing-change.unsaved-edit';
 export const STALE_EDIT_REFUSAL = 'ui.existing-change.stale-edit';
 /** The runtime's own stale-revision code, surfaced unchanged by the UI. */
 export const STALE_REVISION_CODE = 'explicit-draft.stale-revision';
+
+/** The changed fixture path the public output and rendered body must prove. */
+export const CHANGE_FIXTURE_PATH = 'e2e-change-fixture/change.txt';
 
 export const DEFAULT_CHANGE_TIMEOUT_MS = Number(process.env.E2E_CHANGE_TIMEOUT_MS ?? 240_000);
 
@@ -289,6 +295,9 @@ export async function runExistingTaskChangeScenario(binding) {
 
   const dashboard = await waitForChangeTerminal(binding, changeOperation.record.operationId);
   const rendered = await readTaskDashboardDom(binding).catch((error) => ({ error: error.message }));
+  const productFocus = await waitForProductFocusRead(binding, {
+    requiredSessionText: CHANGE_FIXTURE_PATH,
+  });
   const taskShot = await captureScreenshot(binding, '04-existing-change-task-updated');
   evidence.screenshots.push(taskShot);
 
@@ -396,6 +405,8 @@ export async function runExistingTaskChangeScenario(binding) {
       checkpoints: facts.checkpoints.length,
       terminal: facts.finalTerminals.slice(-1)[0]?.state ?? null,
     },
+    dashboardProbe: binding.dashboardProbe ?? null,
+    productFocus,
     terminal: { state: dashboard.state ?? null, rendered },
   };
 
@@ -421,6 +432,8 @@ export async function runExistingTaskChangeScenario(binding) {
       interactionJournalPath: brainJournalPath,
       execution: observation.execution,
       journalFacts: observation.journalFacts,
+      dashboardProbe: observation.dashboardProbe,
+      productFocus: observation.productFocus,
       terminal: observation.terminal,
       confirmation: {
         status: confirmationStatus,
@@ -662,6 +675,62 @@ export function changeObservationProblems(observation) {
   const renderedInput = factValue('输入');
   if (!String(renderedInput).includes(observation.scenarioMarkers?.revisionMarker ?? '\u0000')) {
     missing.push('the changed task dashboard did not show the confirmed revision as the current input');
+  }
+
+  const dashboardProbe = observation.dashboardProbe;
+  if (dashboardProbe === null || dashboardProbe === undefined) {
+    missing.push('the change dashboard read-back was not captured');
+  } else if (typeof dashboardProbe !== 'object' || Array.isArray(dashboardProbe)) {
+    missing.push(`the change dashboard read-back was malformed: ${JSON.stringify(dashboardProbe)}`);
+  } else if (dashboardProbe.error) {
+    missing.push(`the change dashboard read-back failed: ${String(dashboardProbe.error)}`);
+  } else {
+    const publicOutput = dashboardProbe.publicOutput;
+    if (publicOutput === null || publicOutput === undefined || typeof publicOutput !== 'object' || Array.isArray(publicOutput)) {
+      missing.push('the change dashboard read-back returned no public output');
+    } else {
+      if (publicOutput.state !== 'committed') {
+        missing.push(`the change public output was not committed: state=${JSON.stringify(publicOutput.state ?? null)}`);
+      }
+      if (!Array.isArray(publicOutput.commits)) {
+        missing.push(`the change public output commits were malformed: ${JSON.stringify(publicOutput.commits ?? null)}`);
+      } else if (publicOutput.commits.length === 0) {
+        missing.push('the committed change public output has no commits');
+      } else if (!publicOutput.commits.some((commit) => String(commit?.text ?? '').includes(CHANGE_FIXTURE_PATH))) {
+        missing.push(
+          `the committed change public output did not reference the changed fixture ${CHANGE_FIXTURE_PATH}: `
+          + `${JSON.stringify(publicOutput.commits.map((commit) => commit?.text ?? null))}`,
+        );
+      }
+    }
+  }
+
+  const productFocus = observation.productFocus;
+  if (productFocus === null || productFocus === undefined || typeof productFocus !== 'object' || Array.isArray(productFocus)) {
+    missing.push('the product focus read-back was not captured');
+  } else if (productFocus.timedOut === true) {
+    missing.push(
+      `the product focus read timed out before proving ${CHANGE_FIXTURE_PATH}: `
+      + `state=${JSON.stringify(productFocus.state ?? null)}`,
+    );
+  } else if (productFocus.found !== true) {
+    missing.push('the product focus center was not rendered on the change task dashboard');
+  } else if (productFocus.hasFailure === true) {
+    missing.push(`the product focus read the committed result as a failure: ${JSON.stringify(productFocus.failureText ?? null)}`);
+  } else if (productFocus.state !== 'ready') {
+    missing.push(`the product focus did not reach a ready state: state=${JSON.stringify(productFocus.state ?? null)}`);
+  } else if (productFocus.visible !== true) {
+    missing.push('the product focus session was not visible');
+  } else {
+    const sessionText = String(productFocus.sessionText ?? '').trim();
+    if (!sessionText) {
+      missing.push('the product focus session text was empty');
+    } else if (!sessionText.includes(CHANGE_FIXTURE_PATH)) {
+      missing.push(
+        `the product focus session did not render the changed fixture ${CHANGE_FIXTURE_PATH}: `
+        + `${JSON.stringify(sessionText.slice(0, 300))}`,
+      );
+    }
   }
 
   return missing;

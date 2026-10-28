@@ -1522,6 +1522,72 @@ export async function readTaskDashboardDom(binding, options = {}) {
 }
 
 /**
+ * Wait for the rendered product-focus-center to prove the required public
+ * output body. A ready seed body is not terminal: the center may refresh from
+ * ready(seed) to ready(changed). Output failure ends the wait immediately;
+ * timeout returns the last observation for fail-closed classification.
+ */
+export async function waitForProductFocusRead(binding, options = {}) {
+  const { page } = binding.browser;
+  const timeoutMs = Number(options.timeoutMs ?? Number(process.env.E2E_PRODUCT_FOCUS_TIMEOUT_MS ?? 60_000));
+  const requiredSessionText = String(options.requiredSessionText ?? '').trim();
+  const deadline = Date.now() + timeoutMs;
+  const read = async () => page.evaluate(() => {
+    const section = document.querySelector('section.product-focus-center[data-product-focus-state]');
+    const failure = document.querySelector('[data-product-role="output-failure"]');
+    if (!section) {
+      return {
+        found: false,
+        state: null,
+        sessionText: null,
+        visible: false,
+        hasFailure: Boolean(failure),
+        failureText: failure ? (failure.textContent ?? '').trim() : null,
+      };
+    }
+    const state = section.getAttribute('data-product-focus-state');
+    const session = section.querySelector('.product-focus-session');
+    return {
+      found: true,
+      state,
+      sessionText: session ? (session.textContent ?? '').trim() : null,
+      visible: Boolean(session && session.getClientRects().length > 0),
+      hasFailure: Boolean(failure),
+      failureText: failure ? (failure.textContent ?? '').trim() : null,
+    };
+  });
+
+  let last = null;
+  for (;;) {
+    const data = await read().catch(() => null);
+    if (data?.hasFailure === true) {
+      return { ...data, timedOut: false };
+    }
+    if (
+      data?.found === true
+      && data.state === 'ready'
+      && requiredSessionText
+      && String(data.sessionText ?? '').includes(requiredSessionText)
+    ) {
+      return { ...data, timedOut: false };
+    }
+    last = data;
+    if (Date.now() > deadline) {
+      return {
+        found: Boolean(last?.found),
+        state: last?.state ?? null,
+        sessionText: last?.sessionText ?? null,
+        visible: Boolean(last?.visible),
+        hasFailure: Boolean(last?.hasFailure),
+        failureText: last?.failureText ?? null,
+        timedOut: true,
+      };
+    }
+    await sleep(500);
+  }
+}
+
+/**
  * Read the rendered pipeline observation page: the real node cards and the
  * page-level projected state chip.
  */
