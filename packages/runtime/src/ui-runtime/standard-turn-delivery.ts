@@ -16,6 +16,8 @@ import {
   type StandardTurnEndCommand,
   isStandardTurnEndToolId,
   type WorkAssignment,
+  assertProviderToolExecutionFactBinding,
+  ContractError,
 } from '../../../contracts/src/index.js';
 import type { ActiveTurnSegmentCaptureV2 } from '../../../contracts/src/active-turn-segments.js';
 import type { OperationCompletionJournalPort } from '../gateway/operation-completion.js';
@@ -466,9 +468,32 @@ export async function readStandardTurnDelivery(
     const inspectCompletion = inspections[0];
     if (inspectCompletion !== undefined) {
       const result = fact.envelope.fact.result;
-      if (result.status !== 'succeeded' || result.executionFact !== undefined) {
+      if (result.status !== 'succeeded') {
         throw new StandardTurnDeliveryError('standard-turn-delivery.completion-conflict',
-          `the accepted inspect result for ${inspectCompletion.callId} must succeed without an execution fact`);
+          `the accepted inspect result for ${inspectCompletion.callId} must succeed`);
+      }
+      // A legitimate inspect result may carry a provider execution fact. The
+      // delivery layer has no independent trusted binding/route authority, so
+      // surface/bindingRef/route are only shape-checked; toolId comes from the
+      // trusted inspect completion, and the contract function cross-checks the
+      // fact against the result and the trusted requestId.
+      if (result.executionFact !== undefined) {
+        const expectedToolIdentity = {
+          surface: result.executionFact.identity.surface,
+          toolId: inspectCompletion.toolId,
+          bindingRef: result.executionFact.identity.bindingRef,
+          route: result.executionFact.identity.route,
+        };
+        try {
+          assertProviderToolExecutionFactBinding(result, expectedToolIdentity, inspectCompletion.requestId);
+        } catch (cause) {
+          if (cause instanceof ContractError) {
+            throw new StandardTurnDeliveryError('standard-turn-delivery.completion-conflict',
+              `the accepted inspect execution fact for ${inspectCompletion.callId} is not bound to the trusted completion`,
+              OWNER, { cause });
+          }
+          throw cause;
+        }
       }
       const bytesDigest = await digestOf(bytes);
       if ((result.outputDigest !== undefined && result.outputDigest !== bytesDigest)

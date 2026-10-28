@@ -190,3 +190,188 @@ test('inspect delivery binds the raw report when an inspect result has no primar
     outputDigest: reportDigest,
   }));
 });
+
+// Real local-file-search results carry a complete `executionFact`. The reader
+// must verify that fact against the trusted inspect completion and the accepted
+// result instead of rejecting every inspect result that has one.
+test('inspect delivery accepts a verified execution fact and rejects a mismatched one', async () => {
+  const scope: ScopeRef = {
+    organId: id('organ', 'inspect-fact-organ'),
+    taskId: id('task', 'inspect-fact-task'),
+    cycleId: id('cycle', 'inspect-fact-cycle'),
+    operationId: id('operation', 'inspect-fact-parent'),
+  };
+  const toolOperationId = id('operation', 'inspect-fact-tool');
+  const reportText = '{"matches":[{"path":"note.md","line":1}]}';
+  const reportBytes = new TextEncoder().encode(reportText);
+  const reportDigest = `sha256:${createHash('sha256').update(reportBytes).digest('hex')}`;
+  const rawReportLocator = 'asset://provider-tool/output/inspect-fact-call';
+  const callId = 'call_inspect_fact_1';
+  const requestId = 'request-inspect-fact-1';
+  const toolId = 'file.search';
+  const evidence: EvidenceRef = {
+    evidenceId: id('evidence', 'inspect-fact-output'),
+    kind: 'tool',
+    source: 'inspect-fact-consumer',
+    locator: rawReportLocator,
+    digest: reportDigest,
+    scope: { ...scope, operationId: toolOperationId },
+  };
+  const execution = {
+    runtimeId: 'inspect-fact-runtime',
+    taskId: scope.taskId!,
+    operationId: scope.operationId!,
+    organId: scope.organId,
+    cycleId: scope.cycleId!,
+    executionEpoch: 2,
+  };
+  const fact: AcceptedRawFact = {
+    seq: 2001,
+    envelope: {
+      execution: { runtimeId: execution.runtimeId, executionEpoch: execution.executionEpoch },
+      scope,
+      request: { turnId: 'inspect-fact-turn', requestId },
+      producerSeq: 1,
+      fact: {
+        kind: 'tool-result',
+        contentUnitId: 'inspect-fact-result',
+        callId,
+        continuationRef: 'inspect-fact-continuation',
+        complete: true,
+        result: {
+          ...execution,
+          toolId,
+          callId,
+          status: 'succeeded',
+          outputRef: rawReportLocator,
+          outputDigest: reportDigest,
+          outputRefs: [rawReportLocator],
+          evidenceRefs: [evidence],
+          executionFact: {
+            identity: {
+              surface: 'responses',
+              toolId,
+              bindingRef: 'inspect-fact-binding',
+              route: 'app.file-search.local',
+            },
+            requestRef: requestId,
+            callRef: callId,
+            operationRef: scope.operationId!.value,
+            state: 'succeeded',
+            rawEvidenceRefs: [rawReportLocator],
+            resultRef: rawReportLocator,
+            resultDigest: reportDigest,
+          },
+        },
+        rawOutput: { ref: evidence, view: { kind: 'utf8-text' } },
+      },
+    },
+  };
+  const assignment: WorkAssignment = {
+    assignmentId: 'inspect-fact-assignment',
+    taskId: scope.taskId!,
+    pipelineNodeId: 'inspect-fact-node',
+    attempt: 1,
+    executionEpoch: 2,
+    inputRevision: 1,
+    objective: 'inspect and present the project material',
+    targetRefs: [],
+    expectedOutputRefs: [],
+    successCriteria: [],
+    failureCriteria: [],
+    incompleteCriteria: [],
+    requiredCapabilities: [],
+    mergeGate: 'not-required',
+  };
+  const section = { text: 'inspect completed', evidenceRefs: [evidence] };
+  const acceptedEnd: StandardTurnEndCommand = {
+    kind: 'standard-turn-end',
+    identity: {
+      turnId: 'inspect-fact-turn',
+      workAssignmentRef: assignment.assignmentId,
+      taskRef: assignment.taskId,
+      scopeRef: scope,
+      cycleRef: scope.cycleId!,
+      inputRevision: assignment.inputRevision,
+      directiveRevision: 1,
+      executionEpoch: assignment.executionEpoch,
+      runtimeBindingRef: 'inspect-fact-binding',
+      permissionRevision: 'inspect-fact-permission',
+    },
+    summary: { goal: section, actions: section, result: section, expectedNextStep: section },
+    deliveryRefs: [evidence.locator],
+    resolvedEvidenceRefs: [evidence],
+  };
+  const inspectCompletion: InspectToolCompletionDescriptor = {
+    execution,
+    scope: evidence.scope,
+    toolOperationId,
+    requestId,
+    callId,
+    toolId,
+    intentKind: 'inspect',
+    status: 'succeeded',
+    evidenceRefs: [evidence],
+  };
+  const rawContent: RawContentReadPort = {
+    async read(request) {
+      assert.deepEqual(request, {
+        scope,
+        content: fact.envelope.fact.kind === 'tool-result' ? fact.envelope.fact.rawOutput : undefined,
+      });
+      return reportBytes;
+    },
+  };
+  const unexpectedEffect = async (): Promise<never> => {
+    throw new Error('inspect delivery must not read or invent an effect completion');
+  };
+  const reader: StandardTurnDeliveryReaderPort = {
+    rawContent,
+    completion: {
+      readExact: unexpectedEffect,
+      commitIntent: unexpectedEffect,
+      commitCompletion: unexpectedEffect,
+      discoverExactExecution: unexpectedEffect,
+    },
+  };
+  const read = (candidate: AcceptedRawFact) => readStandardTurnDelivery({
+    assignment,
+    acceptedEnd,
+    entries: [candidate],
+    completionLookups: [],
+    inspectCompletions: [inspectCompletion],
+  }, reader);
+
+  const readback = await read(fact);
+  const material = readback.materials[0];
+  assert.equal(material?.kind, 'inspect-tool-report');
+  if (material?.kind !== 'inspect-tool-report') throw new Error('fixture must produce an inspect report');
+  assert.equal(material.outputRef, rawReportLocator);
+  assert.equal(material.outputDigest, reportDigest);
+  assert.deepEqual(material.bytes, reportBytes);
+
+  assert.equal(fact.envelope.fact.kind, 'tool-result');
+  if (fact.envelope.fact.kind !== 'tool-result') throw new Error('fixture must be a tool result');
+  const baseFact = fact.envelope.fact;
+  const baseResult = baseFact.result;
+  const baseExecutionFact = baseResult.executionFact;
+  if (baseExecutionFact === undefined) throw new Error('fixture must carry an execution fact');
+  const withExecutionFact = (candidate: typeof baseExecutionFact): AcceptedRawFact => ({
+    ...fact,
+    envelope: {
+      ...fact.envelope,
+      fact: { ...baseFact, result: { ...baseResult, executionFact: candidate } },
+    },
+  });
+  const rejects = async (candidate: AcceptedRawFact): Promise<void> => {
+    await assert.rejects(
+      () => read(candidate),
+      (error: unknown) => error instanceof StandardTurnDeliveryError
+        && error.code === 'standard-turn-delivery.completion-conflict',
+    );
+  };
+  await rejects(withExecutionFact({ ...baseExecutionFact, callRef: 'call_mismatch' }));
+  await rejects(withExecutionFact({ ...baseExecutionFact, resultDigest: `sha256:${'1'.repeat(64)}` }));
+  const { resultRef: _omittedResultRef, ...withoutResultRef } = baseExecutionFact;
+  await rejects(withExecutionFact(withoutResultRef));
+});
