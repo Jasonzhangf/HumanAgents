@@ -158,6 +158,7 @@ test('legacy interactions without actor or time are not rewritten as human', asy
           nextAction: 'start-matching',
           condition: 'matching-requested',
           history: ['received'],
+          steps: [],
         },
       ],
     };
