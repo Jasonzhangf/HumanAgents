@@ -38,6 +38,16 @@ const SERVE_STARTUP_STOP_TIMEOUT_MS = Number(process.env.E2E_SERVE_STARTUP_STOP_
 const SERVE_STARTUP_LOG_LIMIT_BYTES = 256 * 1024;
 const SERVE_STARTUP_EXCERPT_CHARS = 8_000;
 
+/**
+ * Default confirmation-window length for a single submission. Read once at call
+ * time so a test can override E2E_CONFIRM_TIMEOUT_MS and observe the change;
+ * the default stays 90 seconds and existing behavior is unchanged when the
+ * variable is absent.
+ */
+function confirmTimeoutMs() {
+  return Number(process.env.E2E_CONFIRM_TIMEOUT_MS ?? 90_000);
+}
+
 function byteLength(text) {
   return Buffer.byteLength(text, 'utf8');
 }
@@ -317,13 +327,20 @@ export async function describeDraftStage(binding) {
 
 export async function startServeForAttempt(binding, options = {}) {
   const repoPath = binding.repoPath ?? DEFAULT_REPO_PATH;
-  // The candidate CLI is the default and the real path. An explicit override
-  // exists only so deterministic contract tests can drive this exact spawn and
-  // readiness machinery with a controlled child instead of a real service.
-  const cli = options.cliPath ?? cliPath(repoPath);
+  // Explicit path support: formal acceptance must be able to point the runner
+  // at the artifact installed into an isolated prefix, and contract tests drive
+  // the spawn/readiness machinery with a controlled child. A requested path
+  // that does not exist fails closed instead of silently falling back to the
+  // worktree dist.
+  const explicit = options.cliPath ?? null;
+  const cli = explicit ?? cliPath(repoPath);
   if (!cli) {
     throw new Error(`built CLI is missing at ${join(repoPath, 'dist/app/app/src/cli.js')}; run \`pnpm build:app\` in the worktree first`);
   }
+  if (explicit && !existsSync(explicit)) {
+    throw new Error(`explicit CLI is missing at ${explicit}; refusing to fall back to the worktree dist`);
+  }
+  binding.serveCliPath = cli;
   if (binding.serviceMode === 'installed-attach') {
     throw new Error('installed-attach never starts a candidate serve; use attachToInstalledService()');
   }
@@ -698,7 +715,7 @@ async function openEntryPage(binding) {
   return entryUrl;
 }
 
-function taskScopedNavigation(value, baseUrl) {
+export function taskScopedNavigation(value, baseUrl) {
   let candidate;
   try {
     candidate = value instanceof URL ? value : new URL(String(value), baseUrl);
@@ -712,7 +729,13 @@ function taskScopedNavigation(value, baseUrl) {
     return null;
   }
   if (candidate.origin !== expected.origin) return null;
-  if (candidate.pathname !== '/observation.html' && candidate.pathname !== '/task-dashboard.html') return null;
+  // The served product lands a confirmed new-task submission on `./task.html`,
+  // so that path is a real task-scoped landing alongside observation and the
+  // legacy dashboard page. The task parameter is required below for every
+  // accepted path.
+  if (candidate.pathname !== '/observation.html'
+    && candidate.pathname !== '/task-dashboard.html'
+    && candidate.pathname !== '/task.html') return null;
   const taskId = candidate.searchParams.get('task');
   if (!taskId || taskId.trim() === '') return null;
   return {
@@ -929,7 +952,7 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
     // the observation. The selected identity comes only from this navigation.
     const navigationPromise = waitForTaskScopedNavigation(
       binding,
-      Number(options.confirmTimeoutMs ?? 90_000),
+      Number(options.confirmTimeoutMs ?? confirmTimeoutMs()),
     );
     try {
       await page.click('#entry-form button[type="submit"]');
@@ -968,7 +991,7 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
     response.url().includes('/api/explicit/interactions/')
     && response.url().endsWith('/confirmation')
     && response.request().method() === 'POST',
-  { timeout: Number(options.confirmTimeoutMs ?? 90_000) }).catch((error) => ({ waitError: error }));
+  { timeout: Number(options.confirmTimeoutMs ?? confirmTimeoutMs()) }).catch((error) => ({ waitError: error }));
 
   const clarificationLog = [];
   let confirmationResponse;
@@ -1055,7 +1078,7 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
       throw new Error(`one Dashboard submission created ${created.length} new tasks: ${created.map((task) => task.taskId.value).join(', ')}`);
     }
     return created.length === 1 ? created[0].taskId.value : null;
-  }, Number(options.confirmTimeoutMs ?? 90_000));
+  }, Number(options.confirmTimeoutMs ?? confirmTimeoutMs()));
   const taskProbe = await jsonRequest(`${base}/api/tasks/${encodeURIComponent(taskId)}/dashboard`, {}, binding.auth);
   if (!sameId(taskProbe.taskId, taskId)) {
     throw new Error(`new-task Dashboard API identity mismatch: expected ${taskId}, received ${JSON.stringify(taskProbe.taskId ?? null)}`);
@@ -1073,16 +1096,178 @@ function taskGroups(tasks) {
     .flatMap((group) => Array.isArray(tasks?.[group]) ? tasks[group] : []);
 }
 
+function idValueOf(value) {
+  if (value === undefined || value === null) return null;
+  return typeof value === 'object' && value !== null && 'value' in value ? String(value.value) : String(value);
+}
+
+/** The task whose terminal/settlement identity the runner must follow. */
+export function resolveExecutionTaskId(binding) {
+  return binding.executionTaskId ?? binding.taskId ?? null;
+}
+
+/**
+ * Resolve the exact task identities this submission owns before any grant is
+ * approved. The business anchor plus its listed executions are the only tasks
+ * this attempt may approve; a pending decision naming any other task belongs to
+ * a different submission on the same serve and must be refused.
+ */
+export async function resolveOwnedExecutionTasks(binding, { projectKey, mode }) {
+  const anchor = binding.taskId ?? binding.scope?.taskId ?? null;
+  const taskIds = [];
+  const groups = [];
+  const anchorValue = anchor ? String(idValueOf(anchor)) : null;
+  if (!anchorValue) {
+    return { error: 'no bound anchor task for this submission; the grant cannot be scoped', taskIds, groups };
+  }
+  try {
+    const tasks = await jsonRequest(`${binding.serveBaseUrl}/api/tasks`, {}, binding.auth);
+    const all = taskGroups(tasks);
+    const anchorRow = all.find((task) => String(idValueOf(task?.taskId ?? task)) === anchorValue)
+      ?? all.find((task) => (Array.isArray(task?.executions) ? task.executions : [])
+        .some((child) => String(idValueOf(child?.taskId ?? child)) === anchorValue));
+    if (!anchorRow) {
+      return { error: `anchor task ${anchorValue} is not listed on the serve board`, taskIds, groups };
+    }
+    taskIds.push(anchorRow.taskId ?? anchorRow);
+    groups.push({ anchor: anchorRow.taskId ?? anchorRow, executions: [] });
+    for (const child of Array.isArray(anchorRow.executions) ? anchorRow.executions : []) {
+      const childId = child?.taskId ?? child;
+      taskIds.push(childId);
+      groups[0].executions.push(childId);
+    }
+    return { error: null, taskIds, groups };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error), taskIds, groups };
+  }
+}
+
+/**
+ * Approve the pending task-scoped execution grant for a confirmed submission.
+ * This mirrors the product 批准继续 button: it only acts when the runtime
+ * reports a waiting prepared task, and it calls the same control route the page
+ * uses. The confirmation itself is never a second new-task confirmation.
+ */
+export async function approvePendingTaskGrant(binding, options = {}) {
+  const base = binding.serveBaseUrl;
+  const projectKey = binding.projectKey ?? binding.runtimePaths?.projectKey ?? binding.journalProjectKey ?? null;
+  const mode = 'rcc';
+  if (!projectKey) {
+    binding.grantDisposition = { kind: 'skipped', reason: 'no projectKey to read the product decision scope' };
+    return;
+  }
+  const decisionUrl = `${base}/api/product/decision?projectKey=${encodeURIComponent(projectKey)}&mode=${mode}`;
+  const grantTimeoutMs = Number(
+    options.grantTimeoutMs ?? process.env.E2E_GRANT_TIMEOUT_MS ?? 120_000,
+  );
+  const startedAt = new Date().toISOString();
+  let ownedTaskIds = new Set();
+  let ownerError = null;
+  let pending = null;
+  try {
+    pending = await waitForDom(binding.browser.page ?? {}, 'pending task-grant decision', async () => {
+      const decision = await jsonRequest(decisionUrl, {}, binding.auth).catch(() => null);
+      if (!decision || decision.kind !== 'task-grant' || decision.state !== 'waiting') return null;
+      if (!decision.target || !decision.target.taskRef) return null;
+      const candidate = taskIdValue(decision.target.taskRef);
+      if (!candidate) return null;
+      const fresh = await resolveOwnedExecutionTasks(binding, { projectKey, mode });
+      ownerError = fresh.error;
+      ownedTaskIds = new Set(fresh.taskIds.map((value) => String(value.value ?? value)));
+      if (ownerError) return null;
+      if (!ownedTaskIds.has(String(candidate))) {
+        const seen = binding.grantForeignDecisions ?? [];
+        if (!seen.some((entry) => String(entry.taskId) === String(candidate))) {
+          binding.grantForeignDecisions = [...seen, {
+            taskId: candidate,
+            observedAt: new Date().toISOString(),
+            ownedTaskIds: [...ownedTaskIds],
+          }];
+        }
+        return null;
+      }
+      return decision;
+    }, grantTimeoutMs);
+  } catch {
+    binding.grantDisposition = {
+      kind: 'not-required',
+      reason: ownerError
+        ? `no owned pending task-grant decision: ${ownerError}`
+        : 'no pending task-grant decision surfaced before the approval window; execution did not need a human grant',
+      decisionUrl,
+      ownedTaskIds: [...ownedTaskIds],
+      foreignDecisions: binding.grantForeignDecisions ?? [],
+      waitedMs: grantTimeoutMs,
+      startedAt,
+    };
+    return;
+  }
+  const taskId = taskIdValue(pending.target.taskRef);
+  if (!taskId) {
+    binding.grantDisposition = { kind: 'skipped', reason: 'pending decision carried no taskRef', decision: pending };
+    return;
+  }
+  if (Array.isArray(binding.grantForeignDecisions) && binding.grantForeignDecisions.length > 0) {
+    const remaining = binding.grantForeignDecisions.filter((entry) => String(entry.taskId) !== String(taskId));
+    binding.grantForeignDecisions = remaining.length > 0 ? remaining : undefined;
+  }
+  const requestId = `approve:${binding.attemptId}:${Date.now()}`;
+  const requestBody = { requestId, expectedRevision: 0 };
+  const grantUrl = `${base}/api/tasks/${encodeURIComponent(taskId)}/control/grant?projectKey=${encodeURIComponent(projectKey)}&mode=${mode}`;
+  const approvedAt = new Date().toISOString();
+  const response = await requestJsonWithStatus(grantUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(requestBody),
+  }, binding.auth);
+  const grant = {
+    kind: 'approved',
+    taskId,
+    decisionUrl,
+    grantUrl,
+    requestId,
+    approvedAt,
+    status: response.status,
+    body: response.body,
+    startedAt,
+  };
+  binding.grantReceipt = grant;
+  binding.grantDisposition = { kind: 'approved', taskId, status: response.status, approvedAt, requestId };
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(
+      `task execution grant was refused (status=${response.status}) for ${taskId}: ${JSON.stringify(response.body).slice(0, 600)}; `
+      + 'the confirmed task stayed waiting and this attempt cannot claim a real execution',
+    );
+  }
+  const execution = response.body?.execution;
+  if (execution?.state === 'blocked' || execution?.state === 'not-applicable') {
+    throw new Error(
+      `grant accepted but releaseGrantedTaskExecution reported state=${execution.state} for ${taskId}: ${JSON.stringify(execution).slice(0, 600)}`,
+    );
+  }
+  binding.grantReceipt = grant;
+  binding.executionTaskId = taskId;
+  return grant;
+}
+
 /** Open the per-task dashboard and wait for the task to be nonterminal-running. */
 export async function openTaskDashboard(binding, options = {}) {
   const { page } = binding.browser;
-  const dashboardUrl = `${binding.serveBaseUrl}/task-dashboard.html?task=${encodeURIComponent(taskIdValue(binding.taskId))}`;
+  const taskId = resolveExecutionTaskId(binding);
+  // Carry task/projectKey/mode (taskFocusHref contract) so the served product
+  // never falls into the legacy unscoped error page.
+  const projectKey = binding.projectKey ?? binding.runtimePaths?.projectKey ?? binding.journalProjectKey ?? null;
+  const mode = 'rcc';
+  const params = new URLSearchParams({ task: taskIdValue(taskId) });
+  if (projectKey) params.set('projectKey', projectKey);
+  if (mode) params.set('mode', mode);
+  const dashboardUrl = `${binding.serveBaseUrl}/task-dashboard.html?${params.toString()}`;
   if (page.url() !== dashboardUrl) {
     await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
   }
   if (options.waitNonterminal !== false) {
     await waitForDom(page, 'nonterminal task dashboard', async () => {
-      const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/dashboard`, {}, binding.auth);
+      const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/dashboard`, {}, binding.auth);
       if (probe.state && !['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
       if (probe.state === 'failed') return 'failed';
       return null;
@@ -1094,13 +1279,17 @@ export async function openTaskDashboard(binding, options = {}) {
 /** Wait for the task runtime terminal state and return the dashboard probe. */
 export async function waitForTerminal(binding, options = {}) {
   const { page } = binding.browser;
+  // A task-scoped grant keeps the business anchor and moves real execution onto
+  // its released occurrence; the anchor never reaches a terminal, so the wait
+  // must follow the execution identity this attempt really owns.
+  const taskId = resolveExecutionTaskId(binding);
   const state = await waitForDom(page, 'task runtime terminal', async () => {
-    const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/dashboard`, {}, binding.auth);
+    const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/dashboard`, {}, binding.auth);
     if (['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
     return null;
   }, Number(options.timeoutMs ?? TERMINAL_TIMEOUT_MS));
   await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-  const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/dashboard`, {}, binding.auth);
+  const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/dashboard`, {}, binding.auth);
   binding.terminalState = state;
   binding.dashboardProbe = probe;
   return probe;
@@ -1108,21 +1297,23 @@ export async function waitForTerminal(binding, options = {}) {
 
 /** Read the newest execution terminal record from the authoritative journal. */
 export async function readDashboardProbe(binding) {
-  return jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/dashboard`, {}, binding.auth);
+  const taskId = resolveExecutionTaskId(binding);
+  return jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/dashboard`, {}, binding.auth);
 }
 
 export async function captureDashboardEvidence(binding) {
   const dashboardProbe = await readDashboardProbe(binding).catch((error) => ({ error: error.message }));
+  const taskId = resolveExecutionTaskId(binding);
   const observation = await jsonRequest(
-    `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/observation`,
+    `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/observation`,
     {},
     binding.auth,
   ).catch((error) => ({ error: error.message }));
-  const rootScopeRef = observation?.scope?.scopeRef ?? `task://${taskIdValue(binding.taskId)}/observation`;
+  const rootScopeRef = observation?.scope?.scopeRef ?? `task://${taskIdValue(taskId)}/observation`;
   // `pipeline.execute` is a registry node on the root scope; the child scope only
   // holds provider sub-event nodes, so select it without the child scope ref.
   const executeNode = await jsonRequest(
-    `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/observation?node=pipeline.execute`,
+    `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/observation?node=pipeline.execute`,
     {},
     binding.auth,
   ).catch((error) => ({ error: error.message }));
@@ -1146,7 +1337,12 @@ export async function captureDashboardEvidence(binding) {
 export async function readTaskDashboardDom(binding, options = {}) {
   const { page } = binding.browser;
   if (options.navigate !== false) {
-    const dashboardUrl = `${binding.serveBaseUrl}/task-dashboard.html?task=${encodeURIComponent(taskIdValue(binding.taskId))}`;
+    const taskId = resolveExecutionTaskId(binding);
+    const projectKey = binding.projectKey ?? binding.runtimePaths?.projectKey ?? binding.journalProjectKey ?? null;
+    const params = new URLSearchParams({ task: taskIdValue(taskId) });
+    if (projectKey) params.set('projectKey', projectKey);
+    params.set('mode', 'rcc');
+    const dashboardUrl = `${binding.serveBaseUrl}/task-dashboard.html?${params.toString()}`;
     await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.status-layers .detail-cell', { timeout: 30_000 });
   }
@@ -1189,7 +1385,7 @@ export async function readTaskDashboardDom(binding, options = {}) {
  */
 export async function readObservationDom(binding) {
   const { page } = binding.browser;
-  await page.goto(`${binding.serveBaseUrl}/observation.html?task=${encodeURIComponent(taskIdValue(binding.taskId))}`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${binding.serveBaseUrl}/observation.html?task=${encodeURIComponent(taskIdValue(resolveExecutionTaskId(binding)))}`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.flow-node', { timeout: 30_000 });
   return page.evaluate(() => ({
     nodeIds: [...document.querySelectorAll('.flow-node')].map((card) => card.dataset.nodeId ?? ''),
@@ -1331,7 +1527,12 @@ export async function probeDashboardLiveSse(binding, options = {}) {
   const { page, context } = binding.browser;
   const waitDom = options.waitForDom ?? waitForDom;
   const base = binding.serveBaseUrl;
-  const dashboardUrl = `${base}/task-dashboard.html?task=${encodeURIComponent(taskIdValue(binding.taskId))}`;
+  const taskId = resolveExecutionTaskId(binding);
+  const projectKey = binding.projectKey ?? binding.runtimePaths?.projectKey ?? binding.journalProjectKey ?? null;
+  const params = new URLSearchParams({ task: taskIdValue(taskId) });
+  if (projectKey) params.set('projectKey', projectKey);
+  params.set('mode', 'rcc');
+  const dashboardUrl = `${base}/task-dashboard.html?${params.toString()}`;
   await page.addInitScript(() => {
     const recorded = window.__humanagentSseRecorded ??= [];
     const original = EventSource.prototype.addEventListener;

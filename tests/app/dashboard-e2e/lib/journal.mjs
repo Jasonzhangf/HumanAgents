@@ -71,7 +71,9 @@ export async function journalPathFor(binding) {
   const projectKey = attached
     ? (binding.journalProjectKey ?? binding.formalPaths?.projectKey ?? null)
     : (binding.projectKey ?? binding.runtimePaths?.projectKey ?? null);
-  const taskId = binding.taskId ?? binding.scope?.taskId ?? null;
+  // The granted occurrence is the task that really executes; the business anchor
+  // never writes an execution journal, so follow the execution identity first.
+  const taskId = binding.executionTaskId ?? binding.taskId ?? binding.scope?.taskId ?? null;
   if (!projectRoot || !projectKey) {
     throw new Error('journalPathFor requires config-derived projectRoot and projectKey');
   }
@@ -866,8 +868,18 @@ export async function readToolOutputReports(binding, dashboard, events) {
   const reports = [];
   for (const event of events) {
     if (event.kind !== 'provider.tool-result' || event.status !== 'succeeded') continue;
-    if (typeof event.outputRef !== 'string' || typeof event.seq !== 'number') continue;
-    const path = `/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/operations/${encodeURIComponent(operationId)}`
+    // The descriptor can arrive as a plain outputRef string or as an outputRefs
+    // list whose first entry is the immutable asset. Accept either shape, but do
+    // not invent an asset when neither is present.
+    const outputRef = typeof event.outputRef === 'string'
+      ? event.outputRef
+      : (Array.isArray(event.outputRefs) && typeof event.outputRefs[0] === 'string' ? event.outputRefs[0] : null);
+    if (outputRef === null || typeof event.seq !== 'number') continue;
+    // The event belongs to the task that really ran (the granted execution
+    // occurrence). The UI draft anchor only owns the interaction, not the tool
+    // output route; a request scoped to it returns tool-output.event-not-found.
+    const taskId = event.taskId ?? binding.executionTaskId ?? binding.taskId;
+    const path = `/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/operations/${encodeURIComponent(operationId)}`
       + `/executions/${executionEpoch}/events/${event.seq}/tool-output`;
     try {
       const response = await (binding.auth?.fetch ?? fetch)(`${binding.serveBaseUrl}${path}`);

@@ -22,6 +22,8 @@
  *   --entry <homepage|dashboard>                 default dashboard
  *   --outcome <success|failure|cancel>           default success
  *   --service-mode <candidate|installed-attach>  default candidate
+ *   --cli-path <path>                            default <repo>/dist/app/app/src/cli.js
+ *                                               (point at an installed artifact's CLI)
  *
  * Unsupported option combinations are rejected up front: a request for a mode
  * the runner cannot really exercise never silently becomes a new service or a
@@ -88,6 +90,7 @@ export const USAGE = [
   '  --entry <homepage|dashboard>                                          default dashboard',
   '  --outcome <success|failure|cancel>                                    default success',
   '  --service-mode <candidate|installed-attach>                           default candidate',
+  '  --cli-path <path>                                                     default <repo>/dist/app/app/src/cli.js',
   '  --help                                                                print this help',
 ].join('\n');
 
@@ -111,6 +114,7 @@ export function parseOptions(argv) {
     entry: take('--entry') ?? 'dashboard',
     outcome: take('--outcome') ?? 'success',
     serviceMode: take('--service-mode') ?? 'candidate',
+    cliPath: take('--cli-path'),
   };
   assertSupportedCombination(options.scenario, options);
   return options;
@@ -308,7 +312,7 @@ export async function runScenario(scenario, options = {}) {
       await (hooks.attachToInstalledService ?? attachToInstalledService)(binding);
       stageErrors.push({ stage: 'installed_attach', ok: true, owner: binding.attachedOwner });
     } else {
-      await (hooks.startServeForAttempt ?? startServeForAttempt)(binding);
+      await (hooks.startServeForAttempt ?? startServeForAttempt)(binding, { cliPath: options.cliPath ?? null });
       stageErrors.push({ stage: 'serve_start', ok: true, pid: binding.servePid, port: binding.servePort });
     }
     await (hooks.launchBrowserSession ?? launchBrowserSession)(binding);
@@ -359,9 +363,13 @@ export async function runScenario(scenario, options = {}) {
     ?? evidence.executionEpoch
     ?? null;
   binding.cycleId = binding.cycleId ?? evidence.scenarioEvidence?.cycleId ?? null;
-  binding.scope = binding.taskId
+  // The confirmed submission executes as its scheduled occurrence; the grant
+  // released that occurrence, so the journal and settlement identity must follow
+  // it. The business anchor never starts an operation and never reaches terminal.
+  const settleTaskId = binding.executionTaskId ?? binding.taskId ?? null;
+  binding.scope = settleTaskId
     ? {
-        taskId: binding.taskId,
+        taskId: settleTaskId,
         ...(binding.operationId ? { operationId: binding.operationId } : {}),
         ...(binding.cycleId ? { cycleId: binding.cycleId } : {}),
         ...(binding.executionEpoch !== null ? { executionEpoch: binding.executionEpoch } : {}),
@@ -385,7 +393,7 @@ export async function runScenario(scenario, options = {}) {
   if (serviceMode === 'installed-attach') {
     // The same single owner handles attached mode: it never stops the formal
     // owner and only assesses settlement (read-only).
-    settleResult = await stopTaskAndSettle(binding, binding.taskId ?? null, {
+    settleResult = await stopTaskAndSettle(binding, binding.executionTaskId ?? binding.taskId ?? null, {
       expectedOutcome: outcome,
       terminalState: evidence.terminalState ?? null,
     }).catch((error) => ({ stopped: false, attached: true, settled: false, reason: `attached settlement probe failed: ${error.message}` }));
@@ -400,7 +408,7 @@ export async function runScenario(scenario, options = {}) {
     // terminal is assessed read-only (no stop); a still-running task gets one
     // formal stop; a cancel that already used this helper is reused verbatim via
     // its attempt-scoped control record.
-    settleResult = await stopTaskAndSettle(binding, binding.taskId ?? null, {
+    settleResult = await stopTaskAndSettle(binding, binding.executionTaskId ?? binding.taskId ?? null, {
       expectedOutcome: outcome,
       terminalState: evidence.terminalState ?? null,
     })
