@@ -82,12 +82,17 @@ export class JsonlTaskIdentityJournal {
     validateTaskIdentityAppendInput(input);
     const commitId = identityCommitId(input.scope);
     const candidate = createTaskIdentityRecord(input, `jsonl:${commitId}`);
+    const existing = (await this.replay(input.scope))[0];
+    if (existing !== undefined) {
+      assertTaskIdentityEstablishmentMatches(existing, input);
+      return existing;
+    }
     return this.journal.transaction(
       ({ records }) => {
-        const existing = typedReplay(records).find((identity) => taskKey(identity.scope) === taskKey(candidate.scope));
-        if (existing) {
-          assertTaskIdentityEstablishmentMatches(existing, input);
-          return { existing, append: false as const };
+        const raced = typedReplay(records).find((identity) => taskKey(identity.scope) === taskKey(candidate.scope));
+        if (raced) {
+          assertTaskIdentityEstablishmentMatches(raced, input);
+          return { existing: raced, append: false as const };
         }
         const occupiedCommit = records.find((record) => record.commitId === commitId);
         if (occupiedCommit) throw new JournalIntegrityError(`task identity commit ${commitId} belongs to another fact`);

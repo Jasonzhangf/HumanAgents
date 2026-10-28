@@ -99,6 +99,7 @@ import {
   uiRuntimeControlJournalPath,
   type UiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
+import { openUiRuntimeOrganJournal } from '../../packages/app/src/ui-runtime/journal.js';
 import type { ExplicitProviderSettlementReadPort } from '../../packages/app/src/ui-runtime/service.js';
 import { ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { PreparedExecutionStop, PreparedExecutionStopPreparationFailure } from '../../packages/app/src/ui-runtime/prepared-execution-stop.js';
@@ -678,6 +679,33 @@ function serviceFor(
     ...(taskGrantPort === undefined ? {} : { taskGrantPort }),
     runtimeComposition: { admitExecution: async () => {} },
   });
+}
+
+async function seedLargeControlJournal(filePath: string, scope: { readonly organId: typeof organId; readonly taskId: TaskId }, count: number): Promise<void> {
+  const first = await new JsonlOrganJournal(filePath).append({
+    kind: 'event',
+    scope,
+    payload: { filler: 0 },
+  });
+  const lines = [JSON.stringify(first)];
+  let previousRecordDigest = first.recordDigest;
+  for (let index = 1; index < count; index += 1) {
+    const recordWithoutDigest = {
+      version: 1 as const,
+      seq: index + 1,
+      kind: 'event' as const,
+      scope,
+      payload: { filler: index },
+      previousRecordDigest,
+    };
+    const record = {
+      ...recordWithoutDigest,
+      recordDigest: `sha256:${createHash('sha256').update(JSON.stringify(recordWithoutDigest)).digest('hex')}`,
+    };
+    lines.push(JSON.stringify(record));
+    previousRecordDigest = record.recordDigest;
+  }
+  await writeFile(filePath, `${lines.join('\n')}\n`, 'utf8');
 }
 
 function preparedStopAdmission(
@@ -4384,6 +4412,52 @@ test('task dashboard retains current bound public output commits on read failure
   assert.deepEqual(after.publicOutput?.commits, before.publicOutput?.commits);
   assert.equal(after.publicOutput?.publicCommitWatermark, before.publicOutput?.publicCommitWatermark);
   assert.equal(after.output, before.output);
+});
+
+test('unchanged control journal is not re-read on warm task dashboard calls', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-dashboard-cache-'));
+  const controlPath = join(root, 'task-control.jsonl');
+  const task = { taskId: id('task', 'dashboard-cache-task') };
+  let service: UiRuntimeService | undefined;
+  try {
+    await seedLargeControlJournal(controlPath, { organId, taskId: task.taskId }, 12_000);
+    const controlJournal = openUiRuntimeOrganJournal(controlPath);
+    const checkpointStore = new ServiceExecutionCheckpointStore(controlPath, controlJournal, () => new Date());
+    const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+    const running = new UiRuntimeService({
+      mode: 'fake',
+      organId,
+      binding,
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+      checkpointStoreFor: () => checkpointStore,
+      attentionPort: attentionPort(),
+      providerState: 'ready',
+      journal: runtimeJournal,
+      closurePort: runtimeJournal,
+      memory: testMemory('project-ui-test'),
+      explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+      runtimeComposition: { admitExecution: async () => {} },
+    });
+    service = running;
+    const created = running.createTask({ title: 'dashboard cache task' });
+    await running.startExecution(created.taskId, { prompt: 'warm dashboard cache task' });
+    await waitFor(() => assert.equal(running.taskDashboard(created.taskId).state, 'succeeded'));
+
+    await running.taskDashboardWithPlan(created.taskId);
+
+    const timings: number[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const startedAt = performance.now();
+      const dashboard = await running.taskDashboardWithPlan(created.taskId);
+      timings.push(performance.now() - startedAt);
+      assert.equal(dashboard.taskId.value, created.taskId.value);
+    }
+    assert.ok(timings.every((ms) => ms < 20), `warm dashboard calls exceeded 20 ms: ${timings.join(', ')}`);
+    console.log('dashboard cache warm timings', JSON.stringify({ timings }));
+  } finally {
+    await service?.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('confirmed requirement cannot bypass implicit admission when the provider is unavailable', async () => {

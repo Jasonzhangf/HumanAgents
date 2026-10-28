@@ -85,6 +85,14 @@ export class JournalCommitConflictError extends JournalIntegrityError {
 
 const LOCK_RETRY_MS = 20;
 const LOCK_WAIT_MS = 5_000;
+const VERIFIED_JOURNAL_CACHE_LIMIT = 32;
+
+interface VerifiedJournalCacheEntry {
+  readonly key: string;
+  readonly pending: Promise<JournalVerification>;
+}
+
+const verifiedJournals = new Map<string, VerifiedJournalCacheEntry>();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -391,6 +399,56 @@ async function readVerifiedJournal(filePath: string): Promise<JournalVerificatio
   return parse(raw);
 }
 
+async function verifiedJournalCacheKey(filePath: string): Promise<string> {
+  let handle;
+  try {
+    handle = await open(filePath, 'r');
+    const info = await (handle as unknown as {
+      stat(): Promise<{ readonly dev: number; readonly ino: number; readonly size: number; readonly mtimeMs: number }>;
+    }).stat();
+    return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}`;
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return 'absent';
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+function rememberVerifiedJournal(filePath: string, entry: VerifiedJournalCacheEntry): void {
+  verifiedJournals.delete(filePath);
+  verifiedJournals.set(filePath, entry);
+  while (verifiedJournals.size > VERIFIED_JOURNAL_CACHE_LIMIT) {
+    const oldest = verifiedJournals.keys().next();
+    if (oldest.done) return;
+    verifiedJournals.delete(oldest.value);
+  }
+}
+
+async function cachedVerifiedJournal(filePath: string): Promise<JournalVerification> {
+  const key = await verifiedJournalCacheKey(filePath);
+  const cached = verifiedJournals.get(filePath);
+  if (cached !== undefined && cached.key === key) {
+    rememberVerifiedJournal(filePath, cached);
+    return cached.pending;
+  }
+  const entry: VerifiedJournalCacheEntry = { key, pending: readVerifiedJournal(filePath) };
+  rememberVerifiedJournal(filePath, entry);
+  try {
+    return await entry.pending;
+  } catch (error) {
+    if (verifiedJournals.get(filePath) === entry) verifiedJournals.delete(filePath);
+    throw error;
+  }
+}
+
+async function rememberVerifiedJournalState(filePath: string, verification: JournalVerification): Promise<void> {
+  rememberVerifiedJournal(filePath, {
+    key: await verifiedJournalCacheKey(filePath),
+    pending: Promise.resolve(verification),
+  });
+}
+
 async function replaceFileDurably(filePath: string, content: string): Promise<void> {
   const tempPath = `${filePath}.recover-${pid}-${Date.now().toString(36)}-${randomToken()}`;
   try {
@@ -417,7 +475,7 @@ async function replaceFileDurably(filePath: string, content: string): Promise<vo
 export class JsonlOrganJournal {
   constructor(private readonly filePath: string) {}
 
-  async verify(): Promise<JournalVerification> { return readVerifiedJournal(this.filePath); }
+  async verify(): Promise<JournalVerification> { return cachedVerifiedJournal(this.filePath); }
 
   async recover(): Promise<JournalVerification> {
     const lock = await acquireLock(this.filePath);
@@ -427,6 +485,7 @@ export class JsonlOrganJournal {
       const verification = parse(recovered.content);
       if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
       if (recovered.truncated) await replaceFileDurably(this.filePath, recovered.content);
+      await rememberVerifiedJournalState(this.filePath, verification);
       return verification;
     } finally {
       await releaseLock(lock);
@@ -450,22 +509,28 @@ export class JsonlOrganJournal {
   ): Promise<R> {
     const lock = await acquireLock(this.filePath);
     try {
-      const verification = await readVerifiedJournal(this.filePath);
+      let verification = await cachedVerifiedJournal(this.filePath);
       if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
       const input = await read({ records: verification.records });
-      return await apply(input, (next) => this.appendLocked(next));
+      return await apply(input, async (next) => {
+        const appended = await this.appendLocked(next, verification);
+        verification = appended.verification;
+        return appended.record;
+      });
     } finally {
       await releaseLock(lock);
     }
   }
 
-  private async appendLocked(input: JournalAppendInput): Promise<JournalRecord> {
+  private async appendLocked(
+    input: JournalAppendInput,
+    verification: JournalVerification,
+  ): Promise<{ readonly record: JournalRecord; readonly verification: JournalVerification }> {
     const commitId = input.commitId;
     if (commitId !== undefined) validateCommitId(commitId);
     if (input.kind === 'checkpoint' && input.payload !== undefined) throw new JournalIntegrityError('checkpoint record cannot contain payload');
     if (input.kind === 'event' && input.checkpoint !== undefined) throw new JournalIntegrityError('event record cannot contain checkpoint');
     if (input.kind === 'event' && input.nativeCheckpointEnvelope !== undefined) throw new JournalIntegrityError('event record cannot contain checkpoint envelope');
-    const verification = await readVerifiedJournal(this.filePath);
     if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
     if (commitId !== undefined) {
       const existing = verification.records.find((record) => record.commitId === commitId);
@@ -477,7 +542,7 @@ export class JsonlOrganJournal {
           } finally {
             await handle.close();
           }
-          return existing;
+          return { record: existing, verification };
         }
         throw new JournalCommitConflictError(commitId, existing);
       }
@@ -526,7 +591,12 @@ export class JsonlOrganJournal {
     } finally {
       await handle.close();
     }
-    return record;
+    const committedVerification: JournalVerification = {
+      valid: true,
+      records: [...verification.records, JSON.parse(JSON.stringify(record)) as JournalRecord],
+    };
+    await rememberVerifiedJournalState(this.filePath, committedVerification);
+    return { record, verification: committedVerification };
   }
 
   async latest(): Promise<JournalRecord | null> { const result = await this.verify(); if (!result.valid) throw new JournalIntegrityError(result.error ?? 'journal is invalid'); return result.records.at(-1) ?? null; }

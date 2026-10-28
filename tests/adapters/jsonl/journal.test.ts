@@ -9,6 +9,7 @@ import {
   createJsonlEventPublicationJournal,
   JsonlOrganJournal,
   JsonlInteractionParentTurnJournal,
+  JsonlTaskIdentityJournal,
   JournalCommitConflictError,
   JournalIntegrityError,
 } from '../../../packages/adapters/jsonl/src/index.js';
@@ -39,6 +40,44 @@ import {
 const organ = id('organ', 'organ-a'); const task = id('task', 'task-a'); const cycle = id('cycle', 'cycle-a');
 const checkpoint = (seq: number, previousCheckpointId: Checkpoint['previousCheckpointId']): Checkpoint => ({ id: id('checkpoint', `cp-${seq}`), scope: { organId: organ, taskId: task }, cycleId: cycle, seq, previousCheckpointId, directiveRevision: 1, executionEpoch: 1, outcome: 'waiting', summary: `cp-${seq}`, recoveryStateRef: { evidenceId: id('evidence', `ev-${seq}`), kind: 'operation', source: 'test', locator: `state-${seq}`, scope: { organId: organ, taskId: task } }, evidenceRefs: [], next: { kind: 'wait', ref: 'condition' } });
 async function fixture(): Promise<{ journal: JsonlOrganJournal; file: string }> { const dir = await mkdtemp(join(tmpdir(), 'humanagent-journal-')); const file = join(dir, 'organ.jsonl'); return { journal: new JsonlOrganJournal(file), file }; }
+
+const readCountChildCode = [
+  "import { readFileSync } from 'node:fs';",
+  "import { createRequire, syncBuiltinESMExports } from 'node:module';",
+  "const [url, file, inputJson, mode] = process.argv.slice(1);",
+  "const { JsonlOrganJournal, JsonlTaskIdentityJournal } = await import(url);",
+  "const input = JSON.parse(inputJson);",
+  "const reads = [];",
+  "const described = [];",
+  "const require = createRequire(import.meta.url);",
+  "const promises = require('node:fs/promises');",
+  "const original = promises.readFile;",
+  "promises.readFile = async (target, ...rest) => {",
+  "  if (String(target) === file) reads.push('full');",
+  "  return original.call(this, target, ...rest);",
+  "};",
+  "syncBuiltinESMExports();",
+  "const journal = new JsonlOrganJournal(file);",
+  "if (mode === 'identity') {",
+  "  const identities = new JsonlTaskIdentityJournal(journal);",
+  "  await identities.append(input);",
+  "  for (let i = 0; i < 20; i += 1) {",
+  "    const before = reads.length;",
+  "    const existing = await identities.append(input);",
+  "    if (reads.length !== before) described.push(`append-${i}:read`);",
+  "    reads.length = before;",
+  "    if (existing.title !== input.title) throw new Error(`identity retry changed shape ${i}`);",
+  "  }",
+  "} else if (mode === 'append-after-verify') {",
+  "  await journal.verify();",
+  "  reads.length = 0;",
+  "  await journal.append(input);",
+  "} else if (mode === 'stats') {",
+  "  await journal.verify();",
+  "  reads.length = 0;",
+  "}",
+  "process.stdout.write(JSON.stringify({ reads: reads.length, described, bytes: readFileSync(file, 'utf8').length }));",
+].join('\n');
 
 const childCode = [
   "const url = process.argv[1];",
@@ -167,10 +206,103 @@ function runBoundedChild(code: string, args: string[]): Promise<ChildResult> {
 }
 
 test('append, latest, replay and verify checkpoint chain across events', async () => { const { journal } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); await journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { observed: true } }); const second = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(2, first.checkpoint!.id) }); assert.equal((await journal.latest())!.seq, 3); assert.equal((await journal.replay()).length, 3); assert.equal((await journal.verify()).valid, true); assert.equal(second.checkpoint!.previousCheckpointId!.value, 'cp-1'); });
+test('unchanged control journal is verified once across repeated no-op identity appends', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-identity-cache-'));
+  const file = join(root, 'organ.jsonl');
+  const scope = { organId: organ, taskId: task };
+  const input = {
+    scope,
+    title: 'identity cache',
+    source: {
+      requirementId: 'requirement:identity-cache',
+      inputRevision: 1,
+      draftId: 'draft:identity-cache',
+      draftRevisionVersion: 1,
+      draftRevisionHash: 'sha256:identity-cache',
+      confirmationRef: 'confirmation:identity-cache',
+    },
+  };
+  const moduleUrl = new URL('../../../packages/adapters/jsonl/src/index.js', import.meta.url).href;
+  try {
+    const journal = new JsonlOrganJournal(file);
+    await journal.append({
+      commitId: 'task-identity:seed',
+      kind: 'event',
+      scope,
+      payload: { type: 'task-identity.established', identity: { ...input, journalCommitRef: 'jsonl:task-identity:seed' } },
+    });
+    const baseline = await runBoundedChild(readCountChildCode, [
+      moduleUrl, file, JSON.stringify(input), 'stats',
+    ]);
+    assert.equal(baseline.code, 0, `baseline child failed: ${baseline.stderr}`);
+    const baselineReads = (JSON.parse(baseline.stdout) as { readonly reads: number }).reads;
+    assert.equal(baselineReads, 0, 'a warmed verification must not re-read the journal');
+    const result = await runBoundedChild(readCountChildCode, [
+      moduleUrl, file, JSON.stringify(input), 'identity',
+    ]);
+    assert.equal(result.code, 0, `identity child failed: ${result.stderr}`);
+    const report = JSON.parse(result.stdout) as { readonly reads: number; readonly described: readonly string[]; readonly bytes: number };
+    assert.equal(report.described.length, 0, `no-op identity appends re-read the journal: ${report.described.join(',')}`);
+    assert.equal(report.reads, baselineReads + 1, `no-op identity appends performed more than the initial verification (${report.reads})`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a new append verifies the unchanged file at most once', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-single-verify-'));
+  const file = join(root, 'organ.jsonl');
+  const moduleUrl = new URL('../../../packages/adapters/jsonl/src/index.js', import.meta.url).href;
+  const input = { kind: 'event' as const, scope: { organId: organ, taskId: task }, payload: { step: 1 } };
+  try {
+    const seeded = new JsonlOrganJournal(file);
+    await seeded.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { seed: true } });
+    const result = await runBoundedChild(readCountChildCode, [
+      moduleUrl, file, JSON.stringify(input), 'append-after-verify',
+    ]);
+    assert.equal(result.code, 0, `append child failed: ${result.stderr}`);
+    const report = JSON.parse(result.stdout) as { readonly reads: number };
+    assert.equal(report.reads, 0, `a warm append performed additional verification reads (${report.reads})`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an externally changed journal state always forces a new full verification', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-cache-invalidation-'));
+  const file = join(root, 'organ.jsonl');
+  const scope = { organId: organ, taskId: task };
+  const moduleUrl = new URL('../../../packages/adapters/jsonl/src/index.js', import.meta.url).href;
+  try {
+    const journal = new JsonlOrganJournal(file);
+    const first = await journal.append({ kind: 'event', scope, payload: { step: 1 } });
+    const report = await runBoundedChild(readCountChildCode, [
+      moduleUrl, file, JSON.stringify({ kind: 'event', scope, payload: { step: 2 } }), 'stats',
+    ]);
+    const baseline = JSON.parse(report.stdout) as { readonly reads: number };
+    assert.equal(baseline.reads, 0);
+
+    await appendFile(file, `${JSON.stringify({
+      version: 1,
+      seq: first.seq + 1,
+      kind: 'event',
+      scope,
+      payload: { step: 2 },
+      previousRecordDigest: first.recordDigest,
+      recordDigest: 'sha256:stale-verification-was-reused',
+    })}\n`, 'utf8');
+    const verification = await journal.verify();
+    assert.equal(verification.valid, false);
+    assert.match(verification.error!, /digest/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test('rejects duplicate and broken sequence records', async () => { const { journal, file } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); await journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { observed: true } }); const raw = await readFile(file, 'utf8'); const [a, b] = raw.trim().split('\n').map((line) => JSON.parse(line) as { seq: number; previousRecordDigest: string | null }); await writeFile(file, `${JSON.stringify(a)}\n${JSON.stringify({ ...b, seq: a.seq })}\n`, 'utf8'); let result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /duplicate/); await writeFile(file, `${JSON.stringify(a)}\n${JSON.stringify({ ...b, previousRecordDigest: 'sha256:wrong' })}\n`, 'utf8'); result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /predecessor/); });
 test('commitId is idempotent for the same facts and conflicts for different facts', async () => { const { journal, file } = await fixture(); const scope = { organId: organ, taskId: task }; const first = await journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 1 } }); const replay = await journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 1 } }); assert.equal(replay.seq, first.seq); assert.equal(replay.commitId, 'job-1'); assert.equal((await readFile(file, 'utf8')).trim().split('\n').length, 1); await assert.rejects(() => journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 2 } }), JournalCommitConflictError); const second = await journal.append({ commitId: 'job-2', kind: 'event', scope, payload: { step: 2 } }); assert.equal(second.seq, 2); assert.equal((await journal.findByCommitId('job-1'))!.seq, 1); assert.equal((await journal.findByCommitId('job-2'))!.seq, 2); });
 test('recovers a committed journal fact after writer termination without an outer receipt', async () => {
-  const fixtureRoot = '/Users/fanzhang/.humanagent/test-fixtures/native-reasoning-f1-j-a2';
+  const fixtureRoot = process.env.HUMANAGENT_TEST_ROOT
+    ?? '/Users/fanzhang/.humanagent/test-fixtures/native-reasoning-f1-j-a2';
   await mkdir(fixtureRoot, { recursive: true });
   const fixturePath = await mkdtemp(join(fixtureRoot, 'receipt-loss-'));
   const file = join(fixturePath, 'organ.jsonl');
@@ -599,7 +731,8 @@ test('recovery appends a root checkpoint for a new operation chain after another
 });
 
 test('recover rejects complete journal corruption without rewriting evidence', async () => {
-  const fixtureParent = '/Users/fanzhang/.humanagent/test-fixtures/native-reasoning-f1-j-r1/';
+  const fixtureParent = process.env.HUMANAGENT_TEST_ROOT
+    ?? '/Users/fanzhang/.humanagent/test-fixtures/native-reasoning-f1-j-r1/';
   await mkdir(fixtureParent, { recursive: true });
   const fixture = await mkdtemp(join(fixtureParent, 'journal-corruption-'));
   const scope = { organId: organ, taskId: task };

@@ -157,7 +157,7 @@ import { readStandardTurnDelivery,
 export class ServiceExecutionCheckpointStore extends FileCheckpointStore {
   private readonly native;
   constructor(filePath: string, journal: JsonlOrganJournal, private readonly clock: () => Date) {
-    super(filePath);
+    super(filePath, journal);
     this.native = createJsonlCheckpointJournal({ filePath, journal });
   }
   override async append(value: import('../../../runtime/src/checkpoints/ports.js').CheckpointAppendRequest) {

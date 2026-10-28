@@ -1,5 +1,4 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { open } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type {
@@ -36,7 +35,6 @@ import {
   JournalIntegrityError,
   JsonlOrganJournal,
   type JournalRecord,
-  type JournalVerification,
 } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
@@ -112,82 +110,18 @@ export function uiRuntimeTaskCheckpointPath(
  * content. Nothing about a task, a decision or a control fact is derived or
  * remembered here; only the already committed lines are shared.
  */
-const SHARED_JOURNAL_CACHE_LIMIT = 2;
-
-interface SharedJournalEntry {
-  readonly key: string;
-  readonly pending: Promise<JournalVerification>;
-}
-
-const sharedJournals = new Map<string, SharedJournalEntry>();
-
-async function journalCacheKey(filePath: string): Promise<string> {
-  let handle;
-  try {
-    handle = await open(filePath, 'r');
-    const info = await handle.stat();
-    return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}`;
-  } catch (error) {
-    if ((error as { code?: string }).code === 'ENOENT') return 'absent';
-    throw error;
-  } finally {
-    await handle?.close();
-  }
-}
-
-function rememberSharedJournal(filePath: string, entry: SharedJournalEntry): void {
-  // Re-insert so the map keeps the most recently used journal last.
-  sharedJournals.delete(filePath);
-  sharedJournals.set(filePath, entry);
-  while (sharedJournals.size > SHARED_JOURNAL_CACHE_LIMIT) {
-    const oldest = sharedJournals.keys().next();
-    if (oldest.done) return;
-    sharedJournals.delete(oldest.value);
-  }
-}
-
-class SharedVerifiedOrganJournal extends JsonlOrganJournal {
-  constructor(private readonly journalPath: string) {
-    super(journalPath);
-  }
-
-  private async load(): Promise<JournalVerification> {
-    const key = await journalCacheKey(this.journalPath);
-    const cached = sharedJournals.get(this.journalPath);
-    if (cached !== undefined && cached.key === key) {
-      rememberSharedJournal(this.journalPath, cached);
-      return cached.pending;
-    }
-    const pending = super.verify();
-    const entry: SharedJournalEntry = { key, pending };
-    rememberSharedJournal(this.journalPath, entry);
-    try {
-      return await pending;
-    } catch (error) {
-      if (sharedJournals.get(this.journalPath) === entry) sharedJournals.delete(this.journalPath);
-      throw error;
-    }
-  }
-
-  override async verify(): Promise<JournalVerification> {
-    return this.load();
-  }
-
-  override async replay(): Promise<readonly JournalRecord[]> {
-    const verification = await this.load();
-    if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
-    return verification.records;
-  }
-}
-
 /**
  * Opens one canonical Organ Journal for reading. Every reader opened through
  * this function sees the same verified records until the file changes on disk,
  * and a concurrent burst is served by one parse instead of one per reader.
+ *
+ * The verified-record cache is owned by the adapter's `JsonlOrganJournal` and
+ * keyed by the file identity. This factory stays a single path-based entry so
+ * the app never opens a second cache around the same physical journal.
  */
 export function openUiRuntimeOrganJournal(filePath: string): JsonlOrganJournal {
   if (!filePath.trim()) throw new Error('Organ Journal path is required');
-  return new SharedVerifiedOrganJournal(filePath);
+  return new JsonlOrganJournal(filePath);
 }
 
 export interface DurableJournalReadFailure {
@@ -738,7 +672,10 @@ function publicOutputRefFromRecord(record: import('../../../adapters/jsonl/src/i
 }
 
 export class FileCheckpointStore implements NativeCheckpointJournalPort, CheckpointCommitPort, PublicOutputJournalPort {
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly sharedJournal?: JsonlOrganJournal,
+  ) {}
 
   async verify(_scope: ScopeRef): Promise<CheckpointChainVerification> {
     const verification = await this.journal().verify();
@@ -852,7 +789,7 @@ export class FileCheckpointStore implements NativeCheckpointJournalPort, Checkpo
   }
 
   private checkpointPort(): NativeCheckpointJournalPort {
-    return createJsonlCheckpointJournal({ filePath: this.filePath });
+    return createJsonlCheckpointJournal({ filePath: this.filePath, journal: this.journal() });
   }
 
   /**
@@ -917,7 +854,7 @@ export class FileCheckpointStore implements NativeCheckpointJournalPort, Checkpo
   }
 
   private journal(): JsonlOrganJournal {
-    return new JsonlOrganJournal(this.filePath);
+    return this.sharedJournal ?? openUiRuntimeOrganJournal(this.filePath);
   }
 }
 
