@@ -1344,7 +1344,7 @@ export async function readTaskDashboardDom(binding, options = {}) {
     params.set('mode', 'rcc');
     const dashboardUrl = `${binding.serveBaseUrl}/task-dashboard.html?${params.toString()}`;
     await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('.status-layers .detail-cell', { timeout: 30_000 });
+    await page.waitForSelector('.status-layers .detail-cell', { timeout: 30_000, state: 'attached' });
   }
   return page.evaluate(() => {
     const text = (node) => node?.textContent?.trim() ?? null;
@@ -1557,7 +1557,7 @@ export async function probeDashboardLiveSse(binding, options = {}) {
     };
   });
   await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('.status-layers .detail-cell', { timeout: 30_000 });
+  await page.waitForSelector('.status-layers .detail-cell', { timeout: 30_000, state: 'attached' });
 
   const readState = () => page.evaluate(() => {
     const text = (node) => node?.textContent?.trim() ?? null;
