@@ -57,6 +57,7 @@ import {
   assessSettlement,
   executionTaskFromRecords,
   isCheckpointJournalFile,
+  isLegalTerminalState,
   journalPathFor,
   journalRootFor,
   manifestsIdentical,
@@ -76,6 +77,7 @@ import {
   startServeForAttempt,
   submitDirectiveAndConfirmDraft,
   taskScopedNavigation,
+  waitForTerminal,
 } from './lib/browser.mjs';
 import {
   closeNoTaskAttempt,
@@ -3682,4 +3684,137 @@ test('cleanup stop/settle projects string and typed task identities to the same 
       await stopChild(owned);
     }
   }
+});
+
+/**
+ * Runner observation gap (Frank ruling): blocked/not-applicable are real final
+ * domain terminals. The observation layer must recognise them at once and hand
+ * the real state to settlement, instead of waiting out the terminal timeout and
+ * misreporting timeout/identity-unavailable. These tests pin the post-fix
+ * behaviour; they fail against the pre-fix code that only knew
+ * succeeded/failed/stopped.
+ */
+test('OBSERVED_TERMINAL_STATES and isLegalTerminalState recognise blocked/not-applicable', async () => {
+  const journal = await import('./lib/journal.mjs');
+  const observed = journal.OBSERVED_TERMINAL_STATES ?? [];
+  for (const state of ['succeeded', 'failed', 'stopped', 'cancelled', 'canceled', 'blocked', 'not-applicable']) {
+    assert.equal(isLegalTerminalState(state), true, `${state} is a legal authoritative terminal`);
+    assert.equal(observed.includes(state), true, `${state} is in OBSERVED_TERMINAL_STATES`);
+  }
+  assert.equal(isLegalTerminalState('running'), false, 'running is not a terminal');
+  assert.equal(isLegalTerminalState('unknown'), false, 'unknown is not a terminal');
+});
+
+test('waitForTerminal returns immediately when the dashboard reports a blocked terminal', async () => {
+  const page = recordingPage();
+  const calls = [];
+  // The dashboard is already blocked before the first poll: the wait must return
+  // on the first observation, not after a 600s timeout.
+  const auth = {
+    fetch: async (url, init = {}) => {
+      calls.push({ url: String(url), method: String(init.method ?? 'GET').toUpperCase() });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          state: 'blocked',
+          operationId: CONTRACT_OPERATION.value,
+          executionEpoch: CONTRACT_EPOCH,
+        }),
+      };
+    },
+  };
+  const binding = {
+    serveBaseUrl: 'http://127.0.0.1:1',
+    taskId: CONTRACT_TASK,
+    executionTaskId: { scope: 'task', value: 'scheduled-task-observed-blocked' },
+    browser: { page },
+    auth,
+  };
+  const probe = await waitForTerminal(binding, { timeoutMs: 50 });
+  assert.equal(probe.state, 'blocked', 'waitForTerminal must surface the blocked state');
+  assert.equal(binding.terminalState, 'blocked', 'the blocked state is recorded on the binding');
+  // Exactly one dashboard probe: the first observation already saw a terminal.
+  const dashboardProbes = calls.filter((call) => call.url.includes('/dashboard'));
+  assert.ok(dashboardProbes.length >= 1, 'the dashboard was probed');
+  assert.ok(dashboardProbes.length <= 2, 'a terminal dashboard must not be polled to timeout');
+});
+
+test('waitForTerminal returns immediately when the dashboard reports not-applicable', async () => {
+  const page = recordingPage();
+  const auth = {
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ state: 'not-applicable' }),
+    }),
+  };
+  const binding = {
+    serveBaseUrl: 'http://127.0.0.1:1',
+    taskId: CONTRACT_TASK,
+    browser: { page },
+    auth,
+  };
+  const probe = await waitForTerminal(binding, { timeoutMs: 50 });
+  assert.equal(probe.state, 'not-applicable');
+});
+
+test('stopTaskAndSettle returns readOnly with zero stop POSTs for a blocked terminal', async () => {
+  const dir = await makeTempRoot('blocked-readonly-stop');
+  const journal = await writeOutcomeFixture(dir, 'blocked-stop', {
+    terminalState: 'blocked',
+    finalState: 'blocked',
+    checkpointOutcome: 'blocked',
+  });
+  const calls = [];
+  const binding = {
+    serviceMode: 'candidate',
+    outcome: 'success',
+    ...CONTRACT_SCOPE,
+    scope: CONTRACT_SCOPE,
+    terminalState: 'blocked',
+    serveBaseUrl: 'http://127.0.0.1:1',
+    journalPath: journal.uiPath,
+    journalPaths: journal.paths,
+    auth: fakeAuth(calls, { dashboardState: 'blocked' }),
+    browser: { close: async () => {} },
+    tempRoots: [],
+    persistentRoots: [],
+    servePid: null,
+  };
+  const result = await stopTaskAndSettle(binding, binding.taskId, { expectedOutcome: 'success', terminalState: 'blocked' });
+  assert.equal(calls.filter((call) => call.method === 'POST').length, 0, 'a blocked terminal must never receive a stop POST');
+  assert.equal(result.readOnly, true);
+  assert.equal(result.settled, false, 'a blocked terminal does not match the success outcome');
+  assert.equal(result.state, 'blocked');
+});
+
+test('assessSettlement parses the scheduled execution task id and reports blocked mismatch, not timeout/identity-unavailable', async () => {
+  const dir = await makeTempRoot('blocked-settle-identity');
+  const journal = await writeOutcomeFixture(dir, 'blocked-identity', {
+    terminalState: 'blocked',
+    finalState: 'blocked',
+    checkpointOutcome: 'blocked',
+  });
+  // The binding carries the draft anchor as taskId but the real execution task
+  // (scheduled-task-*) via executionTaskId; expectedScopeOf must prefer it.
+  const binding = {
+    outcome: 'success',
+    ...CONTRACT_SCOPE,
+    taskId: { scope: 'task', value: 'ui-task-implicit-draft-4' },
+    executionTaskId: CONTRACT_SCOPE.taskId,
+    scope: CONTRACT_SCOPE,
+    journalPath: journal.uiPath,
+    journalPaths: journal.paths,
+  };
+  const settlement = await assessSettlement(binding, { expectedOutcome: 'success' });
+  assert.equal(settlement.settled, false, 'a blocked terminal never settles as success');
+  assert.equal(settlement.terminal?.state, 'blocked', 'the blocked terminal is resolved from the journal');
+  assert.match(
+    settlement.reason,
+    /terminal state "blocked" does not match the expected success outcome/,
+    'the reason names the real blocked terminal, not timeout or identity-unavailable',
+  );
+  assert.equal(settlement.reason.includes('timeout'), false);
+  assert.equal(settlement.reason.includes('execution identity is unavailable'), false);
 });

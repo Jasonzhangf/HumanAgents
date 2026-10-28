@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createAttemptAuth } from './auth.mjs';
 import { taskIdValue } from './binding.mjs';
 import {
+  OBSERVED_TERMINAL_STATES,
   executionJournalPathFor,
   executionTaskFromRecords,
   readJournalStrict,
@@ -1358,8 +1359,14 @@ export async function openTaskDashboard(binding, options = {}) {
   if (options.waitNonterminal !== false) {
     await waitForDom(page, 'nonterminal task dashboard', async () => {
       const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/dashboard`, {}, binding.auth);
-      if (probe.state && !['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
-      if (probe.state === 'failed') return 'failed';
+      // A real terminal (including blocked/not-applicable) never advances to a
+      // running state: record it and stop waiting instead of timing out on a
+      // dashboard that will never change.
+      if (OBSERVED_TERMINAL_STATES.includes(probe.state)) {
+        binding.terminalState = probe.state;
+        return probe.state;
+      }
+      if (probe.state) return probe.state;
       return null;
     }, Number(options.runTimeoutMs ?? 240_000));
   }
@@ -1376,7 +1383,9 @@ export async function waitForTerminal(binding, options = {}) {
   const taskId = resolveExecutionTaskId(binding);
   const state = await waitForDom(page, 'task runtime terminal', async () => {
     const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(taskId))}/dashboard`, {}, binding.auth);
-    if (['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
+    // blocked/not-applicable are genuine final terminals: observe them at once
+    // and hand the real state to settlement instead of waiting out the timeout.
+    if (OBSERVED_TERMINAL_STATES.includes(probe.state)) return probe.state;
     return null;
   }, Number(options.timeoutMs ?? TERMINAL_TIMEOUT_MS));
   await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
