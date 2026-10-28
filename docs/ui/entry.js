@@ -147,6 +147,19 @@ export function taskScopeFromSystemRead(read, taskId) {
         taskId: { scope: 'task', value: id },
       }
     }
+    for (const row of project.tasks) {
+      if (row.scope?.kind !== 'task' || !Array.isArray(row.task?.executions)) continue
+      for (const child of row.task.executions) {
+        const childId = taskIdValue(child?.taskId)
+        if (childId !== id) continue
+        return {
+          kind: 'task',
+          projectKey: row.scope.projectKey,
+          mode: row.scope.mode,
+          taskId: { scope: 'task', value: id },
+        }
+      }
+    }
   }
   return null
 }

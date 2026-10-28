@@ -150,6 +150,38 @@ test('the exact task scope comes from the committed project read, never from a g
   assert.equal(resolveSubmittedTaskScope({ taskId, hint: {} }), null)
 })
 
+test('a child execution uses only its parent row committed project scope', () => {
+  const childId = { scope: 'task', value: 'task-child' }
+  const read = {
+    projects: [
+      {
+        tasks: [
+          {
+            scope: taskScope,
+            task: {
+              taskId,
+              executions: [
+                { taskId: { scope: 'task', value: 'task-other' } },
+                { taskId: childId },
+              ],
+            },
+          },
+          {
+            scope: { ...taskScope, kind: 'project', projectKey: 'project-other' },
+            task: { taskId: childId, executions: [] },
+          },
+        ],
+      },
+    ],
+  }
+
+  assert.deepEqual(taskScopeFromSystemRead(read, 'task-child'), {
+    ...taskScope,
+    taskId: childId,
+  })
+  assert.equal(taskScopeFromSystemRead(read, 'task-unlisted-child'), null)
+})
+
 test('refresh and landing only read and never recreate an existing task', async () => {
   const calls = []
   const api = {
