@@ -48,7 +48,7 @@ import {
   waitForTerminal,
 } from '../lib/browser.mjs';
 import { taskIdValue } from '../lib/binding.mjs';
-import { journalPathFor, readJournalStrict, scopeFactsFromRecords } from '../lib/journal.mjs';
+import { journalPathFor, readJournalStrict, scopeFactsFromRecords, OBSERVED_TERMINAL_STATES } from '../lib/journal.mjs';
 
 export const SCENARIO = 'existing-task-change';
 
@@ -923,9 +923,13 @@ async function waitForChangeTerminal(binding, operationId) {
   const probe = await waitForDom(page, 'changed task terminal', async () => {
     const dashboard = await readDashboardProbe(binding).catch(() => null);
     if (!dashboard) return null;
-    if (!['succeeded', 'failed', 'stopped'].includes(dashboard.state)) return null;
-    if (!expected || idValue(dashboard.operationId) !== expected) return null;
-    return dashboard;
+    // blocked/not-applicable are real final terminals: record and return instead
+    // of waiting out the change timeout on a task that will never advance.
+    if (OBSERVED_TERMINAL_STATES.includes(dashboard.state)) {
+      if (!expected || idValue(dashboard.operationId) !== expected) return null;
+      return dashboard;
+    }
+    return null;
   }, Number(process.env.E2E_TERMINAL_TIMEOUT_MS ?? 600_000));
   binding.terminalState = probe.state;
   binding.dashboardProbe = probe;

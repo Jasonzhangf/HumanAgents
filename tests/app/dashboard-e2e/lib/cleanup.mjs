@@ -29,6 +29,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { jsonRequest, resolveExecutionTaskId, serveExitStatus, sleep } from './browser.mjs';
 import { taskIdValue } from './binding.mjs';
 import {
+  OBSERVED_TERMINAL_STATES,
   assessSettlement,
   isLegalTerminalState,
   journalPathFor,
@@ -206,7 +207,10 @@ export async function stopTaskAndSettle(binding, taskId, options = {}) {
   const stopResponse = control.stopResponse;
   const state = await pollUntil('task settled', async () => {
     const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(target))}/dashboard`, {}, binding.auth).catch(() => null);
-    if (probe && ['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
+    // A terminal the runtime really reached (including blocked/not-applicable) is
+    // where the stop poll must stop; settlement then judges it against the
+    // requested outcome instead of waiting for a state that will never come.
+    if (probe && OBSERVED_TERMINAL_STATES.includes(probe.state)) return probe.state;
     return null;
   }, SETTLE_TIMEOUT_MS).catch(() => null);
   if (!state) {

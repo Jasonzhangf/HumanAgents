@@ -383,9 +383,12 @@ function eventScopeOf(event) {
 
 function expectedScopeOf(binding) {
   const scope = binding.scope ?? null;
+  // The granted execution occurrence is the task that really runs; the draft
+  // anchor never starts an operation, so follow executionTaskId first and keep
+  // the same precedence the journal resolver uses (journalPathFor).
   return {
     organId: binding.organId ?? scope?.organId ?? null,
-    taskId: binding.taskId ?? scope?.taskId ?? null,
+    taskId: binding.executionTaskId ?? scope?.taskId ?? binding.taskId ?? null,
     operationId: binding.operationId ?? scope?.operationId ?? null,
     cycleId: binding.cycleId ?? scope?.cycleId ?? null,
     executionEpoch: binding.executionEpoch ?? scope?.executionEpoch ?? null,
@@ -682,9 +685,27 @@ const SETTLE_TERMINAL_STATES = Object.freeze({
   cancel: ['stopped', 'cancelled', 'canceled'],
 });
 
+/**
+ * Every state the runtime projects as an authoritative terminal, whether or not
+ * it matches a requested outcome. `blocked` and `not-applicable` are real,
+ * final domain terminals: they never advance to succeeded, so the observation
+ * layer must recognise them immediately instead of waiting out a timeout.
+ * Settlement still decides against SETTLE_TERMINAL_STATES; this set only tells
+ * the observer when a task has really stopped moving.
+ */
+export const OBSERVED_TERMINAL_STATES = Object.freeze([
+  'succeeded',
+  'failed',
+  'stopped',
+  'cancelled',
+  'canceled',
+  'blocked',
+  'not-applicable',
+]);
+
 /** True when a runtime state is a legal authoritative terminal for settlement. */
 export function isLegalTerminalState(state) {
-  return Object.values(SETTLE_TERMINAL_STATES).some((states) => states.includes(state));
+  return OBSERVED_TERMINAL_STATES.includes(state);
 }
 
 /**
