@@ -1005,6 +1005,33 @@ export interface RuntimeSseEvent {
   readonly terminalPhase?: 'provider' | 'final';
 }
 
+/**
+ * Explicit-brain live step stream. The runtime owns sequence and occurrence
+ * time; the browser consumes the durable, human-readable step kind plus the
+ * identity fields the real provider/helper turn reported.
+ */
+export type ExplicitInteractionStepKind =
+  | 'request.dispatching'
+  | 'request.dispatched'
+  | 'response.reasoning'
+  | 'response.streaming'
+  | 'helper.dispatched'
+  | 'helper.request'
+  | 'helper.response'
+  | 'helper.accepted'
+  | 'request.settled'
+  | 'turn.completed';
+
+export interface ExplicitInteractionStepProjection {
+  readonly seq: number;
+  readonly kind: ExplicitInteractionStepKind;
+  readonly summary: string;
+  readonly occurredAt: string;
+  readonly requestId?: string;
+  readonly turnId?: string;
+  readonly helperCallId?: string;
+}
+
 export class RuntimeProjectionError extends Error {
   constructor(message: string) {
     super(message);

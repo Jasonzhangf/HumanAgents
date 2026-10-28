@@ -5,6 +5,7 @@ import { JsonlTaskGrantJournal, readTaskBusinessRegistration } from '../../../ad
 import { createJsonlOperationControlJournal } from '../operation-control-journal.js';
 import type { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeExecutionAllocation, RuntimeTaskJournalPort } from '../../../runtime/src/ui-runtime/coordinator.js';
+import { taskStepPublisherForPool } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { OperationStopSettlementPort, OperationTaskBoundaryPort } from '../../../runtime/src/gateway/ports.js';
 import { createToolExecutionGateway } from '../tool-execution-gateway.js';
 import { AppLifecycleError } from '../errors.js';
@@ -1267,6 +1268,12 @@ export function createDefaultExecutionComposition(input: {
         } else {
           if (stored?.record.stage === 'invoked') missing('submitted Planner outcome is unknown; retain the same duty without another call');
           if (stored?.record.stage === 'prepared' && !revisionCall) missing('prepared Planner lease is not revivable; reconcile the actual instance before Provider selection');
+          const plannerPool = input.closedTurnPlannerPool(allocation.taskId);
+          const publishPlannerStep = taskStepPublisherForPool(plannerPool);
+          publishPlannerStep?.({
+            state: 'planner.aligning',
+            summary: 'Closed turn planner started',
+          });
           revisionCall ??= await configuredPlannerCall(`planner:${stage.closure.identity.turnId}`);
           let outcome: Awaited<ReturnType<typeof revisionCall.duty.run>>;
           try {
@@ -1290,6 +1297,13 @@ export function createDefaultExecutionComposition(input: {
         if (existing) assertTaskPlanRevisionRetryMatches(existing, candidate);
         const alignment = await loop.alignTurn({ consumer: plans, ...returned });
         if (alignment.state !== 'aligned') missing(`canonical Planner alignment retains recovery: ${alignment.firstErrorRef}`);
+        const publishPlannerStep = taskStepPublisherForPool(
+          input.closedTurnPlannerPool(allocation.taskId),
+        );
+        publishPlannerStep?.({
+          state: 'planner.aligned',
+          summary: `Closed turn planner aligned: ${returned.decision}`,
+        });
         return acceptAlignedPlan();
       }
       async function acceptAlignedPlan() {

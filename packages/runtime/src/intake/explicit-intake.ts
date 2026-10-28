@@ -148,6 +148,31 @@ export interface Proposal {
   readonly decisionRefs?: readonly string[];
 }
 
+export type ExplicitInteractionStepKind =
+  | 'request.dispatching'
+  | 'request.dispatched'
+  | 'response.reasoning'
+  | 'response.streaming'
+  | 'helper.dispatched'
+  | 'helper.request'
+  | 'helper.response'
+  | 'helper.accepted'
+  | 'request.settled'
+  | 'turn.completed';
+
+export interface ExplicitInteractionStepInput {
+  readonly kind: ExplicitInteractionStepKind;
+  readonly summary: string;
+  readonly requestId?: string;
+  readonly turnId?: string;
+  readonly helperCallId?: string;
+}
+
+export interface ExplicitInteractionStep extends ExplicitInteractionStepInput {
+  readonly seq: number;
+  readonly occurredAt: string;
+}
+
 export interface ExplicitInteractionSnapshot {
   readonly interactionId: InteractionId;
   readonly requestNumber?: number;
@@ -170,6 +195,7 @@ export interface ExplicitInteractionSnapshot {
   readonly confirmations?: readonly DraftConfirmation[];
   readonly rejections?: readonly DraftRejectClosure[];
   readonly confirmation?: ConfirmedRequirementDraft;
+  readonly steps: readonly ExplicitInteractionStep[];
   readonly history: readonly ExplicitInteractionState[];
 }
 
@@ -245,6 +271,7 @@ interface ExplicitInteractionRecordState {
   readonly rejections?: readonly DraftRejectClosure[];
   readonly revisionEdits?: readonly RevisionEditRecord[];
   readonly confirmation?: ConfirmedRequirementDraft;
+  readonly steps: readonly ExplicitInteractionStep[];
   readonly history: readonly ExplicitInteractionState[];
 }
 
@@ -272,6 +299,7 @@ interface InteractionRecord {
   rejections?: DraftRejectClosure[];
   revisionEdits?: RevisionEditRecord[];
   confirmation?: ConfirmedRequirementDraft;
+  steps: ExplicitInteractionStep[];
   readonly history: ExplicitInteractionState[];
 }
 
@@ -357,6 +385,7 @@ export class ExplicitIntake {
     this.nextRequestNumber = state.nextRequestNumber ?? 1;
     for (const input of state.interactions) {
       const interaction = structuredClone(input) as InteractionRecord;
+      if (!Array.isArray(interaction.steps)) interaction.steps = [];
       this.interactions.set(interaction.interactionId, interaction);
       if (interaction.draft) this.draftInteractions.set(interaction.draft.draftId, interaction.interactionId);
       if (interaction.revision) this.draftInteractions.set(interaction.revision.draftId, interaction.interactionId);
@@ -460,6 +489,7 @@ export class ExplicitIntake {
         owner: 'explicit-intake',
         nextAction: 'start-matching',
         condition: 'matching-requested',
+        steps: [],
         history: ['received'],
       });
     });
@@ -490,8 +520,28 @@ export class ExplicitIntake {
       confirmations: interaction.confirmations,
       rejections: interaction.rejections,
       confirmation: interaction.confirmation,
+      steps: interaction.steps,
       history: interaction.history,
     });
+  }
+
+  /**
+   * Record one live explicit-brain step for the owning interaction. The
+   * sequence and occurrence time come from the intake's own store and clock;
+   * the caller only supplies the real lifecycle kind, human-readable summary
+   * and the identity it actually observed.
+   */
+  recordStep(interactionId: InteractionId, step: ExplicitInteractionStepInput): ExplicitInteractionStep {
+    const interaction = this.requireInteraction(interactionId);
+    const recorded: ExplicitInteractionStep = {
+      ...step,
+      seq: interaction.steps.length + 1,
+      occurredAt: this.now().toISOString(),
+    };
+    this.persistMutation(() => {
+      interaction.steps.push(recorded);
+    });
+    return recorded;
   }
 
   inputRevision(input: InteractionId): number {
