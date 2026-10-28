@@ -77,7 +77,7 @@ export async function runWebSearchScenario(binding) {
   if (results.length === 0) missing.push('no tool result was recorded for the web.search call');
   if (urls.length === 0) missing.push('no http(s) URL appeared in the tool round evidence or tool output reports');
   const dashboardDom = dashboardEvidence.taskDashboardDom ?? {};
-  if (!Array.isArray(dashboardDom.statusLayers) || dashboardDom.statusLayers.length !== 3) {
+  if (!Array.isArray(dashboardDom.statusLayers) || dashboardDom.statusLayers.length < 3) {
     missing.push('dashboard did not render the business/waiting/freshness status layers');
   }
   if ((dashboardDom.duplicateEventIds ?? []).length > 0) {

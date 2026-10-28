@@ -37,11 +37,13 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
+  approvePendingTaskGrant,
   assertEntryInputStage,
   captureScreenshot,
   readDashboardProbe,
   readExistingChangeDom,
   readTaskDashboardDom,
+  resolveExecutionTaskId,
   sleep,
   submitDirectiveAndConfirmDraft,
   waitForDom,
@@ -108,11 +110,12 @@ export async function runExistingTaskChangeScenario(binding) {
     'Do not create, modify, move or delete any file. Do not ask clarifying questions.',
   ].join(' ');
   await submitSeedTask(binding, seedDirective, evidence);
+  const seedDashboard = await waitForSeedTerminal(binding);
+  binding.taskId = resolveExecutionTaskId(binding);
   const existingTaskId = taskIdValue(binding.taskId);
   if (!existingTaskId) {
     throw new Error('the new-task entry did not bind the exact task the change must target');
   }
-  const seedDashboard = await waitForSeedTerminal(binding);
   if (seedDashboard.state !== 'succeeded') {
     throw new Error(
       `the task targeted by the change did not reach a real succeeded terminal first: `
@@ -763,6 +766,7 @@ async function submitSeedTask(binding, directive, evidence) {
       evidence.screenshots.push(screenshot);
     },
   });
+  await approvePendingTaskGrant(binding);
 }
 
 async function captureInteractionInputStage(binding, directive) {

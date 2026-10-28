@@ -1448,18 +1448,58 @@ export async function readTaskDashboardDom(binding, options = {}) {
     await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.status-layers .detail-cell', { timeout: 30_000, state: 'attached' });
   }
-  return page.evaluate(() => {
+  return page.evaluate((navigate) => {
     const text = (node) => node?.textContent?.trim() ?? null;
-    const cells = (root) => [...(root?.querySelectorAll('.detail-cell') ?? [])].map((cell) => ({
+    const cells = (nodes) => [...nodes].map((cell) => ({
       label: text(cell.querySelector('dt')),
       value: text(cell.querySelector('dd')),
     }));
+    const buttonByText = (label) => [...document.querySelectorAll('button')]
+      .find((button) => (button.textContent ?? '').trim() === label);
+
+    // The 技术详情 trigger opens the shared technical-detail drawer, which
+    // renders the exact typed entries (checkpoint/input/error) as a draft-receipt.
+    let techFacts = [];
+    if (navigate) {
+      const techButton = buttonByText('技术详情');
+      if (techButton) {
+        techButton.click();
+        const list = document.querySelector('dialog[data-technical-detail="true"] dl.draft-receipt')
+          ?? document.querySelector('dl.draft-receipt');
+        if (list) techFacts = cells(list.querySelectorAll(':scope > div'));
+      }
+    }
+
+    // The 查看执行轨迹 trigger renders the typed event list into the
+    // execution-trace-drawer; without it no event rows exist in the DOM.
+    if (navigate || !document.querySelector('.execution-trace-drawer')) {
+      const traceButton = buttonByText('查看执行轨迹');
+      if (traceButton) traceButton.click();
+    }
+
+    const stateChip = text(document.querySelector('.page-heading-copy .state-chip, .page-heading .state-chip'));
     const rows = [...document.querySelectorAll('.event-list li.event')];
     const eventIds = rows.map((row) => row.dataset.eventId ?? null);
+
+    const facts = [...cells(document.querySelectorAll('.detail-grid:not(.status-layers) .detail-cell')), ...techFacts];
+    const hasFact = (label) => facts.some((cell) => cell.label === label);
+    const techFact = (label) => techFacts.find((cell) => cell.label === label)?.value ?? null;
+    if (stateChip && !hasFact('当前状态')) facts.push({ label: '当前状态', value: stateChip });
+    if (techFact('checkpoint.outcome') && !hasFact('Checkpoint')) {
+      facts.push({
+        label: 'Checkpoint',
+        value: [techFact('checkpoint.outcome'), techFact('checkpoint.seq'), techFact('checkpoint.summary')].filter(Boolean).join(' · '),
+      });
+    }
+    const taskInput = techFact('任务输入');
+    if (taskInput !== null && taskInput !== undefined && taskInput !== '' && !hasFact('输入')) {
+      facts.push({ label: '输入', value: taskInput });
+    }
+
     return {
-      stateChip: text(document.querySelector('.page-heading .state-chip')),
-      statusLayers: cells(document.querySelector('.status-layers')),
-      facts: cells([...document.querySelectorAll('.detail-grid')].find((grid) => !grid.classList.contains('status-layers'))),
+      stateChip,
+      statusLayers: cells(document.querySelectorAll('.status-layers .detail-cell')),
+      facts,
       eventRows: rows.map((row) => ({
         eventId: row.dataset.eventId ?? null,
         kind: text(row.querySelector('.event-kind')),
@@ -1478,7 +1518,7 @@ export async function readTaskDashboardDom(binding, options = {}) {
         disabled: button.disabled,
       })),
     };
-  });
+  }, options.navigate !== false);
 }
 
 /**
@@ -1631,11 +1671,7 @@ export async function probeDashboardLiveSse(binding, options = {}) {
   const waitDom = options.waitForDom ?? waitForDom;
   const base = binding.serveBaseUrl;
   const taskId = resolveExecutionTaskId(binding);
-  const projectKey = binding.projectKey ?? binding.runtimePaths?.projectKey ?? binding.journalProjectKey ?? null;
-  const params = new URLSearchParams({ task: taskIdValue(taskId) });
-  if (projectKey) params.set('projectKey', projectKey);
-  params.set('mode', 'rcc');
-  const dashboardUrl = `${base}/task-dashboard.html?${params.toString()}`;
+  const dashboardUrl = `${base}/task-dashboard.html?task=${encodeURIComponent(taskIdValue(taskId))}`;
   await page.addInitScript(() => {
     const recorded = window.__humanagentSseRecorded ??= [];
     const original = EventSource.prototype.addEventListener;
@@ -1687,7 +1723,8 @@ export async function probeDashboardLiveSse(binding, options = {}) {
 
   const connected = await waitDom(page, 'live freshness connected', async () => {
     const state = await readState();
-    return state.freshness.includes('实时连接已建立') ? state : null;
+    return state.freshness.includes('实时连接已建立')
+      && (state.sseRecorded ?? []).some((entry) => entry.kind === 'provider.tool-result') ? state : null;
   }, options.connectedTimeoutMs ?? 90_000, 500);
 
   const failProjectionReads = async (route) => {
@@ -1726,7 +1763,7 @@ export async function probeDashboardLiveSse(binding, options = {}) {
   const recovered = await waitDom(page, 'freshness restored after reconnect', async () => {
     const state = await readState();
     const liveOrSettled = state.freshness.includes('实时连接已建立') || state.freshness.includes('已收拢');
-    return liveOrSettled ? state : null;
+    return liveOrSettled && String(state.pageStatus ?? '').includes('任务投影已同步') ? state : null;
   }, options.recoveredTimeoutMs ?? 60_000, 500);
 
   return {

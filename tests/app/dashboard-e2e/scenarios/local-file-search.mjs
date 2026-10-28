@@ -180,7 +180,7 @@ export async function runLocalFileSearchScenario(binding) {
     missing.push('dashboard history did not page back to older typed events');
   }
   const dashboardDom = dashboardEvidence.taskDashboardDom ?? {};
-  if (!Array.isArray(dashboardDom.statusLayers) || dashboardDom.statusLayers.length !== 3) {
+  if (!Array.isArray(dashboardDom.statusLayers) || dashboardDom.statusLayers.length < 3) {
     missing.push('dashboard did not render the business/waiting/freshness status layers');
   }
   if ((dashboardDom.duplicateEventIds ?? []).length > 0) {

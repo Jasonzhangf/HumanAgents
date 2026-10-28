@@ -3913,6 +3913,7 @@ async function refresh() {
     agentReadPending = false
     if (agentQuery) agentReadFailure = error
     setRefreshError(error)
+    if (!explicitScope) scheduleObservation()
     throw error
   }
   if (pageDisposed) return
@@ -3983,7 +3984,7 @@ async function revokeTaskGrantControl() {
 }
 
 function subscribe(operationId) {
-  if (subscribedOperationId === operationId) return
+  if (subscribedOperationId === operationId && stream && stream.readyState !== EventSource.CLOSED && connectionState !== 'disconnected') return
   closeStream()
   subscribedOperationId = undefined
   lastSeenSeq = 0
