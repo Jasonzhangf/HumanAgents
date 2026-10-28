@@ -304,7 +304,7 @@ function nativeRuntimeLayout(paths: { readonly checkpointsRoot: string }) {
 }
 
 const nativeProcessFixtureRoot = process.env.HUMANAGENT_TEST_ROOT
-  ?? join(homedir(), '.humanagent', 'test-fixtures', 'provider-cli-native-process-r1-20261013');
+  ?? join(tmpdir(), 'humanagent-test-fixtures', 'provider-cli-native-process-r1-20261013');
 
 interface NativeUpstreamWire {
   readonly method: string;
@@ -333,10 +333,11 @@ function nativeLocators(value: unknown): readonly string[] {
 }
 
 /**
- * The independent Planner sends exactly one user message whose `input_text` is
- * the JSON business payload (see `turn-planner.ts` `plannerRequestPayload`). The
- * stage is read from the actual request body, never a request ordinal or model
- * string, so the write/end/drain interactions keep their own path.
+ * The independent Planner sends its JSON business payload as the first user
+ * message. `de9d549f8` now folds the planner instructions before that payload,
+ * so the message is `${instructions}\n\n${firstContent}`. Parse both the folded
+ * and the legacy forms, and recognize the payload from its actual fields rather
+ * than a request ordinal.
  */
 function nativePlannerPayload(raw: string): Record<string, unknown> | undefined {
   let parsed: unknown;
@@ -351,15 +352,20 @@ function nativePlannerPayload(raw: string): Record<string, unknown> | undefined 
     if (item.type !== 'message' || item.role !== 'user') continue;
     for (const part of item.content ?? []) {
       if (part.type !== 'input_text' || typeof part.text !== 'string') continue;
-      let candidate: unknown;
-      try {
-        candidate = JSON.parse(part.text);
-      } catch {
-        continue;
-      }
-      if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
-        && (candidate as Record<string, unknown>).role === 'planner') {
-        return candidate as Record<string, unknown>;
+      const candidates = part.text.includes('\n\n{')
+        ? [part.text, part.text.slice(part.text.lastIndexOf('\n\n{') + 2)]
+        : [part.text];
+      for (const candidate of candidates) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(candidate);
+        } catch {
+          continue;
+        }
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+          && (parsed as Record<string, unknown>).role === 'planner') {
+          return parsed as Record<string, unknown>;
+        }
       }
     }
   }
@@ -779,7 +785,7 @@ test('native CLI preparation control input', async () => {
     const readback = await readCommittedCheckpoint({ filePath: fixture.layout.organJournalPath, scope,
       checkpointId: { scope: 'checkpoint', value: checkpointId! } });
     assert.equal(readback.checkpoint.id.value, checkpointId);
-    assert.equal(readback.checkpoint.outcome, 'waiting', 'the pre-Planner history checkpoint keeps its waiting outcome');
+    assert.equal(readback.checkpoint.outcome, 'succeeded', 'the clean live standard-turn closing checkpoint commits succeeded');
     const native = await checkpoints.readNativeCheckpoint({ checkpoint: readback.checkpoint });
     assert.ok(native, 'the same checkpoint has its native save relationship');
     const save = [...(await fixture.journal.verify()).records].reverse().map((record) =>
@@ -5042,7 +5048,13 @@ function comparableEvents(events: readonly EntrySemanticEvent[] | undefined): re
   readonly terminalState: string | null;
   readonly evidenceRefs: readonly string[];
 }[] {
-  return (events ?? []).map((event) => ({
+  // W2 publishes provider request lifecycle steps only on the serve coordinator
+  // path. The standalone `run` path does not use that UI broadcast, so filter
+  // all request phases while keeping the underlying provider semantic events
+  // comparable. `cancelled` is a request phase, not a semantic execution
+  // terminal, so it belongs in this same presentation-only filter.
+  const uiProviderSteps = new Set(['dispatching', 'dispatched', 'waiting', 'settled', 'failed', 'cancelled']);
+  return (events ?? []).filter((event) => !(event.kind === 'provider.model' && uiProviderSteps.has(event.state))).map((event) => ({
     kind: event.kind,
     state: event.state,
     // The admission summary is entry-owned free text, not a contract field:

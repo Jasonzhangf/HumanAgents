@@ -729,7 +729,7 @@ test(`default App composition admits the retained Task only after real HTTP gran
 // Impact: serialization or false completion; cost: one bounded local HTTP consumer.
 test('two top-level native tasks share one App and overlap real execution requests with independent Planners', async () => {
   const projectKey = `two-top-level-native-${randomUUID()}`;
-  const fixtureBase = join(process.env.HOME ?? '/Users/fanzhang', '.humanagent', 'test-fixtures');
+  const fixtureBase = process.env.HUMANAGENT_TEST_ROOT ?? join(tmpdir(), 'humanagent-test-fixtures');
   await mkdir(fixtureBase, { recursive: true });
   const root = await mkdtemp(join(fixtureBase, 'provider-two-top-tasks-'));
   const taskSpecs = [
@@ -856,14 +856,19 @@ test('two top-level native tasks share one App and overlap real execution reques
         if (typeof part !== 'object' || part === null || Array.isArray(part)) continue;
         const content = part as Record<string, unknown>;
         if (content.type !== 'input_text' || typeof content.text !== 'string') continue;
-        let candidate: unknown;
-        try {
-          candidate = JSON.parse(content.text);
-        } catch {
-          continue;
+        const candidates = content.text.includes('\n\n{')
+          ? [content.text, content.text.slice(content.text.lastIndexOf('\n\n{') + 2)]
+          : [content.text];
+        for (const candidate of candidates) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(candidate);
+          } catch {
+            continue;
+          }
+          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+            && (parsed as Record<string, unknown>).role === 'planner') return parsed as Record<string, unknown>;
         }
-        if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
-          && (candidate as Record<string, unknown>).role === 'planner') return candidate as Record<string, unknown>;
       }
     }
     return undefined;
