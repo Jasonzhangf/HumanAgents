@@ -80,7 +80,11 @@ test('production patrol dispatches a scheduled occurrence only at its due time a
     // occurrence task, and its committed checkpoint is the success truth.
     const expectedBinding = bindingFor(occurrenceId, policy, startAt);
     const tasks = await harness.json<TaskListView>('/api/tasks');
-    const scheduledTask = tasks.completed.find((task) => task.taskId.value === expectedBinding.taskId.value);
+    const scheduledTask = tasks.completed.find((task) =>
+      task.taskId.value === expectedBinding.taskId.value
+      || task.currentExecutionTaskId?.value === expectedBinding.taskId.value
+      || task.executions?.some((child) => child.taskId.value === expectedBinding.taskId.value),
+    );
     assert.ok(scheduledTask, 'the deterministic occurrence task is completed in the public task list');
     const dashboard = await harness.json<TaskDashboardView>(
       `/api/tasks/${encodeURIComponent(expectedBinding.taskId.value)}/dashboard`,

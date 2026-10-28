@@ -543,6 +543,7 @@ export interface UiRuntimeServiceOptions {
   readonly mode: 'fake' | 'rcc';
   readonly maxConcurrentTasks?: number;
   readonly organId: OrganId;
+  readonly principalOwner?: string;
   readonly binding: ProviderBinding;
   readonly port: ExecutionRuntimePort;
   readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => PublicOutputCheckpointStore;
@@ -1428,14 +1429,6 @@ function normalizedInputForDraftFields(
 ): string {
   if (typeof fields.normalizedInput === 'string') return fields.normalizedInput;
   return canonicalJsonStringify(draftFieldValues(current, fields));
-}
-
-function normalizedInputExpressesDraftFields(normalizedInput: string, fields: DraftFieldValues): boolean {
-  try {
-    return canonicalJsonStringify(JSON.parse(normalizedInput)) === canonicalJsonStringify(fields);
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -5444,10 +5437,16 @@ export class UiRuntimeService {
           409,
         );
       }
+      const allocation = this.coordinator.prepareExecution(taskId, input);
+      if (this.mode === 'fake') {
+        const owner = this.options.principalOwner;
+        if (owner !== undefined) {
+          await this.grantTaskExecutionIfMissing(taskId, `fake-execution:${taskId.value}`, owner);
+        }
+      }
       // Wait for the real admission/release edge before reporting the start, so
       // a denied start returns its typed error instead of a false 202. The
       // driver/Provider factory is created only after admission authorizes.
-      const allocation = this.coordinator.prepareExecution(taskId, input);
       await this.coordinator.releaseExecution(taskId, allocation.operationId);
       this.watchExecutionForImplicitWakeup(allocation.operationId);
       return { operationId: allocation.operationId, executionEpoch: allocation.executionEpoch };
@@ -5694,6 +5693,14 @@ export class UiRuntimeService {
     }
     const task = existing ?? this.coordinator.createTask({ taskId: binding.taskId, title, directive: prompt });
     await this.establishScheduledOccurrenceIdentity(binding, task.taskId, envelope);
+    const principalOwner = this.options.principalOwner;
+    if (principalOwner !== undefined && (this.mode === 'fake' || envelope.confirmedBy === principalOwner)) {
+      await this.grantTaskExecutionIfMissing(
+        task.taskId,
+        `scheduled-occurrence:${binding.occurrenceId}:${task.taskId.value}`,
+        principalOwner,
+      );
+    }
     const current = this.coordinator.taskSnapshot(task.taskId);
     if (
       current.state === 'succeeded'
@@ -6673,8 +6680,7 @@ export class UiRuntimeService {
     const bindTemplate = !existingTaskChange
       && !confirmedReplayMatches
       && hasExplicitDraftFields(input)
-      && (canonicalJsonStringify(confirmationFields) !== canonicalJsonStringify(currentFields)
-        || !normalizedInputExpressesDraftFields(revision.normalizedInput, confirmationFields));
+      && canonicalJsonStringify(confirmationFields) !== canonicalJsonStringify(currentFields);
     if (bindExecutionPolicy || bindTemplate) {
       // Interpretation mints the reviewable draft before confirmation. Bind
       // only the missing typed inputs in one revision; an omitted input keeps
@@ -6831,22 +6837,22 @@ export class UiRuntimeService {
     const snapshot = await this.explicitIntake.inspect(interactionId);
     const draft = snapshot.draft;
     if (!draft) return undefined;
-    const goal = options.goal ?? draft.proposal;
-    const scope = options.scope ?? draft.normalizedInput;
-    const fields = {
-      goal,
-      scope,
-      constraints: options.constraints ?? [],
-      deliverables: options.deliverables ?? [],
-    };
+    const currentFields = draftFieldValues({
+      goal: draft.proposal,
+      scope: draft.normalizedInput,
+      constraints: [],
+      deliverables: [],
+    }, {});
+    const templateFields = draftFieldValues(currentFields, options);
+    const templateChanged = canonicalJsonStringify(templateFields) !== canonicalJsonStringify(currentFields);
     try {
       await this.explicitIntake.createDraft(interactionId, {
-        goal,
-        scope,
-        constraints: options.constraints,
-        deliverables: options.deliverables,
-        normalizedInput: hasExplicitDraftFields(options)
-          ? normalizedInputForDraftFields(fields, {})
+        goal: templateFields.goal,
+        scope: templateFields.scope,
+        constraints: templateFields.constraints,
+        deliverables: templateFields.deliverables,
+        normalizedInput: templateChanged
+          ? normalizedInputForDraftFields(templateFields, {})
           : draft.normalizedInput,
         proposedIntent: draft.proposedIntent,
         proposal: draft.proposal,
@@ -7198,7 +7204,27 @@ export class UiRuntimeService {
     const port = this.options.taskGrantPort;
     if (port === undefined) return true;
     const readback = await port.readTaskGrant(taskId);
-    return readback.grant?.state === 'granted';
+    return readback.grant?.state === 'granted'
+      && (this.options.principalOwner === undefined || readback.grant.owner === this.options.principalOwner);
+  }
+
+  private async grantTaskExecutionIfMissing(taskId: TaskId, requestId: string, owner: string): Promise<void> {
+    const port = this.options.taskGrantPort;
+    if (port === undefined) return;
+    const readback = await port.readTaskGrant(taskId);
+    if (readback.grant !== null) return;
+    const scope: ScopeRef = { organId: this.options.organId, taskId };
+    await port.grant({
+      requestId,
+      taskId,
+      owner,
+      capability: {
+        actionId: TASK_EXECUTION_ACTION_ID,
+        capabilities: [PROVIDER_EXECUTION_CAPABILITY],
+        scope,
+      },
+      expectedRevision: 0,
+    });
   }
 
   /**
@@ -7244,22 +7270,15 @@ export class UiRuntimeService {
     // durable grant yet, bind the verified principal's default execution grant
     // so the confirmed create can auto-start. Existing-task append/change and
     // every already-granted task keep the existing grant decision untouched.
-    if (!isTaskInputUpdate && consumed.intent === 'create' && this.options.taskGrantPort !== undefined) {
-      const readback = await this.options.taskGrantPort.readTaskGrant(task.taskId);
-      if (readback.grant === null) {
-        const scope: ScopeRef = { organId: this.options.organId, taskId: task.taskId };
-        await this.options.taskGrantPort.grant({
-          requestId: `confirmation:${consumed.requirementId}:${task.taskId.value}`,
-          taskId: task.taskId,
-          owner: consumed.confirmedBy,
-          capability: {
-            actionId: TASK_EXECUTION_ACTION_ID,
-            capabilities: [PROVIDER_EXECUTION_CAPABILITY],
-            scope,
-          },
-          expectedRevision: 0,
-        });
-      }
+    if (!isTaskInputUpdate && consumed.intent === 'create'
+      && this.options.taskGrantPort !== undefined
+      && this.options.principalOwner !== undefined
+      && (this.mode === 'fake' || consumed.confirmedBy === this.options.principalOwner)) {
+      await this.grantTaskExecutionIfMissing(
+        task.taskId,
+        `confirmation:${consumed.requirementId}:${task.taskId.value}`,
+        this.options.principalOwner,
+      );
     }
     // Confirmation only confirms intent. Execution auto-starts only when the
     // bound task-scoped grant already authorizes the verified origin; otherwise
@@ -7330,9 +7349,11 @@ export class UiRuntimeService {
         });
         executionEpoch = execution.executionEpoch;
       }
-      // A retained operation epoch proves allocation, not durable startup.
-      // Retry its release before recording dispatch completion or acknowledging.
-      if (autoStart && executionEpoch !== undefined) {
+      // A retry may find the identical operation already released or terminal.
+      // Only a prepared allocation owes another release; releasing an already
+      // released cycle would strand the confirmed FIFO entry.
+      if (autoStart && executionEpoch !== undefined
+        && this.coordinator.taskSnapshot(task.taskId).executionRelease === 'prepared') {
         await this.coordinator.releaseExecution(task.taskId, operationId);
       }
       const started: DispatchLedgerEntry = {
@@ -7420,7 +7441,7 @@ export class UiRuntimeService {
         && requirement.draftId === consumed.draftId
         && requirement.inputRevision === consumed.inputRevision);
     if (candidates.length === 0) {
-      if (this.options.taskIdentity === undefined) return undefined;
+      if (this.confirmationLedger.currentRevision(consumed.draftId) === undefined) return undefined;
       throw new UiRuntimeApiError(
         'explicit-brain.task-identity-source-missing', APP_OWNER,
         `requirement ${consumed.requirementId} has no exact typed final-submit source for this FIFO entry`,

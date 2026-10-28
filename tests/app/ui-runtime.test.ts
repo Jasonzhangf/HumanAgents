@@ -659,6 +659,7 @@ function serviceFor(
   explicitBrainInterpreter?: ExplicitBrainInputInterpreter,
   explicitProviderSettlementRead?: ExplicitProviderSettlementReadPort,
   taskGrantPort?: TaskGrantPort,
+  principalOwner?: string,
 ): UiRuntimeService {
   const runtimeJournal = journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   return new UiRuntimeService({
@@ -677,6 +678,7 @@ function serviceFor(
     explicitBrainInterpreter: explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
     ...(explicitProviderSettlementRead ? { explicitProviderSettlementRead } : {}),
     ...(taskGrantPort === undefined ? {} : { taskGrantPort }),
+    ...(principalOwner === undefined ? {} : { principalOwner }),
     runtimeComposition: { admitExecution: async () => {} },
   });
 }
@@ -4423,7 +4425,7 @@ test('confirmed new-task create binds the verified principal execution grant and
     new JsonlOrganJournal(join(root, 'fake', 'task-grants.jsonl')),
   );
   const service = serviceFor(root, port, 'fake', 'ready', undefined, undefined, undefined, undefined,
-    undefined, undefined, grantJournal);
+    undefined, undefined, grantJournal, 'human:operator');
   try {
     await confirmExplicitRequirementFor(service, 'create-auto-grant');
     const dispatched = await service.dispatchNextExplicitRequirement();
@@ -6181,9 +6183,20 @@ test('pairing recovery projects the config pairing command without authenticatio
   try {
     const pairingCommand = formatPairingCommand({ controlRoot: productRoot });
     assert.ok(pairingCommand !== formatPairingCommand({ controlRoot: root }));
-    const unauthenticated = await fetch(`${base}/api/auth/session`);
-    assert.equal(unauthenticated.status, 200);
-    assert.deepEqual(await unauthenticated.json(), { authenticated: false, pairingCommand });
+    const unpaired = await fetch(`${base}/api/auth/session`);
+    assert.equal(unpaired.status, 200);
+    const unpairedBody = await unpaired.json() as {
+      readonly authenticated: boolean;
+      readonly localAccess?: boolean;
+      readonly expiresAt?: string;
+      readonly pairingCommand: string;
+    };
+    // MVP loopback access adopts a local session without pairing, while the
+    // pairing command still projects the configured product root.
+    assert.equal(unpairedBody.authenticated, true);
+    assert.equal(unpairedBody.localAccess, true);
+    assert.equal(unpairedBody.pairingCommand, pairingCommand);
+    assert.ok(typeof unpairedBody.expiresAt === 'string' && unpairedBody.expiresAt.length > 0);
 
     const challenge = await accessControl.issuePairingChallenge();
     const paired = await fetch(`${base}/api/auth/pair`, {
@@ -6626,7 +6639,10 @@ test('explicit brain interprets create, query, append, change, and clarification
 
 test('explicit brain persists a live-shaped structured provider proposal after successful settlement', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-live-proposal-'));
-  const parentRoot = await mkdtemp(join('/Users/fanzhang/.humanagent/test-fixtures/provider-explicit-parent-wiring-20261016', 'ui-intake-'));
+  const parentRoot = await mkdtemp(join(
+    process.env.HUMANAGENT_TEST_ROOT ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-explicit-parent-wiring-20261016',
+    'ui-intake-',
+  ));
   const journalPath = join(root, 'ui-runtime-journal.jsonl');
   const providerOutput = JSON.stringify({
     interactionId: 'interaction-live-shaped',
@@ -8158,6 +8174,7 @@ test('a failed tool execution releases the provider session and reports the real
   const started = await service.startExecution(task.taskId, { prompt: 'read the directory' });
 
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, 'failed'));
 
   const dashboard = service.taskDashboard(task.taskId);
   // The real tool failure owns the task terminal state; resource cleanup must
@@ -8247,8 +8264,13 @@ test('failure cleanup does not report a clean failure while the shared provider 
   assert.equal(service.taskDashboard(other.taskId).state, 'running');
   assert.equal(port.closeCalls, 0);
 
-  // The other execution stays suspended, so no further journal writes race the
-  // teardown of the temp directory.
+  // Release both provider executions before removing the temp directory so no
+  // 300s silence-budget timer can write to the journal after teardown. The
+  // failed task still holds its session, so its pending stop is retried first;
+  // then the held background execution is stopped.
+  port.failStop = false;
+  await service.retryStop(task.taskId);
+  await service.stop(other.taskId);
   await rm(root, { recursive: true, force: true });
 });
 
@@ -8375,6 +8397,7 @@ test('stop racing a startup failure leaves a terminal failed task instead of ret
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.running',
   );
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, 'failed'));
   assert.deepEqual(service.taskDashboard(task.taskId).allowedActions, ['start']);
   assert.equal(service.eventsSince(started.operationId).some((event) => event.state === 'blocked'), false);
 });
@@ -10124,6 +10147,10 @@ test('post-commit stop recovery fences a late observation and closes the provide
   const lateReady = new Promise<void>((resolve) => {
     releaseLate = resolve;
   });
+  let markFirstYielded!: () => void;
+  const firstYielded = new Promise<void>((resolve) => {
+    markFirstYielded = resolve;
+  });
   let markLateYielded!: () => void;
   const lateYielded = new Promise<void>((resolve) => {
     markLateYielded = resolve;
@@ -10145,6 +10172,7 @@ test('post-commit stop recovery fences a late observation and closes the provide
       const first = await iterator.next();
       if (first.done || !first.value) return;
       yield first.value;
+      markFirstYielded();
       await lateReady;
       markLateYielded();
       yield {
@@ -10166,7 +10194,9 @@ test('post-commit stop recovery fences a late observation and closes the provide
   const service = serviceFor(root, driver, 'fake', 'ready', undefined, undefined, hooks);
   const task = service.createTask({ title: 'late observation fence' });
   const started = await service.startExecution(task.taskId, { prompt: 'stop before late event' });
-  await waitFor(() => assert.equal(service.eventsSince(started.operationId).some((event) => event.kind === 'provider.model'), true));
+  await waitFor(() => assert.equal(service.eventsSince(started.operationId).some((event) =>
+    event.kind === 'provider.model' && event.state === 'model'), true));
+  await firstYielded;
 
   const stopping = service.stop(task.taskId);
   await waitFor(() => {
@@ -10370,7 +10400,7 @@ test('actual UI entry follows the provider-neutral composition and keeps hook, c
   await waitFor(() => assert.equal(failingService.taskDashboard(failedTask.taskId).state, 'failed'));
   const failedDashboard = failingService.taskDashboard(failedTask.taskId);
   assert.match(failedDashboard.statusSections.business, /失败/);
-  assert.match(failedDashboard.statusSections.waiting, /已收拢：failed/);
+  assert.match(failedDashboard.statusSections.waiting, /已提交收拢记录/);
   assert.equal(failedDashboard.statusSections.business.includes('尚未提交'), false);
   const failedEvents = failingService.eventsSince(failedStart.operationId);
   assert.equal(failedEvents.some((event) => event.kind === 'provider.error' && event.ownerId === 'ui-runtime-blocking-hook'), true);

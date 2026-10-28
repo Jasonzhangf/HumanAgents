@@ -181,6 +181,8 @@ export function issueText(status: SchedulerStatusView): string {
 
 export interface TaskListRow {
   readonly taskId: { readonly value: string };
+  readonly currentExecutionTaskId?: { readonly value: string };
+  readonly executions?: readonly TaskListRow[];
   readonly state: string;
   readonly title: string;
 }

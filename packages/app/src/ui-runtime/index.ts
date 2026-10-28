@@ -616,6 +616,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     mode: options.mode,
     maxConcurrentTasks: options.maxConcurrentTasks,
     organId: options.organId,
+    principalOwner,
     binding: options.binding,
     port: options.port,
     checkpointStoreFor,
@@ -627,9 +628,10 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     providerState,
     providerError,
     ...(readiness === undefined ? {} : { providerReadiness: readiness }),
-    // A configured native launch binds the real task-scoped grant journal, so
-    // confirmation only confirms intent and execution waits for a real grant.
-    ...(configuredNativeLaunch ? { taskGrantPort: new JsonlTaskGrantJournal(taskControlJournal) } : {}),
+    // Fake admission and every execution start read the same task-scoped grant
+    // journal. This keeps a fake launch from composing admission against one
+    // durable truth while execution reads no grant boundary at all.
+    taskGrantPort: new JsonlTaskGrantJournal(taskControlJournal),
     ...(options.providerSource === undefined ? {} : { providerSource: options.providerSource }),
     journal,
     closurePort: interactionJournal ?? journal,

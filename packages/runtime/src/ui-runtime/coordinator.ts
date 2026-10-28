@@ -5425,6 +5425,11 @@ export class RuntimeTaskCoordinator {
         }
         return;
       }
+      // This task execution has terminated with no residual stop or retry-stop
+      // duty (including retained-close and no-driver paths). Clear the
+      // runtime-time ['stop'] so the settled projection reports ['start']
+      // (or [] once blocked).
+      record.allowedActions = [];
       try {
         await this.commitBusinessCheckpoint(record, scope, outcome, errorEvidenceRefs);
       } catch (checkpointError) {

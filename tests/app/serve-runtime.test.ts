@@ -198,11 +198,61 @@ function materialFor(
   workerResult: WorkResult,
   body = serveArtifactBody,
 ) {
+  // bc34027ec added a hard gate: review requires the produced artifact body
+  // for every serve target. The deterministic fixture worker returns no body,
+  // so derive it from the same target refs the worker reports.
+  const withBodies: WorkResult = workerResult.producedArtifactBodies === undefined
+    ? {
+        ...workerResult,
+        producedArtifactBodies: workerAssignment.targetRefs.map(() => body),
+      }
+    : workerResult;
   return resolveReviewMaterial({
     workerAssignment,
-    workerResult,
+    workerResult: withBodies,
     subjects: workerAssignment.targetRefs.map((ref) => ({ ref, body })),
   });
+}
+
+/**
+ * The deterministic fixture worker reports refs but no produced body. The
+ * current review gate requires the body of every assignment target, so wrap
+ * the fixture execution agent and derive that body from the real target refs.
+ */
+function withProducedArtifactBodies(
+  ports: ReturnType<typeof createDeterministicServeOrchestrationPorts>,
+  body = serveArtifactBody,
+): ReturnType<typeof createDeterministicServeOrchestrationPorts> {
+  const worker = ports.executionAgent;
+  if (worker === undefined) return ports;
+  const decorate = (
+    input: Parameters<ExecutionAgentPort['execute']>[0],
+    delivery: Awaited<ReturnType<ExecutionAgentPort['execute']>>,
+  ): WorkResult => {
+    const result = 'result' in delivery ? delivery.result : delivery;
+    return {
+      ...result,
+      producedArtifactBodies: input.assignment.targetRefs.map(() => body),
+    };
+  };
+  return {
+    ...ports,
+    executionAgent: {
+      ...worker,
+      async execute(input) {
+        return decorate(input, await worker.execute(input));
+      },
+      createInstance(create) {
+        const handle = worker.createInstance(create);
+        return {
+          ...handle,
+          async execute(input) {
+            return decorate(input, await handle.execute(input));
+          },
+        };
+      },
+    },
+  };
 }
 
 /**
@@ -431,7 +481,7 @@ test('serve runtime composes and closes a task-scoped M3 dispatch', async () => 
       publishers: eventBus.ports.publishers,
     },
     feedbackPublisherId: 'serve-test',
-    ...createDeterministicServeOrchestrationPorts(),
+    ...withProducedArtifactBodies(createDeterministicServeOrchestrationPorts()),
   });
   const task: Task = {
     id: id('task', 'serve-composition-task'),
@@ -725,6 +775,7 @@ test('confirmed requirement preserves non-success provider closures through orch
       });
 
       const taskId = await waitForRuntimeTask(runtime);
+      await waitForTaskState(() => runtime.service.taskDashboard(taskId).checkpoint?.outcome ?? '', terminalState);
       await waitForTaskState(() => runtime.service.taskDashboard(taskId).state, terminalState);
       const dashboard = runtime.service.taskDashboard(taskId);
       assert.equal(dashboard.checkpoint?.outcome, terminalState);
@@ -1378,7 +1429,7 @@ test('RCC ports reach the runtime review and Harness merge gates with provider a
     eventBusPorts: eventBus.ports,
     feedbackPorts: { journal: eventBus.ports.journal, publishers: eventBus.ports.publishers },
     feedbackPublisherId: 'serve-test',
-    ...createDeterministicServeOrchestrationPorts(),
+    ...withProducedArtifactBodies(createDeterministicServeOrchestrationPorts()),
     ...createRccServeOrchestrationPorts({
       port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed', outputRef: 'serve-rcc-manager-output' }),
       binding: providerBinding(),
