@@ -2,7 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
 
-import type { AgentRole, EffectiveAgentProviderBinding, ProviderConfig } from '../../packages/config/src/index.js';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  ensureControlLayout,
+  loadConfiguration,
+  resolveRuntimePaths,
+} from '../../packages/config/src/index.js';
+import { resolveCliAgentProviderBindings } from '../../packages/app/src/cli.js';
+
+import type { AgentConfig, AgentRole, EffectiveAgentProviderBinding, ProviderConfig } from '../../packages/config/src/index.js';
 import type { ExecutionRuntimePort, ProviderBinding } from '../../packages/contracts/src/index.js';
 import {
   createAgentProviderPort,
@@ -277,4 +288,124 @@ test('default port producer constructs a port from complete provider and binding
   const binding = providerBindingFromConfig(provider);
   const port = createAgentProviderPort({ provider, binding }, '/Users/fanzhang/.humanagent/test-fixtures/provider-g-selected-s1-r1-20261013');
   assert.ok(port);
+});
+
+test('CLI provider override is applied to inherited agent provider bindings', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'serve-inherited-override-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot, workspace });
+    await ensureControlLayout(paths);
+    const configuration = await loadConfiguration(paths);
+    // defaultUserToml sets [provider] model = "MiniMax-M3"; interaction-default
+    // and orchestration-default inherit it (source: 'inherited').
+    assert.equal(configuration.effective.provider?.model, 'MiniMax-M3');
+
+    const overrideProvider: ProviderConfig = {
+      ...configuration.effective.provider!,
+      model: 'gpt-5.5',
+      binding: 'ui-dash-e2e',
+      baseUrl: 'http://127.0.0.1:4444',
+    };
+
+    // Without the resolver the inherited binding keeps MiniMax-M3 even though
+    // the CLI-supplied legacy provider requested gpt-5.5.
+    const rawInteraction = selectAgentProvider({
+      roleId: 'interaction',
+      agentProviderBindings: configuration.agentProviderBindings,
+      legacyProvider: overrideProvider,
+      createPort: (input) => new RecordingPort(input.binding, input.binding),
+    });
+    assert.equal(rawInteraction.provider.model, 'MiniMax-M3');
+
+    // With the resolver the CLI override wins for inherited bindings.
+    const resolvedBindings = resolveCliAgentProviderBindings(configuration, overrideProvider);
+    const interaction = selectAgentProvider({
+      roleId: 'interaction',
+      agentProviderBindings: resolvedBindings,
+      legacyProvider: overrideProvider,
+      createPort: (input) => new RecordingPort(input.binding, input.binding),
+    });
+    assert.equal(interaction.provider.model, 'gpt-5.5');
+    assert.equal(interaction.provider.binding, 'ui-dash-e2e');
+
+    const orchestration = selectAgentProvider({
+      roleId: 'orchestration',
+      agentProviderBindings: resolvedBindings,
+      legacyProvider: overrideProvider,
+      createPort: (input) => new RecordingPort(input.binding, input.binding),
+    });
+    assert.equal(orchestration.provider.model, 'gpt-5.5');
+    assert.equal(orchestration.provider.binding, 'ui-dash-e2e');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI provider override preserves an agent with an explicit source: agent binding', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'serve-agent-explicit-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot, workspace });
+    await ensureControlLayout(paths);
+    const configuration = await loadConfiguration(paths);
+
+    const overrideProvider: ProviderConfig = {
+      ...configuration.effective.provider!,
+      model: 'gpt-5.5',
+      binding: 'ui-dash-e2e',
+      baseUrl: 'http://127.0.0.1:4444',
+    };
+    const explicitProvider: ProviderConfig = {
+      provider: 'rcc',
+      binding: 'explicit-binding',
+      protocol: 'responses',
+      model: 'claude-opus',
+      route: 'explicit-route',
+      baseUrl: 'http://10.0.0.1:9000',
+    };
+    const explicitAgent: AgentConfig = {
+      agentId: 'explicit-agent',
+      roleId: 'execution',
+      templateRef: 'builtin/execution@1.0.0',
+      driverRef: 'fake',
+      skills: [],
+      tools: [],
+      permissions: [],
+      memoryScopes: [],
+      resourceClass: 'background',
+      provider: explicitProvider,
+    };
+    // The explicit agent carries its own provider block, so recompiling with
+    // the CLI override must keep it as source: 'agent' rather than inheriting.
+    const resolvedBindings = resolveCliAgentProviderBindings(
+      {
+        effective: {
+          ...configuration.effective,
+          agents: [...configuration.effective.agents, explicitAgent],
+        },
+        agentProviderBindings: configuration.agentProviderBindings,
+      },
+      overrideProvider,
+    );
+    const explicitBinding = resolvedBindings.find((binding) => binding.agentId === 'explicit-agent');
+    assert.equal(explicitBinding?.source, 'agent');
+    assert.deepEqual(explicitBinding?.provider, explicitProvider);
+
+    const selected = selectAgentProvider({
+      roleId: 'execution',
+      agentId: 'explicit-agent',
+      agentProviderBindings: resolvedBindings,
+      legacyProvider: overrideProvider,
+      createPort: (input) => new RecordingPort(input.binding, input.binding),
+    });
+    assert.equal(selected.provider.model, 'claude-opus');
+    assert.equal(selected.provider.binding, 'explicit-binding');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

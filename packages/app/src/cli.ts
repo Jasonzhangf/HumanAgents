@@ -93,7 +93,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
 import { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from './serve-orchestration.js';
-import { PROVIDERS, type ProviderConfig, type ProviderSource } from '../../config/src/index.js';
+import {
+  compileAgentProviderBindings,
+  PROVIDERS,
+  type EffectiveAgentProviderBinding,
+  type ProviderConfig,
+  type ProviderSource,
+} from '../../config/src/index.js';
 import { createTaskExecutionPreparation } from './task-execution-preparation.js';
 import { createPreparedOperationBoundary } from './prepared-operation-boundary.js';
 import { createJsonlI2JournalPort } from './i2-journal.js';
@@ -876,6 +882,19 @@ function servePromptSegments(
   return loaded.segments.map((segment) => segment.content);
 }
 
+export function resolveCliAgentProviderBindings(
+  configuration: Pick<LoadedConfiguration, 'effective' | 'agentProviderBindings'>,
+  effectiveTopLevelProvider: ProviderConfig,
+): readonly EffectiveAgentProviderBinding[] {
+  if (configuration.effective.provider === undefined) {
+    return configuration.agentProviderBindings;
+  }
+  return compileAgentProviderBindings({
+    ...configuration.effective,
+    provider: effectiveTopLevelProvider,
+  });
+}
+
 function taskAgentProviderPreparer(
   args: readonly string[],
   configuration: LoadedConfiguration,
@@ -904,9 +923,10 @@ function taskAgentProviderPreparer(
       route: option(args, '--route') ?? configured.route,
       baseUrl,
     };
+    const agentProviderBindings = resolveCliAgentProviderBindings(configuration, legacyProvider);
     return prepareAgentProvider({
       ...input,
-      agentProviderBindings: configuration.agentProviderBindings,
+      agentProviderBindings,
       legacyProvider,
       legacyBindingOverrides: {
         endpointRef: binding.endpointRef,
@@ -1753,6 +1773,7 @@ export async function main(args: readonly string[]): Promise<void> {
         route: option(args, '--route') ?? configuredProvider.route,
         baseUrl,
       };
+      const effectiveAgentProviderBindings = resolveCliAgentProviderBindings(configuration, effectiveLegacyProvider);
       const prepareSelectedAgentProvider = <
         TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
       >(input: {
@@ -1760,7 +1781,7 @@ export async function main(args: readonly string[]): Promise<void> {
         readonly configuredAgentId?: string;
       }) => prepareAgentProvider<TIdentity>({
         ...input,
-        agentProviderBindings: configuration.agentProviderBindings,
+        agentProviderBindings: effectiveAgentProviderBindings,
         legacyProvider: effectiveLegacyProvider,
         legacyBindingOverrides: {
           endpointRef: binding.endpointRef,
@@ -1959,7 +1980,7 @@ export async function main(args: readonly string[]): Promise<void> {
                   ) => prepareExecutionAgentProvider({
                     roleId: selection.roleId,
                     ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
-                    agentProviderBindings: configuration.agentProviderBindings,
+                    agentProviderBindings: effectiveAgentProviderBindings,
                     legacyProvider: effectiveLegacyProvider,
                     legacyBindingOverrides: {
                       endpointRef: binding.endpointRef,
