@@ -3112,6 +3112,7 @@ export class RuntimeTaskCoordinator {
       // after the successor allocation/release exists so they can follow it.
       if (advance.state === 'advancing' && terminal) {
         this.listeners.emit(operation.operationId.value, terminal);
+        this.listeners.emit(`task:${record.taskId.value}`, terminal);
       }
     }
     return advance;
@@ -3660,6 +3661,19 @@ export class RuntimeTaskCoordinator {
     const replay = index === -1 ? operation.events : operation.events.slice(index + 1);
     const unsubscribe = this.listeners.add(operationId.value, listener);
     return { replay, unsubscribe };
+  }
+
+  subscribeTaskReplay(
+    taskId: TaskId,
+    lastEventId: string | undefined,
+    listener: (event: RuntimeTaskEvent) => void,
+  ): { readonly replay: readonly RuntimeTaskEvent[]; readonly unsubscribe: () => void } {
+    const record = this.tasks.get(taskId.value);
+    const events = record?.events ?? [];
+    const index = lastEventId ? events.findIndex((event) => event.eventId === lastEventId) : -1;
+    const replay = index === -1 ? events : events.slice(index + 1);
+    const unsubscribe = this.listeners.add(`task:${taskId.value}`, listener);
+    return { replay: [...replay], unsubscribe };
   }
 
   /** Return the actual Task assembly pool for the independent closed-turn Planner. */
@@ -4254,9 +4268,10 @@ export class RuntimeTaskCoordinator {
     const coordinator = this;
     const store = this.options.checkpointStoreFor(record.taskId, scope.cycleId!);
     const operation = record.operationId === undefined ? undefined : this.operations.get(record.operationId.value);
-    const canPushLive = operation !== undefined
-      && !operation.events.some((entry) => entry.kind === 'execution.terminal' && entry.terminalPhase === 'final');
     const pushLifecycleStep = (state: string, summary: string, childCallId?: string): void => {
+      const canPushLive = operation !== undefined
+        && record.executionEpoch === operation.executionEpoch
+        && !operation.events.some((entry) => entry.kind === 'execution.terminal' && entry.terminalPhase === 'final');
       if (record.operationId === undefined || operation === undefined || !canPushLive) return;
       this.pushEvent(
         record,
@@ -4323,11 +4338,6 @@ export class RuntimeTaskCoordinator {
       },
       async recordAdoption(input: ChildCallAdoptionInput): Promise<void> {
         context.assertProductionOpen();
-        pushLifecycleStep('child.adopted',
-          input.kind === 'execution'
-            ? `child execution ${input.invocationId} adopted`
-            : `child review ${input.invocationId} adopted`,
-          input.invocationId);
         const delivery = context.entries().find((entry) => (
           !('envelope' in entry) && entry.invocationId === input.invocationId && entry.kind === input.kind
         ));
@@ -4338,6 +4348,11 @@ export class RuntimeTaskCoordinator {
           );
         }
         await context.recordChildAdoption(input.invocationId, delivery);
+        pushLifecycleStep('child.adopted',
+          input.kind === 'execution'
+            ? `child execution ${input.invocationId} adopted`
+            : `child review ${input.invocationId} adopted`,
+          input.invocationId);
       },
       async recordReviewCheckpoint(input: ChildCallReviewCheckpointInput): Promise<ChildCallReviewCheckpointReceipt> {
         const committed = await coordinator.commitReviewResultCheckpoint(context, store, input);
@@ -6126,7 +6141,10 @@ export class RuntimeTaskCoordinator {
       error: details?.error,
       ...(details?.zeroEffectAdmissionDenial === undefined ? {} : { zeroEffectAdmissionDenial: details.zeroEffectAdmissionDenial }),
     });
-    if (!deferEmission) this.listeners.emit(operation.operationId.value, event);
+    if (!deferEmission) {
+      this.listeners.emit(operation.operationId.value, event);
+      this.listeners.emit(`task:${record.taskId.value}`, event);
+    }
     return event;
   }
 

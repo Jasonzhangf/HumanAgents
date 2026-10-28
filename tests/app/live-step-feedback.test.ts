@@ -598,6 +598,76 @@ async function confirmRequirement(service: UiRuntimeService, suffix: string): Pr
   });
 }
 
+test('task events stream keeps live feedback when subscribed before the operation exists', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-w2-task-early-'));
+  try {
+    const journal = new UiRuntimeJournal(join(root, 'ui-runtime.jsonl'));
+    const service = new UiRuntimeService({
+      mode: 'fake',
+      organId,
+      binding,
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+      checkpointStoreFor: (taskId: TaskId, cycleId: { value: string }) => new FileCheckpointStore(
+        join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`),
+      ),
+      attentionPort: attentionPort(),
+      providerState: 'ready',
+      journal,
+      closurePort: journal,
+      memory: testMemory('w2-task-early'),
+      explicitBrainInterpreter: { interpret: async () => { throw new Error('explicit brain is not configured for early task events'); } },
+      runtimeComposition: { admitExecution: async () => {} },
+    });
+    const task = service.createTask({ title: 'early task events', directive: 'subscribe before the operation exists' });
+
+    const accessControl = await AccessControlService.open({ credentialPath: join(root, 'credential.json'), create: true });
+    const challenge = await accessControl.issuePairingChallenge();
+    const session = await accessControl.consumePairingCode(challenge.code);
+    const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+    const { listener } = createUiRuntimeRequestDispatcher({
+      service,
+      accessControl,
+      productRoot: root,
+      uiRoot: join(process.cwd(), 'docs', 'ui'),
+      isClosing: () => false,
+    });
+
+    // Subscribe while the task has no operation yet. The old task binding
+    // returned an empty replay and dropped this listener, so the first
+    // operation allocation lost every live step.
+    const sse = dispatch(listener, { url: `/api/tasks/${encodeURIComponent(task.taskId.value)}/events`, headers: { cookie } });
+    await waitFor(() => sse.status === 200);
+    assert.equal(sse.text(), '');
+
+    const started = await service.startExecution(task.taskId, { prompt: 'stream from the first step' });
+    await waitFor(() => sse.writableEnded, 8000);
+
+    const events = sseFrames(sse.text()).map((frame) => JSON.parse(frame.data) as { readonly kind: string; readonly state: string });
+    assert.deepEqual(events.map((event) => event.kind), [
+      'execution.started',
+      'provider.model',
+      'provider.model',
+      'provider.model',
+      'provider.output',
+      'provider.tool',
+      'provider.output',
+      'execution.terminal',
+      'provider.model',
+      'execution.settling',
+      'checkpoint.committed',
+      'execution.terminal',
+    ]);
+    const states = events.filter((event) => event.kind === 'provider.model').map((event) => event.state);
+    for (const expected of ['dispatching', 'dispatched', 'settled']) {
+      assert.ok(states.includes(expected), `missing provider ${expected}: ${states.join(',')}`);
+    }
+    assert.equal(service.taskDashboard(task.taskId).operationId, started.operationId.value);
+    assert.equal(service.taskDashboard(task.taskId).state, 'succeeded');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('task events stream reports provider request rounds and child lifecycle steps', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-w2-task-'));
   try {

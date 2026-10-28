@@ -5884,9 +5884,9 @@ export class UiRuntimeService {
   }
 
   /**
-   * Task-scoped SSE binding: map the task to its current operation and reuse
-   * the coordinator's replay-and-live subscription. A queued task has no
-   * operation yet, so it participates only once the coordinator allocates one.
+   * Task-scoped SSE binding: validate the queued or coordinated task and attach
+   * to the task's durable event stream. Registering before the operation is
+   * allocated keeps later turns and operation changes on the same stream.
    */
   subscribeTaskEvents(
     taskId: TaskId,
@@ -5894,11 +5894,8 @@ export class UiRuntimeService {
     listener: (event: RuntimeSseEvent) => void,
   ): { readonly replay: readonly RuntimeSseEvent[]; readonly unsubscribe: () => void } {
     try {
-      const snapshot = this.coordinator.taskSnapshot(taskId);
-      if (snapshot.operationId === undefined) {
-        return { replay: [], unsubscribe: () => {} };
-      }
-      return this.coordinator.subscribeReplay(id('operation', snapshot.operationId), lastEventId, listener);
+      this.coordinatorOrQueuedTaskSnapshot(taskId);
+      return this.coordinator.subscribeTaskReplay(taskId, lastEventId, listener);
     } catch (error) {
       throw apiError(error);
     }
