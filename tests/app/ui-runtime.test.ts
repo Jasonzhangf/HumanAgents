@@ -4312,6 +4312,110 @@ test('typed existing-task-change fails closed on a missing or mismatched target 
   assert.equal(port.startPayloads.length, 0, 'replay must not dispatch the queued change');
 });
 
+test('existing-task-change on a settled task prepares one granted execution occurrence instead of only appending', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-existing-change-dispatch-'));
+  const grants = new JsonlTaskGrantJournal(new JsonlOrganJournal(join(root, 'grants.jsonl')));
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 });
+  let matchedTaskId = '';
+  const service = serviceFor(root, port, 'fake', 'ready', undefined, undefined, undefined, undefined, {
+    async interpret(input) {
+      return {
+        kind: 'requirement',
+        normalizedInput: 'change this task',
+        matchedTaskId,
+        knownFacts: [],
+        intent: 'change',
+        proposal: 'change the existing task',
+        structuredProposal: {
+          revision: input.inputRevision,
+          intent: 'change',
+          title: 'change this task',
+          objective: 'change this task',
+          deliverable: 'change the existing task',
+          deliveryConditions: [],
+          evidenceRefs: [],
+          blockingGaps: [],
+        },
+        decisionRefs: [],
+      };
+    },
+  }, undefined, grants);
+
+  try {
+    const target = service.createTask({ title: 'settled change target', directive: 'seed directive' });
+    matchedTaskId = target.taskId.value;
+
+    // The target already reached a real terminal before the change.
+    await service.startExecution(target.taskId, { prompt: 'seed directive' });
+    await waitFor(() => assert.equal(service.taskDashboard(target.taskId).state, 'succeeded'));
+    const seedEpoch = service.taskDashboard(target.taskId).executionEpoch ?? 0;
+    assert.equal(seedEpoch, 1);
+    const seedPayloads = port.startPayloads.length;
+
+    // Confirm an existing-task-change against that settled task while the
+    // task-scoped grant is still pending (not yet authorized).
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: 'ui:existing-change-dispatch',
+      rawInput: 'change this task',
+      channel: 'business',
+      requestKind: 'existing-task-change',
+    });
+    await service.interpretExplicitInput({ interactionId });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    assert.ok(proposed.revision);
+    const draftId = proposed.draft!.draftId;
+    const draftRevisionVersion = proposed.revision!.revisionVersion;
+    const draftRevisionHash = proposed.revision!.revisionHash;
+    await service.confirmExplicitRequirement({
+      interactionId,
+      draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:existing-change-dispatch',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-10T00:00:00.000Z',
+      payloadRef: 'asset://requirements/existing-change-dispatch',
+      requestKind: 'existing-task-change',
+      taskRef: target.taskId,
+      draftRevisionVersion,
+      draftRevisionHash,
+    });
+
+    // Dispatching before the grant is authorized must still prepare the change's
+    // own execution occurrence and wait for the grant, not silently stop after
+    // appending the input to the task mailbox.
+    const dispatched = await service.dispatchNextExplicitRequirement();
+    assert.equal(dispatched.taskId.value, target.taskId.value);
+    assert.ok(dispatched.operationId, 'a change must mint its own prepared operation identity');
+    assert.equal(service.taskDetail(target.taskId).state, 'waiting');
+    assert.equal(port.startPayloads.length, seedPayloads, 'a pending grant must not release the change yet');
+
+    // The task-scoped grant authorizes exactly that prepared change occurrence.
+    await grants.grant({
+      requestId: 'grant-existing-change-target',
+      taskId: target.taskId,
+      owner: 'human:operator',
+      expectedRevision: 0,
+      capability: {
+        actionId: TASK_EXECUTION_ACTION_ID,
+        capabilities: [TASK_EXECUTION_CAPABILITY],
+        scope: { organId, taskId: target.taskId },
+      },
+    });
+    const released = await service.releaseGrantedTaskExecution(target.taskId);
+    assert.equal(released.state, 'released');
+    await waitFor(() => assert.equal(service.taskDashboard(target.taskId).state, 'succeeded'));
+    assert.equal(service.taskDashboard(target.taskId).executionEpoch, seedEpoch + 1);
+    assert.equal(port.startPayloads.length, seedPayloads + 1, 'the grant must start exactly one new execution cycle');
+    const events = service.eventsSince(dispatched.operationId!);
+    assert.equal(events.some((event) => event.kind === 'execution.started'), true);
+    assert.equal(events.some((event) => event.kind === 'execution.terminal' && event.terminalPhase === 'final' && event.state === 'succeeded'), true);
+  } finally {
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('confirmed new-task create binds the verified principal execution grant and starts once', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-create-grant-'));
   const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 });

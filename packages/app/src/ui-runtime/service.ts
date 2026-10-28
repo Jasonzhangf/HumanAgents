@@ -7267,7 +7267,7 @@ export class UiRuntimeService {
       this.persistExplicitBrainState();
       const current = this.coordinator.taskSnapshot(task.taskId);
       if (executionEpoch === undefined) {
-        if (this.isTaskOccupyingExecutionSlot(current)) {
+        if (this.isTaskOccupyingExecutionSlot(current) || current.executionRelease === 'prepared') {
           // The target is busy. Do not start a conflicting execution (that used
           // to surface as task.busy); keep the confirmed requirement pending in
           // the FIFO so the running task's terminal wake consumes the appended
@@ -7283,16 +7283,25 @@ export class UiRuntimeService {
         }
         const pending = this.coordinator.pendingTaskInput(task.taskId);
         const prompt = pending ? pending.envelope.normalizedInput : consumed.normalizedInput;
-        if (autoStart) {
+        // A change/append to a settled task is its own execution cycle. Prepare
+        // it as the grant-gated occurrence even before authorization, so the
+        // task-scoped grant releases exactly this change instead of the
+        // requirement silently stopping after the mailbox append. The revision
+        // is consumed by the prepared cycle; release only starts it once the
+        // grant authorizes the origin.
+        const settled = current.executionEpoch !== undefined;
+        if (settled || autoStart) {
           const execution = this.coordinator.prepareExecution(task.taskId, {
             prompt,
             ...this.defaultOrchestrate(),
             operationId,
             ...(implicitRequirement === undefined ? {} : { implicitRequirement }),
           });
-          await this.coordinator.releaseExecution(task.taskId, execution.operationId);
-          if (pending) this.coordinator.consumeTaskInput(task.taskId, pending.inputRevision);
           executionEpoch = execution.executionEpoch;
+          if (pending) this.coordinator.consumeTaskInput(task.taskId, pending.inputRevision);
+          if (autoStart) {
+            await this.coordinator.releaseExecution(task.taskId, execution.operationId);
+          }
         }
       }
       const started: DispatchLedgerEntry = {
