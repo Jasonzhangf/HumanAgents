@@ -1543,10 +1543,10 @@ export async function readObservationDom(binding) {
 export async function readTaskListDom(binding) {
   const { page } = binding.browser;
   await page.goto(`${binding.serveBaseUrl}/tasks.html`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('[data-task-groups]', { timeout: 30_000, state: 'attached' });
+  await page.waitForSelector('[data-task-groups], .task-lists .task-item', { timeout: 30_000, state: 'attached' });
   return page.evaluate(() => ({
-    groupTitles: [...document.querySelectorAll('[data-task-groups] h2')].map((node) => node.textContent?.trim() ?? ''),
-    links: [...document.querySelectorAll('[data-task-groups] a')].map((link) => ({
+    groupTitles: [...document.querySelectorAll('[data-task-groups] h2, [data-task-groups] h3, .task-lists h2, .task-lists h3')].map((node) => node.textContent?.trim() ?? ''),
+    links: [...document.querySelectorAll('[data-task-groups] a, .task-lists a')].map((link) => ({
       href: link.getAttribute('href') ?? '',
       text: link.textContent?.trim() ?? '',
     })),

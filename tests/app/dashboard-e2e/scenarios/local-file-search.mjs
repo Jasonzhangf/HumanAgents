@@ -305,7 +305,11 @@ export async function runLocalFileSearchScenario(binding) {
   if (taskListDom.error) {
     missing.push(`task list page DOM could not be read: ${taskListDom.error}`);
   } else {
-    const completedRow = (taskListDom.links ?? []).find((link) => link.href.includes(binding.taskId) && link.text.includes('已完成'));
+    const executionTaskId = resolveExecutionTaskId(binding);
+    const completedRow = (taskListDom.links ?? []).find((link) =>
+      (link.href.includes(binding.taskId) || (executionTaskId && link.href.includes(executionTaskId)))
+      && link.text.includes('已完成')
+    );
     if (!completedRow) {
       missing.push(`task list page did not show task ${binding.taskId} as a completed row`);
     }

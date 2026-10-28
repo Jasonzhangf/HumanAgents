@@ -819,6 +819,7 @@ function renderLifecycleControl(rows, current, onChange) {
 // control, so the select keeps focus, and it never fetches or persists anything.
 function renderTaskFlowGroups(rows) {
   const host = element('div')
+  host.dataset.taskGroups = ''
   const sectionsHost = element('div')
   let lifecycle = ''
   const renderSections = () => {

@@ -2808,12 +2808,32 @@ function rememberEvent(event) {
 }
 
 function shouldObserveActiveState() {
+  if (!dashboard) return false
+  if (connectionState === 'disconnected' || Boolean(dashboardFailure)) {
+    return true
+  }
   return ['created', 'admitted', 'running', 'settling'].includes(dashboard.state)
     && !dashboard.operationId
 }
 
 function visibleRecentEvents(events) {
-  return events.filter((event) => event.kind !== 'provider.model' || (event.summary && event.summary !== 'model'))
+  const filtered = events.filter((event) => event.kind !== 'provider.model' || (event.summary && event.summary !== 'model'))
+  const coalesced = []
+  for (const event of filtered) {
+    const prev = coalesced[coalesced.length - 1]
+    if (event.kind === 'provider.output' && prev?.kind === 'provider.output') {
+      const prevText = prev.summary && prev.summary !== '未投影' ? prev.summary : ''
+      const nextText = event.summary && event.summary !== '未投影' ? event.summary : ''
+      const combined = `${prevText}${nextText}`.trim()
+      coalesced[coalesced.length - 1] = {
+        ...event,
+        summary: combined || event.summary || prev.summary,
+      }
+    } else {
+      coalesced.push(event)
+    }
+  }
+  return coalesced
 }
 
 function isRequestStart(event) {
@@ -2858,11 +2878,11 @@ function connectionText() {
   const syncedAt = lastSyncAt ? formatPreciseTime(lastSyncAt) : '尚未同步'
   if (explicitScope) return `只读范围 · 最近同步 ${syncedAt}`
   const eventAge = lastEventAt ? ageText(lastEventAt) : '尚无业务事件'
-  if (taskSettled()) {
-    return `执行已收拢 · 最近同步 ${syncedAt} · 最近业务事件 ${eventAge}`
-  }
   if (connectionState === 'disconnected') {
     return `实时连接已断开 · 最近同步 ${syncedAt} · 最近业务事件 ${eventAge}`
+  }
+  if (taskSettled()) {
+    return `执行已收拢 · 最近同步 ${syncedAt} · 最近业务事件 ${eventAge}`
   }
   if (connectionState === 'connected') {
     return `实时连接已建立 · 最近同步 ${syncedAt} · 最近业务事件 ${eventAge}`
@@ -3906,12 +3926,16 @@ async function refresh() {
     }
     status.dataset.tone = 'success'
     status.textContent = '任务投影已同步'
+    if (connectionState === 'disconnected') {
+      connectionState = taskSettled() ? 'settled' : 'connected'
+    }
     markSync()
     renderActiveReadingMode()
   } catch (error) {
     if (pageDisposed) return
     agentReadPending = false
     if (agentQuery) agentReadFailure = error
+    dashboardFailure = error
     setRefreshError(error)
     if (!explicitScope) scheduleObservation()
     throw error
@@ -4074,6 +4098,20 @@ function handlePopState(event) {
   }
 }
 
+function handleOffline() {
+  if (pageDisposed || explicitScope) return
+  closeStream()
+  subscribedOperationId = undefined
+  connectionState = 'disconnected'
+  renderActiveReadingMode()
+  void refresh().catch(setRefreshError)
+}
+
+function handleOnline() {
+  if (pageDisposed || explicitScope) return
+  void refresh().catch(setRefreshError)
+}
+
 let pageDisposed = false
 function disposePage(event) {
   if (pageDisposed) return
@@ -4081,6 +4119,8 @@ function disposePage(event) {
   pageDisposed = true
   window.removeEventListener('popstate', handlePopState)
   window.removeEventListener('pagehide', disposePage)
+  window.removeEventListener('offline', handleOffline)
+  window.removeEventListener('online', handleOnline)
   refreshButton.removeEventListener('click', refreshPage)
   stopObserving()
   closeStream()
@@ -4103,5 +4143,7 @@ function disposePage(event) {
 if (!TASK_DASHBOARD_TEST_MODE) {
   window.addEventListener('popstate', handlePopState)
   window.addEventListener('pagehide', disposePage)
+  window.addEventListener('offline', handleOffline)
+  window.addEventListener('online', handleOnline)
   void load().then(() => shell.initializeDisplayPreference())
 }
