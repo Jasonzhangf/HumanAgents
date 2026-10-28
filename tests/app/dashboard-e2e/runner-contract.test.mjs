@@ -55,6 +55,7 @@ import {
 } from './lib/binding.mjs';
 import {
   assessSettlement,
+  executionTaskFromRecords,
   isCheckpointJournalFile,
   journalPathFor,
   journalRootFor,
@@ -71,8 +72,10 @@ import {
   probeDashboardLiveSse,
   readDashboardProbe,
   readObservationDom,
+  resolveExecutionTaskId,
   startServeForAttempt,
   submitDirectiveAndConfirmDraft,
+  taskScopedNavigation,
 } from './lib/browser.mjs';
 import {
   closeNoTaskAttempt,
@@ -138,15 +141,24 @@ test('option surface is reported and accepted combinations parse', () => {
   assert.match(USAGE, /--entry <homepage\|dashboard>/);
   assert.match(USAGE, /--outcome <success\|failure\|cancel>/);
   assert.match(USAGE, /--service-mode <candidate\|installed-attach>/);
+  assert.match(USAGE, /--cli-path <path>/);
 
   // Documented defaults.
   assert.deepEqual(parseOptions(['--scenario', 'local-file-search']), {
-    scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'candidate',
+    scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'candidate', cliPath: null,
   });
   // Explicit accepted combinations.
   assert.deepEqual(
     parseOptions(['--scenario', 'local-file-search', '--entry', 'homepage', '--outcome', 'cancel', '--service-mode', 'candidate']),
-    { scenario: 'local-file-search', entry: 'homepage', outcome: 'cancel', serviceMode: 'candidate' },
+    { scenario: 'local-file-search', entry: 'homepage', outcome: 'cancel', serviceMode: 'candidate', cliPath: null },
+  );
+  assert.equal(
+    parseOptions(['--scenario', 'local-file-search', '--cli-path', '/opt/prefix/humanagent/cli.js']).cliPath,
+    '/opt/prefix/humanagent/cli.js',
+  );
+  assert.throws(
+    () => parseOptions(['--scenario', 'local-file-search', '--cli-path']),
+    /--cli-path requires a value/,
   );
   // Positional scenario (the current pnpm script form) is preserved.
   assert.equal(parseOptions(['local-file-search']).scenario, 'local-file-search');
@@ -176,7 +188,7 @@ test('unsupported combinations are rejected, never downgraded', () => {
   // Accepted attach combination with an existing-task entry.
   assert.deepEqual(
     parseOptions(['--scenario', 'local-file-search', '--service-mode', 'installed-attach', '--entry', 'dashboard']),
-    { scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'installed-attach' },
+    { scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'installed-attach', cliPath: null },
   );
   assert.deepEqual(assertSupportedCombination('local-file-search', { entry: 'dashboard', outcome: 'failure', serviceMode: 'candidate' }).outcome, 'failure');
 });
@@ -1883,6 +1895,185 @@ test('public main/CLI stays INCOMPLETE when scenario success has no strict Journ
   }
 });
 
+/**
+ * W4-a readback scope. The provider tool result belongs to the scheduled
+ * execution occurrence, not the UI draft anchor. Reading it through the anchor
+ * returns `tool-output.event-not-found`; the route must use the event's own
+ * execution task. Both descriptor shapes must reach that digest-verifying route.
+ */
+test('tool-output readback uses the event execution task and accepts outputRef and outputRefs[0]', async () => {
+  const base = 'http://127.0.0.1:1';
+  const anchorTask = 'ui-task-implicit-draft-2';
+  const executionTask = 'scheduled-task-readback';
+  const eventTask = 'scheduled-task-event-scope';
+  const calls = [];
+  const reportsBySeq = new Map([
+    [3, { query: 'alpha', hits: ['seed.txt'] }],
+    [4, { query: 'beta', hits: ['change.txt'] }],
+    [5, { query: 'gamma', hits: ['gamma.txt'] }],
+    [6, { query: 'delta', hits: ['delta.txt'] }],
+  ]);
+  const auth = {
+    async fetch(url) {
+      const target = String(url);
+      calls.push(target);
+      const match = /\/api\/tasks\/([^/]+)\/operations\/([^/]+)\/executions\/\d+\/events\/(\d+)\/tool-output$/.exec(new URL(target).pathname);
+      if (!match) return { ok: false, status: 404, text: async () => JSON.stringify({ error: { message: 'not found' } }) };
+      const report = reportsBySeq.get(Number(match[3]));
+      // This fake route models the product's digest-checked reader: it only has
+      // a report for the recorded descriptor, so a wrong scope never reads one.
+      if (!report) return { ok: false, status: 409, text: async () => JSON.stringify({ error: { message: 'tool-output.report-missing-or-changed' } }) };
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(report),
+        json: async () => report,
+      };
+    },
+  };
+  const events = [
+    { kind: 'provider.tool-result', status: 'succeeded', outputRef: 'asset://alpha', outputDigest: 'sha256:alpha', seq: 3, toolId: 'file.search' },
+    { kind: 'provider.tool-result', status: 'succeeded', outputRefs: ['asset://beta'], outputDigest: 'sha256:beta', seq: 4, toolId: 'file.search' },
+    { kind: 'provider.tool-result', status: 'succeeded', outputRef: 'asset://gamma', outputDigest: 'sha256:gamma', seq: 5, toolId: 'file.search' },
+    { kind: 'provider.tool-result', status: 'succeeded', outputRef: 'asset://delta', outputDigest: 'sha256:delta', seq: 6, toolId: 'file.search', taskId: { scope: 'task', value: eventTask } },
+  ];
+  const binding = { serveBaseUrl: base, taskId: anchorTask, executionTaskId: executionTask, auth };
+  const reports = await readToolOutputReports(
+    binding,
+    { operationId: CONTRACT_OPERATION.value, executionEpoch: CONTRACT_EPOCH },
+    events,
+  );
+  assert.equal(reports.length, 4);
+  assert.ok(reports.every((entry) => entry.ok), JSON.stringify(reports));
+  assert.deepEqual(reports.map((entry) => entry.seq), [3, 4, 5, 6]);
+  // The event's own taskId wins; otherwise the executionTaskId is used. The UI
+  // draft anchor is never the tool-output scope.
+  for (const report of reports.slice(0, 3)) {
+    assert.match(report.path, new RegExp(`/api/tasks/${executionTask}/operations/`));
+  }
+  assert.match(reports[3].path, new RegExp(`/api/tasks/${eventTask}/operations/`));
+  for (const target of calls) {
+    assert.equal(target.includes(anchorTask), false, 'the draft anchor must never scope a tool-output read');
+  }
+  assert.deepEqual(reports[0].report, reportsBySeq.get(3));
+  assert.deepEqual(reports[1].report, reportsBySeq.get(4));
+
+  // With no event task and no executionTaskId the anchor remains the last
+  // fallback, and the call still goes through the same digest-checked route.
+  const fallbackCalls = [];
+  const fallbackAuth = {
+    async fetch(url) {
+      fallbackCalls.push(String(url));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ query: 'anchor' }) };
+    },
+  };
+  const fallback = await readToolOutputReports(
+    { serveBaseUrl: base, taskId: anchorTask, auth: fallbackAuth },
+    { operationId: CONTRACT_OPERATION.value, executionEpoch: CONTRACT_EPOCH },
+    [{ kind: 'provider.tool-result', status: 'succeeded', outputRefs: ['asset://anchor'], outputDigest: 'sha256:anchor', seq: 9, toolId: 'file.search' }],
+  );
+  assert.equal(fallback.length, 1);
+  assert.equal(
+    fallbackCalls[0],
+    `${base}/api/tasks/${anchorTask}/operations/${CONTRACT_OPERATION.value}/executions/${CONTRACT_EPOCH}/events/9/tool-output`,
+  );
+});
+
+test('taskScopedNavigation accepts the product task.html landing with a non-empty task id', () => {
+  const base = 'http://127.0.0.1:1';
+  const accepted = taskScopedNavigation(
+    `${base}/task.html?task=task-submitted&projectKey=contract&mode=rcc`,
+    base,
+  );
+  assert.ok(accepted, 'the served product lands a confirmed submission on ./task.html');
+  assert.equal(accepted.pathname, '/task.html');
+  assert.equal(accepted.taskId, 'task-submitted');
+  assert.equal(accepted.origin, base);
+  // A bare task.html load without a task id is not a settled task navigation.
+  assert.equal(taskScopedNavigation(`${base}/task.html?task=`, base), null);
+  assert.equal(taskScopedNavigation('http://127.0.0.1:2/task.html?task=foreign', base), null);
+});
+
+test('E2E_CONFIRM_TIMEOUT_MS raises the default confirmation window and an explicit option wins', async () => {
+  const seen = [];
+  const makeBinding = () => {
+    const page = fakeHomepagePage('http://127.0.0.1:1/task.html?task=task-submitted');
+    const innerWaitForURL = page.waitForURL.bind(page);
+    page.waitForURL = async (predicate, options = {}) => {
+      seen.push(options.timeout);
+      return innerWaitForURL(predicate, options);
+    };
+    return {
+      entry: 'homepage',
+      serveBaseUrl: 'http://127.0.0.1:1',
+      browser: { page },
+      auth: {
+        async fetch(url) {
+          const target = String(url);
+          if (target.endsWith('/api/tasks')) {
+            return {
+              ok: true,
+              status: 200,
+              text: async () => JSON.stringify({
+                running: [{ taskId: { scope: 'task', value: 'task-submitted' } }],
+              }),
+            };
+          }
+          if (target.includes('/dashboard')) {
+            return {
+              ok: true,
+              status: 200,
+              text: async () => JSON.stringify({
+                state: 'running',
+                taskId: { scope: 'task', value: 'task-submitted' },
+                operationId: CONTRACT_OPERATION.value,
+                executionEpoch: CONTRACT_EPOCH,
+              }),
+            };
+          }
+          return { ok: true, status: 200, text: async () => JSON.stringify({}) };
+        },
+      },
+    };
+  };
+
+  const previous = process.env.E2E_CONFIRM_TIMEOUT_MS;
+  try {
+    delete process.env.E2E_CONFIRM_TIMEOUT_MS;
+    await submitDirectiveAndConfirmDraft(makeBinding(), 'submitted task');
+    assert.equal(seen.at(-1), 90_000, 'the default confirmation window stays 90 seconds');
+
+    process.env.E2E_CONFIRM_TIMEOUT_MS = '600000';
+    await submitDirectiveAndConfirmDraft(makeBinding(), 'submitted task');
+    assert.equal(seen.at(-1), 600_000, 'the environment raises the confirmation window');
+
+    await submitDirectiveAndConfirmDraft(makeBinding(), 'submitted task', { confirmTimeoutMs: 40 });
+    assert.equal(seen.at(-1), 40, 'a caller-supplied timeout still wins');
+  } finally {
+    if (previous === undefined) delete process.env.E2E_CONFIRM_TIMEOUT_MS;
+    else process.env.E2E_CONFIRM_TIMEOUT_MS = previous;
+  }
+});
+
+test('openTaskDashboard carries task, projectKey and mode so it never lands on the legacy unscoped page', async () => {
+  const base = 'http://127.0.0.1:1';
+  const page = recordingPage();
+  const binding = {
+    serveBaseUrl: base,
+    taskId: CONTRACT_TASK,
+    projectKey: 'contract-project',
+    browser: { page },
+    auth: { async fetch() { return { ok: true, status: 200, text: async () => JSON.stringify({}) }; } },
+  };
+  await openTaskDashboard(binding, { waitNonterminal: false });
+  assert.equal(page.gotos.length, 1);
+  const url = new URL(page.gotos[0]);
+  assert.equal(url.pathname, '/task-dashboard.html');
+  assert.equal(url.searchParams.get('task'), CONTRACT_TASK.value);
+  assert.equal(url.searchParams.get('projectKey'), 'contract-project');
+  assert.equal(url.searchParams.get('mode'), 'rcc');
+});
+
 test('public main/CLI stays INCOMPLETE when strict settlement passes but cleanup fails', async () => {
   assertResolverAvailable();
   const dir = await makeTempRoot('cleanup-failure');
@@ -3271,7 +3462,7 @@ test('every task URL consumer projects string and typed task identities to the s
     [
       'openTaskDashboard',
       async (binding) => { await openTaskDashboard(binding, { waitNonterminal: false }); },
-      [`${base}/task-dashboard.html?task=${task}`],
+      [`${base}/task-dashboard.html?task=${task}&mode=rcc`],
     ],
     [
       'readDashboardProbe',
@@ -3325,6 +3516,63 @@ test('every task URL consumer projects string and typed task identities to the s
       assert.ok(typedUrls.includes(target), `${name}: expected ${target} for the typed identity in ${JSON.stringify(typedUrls)}`);
     }
   }
+});
+
+/**
+ * A confirmed submission can create both a draft placeholder and the scheduled
+ * task that later holds the verified `operation.started`. The runner must bind
+ * its dashboard/observation/settlement identity to the latter, never to the
+ * draft placeholder that has no execution facts.
+ */
+test('draft and scheduled tasks coexist: execution identity comes only from operation.started', () => {
+  const draft = { scope: 'task', value: 'ui-task-implicit-draft-2' };
+  const execution = { scope: 'task', value: 'scheduled-task-665227213af5adf02045' };
+  const operation = { scope: 'operation', value: 'scheduled-operation-665227213af5adf02045' };
+  const cycle = { scope: 'cycle', value: 'ui-cycle-1' };
+  const records = [
+    { kind: 'task.created', taskId: draft, title: 'implicit draft placeholder' },
+    { kind: 'task.created', taskId: execution, title: '计划执行 subscription:requirement:draft-2:2::1::1' },
+    {
+      kind: 'operation.started',
+      taskId: execution,
+      operationId: operation,
+      cycleId: cycle,
+      executionEpoch: 1,
+      startedAt: '2026-10-28T05:22:20.996Z',
+    },
+  ];
+  const resolved = executionTaskFromRecords(records);
+  assert.equal(resolved.ok, true);
+  assert.deepEqual(resolved.identity.taskId, execution);
+  assert.deepEqual(resolved.identity.operationId, operation);
+  assert.equal(resolved.identity.executionEpoch, 1);
+
+  const binding = { taskId: draft, executionTaskId: resolved.identity.taskId };
+  assert.deepEqual(resolveExecutionTaskId(binding), execution);
+
+  // A journal can already hold an older operation.started. The submission time
+  // is a preference that drops that older identity; without it the same history
+  // is ambiguous instead of silently choosing one task.
+  const olderStart = {
+    kind: 'operation.started',
+    taskId: { scope: 'task', value: 'scheduled-task-older' },
+    operationId: { scope: 'operation', value: 'scheduled-operation-older' },
+    cycleId: cycle,
+    executionEpoch: 1,
+    startedAt: '2026-10-28T05:10:00.000Z',
+  };
+  const history = [records[0], records[1], olderStart, records[2]];
+  const chosen = executionTaskFromRecords(history, { notBefore: '2026-10-28T05:20:00.000Z' });
+  assert.equal(chosen.ok, true);
+  assert.deepEqual(chosen.identity.taskId, execution);
+  assert.equal(executionTaskFromRecords(history).ok, false);
+});
+
+test('a draft-only journal never becomes an execution task', () => {
+  const draft = { scope: 'task', value: 'ui-task-implicit-draft-2' };
+  const resolved = executionTaskFromRecords([{ kind: 'task.created', taskId: draft, title: 'draft' }]);
+  assert.equal(resolved.ok, false);
+  assert.match(resolved.reason, /no verified operation\.started/);
 });
 
 /**

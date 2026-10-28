@@ -31,7 +31,7 @@ import {
   readObservationDom,
   readTaskListDom,
   sleep,
-  submitDirectiveAndConfirmDraft,
+  approvePendingTaskGrant, resolveExecutionTaskId, submitDirectiveAndConfirmDraft,
   waitForTerminal,
 } from '../lib/browser.mjs';
 import {
@@ -85,6 +85,9 @@ export async function runLocalFileSearchScenario(binding) {
     clarificationAnswer: CLARIFY_ANSWER,
     onDirectiveFilled: (stage) => captureInputStage(binding, directive, stage),
   });
+  // UX09 approval: approve the pending execution grant the runtime surfaces for
+  // the confirmed submission, then the scheduler resumes into real execution.
+  await approvePendingTaskGrant(binding);
   const inputStage = binding.inputStage ?? null;
   if (inputStage?.screenshot) evidence.screenshots.unshift(inputStage.screenshot);
   const draftIntent = binding.draft?.intent ?? '';
@@ -545,6 +548,7 @@ async function runRequestedNonSuccess(binding) {
   const directive = outcome === 'cancel' ? successDirective : failureDirective;
 
   await submitDirectiveAndConfirmDraft(binding, directive, { clarificationAnswer: CLARIFY_ANSWER });
+  await approvePendingTaskGrant(binding);
   await captureScreenshot(binding, '01-input-submitted');
   evidence.screenshots.push(`${binding.screenshotsDir}/01-input-submitted.png`);
 
@@ -567,7 +571,9 @@ async function runRequestedNonSuccess(binding) {
     // owner records the stop attempt separately from the settlement assessment,
     // so the runner can reassess read-only once the final journal is complete
     // without ever issuing a second stop.
-    const stopSettle = await stopTaskAndSettle(binding, binding.taskId, { expectedOutcome: 'cancel' });
+    // A task-scoped grant keeps the business anchor and moves real execution
+    // onto its occurrence, so the stop must name the execution identity.
+    const stopSettle = await stopTaskAndSettle(binding, resolveExecutionTaskId(binding), { expectedOutcome: 'cancel' });
     binding.attemptControl = { ...(binding.attemptControl ?? {}), stopSettle };
     stopResponse = stopSettle.stopResponse ?? { status: null, body: stopSettle.reason ?? null };
   }
