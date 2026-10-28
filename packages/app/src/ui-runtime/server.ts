@@ -2264,6 +2264,11 @@ function streamTaskEvents(
       await closeStream('auth.invalidated');
     }
   };
+  const closesTaskStream = (event: RuntimeSseEvent | undefined): boolean => {
+    if (event?.kind !== 'execution.terminal' || event.terminalPhase !== 'final') return false;
+    const state = service.taskDashboard(taskId).state;
+    return state === 'succeeded' || state === 'failed' || state === 'cancelled';
+  };
   registry.scheduleAuthRevalidation(accessControl);
   try {
     const lastEventId = request.headers['last-event-id'];
@@ -2278,7 +2283,7 @@ function streamTaskEvents(
             await validateStreamSession();
             if (closed) return;
             writeSse(response, event);
-            if (event.kind === 'execution.terminal' && event.terminalPhase === 'final') await closeStream('terminal');
+            if (closesTaskStream(event)) await closeStream('terminal');
           } catch {
             await closeStream('write-failure');
           }
@@ -2287,7 +2292,7 @@ function streamTaskEvents(
     );
     unsubscribe = subscription.unsubscribe;
     for (const event of subscription.replay) writeSse(response, event);
-    if (subscription.replay.at(-1)?.terminalPhase === 'final') {
+    if (closesTaskStream(subscription.replay.at(-1))) {
       void closeStream('terminal');
       return;
     }
