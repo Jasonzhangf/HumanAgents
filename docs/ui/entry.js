@@ -370,7 +370,15 @@ function setEntryError(error) {
   panel.hidden = false
   panel.append(
     element('strong', error.code || 'request.failed'),
-    element('p', `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the runtime error'}`),
+    element('p', error.message || String(error)),
+    technicalDetailTrigger(() => ({
+      title: '技术详情',
+      entries: [
+        ['code', error?.code, 'data-detail-code'],
+        ['owner', error?.ownerId, 'data-detail-owner'],
+        ['nextAction', error?.nextAction, 'data-detail-next'],
+      ],
+    })),
   )
   appendPairingEntry(panel, error)
 }
@@ -493,10 +501,15 @@ function renderStatus(summary, rows) {
   if (summary.implicitScheduling) {
     const queue = summary.implicitScheduling
     const card = element('article', undefined, 'stat')
+    const queueLabel = queue.state === 'executing' || queue.state === 'admitted'
+      ? '已排入队列，正在执行'
+      : queue.state === 'queued'
+        ? '已排入执行队列，等待调度'
+        : '队列调度就绪'
     card.append(
-      element('span', `FIFO · ${queue.requirementId}`),
-      element('strong', String(queue.fifoSeq)),
-      element('p', `${queue.state} · ${queue.code} · ${queue.nextAction}`, 'muted'),
+      element('span', '队列进度'),
+      element('strong', `第 ${queue.fifoSeq} 位`),
+      element('p', queueLabel, 'muted'),
     )
     stats.append(card)
   }
@@ -570,7 +583,17 @@ async function refreshQueue() {
     const panel = template.hosts.primary.querySelector('#entry-live')
     if (panel) {
       clearNode(panel)
-      panel.append(element('p', `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`, 'empty'))
+      panel.append(
+        element('p', error.message || '队列状态暂时无法刷新，请稍后重试。', 'empty'),
+        technicalDetailTrigger(() => ({
+          title: '技术详情',
+          entries: [
+            ['code', error?.code, 'data-detail-code'],
+            ['owner', error?.ownerId, 'data-detail-owner'],
+            ['nextAction', error?.nextAction, 'data-detail-next'],
+          ],
+        })),
+      )
       appendPairingEntry(panel, error)
     }
   }
@@ -870,6 +893,42 @@ async function waitForTask(identity) {
 const POST_CONFIRMATION_STATES = new Set(['confirmed', 'dispatched'])
 
 /**
+ * Subscribe to the runtime's explicit-intake step stream while the brain is
+ * still organizing the input. The page only mirrors progress summaries; it
+ * never mints steps or a second confirmation. In a non-browser (or non-SSE)
+ * environment the call degrades to a no-op so tests and server slices stay
+ * side-effect free.
+ */
+function subscribeExplicitStepStream(activeId) {
+  if (!activeId || typeof EventSource === 'undefined') return () => {}
+  let stream
+  try {
+    stream = new EventSource(`/api/explicit/interactions/${encodeURIComponent(activeId)}/events`)
+  } catch {
+    return () => {}
+  }
+  stream.addEventListener('step', (event) => {
+    try {
+      const payload = JSON.parse(event.data || '{}')
+      const step = payload?.step ?? payload
+      if (step && typeof step.summary === 'string' && step.summary.trim() !== '') {
+        appendCardEvent('status', step.summary, 'progress', {
+          eventKey: step.kind || 'explicit.step',
+          interactionId: activeId,
+        })
+        status.dataset.tone = 'warning'
+        status.textContent = step.summary
+      }
+    } catch {
+      // Ignore malformed step event payloads
+    }
+  })
+  return () => {
+    try { stream.close() } catch {}
+  }
+}
+
+/**
  * The interaction state the work card may project once the runtime accepted the
  * requirement.
  *
@@ -908,7 +967,12 @@ async function executeSubmission(submission, clarificationAnswer) {
     snapshot = await api.inspectExplicitInteraction(interactionId)
   }
   if (snapshot.state === 'received' || snapshot.state === 'matching') {
-    snapshot = await api.interpretExplicitInput(interactionId)
+    const stopStepStream = subscribeExplicitStepStream(interactionId)
+    try {
+      snapshot = await api.interpretExplicitInput(interactionId)
+    } finally {
+      stopStepStream()
+    }
   }
   latestState = snapshot.state
   renderDraft(snapshot)

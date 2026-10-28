@@ -292,7 +292,7 @@ export function createTaskProductController(options = {}) {
     if (nextState === 'confirmed' || nextState === 'dispatched') {
       state.confirmed = true
       state.notice = nextSnapshot.reply
-        || `已确认，需求已进入 FIFO。当前状态：${nextState}。`
+        || '已确认，需求已进入 FIFO 队列，正在等待调度与执行。'
     } else {
       state.notice = nextSnapshot.reply || nextSnapshot.nextAction
     }
@@ -330,7 +330,7 @@ export function createTaskProductController(options = {}) {
       state.submitting = false
       state.confirmed = true
       state.error = undefined
-      state.notice = '已确认，需求已进入 FIFO。可在任务列表查看 queued/admitted/executing 等状态。'
+      state.notice = '已确认，需求已进入 FIFO 队列。可在任务列表查看排队与执行进度。'
       if (status) {
         status.textContent = state.notice
         status.removeAttribute?.('data-status')
@@ -1052,6 +1052,10 @@ async function load() {
     if (taskId && taskId !== 'new') detail = await api.taskDetail(taskId)
     if (pageLeaving) return
     await renderInteraction(requestedInteraction, taskId)
+    if (taskId && taskId !== 'new' && !pageLeaving) {
+      void loadTaskHistory()
+      void refreshTaskDashboard()
+    }
     return
   }
   if (taskId && window.location.hash === '#task-interaction') {

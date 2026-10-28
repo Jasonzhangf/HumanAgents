@@ -4323,11 +4323,18 @@ export class UiRuntimeService {
         // unified public result is `productPublicOutput`. `task.output` is the
         // runtime's internal execution value and must never be rendered as the
         // public body.
-        investigation: [],
+        investigation: task.publicOutput === undefined || task.publicOutput.commits.length === 0
+          ? []
+          : task.events
+              .map((event) => event.summary)
+              .filter((summary) => summary.trim() !== '')
+              .slice(-5),
         proposal: task.nextStep,
         nextAction: task.nextStep,
-        requiredDecisions: [],
-        customInputAllowed: false,
+        requiredDecisions: task.state === 'waiting' && task.executionRelease === 'prepared'
+          ? ['批准继续执行任务']
+          : [],
+        customInputAllowed: task.state === 'waiting',
         output: task.publicOutput === undefined || task.publicOutput.commits.length === 0
           ? undefined
           : {

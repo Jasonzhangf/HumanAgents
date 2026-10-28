@@ -711,6 +711,25 @@ function responsesPayload(request: ResponsesWireRequest, source: ProviderTranspo
       const existing = userItem.content.map((part) => part.text).join('');
       wireInput[firstUserIndex] = { ...userItem, content: [{ type: 'input_text', text: `${request.instructions}\n\n${existing}` }] };
     }
+  } else if (source === 'rcc') {
+    const firstUserIndex = wireInput.findIndex((item) => item.type === 'message' && item.role === 'user');
+    if (firstUserIndex >= 0) {
+      const userItem = wireInput[firstUserIndex];
+      if (userItem.type === 'message') {
+        const existing = userItem.content.map((part) => part.text).join('');
+        if (existing.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(existing) as { instruction?: unknown };
+            if (typeof parsed.instruction === 'string' && parsed.instruction.length > 0) {
+              const prefix = `${parsed.instruction}\n\nRespond ONLY with the single JSON object specified above. Do not include any conversational text, greetings, or commentary.`;
+              wireInput[firstUserIndex] = { ...userItem, content: [{ type: 'input_text', text: `${prefix}\n\n${existing}` }] };
+            }
+          } catch {
+            // Leave non-JSON user messages untouched.
+          }
+        }
+      }
+    }
   }
   return {
     model: request.model,

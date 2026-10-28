@@ -2829,6 +2829,13 @@ function visibleRecentEvents(events) {
         ...event,
         summary: combined || event.summary || prev.summary,
       }
+    } else if (
+      event.kind === 'provider.model'
+      && prev?.kind === 'provider.model'
+      && event.summary === prev.summary
+      && event.summary !== 'provider requested model work'
+    ) {
+      coalesced[coalesced.length - 1] = event
     } else {
       coalesced.push(event)
     }
@@ -4007,6 +4014,25 @@ async function revokeTaskGrantControl() {
   }
 }
 
+let streamRefreshInFlight = false
+let streamRefreshQueued = false
+function scheduleStreamRefresh() {
+  if (streamRefreshInFlight) {
+    streamRefreshQueued = true
+    return
+  }
+  streamRefreshInFlight = true
+  void refresh()
+    .catch(setRefreshError)
+    .finally(() => {
+      streamRefreshInFlight = false
+      if (streamRefreshQueued && !pageDisposed) {
+        streamRefreshQueued = false
+        scheduleStreamRefresh()
+      }
+    })
+}
+
 function subscribe(operationId) {
   if (subscribedOperationId === operationId && stream && stream.readyState !== EventSource.CLOSED && connectionState !== 'disconnected') return
   closeStream()
@@ -4043,20 +4069,20 @@ function subscribe(operationId) {
       if (isReplay(event)) return
       rememberEvent(event)
       connectionState = 'connected'
-      void refresh().catch(setRefreshError)
+      scheduleStreamRefresh()
     })
   }
   stream.onopen = () => {
     connectionState = 'connected'
     renderActiveReadingMode()
-    void refresh().catch(setRefreshError)
+    scheduleStreamRefresh()
   }
   subscribedOperationId = operationId
   stream.onerror = () => {
     if (closingStream) return
     connectionState = 'disconnected'
     renderActiveReadingMode()
-    void refresh().catch(setRefreshError)
+    scheduleStreamRefresh()
   }
 }
 
