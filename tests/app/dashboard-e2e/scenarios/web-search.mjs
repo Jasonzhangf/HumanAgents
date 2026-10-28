@@ -12,7 +12,7 @@
  * deviation and this attempt stays INCOMPLETE.
  */
 
-import { captureDashboardEvidence, captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
+import { approvePendingTaskGrant, captureDashboardEvidence, captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
 import { countTurnEvidenceFor, journalPathFor, readToolOutputReports } from '../lib/journal.mjs';
 
 export const SCENARIO = 'web-search';
@@ -40,6 +40,8 @@ export async function runWebSearchScenario(binding) {
   await captureScreenshot(binding, '01-input-before-submit');
   evidence.screenshots.push(`${binding.screenshotsDir}/01-input-before-submit.png`);
   await submitDirectiveAndConfirmDraft(binding, directive, { clarificationAnswer: CLARIFY_ANSWER });
+  // UX09 approval: the confirmed submission may wait for its execution grant.
+  await approvePendingTaskGrant(binding);
   await captureScreenshot(binding, '02-draft-confirmed');
   evidence.screenshots.push(`${binding.screenshotsDir}/02-draft-confirmed.png`);
   await captureScreenshot(binding, '03-run-queue');

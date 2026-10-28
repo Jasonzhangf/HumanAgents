@@ -26,7 +26,7 @@
 
 import { access, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { jsonRequest, serveExitStatus, sleep } from './browser.mjs';
+import { jsonRequest, resolveExecutionTaskId, serveExitStatus, sleep } from './browser.mjs';
 import { taskIdValue } from './binding.mjs';
 import {
   assessSettlement,
@@ -250,8 +250,13 @@ export async function stopTaskAndSettle(binding, taskId, options = {}) {
  * the same operation/epoch. No Dashboard value is used to invent identity.
  */
 async function verifyStopIdentity(binding, target) {
+  // A task-scoped grant leaves the anchor draft in place and moves real
+  // execution onto its durable occurrence. Both identities belong to this
+  // attempt, so either is a legal stop target; any other target is a conflict.
   const boundTask = binding.taskId ?? binding.scope?.taskId ?? null;
-  if (boundTask !== null && !sameId(boundTask, target)) {
+  const executionTask = resolveExecutionTaskId(binding);
+  const boundTargets = [boundTask, executionTask].filter((value) => value !== null && value !== undefined);
+  if (boundTargets.length > 0 && !boundTargets.some((value) => sameId(value, target))) {
     return {
       ok: false,
       reason: `stop target ${JSON.stringify(idValue(target))} conflicts with bound task ${JSON.stringify(idValue(boundTask))}`,

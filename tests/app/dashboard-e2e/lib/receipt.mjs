@@ -45,7 +45,8 @@ export function buildReceipt(binding, evidence = {}) {
       model: process.env.HUMANAGENT_UI_MODEL ?? 'gpt-5.5',
     },
     task: {
-      taskId: binding.taskId ?? null,
+      taskId: binding.executionTaskId ?? binding.taskId ?? null,
+      draftTaskId: binding.taskId ?? null,
       terminalState: evidence.terminalState ?? binding.terminalState ?? null,
       dashboardState: evidence.dashboardState ?? null,
     },
@@ -60,6 +61,11 @@ export function buildReceipt(binding, evidence = {}) {
       journalPaths: binding.journalPaths ?? [],
       evidenceRefs: evidence.evidenceRefs ?? [],
       terminalRecord: evidence.terminalRecord ?? null,
+      // How the attempt learned the task that really executed. A resolved
+      // disposition names the verified operation.started owner; an unresolved
+      // one is persisted so a rerun can tell a missing product record from a
+      // short wait window or a wrong journal path.
+      executionIdentity: binding.executionIdentityDisposition ?? null,
       scenarioEvidence: evidence.scenarioEvidence ?? null,
     },
     ui: {
@@ -105,7 +111,8 @@ function renderReceiptMarkdown(receipt) {
   lines.push('');
   lines.push('## Task');
   lines.push('');
-  lines.push(`- Task id: \`${receipt.task.taskId ?? 'n/a'}\``);
+  lines.push(`- Execution task id: \`${receipt.task.taskId ?? 'n/a'}\``);
+  lines.push(`- Submitted draft task id: \`${receipt.task.draftTaskId ?? 'n/a'}\``);
   lines.push(`- Runtime terminal state: \`${receipt.task.terminalState ?? 'n/a'}\``);
   if (receipt.settlement) {
     lines.push(`- Settled: \`${String(receipt.settlement.settled)}\``);
@@ -127,6 +134,9 @@ function renderReceiptMarkdown(receipt) {
   lines.push(`- Evidence refs: ${receipt.evidence.evidenceRefs.length}`);
   if (receipt.evidence.terminalRecord) {
     lines.push(`- Terminal record: \`${JSON.stringify(receipt.evidence.terminalRecord).slice(0, 400)}\``);
+  }
+  if (receipt.evidence.executionIdentity) {
+    lines.push(`- Execution identity: \`${JSON.stringify(receipt.evidence.executionIdentity).slice(0, 600)}\``);
   }
   lines.push('');
   if (receipt.scenarioEvidence) {
