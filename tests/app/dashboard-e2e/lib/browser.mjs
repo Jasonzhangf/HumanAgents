@@ -1116,13 +1116,37 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
 }
 
 function taskGroups(tasks) {
-  return ['running', 'waiting', 'draft', 'completed', 'failed']
+  return ['running', 'waiting', 'draft', 'completed', 'stopped', 'failed']
     .flatMap((group) => Array.isArray(tasks?.[group]) ? tasks[group] : []);
 }
 
 function idValueOf(value) {
   if (value === undefined || value === null) return null;
   return typeof value === 'object' && value !== null && 'value' in value ? String(value.value) : String(value);
+}
+
+const ACTIVE_TASK_STATES = new Set(['running', 'settling', 'succeeded', 'completed', 'failed', 'stopped']);
+
+/**
+ * Return the id of an owned task that is already granted/executing/terminal, or
+ * null when every owned task is still awaiting a grant. Mirrors the product
+ * board groups: rows in `running`/`completed`/`failed`/`stopped` are active and
+ * never wait on a human grant that no longer applies. `waiting`/`draft` keep the
+ * poll so a genuinely pending grant can still be approved.
+ */
+function findOwnedActiveTaskId(tasks, ownedTaskIds) {
+  for (const group of ['running', 'completed', 'stopped', 'failed']) {
+    for (const task of tasks?.[group] ?? []) {
+      const id = String(idValueOf(task?.taskId ?? task));
+      if (!ownedTaskIds.has(id)) continue;
+      if (Array.isArray(task?.executions)) {
+        const child = task.executions.find((entry) => ACTIVE_TASK_STATES.has(String(entry?.state)));
+        if (child) return idValueOf(child.taskId ?? child) ?? id;
+      }
+      return idValueOf(task.taskId ?? task) ?? id;
+    }
+  }
+  return null;
 }
 
 /** The task whose terminal/settlement identity the runner must follow. */
@@ -1225,7 +1249,7 @@ export async function resolveOwnedExecutionTasks(binding, { projectKey, mode }) 
   const groups = [];
   const anchorValue = anchor ? String(idValueOf(anchor)) : null;
   if (!anchorValue) {
-    return { error: 'no bound anchor task for this submission; the grant cannot be scoped', taskIds, groups };
+    return { error: 'no bound anchor task for this submission; the grant cannot be scoped', taskIds, groups, tasks: null };
   }
   try {
     const tasks = await jsonRequest(`${binding.serveBaseUrl}/api/tasks`, {}, binding.auth);
@@ -1234,7 +1258,7 @@ export async function resolveOwnedExecutionTasks(binding, { projectKey, mode }) 
       ?? all.find((task) => (Array.isArray(task?.executions) ? task.executions : [])
         .some((child) => String(idValueOf(child?.taskId ?? child)) === anchorValue));
     if (!anchorRow) {
-      return { error: `anchor task ${anchorValue} is not listed on the serve board`, taskIds, groups };
+      return { error: `anchor task ${anchorValue} is not listed on the serve board`, taskIds, groups, tasks };
     }
     taskIds.push(anchorRow.taskId ?? anchorRow);
     groups.push({ anchor: anchorRow.taskId ?? anchorRow, executions: [] });
@@ -1243,9 +1267,9 @@ export async function resolveOwnedExecutionTasks(binding, { projectKey, mode }) 
       taskIds.push(childId);
       groups[0].executions.push(childId);
     }
-    return { error: null, taskIds, groups };
+    return { error: null, taskIds, groups, tasks };
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error), taskIds, groups };
+    return { error: error instanceof Error ? error.message : String(error), taskIds, groups, tasks: null };
   }
 }
 
@@ -1268,50 +1292,104 @@ export async function approvePendingTaskGrant(binding, options = {}) {
     options.grantTimeoutMs ?? process.env.E2E_GRANT_TIMEOUT_MS ?? 120_000,
   );
   const startedAt = new Date().toISOString();
-  let ownedTaskIds = new Set();
+
+  // Early-exit (P1 fix): when the owned task is already granted or executing, a
+  // human grant is not required. Without this, the 120s poll below stalls the
+  // local-file-search live-SSE probe until the task has already settled. Read
+  // the board once and return before the long wait.
+  const owned = await resolveOwnedExecutionTasks(binding, { projectKey, mode })
+    .catch(() => ({ error: null, taskIds: [] }));
+  const ownedTaskIds = new Set((owned.taskIds ?? []).map((value) => String(idValueOf(value))));
+  const ownedActiveTaskId = findOwnedActiveTaskId(owned.tasks, ownedTaskIds);
+  if (ownedActiveTaskId !== null) {
+    binding.executionTaskId = binding.executionTaskId ?? ownedActiveTaskId;
+    binding.earlyGrantResolution = {
+      kind: 'already-granted',
+      ownedTaskIds: [...ownedTaskIds],
+      capturedAt: new Date().toISOString(),
+    };
+    binding.grantDisposition = {
+      kind: 'already-granted',
+      reason: 'owned task is already granted or executing',
+      taskId: ownedActiveTaskId,
+      startedAt,
+      earlyResolvedAt: new Date().toISOString(),
+    };
+    return;
+  }
+
   let ownerError = null;
   let pending = null;
   try {
     pending = await waitForDom(binding.browser.page ?? {}, 'pending task-grant decision', async () => {
+      // A task can leave the board's empty/draft state one poll after the
+      // confirmation. Re-read the owned board each iteration so an auto-grant
+      // that starts executing is observed immediately, not after the 120s wait.
+      const fresh = await resolveOwnedExecutionTasks(binding, { projectKey, mode });
+      ownerError = fresh.error;
+      const ownedPollIds = new Set(fresh.taskIds.map((value) => String(value.value ?? value)));
+      if (!ownerError && ownedPollIds.size > 0) {
+        const ownedActiveTaskId = findOwnedActiveTaskId(fresh.tasks, ownedPollIds);
+        if (ownedActiveTaskId !== null) return { kind: 'already-granted', taskId: ownedActiveTaskId };
+      }
       const decision = await jsonRequest(decisionUrl, {}, binding.auth).catch(() => null);
       if (!decision || decision.kind !== 'task-grant' || decision.state !== 'waiting') return null;
       if (!decision.target || !decision.target.taskRef) return null;
       const candidate = taskIdValue(decision.target.taskRef);
       if (!candidate) return null;
-      const fresh = await resolveOwnedExecutionTasks(binding, { projectKey, mode });
-      ownerError = fresh.error;
-      ownedTaskIds = new Set(fresh.taskIds.map((value) => String(value.value ?? value)));
       if (ownerError) return null;
-      if (!ownedTaskIds.has(String(candidate))) {
+      if (!ownedPollIds.has(String(candidate))) {
         const seen = binding.grantForeignDecisions ?? [];
         if (!seen.some((entry) => String(entry.taskId) === String(candidate))) {
           binding.grantForeignDecisions = [...seen, {
             taskId: candidate,
             observedAt: new Date().toISOString(),
-            ownedTaskIds: [...ownedTaskIds],
+            ownedTaskIds: [...ownedPollIds],
           }];
         }
         return null;
       }
-      return decision;
+      return { kind: 'decision', decision };
     }, grantTimeoutMs);
   } catch {
+    if (binding.earlyGrantResolution) {
+      binding.grantDisposition = {
+        kind: 'already-granted',
+        reason: 'owned task is already granted or executing',
+        taskId: binding.executionTaskId,
+        startedAt,
+        earlyResolvedAt: binding.earlyGrantResolution.capturedAt,
+      };
+      return;
+    }
     binding.grantDisposition = {
       kind: 'not-required',
       reason: ownerError
         ? `no owned pending task-grant decision: ${ownerError}`
         : 'no pending task-grant decision surfaced before the approval window; execution did not need a human grant',
       decisionUrl,
-      ownedTaskIds: [...ownedTaskIds],
+      ownedTaskIds: [],
       foreignDecisions: binding.grantForeignDecisions ?? [],
       waitedMs: grantTimeoutMs,
       startedAt,
     };
     return;
   }
-  const taskId = taskIdValue(pending.target.taskRef);
+  if (pending.kind === 'already-granted') {
+    binding.executionTaskId = binding.executionTaskId ?? pending.taskId;
+    binding.grantDisposition = {
+      kind: 'already-granted',
+      reason: 'owned task is already granted or executing',
+      taskId: pending.taskId,
+      startedAt,
+      earlyResolvedAt: new Date().toISOString(),
+    };
+    return;
+  }
+  const decision = pending.decision;
+  const taskId = taskIdValue(decision.target.taskRef);
   if (!taskId) {
-    binding.grantDisposition = { kind: 'skipped', reason: 'pending decision carried no taskRef', decision: pending };
+    binding.grantDisposition = { kind: 'skipped', reason: 'pending decision carried no taskRef', decision };
     return;
   }
   if (Array.isArray(binding.grantForeignDecisions) && binding.grantForeignDecisions.length > 0) {
@@ -1753,6 +1831,10 @@ export async function probeDashboardLiveSse(binding, options = {}) {
   const { page, context } = binding.browser;
   const waitDom = options.waitForDom ?? waitForDom;
   const base = binding.serveBaseUrl;
+  // Resolve the real execution task identity (best-effort from the journal
+  // operation.started) before navigating, so the probe opens the running
+  // execution dashboard while the task is still live rather than after it settled.
+  await ensureExecutionTaskIdentity(binding, options);
   const taskId = resolveExecutionTaskId(binding);
   const dashboardUrl = `${base}/task-dashboard.html?task=${encodeURIComponent(taskIdValue(taskId))}`;
   await page.addInitScript(() => {

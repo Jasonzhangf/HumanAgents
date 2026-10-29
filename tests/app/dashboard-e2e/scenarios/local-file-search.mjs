@@ -98,11 +98,10 @@ export async function runLocalFileSearchScenario(binding) {
 
   // Observe the live dashboard's real SSE connection while the task still runs:
   // result events arrive, a network interruption shows 已断开 without faking
-  // failure, and reconnect restores live freshness.
-  await openTaskDashboard(binding);
-  // Capture the live page snapshot while the task still runs: the real SSE
-  // connection, the running state chip, and the trajectory events delivered
-  // before terminal. This must happen before the task terminalizes.
+  // failure, and reconnect restores live freshness. The probe resolves the
+  // execution identity and opens that dashboard itself with the SSE recorder
+  // installed, so the redundant blocking openTaskDashboard is removed. This must
+  // run while the task is still live, before it terminalizes.
   const liveSse = await probeDashboardLiveSse(binding).catch((error) => ({ error: error.message }));
 
   // run queue -> execution turns -> verifiable terminal

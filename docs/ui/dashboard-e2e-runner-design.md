@@ -202,6 +202,17 @@ candidate_binding                    绑定候选并登记本轮资源
 成功路径不提供"保留临时 root"的开关。runner 入口在行为实现前必须 fail closed：`node runner.mjs --scenario <name>`
 现在直接以非零退出，不允许出现"命令返回 0 但没有跑任何场景"的假通过。
 
+### 7.1 P1：owned task 已授权/执行时授权提前返回
+
+审计发现 `approvePendingTaskGrant` 在 auto-grant 的新任务上仍轮询 `120s`
+`/api/product/decision` 等 waiting 决策，使 `local-file-search` 在 live-SSE 探针启动前已进入终态。
+修复：进入轮询前先读一次 `/api/tasks`，若 owned task（含子执行）已处于
+`running/settling/succeeded/completed/failed/stopped`，立即以
+`grantDisposition.kind='already-granted'` 返回，不发 `/control/grant` POST，并把
+`binding.executionTaskId` 绑定到该 running task。`probeDashboardLiveSse` 进入时先
+`ensureExecutionTaskIdentity` 解析执行 task id，再直接导航其 dashboard 并安装 SSE recorder；
+`local-file-search.mjs` 删除探针前的冗余 `openTaskDashboard` 阻塞。
+
 ## 8. 非目标与风险
 
 - 非目标：Retry-10；扩大 20 条事件窗口；新增 Dashboard 产品界面。

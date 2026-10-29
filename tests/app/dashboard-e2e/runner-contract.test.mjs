@@ -66,6 +66,7 @@ import {
   workspaceManifest,
 } from './lib/journal.mjs';
 import {
+  approvePendingTaskGrant,
   attachToInstalledService,
   captureDashboardEvidence,
   describeDraftStage,
@@ -3817,4 +3818,49 @@ test('assessSettlement parses the scheduled execution task id and reports blocke
   );
   assert.equal(settlement.reason.includes('timeout'), false);
   assert.equal(settlement.reason.includes('execution identity is unavailable'), false);
+});
+
+test('approvePendingTaskGrant early-exits already-granted when the owned task is already running', async () => {
+  const base = 'http://127.0.0.1:1';
+  const anchorTask = 'ui-task-implicit-draft-2';
+  const calls = [];
+  const boardBody = {
+    running: [{ taskId: { scope: 'task', value: anchorTask }, state: 'running', executions: [] }],
+    waiting: [],
+    draft: [],
+    completed: [],
+    failed: [],
+  };
+  const auth = {
+    async fetch(url, init = {}) {
+      const target = String(url);
+      const method = String(init.method ?? 'GET').toUpperCase();
+      calls.push({ target, method });
+      const body = target === `${base}/api/tasks` ? boardBody : {};
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        text: async () => JSON.stringify(body),
+        json: async () => body,
+      };
+    },
+  };
+  const binding = {
+    serveBaseUrl: base,
+    taskId: { scope: 'task', value: anchorTask },
+    projectKey: 'contract-project',
+    browser: { page: { url: () => 'about:blank', goto: async () => {} } },
+    auth,
+  };
+
+  const started = Date.now();
+  await approvePendingTaskGrant(binding, { grantTimeoutMs: 120_000 });
+  const elapsed = Date.now() - started;
+
+  assert.equal(binding.grantDisposition?.kind, 'already-granted', JSON.stringify(binding.grantDisposition));
+  assert.equal(binding.executionTaskId, anchorTask, 'the running owned task becomes the execution identity');
+  assert.ok(elapsed < 250, `early-exit must return within the 250ms target, took ${elapsed}ms`);
+  const grantPosts = calls.filter((call) => call.method === 'POST' && call.target.includes('/control/grant'));
+  assert.equal(grantPosts.length, 0, 'an already-granted owned task must never receive a grant POST');
 });
