@@ -1,4 +1,17 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+
+// The app test surface models only the `node:fs` members it uses. The journal
+// cache needs a file-identity stat key, so declare just the members consumed
+// here instead of widening the shared ambient surface.
+declare module 'node:fs' {
+  export interface Stats {
+    readonly dev: number;
+    readonly ino: number;
+    readonly size: number;
+    readonly mtimeMs: number;
+  }
+  export function statSync(path: string): Stats;
+}
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type {
@@ -564,20 +577,84 @@ function readJournalRecords(
   return { records, nextLine };
 }
 
+function sameStatIdentity(
+  left: { readonly dev?: number; readonly ino?: number; readonly size?: number; readonly mtimeMs?: number } | undefined,
+  right: { readonly dev?: number; readonly ino?: number; readonly size?: number; readonly mtimeMs?: number } | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs;
+}
+
 export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosurePort {
   constructor(private readonly filePath: string) {}
 
-  append(record: UiRuntimeJournalRecord): void {
+  // Process-local validated-record cache keyed by the file content identity.
+  // Every `append` previously reread and revalidated the whole journal, so a
+  // long streaming turn reparsed the entire file for each SSE delta. When the
+  // file has not been rewritten by another process, a warm append validates
+  // only the new record and the replay returns the cached records. A different
+  // content identity (external write, truncation, or rotation) invalidates the
+  // cache and forces a full read/validate.
+  private cached?: {
+    readonly identity: ReturnType<UiRuntimeJournal['statIdentity']>;
+    readonly records: readonly UiRuntimeJournalRecord[];
+    readonly context: JournalValidationContext;
+    readonly nextLine: number;
+  };
+
+  private statIdentity(): { readonly dev: number; readonly ino: number; readonly size: number; readonly mtimeMs: number } | undefined {
+    try {
+      const info = statSync(this.filePath);
+      return { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private readRecords(): {
+    readonly records: readonly UiRuntimeJournalRecord[];
+    readonly context: JournalValidationContext;
+    readonly nextLine: number;
+  } {
     const context = createJournalValidationContext();
-    const { nextLine } = readJournalRecords(this.filePath, context);
+    const { records, nextLine } = readJournalRecords(this.filePath, context);
+    return { records, context, nextLine };
+  }
+
+  append(record: UiRuntimeJournalRecord): void {
+    const identity = this.statIdentity();
+    const cached = this.cached;
+    if (cached !== undefined && sameStatIdentity(cached.identity, identity)) {
+      const nextLine = cached.nextLine;
+      const validated = validateJournalRecord(record, this.filePath, nextLine, cached.context);
+      if (validated.duplicate) return;
+      mkdirSync(dirname(this.filePath), { recursive: true });
+      appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, 'utf8');
+      this.cached = {
+        identity: this.statIdentity(),
+        records: [...cached.records, validated.record],
+        context: cached.context,
+        nextLine: nextLine + 1,
+      };
+      return;
+    }
+    const { records, context, nextLine } = this.readRecords();
     const validated = validateJournalRecord(record, this.filePath, nextLine, context);
     if (validated.duplicate) return;
     mkdirSync(dirname(this.filePath), { recursive: true });
     appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, 'utf8');
+    this.cached = { identity: this.statIdentity(), records: [...records, validated.record], context, nextLine: nextLine + 1 };
   }
 
   replay(): readonly UiRuntimeJournalRecord[] {
-    return readJournalRecords(this.filePath, createJournalValidationContext()).records;
+    const identity = this.statIdentity();
+    const cached = this.cached;
+    if (cached !== undefined && sameStatIdentity(cached.identity, identity)) {
+      return cached.records.map((record) => structuredClone(record));
+    }
+    const { records, context, nextLine } = this.readRecords();
+    this.cached = { identity, records, context, nextLine };
+    return records.map((record) => structuredClone(record));
   }
 
   async commit(input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }> {

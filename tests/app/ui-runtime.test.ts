@@ -6408,6 +6408,43 @@ test('server close awaits credential watch drain and reports closure', async () 
   }
 });
 
+test('asynchronous credential watch failure closes the watcher without a stale shutdown error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-watch-runtime-error-'));
+  const credentialPath = join(root, 'security', 'web-access.json');
+  const accessControl = await AccessControlService.open({ credentialPath, create: true });
+  try {
+    let reported = 0;
+    accessControl.startCredentialWatch(
+      async () => undefined,
+      async (error) => {
+        reported += 1;
+        throw error;
+      },
+    );
+    const watcher = (accessControl as unknown as {
+      readonly credentialWatcher?: { emit(event: string, error: unknown): boolean };
+    }).credentialWatcher;
+    assert.ok(watcher, 'the credential watch is active before the runtime error');
+    if (!watcher) throw new Error('credential watcher is not active');
+    // A real `fs.watch` runtime error (for example EMFILE) is delivered through
+    // the watcher error event. Let the enqueued notification settle before the
+    // shutdown path observes it, matching a real failing watcher.
+    watcher.emit('error', new Error('EMFILE: too many open files, watch'));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.ok(reported >= 1, 'the runtime watcher error is reported to the SSE auth notification path');
+    assert.equal((accessControl as unknown as { readonly credentialWatcher?: unknown }).credentialWatcher,
+      undefined, 'the failed watcher is closed on its runtime error');
+    assert.ok(accessControl.credentialWatchRuntimeError() instanceof Error,
+      'the runtime watcher error is latched for the auth layer');
+    const closed = await accessControl.closeCredentialWatch();
+    assert.equal(closed, false, 'shutdown close must not rethrow the stale watcher error and is already closed');
+    assert.equal(await accessControl.closeCredentialWatch(), false, 'shutdown close remains idempotent');
+  } finally {
+    await accessControl.closeCredentialWatch().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('explicit brain status query never creates a task or FIFO entry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-status-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));

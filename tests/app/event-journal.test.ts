@@ -734,6 +734,116 @@ test('UI runtime journal makes exact duplicate append and replay idempotent and 
   }
 });
 
+test('UI runtime journal warm appends and replays reuse validated records without rereading the file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-runtime-cache-'));
+  const filePath = join(root, 'ui-runtime-journal.jsonl');
+  const taskId = id('task', 'task-runtime-cache');
+  const operationId = id('operation', 'operation-runtime-cache');
+  const records = uiRuntimeRecords({ taskId, operationId });
+  const secondEvent = {
+    ...records.event,
+    event: {
+      ...records.event.event,
+      eventId: 'operation-runtime-cache-2',
+      seq: 2,
+      summary: 'second output',
+    },
+  } as typeof records.event;
+  const thirdEvent = {
+    ...records.event,
+    event: {
+      ...records.event.event,
+      eventId: 'operation-runtime-cache-3',
+      seq: 3,
+      summary: 'third output',
+    },
+  } as typeof records.event;
+  const moduleUrl = new URL('../../packages/app/src/ui-runtime/journal.js', import.meta.url).href;
+  const childCode = [
+    "import { createRequire, syncBuiltinESMExports } from 'node:module';",
+    "const [url, file, startedJson, eventJson, secondJson, thirdJson] = process.argv.slice(1);",
+    "const { UiRuntimeJournal } = await import(url);",
+    "const started = JSON.parse(startedJson);",
+    "const event = JSON.parse(eventJson);",
+    "const second = JSON.parse(secondJson);",
+    "const third = JSON.parse(thirdJson);",
+    "const require = createRequire(import.meta.url);",
+    "const fsCjs = require('node:fs');",
+    "const originalReadFileSync = fsCjs.readFileSync;",
+    "let reads = 0;",
+    "fsCjs.readFileSync = function (target, ...rest) { if (String(target) === file) reads += 1; return originalReadFileSync.apply(this, [target, ...rest]); };",
+    "syncBuiltinESMExports();",
+    "const bytes = () => originalReadFileSync(file, 'utf8');",
+    "const lines = () => bytes().split('\\n').filter((line) => line.trim().length > 0);",
+    "const out = {};",
+    "const journal = new UiRuntimeJournal(file);",
+    "journal.append(started);",
+    "journal.append(event);",
+    "reads = 0;",
+    "journal.append(second);",
+    "out.warmAppendReads = reads;",
+    "out.linesAfterWarmAppend = lines().length;",
+    "reads = 0;",
+    "const replayed = journal.replay();",
+    "out.warmReplayReads = reads;",
+    "out.eventSeqs = replayed.filter((record) => record.kind === 'operation.event').map((record) => record.event.seq);",
+    "out.freshEquivalent = JSON.stringify(replayed) === JSON.stringify(new UiRuntimeJournal(file).replay());",
+    "const beforeDuplicate = bytes();",
+    "reads = 0;",
+    "journal.append(second);",
+    "out.duplicateReads = reads;",
+    "out.duplicateUnchanged = bytes() === beforeDuplicate;",
+    "const beforeConflict = bytes();",
+    "let conflict = null;",
+    "try { journal.append({ ...event, event: { ...event.event, summary: 'conflicting output' } }); } catch (error) { conflict = error && error.message && /conflict/i.test(error.message) ? 'conflict' : 'other'; }",
+    "out.conflict = conflict;",
+    "out.conflictUnchanged = bytes() === beforeConflict;",
+    "new UiRuntimeJournal(file).append(third);",
+    "out.refreshedSeqs = journal.replay().filter((record) => record.kind === 'operation.event').map((record) => record.event.seq);",
+    "process.stdout.write(JSON.stringify(out));",
+  ].join('\n');
+  const runChild = (): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> => new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', childCode, moduleUrl, filePath,
+      JSON.stringify(records.started), JSON.stringify(records.event),
+      JSON.stringify(secondEvent), JSON.stringify(thirdEvent)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout!.setEncoding('utf8');
+    child.stdout!.on('data', (chunk: string) => { stdout += chunk; });
+    child.stderr!.setEncoding('utf8');
+    child.stderr!.on('data', (chunk: string) => { stderr += chunk; });
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+  try {
+    const result = await runChild();
+    assert.equal(result.code, 0, result.stderr);
+    const report = JSON.parse(result.stdout) as {
+      readonly warmAppendReads: number;
+      readonly linesAfterWarmAppend: number;
+      readonly warmReplayReads: number;
+      readonly eventSeqs: readonly number[];
+      readonly freshEquivalent: boolean;
+      readonly duplicateReads: number;
+      readonly duplicateUnchanged: boolean;
+      readonly conflict: string | null;
+      readonly conflictUnchanged: boolean;
+      readonly refreshedSeqs: readonly number[];
+    };
+    assert.equal(report.warmAppendReads, 0, 'a warm append must not reread the full journal');
+    assert.equal(report.linesAfterWarmAppend, 3, 'a warm append writes exactly one new line');
+    assert.equal(report.warmReplayReads, 0, 'a warm replay must not reread the full journal');
+    assert.deepEqual(report.eventSeqs, [1, 2], 'warm appends preserve record order');
+    assert.equal(report.freshEquivalent, true, 'the cached replay matches an uncached replay');
+    assert.equal(report.duplicateReads, 0, 'a warm duplicate must not reread the full journal');
+    assert.equal(report.duplicateUnchanged, true, 'a warm duplicate must not rewrite the file');
+    assert.equal(report.conflict, 'conflict', 'a warm conflict remains rejected');
+    assert.equal(report.conflictUnchanged, true, 'a warm conflict must not rewrite the file');
+    assert.deepEqual(report.refreshedSeqs, [1, 2, 3], 'a changed file state invalidates the cache and revalidates');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('UI runtime journal rejects fact-absent identity mismatches and standalone events on append and replay without writing', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-runtime-fact-absent-'));
   try {

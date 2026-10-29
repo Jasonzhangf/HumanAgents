@@ -995,6 +995,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly interruptThirdTurnOnce?: () => Promise<void>;
   readonly holdFirstExecutionOnce?: () => Promise<void>;
   readonly holdInspectionAfterAdoptOnce?: () => Promise<void>;
+  readonly failTurnEndDrain?: boolean;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean;
   inspectionInvocations(): readonly { callId: string; invocationId: string }[];
@@ -1224,6 +1225,12 @@ async function textOnlyResponsesUpstream(input: {
         return;
       }
       if (declaresTurnEnd(body)) {
+        if (input.failTurnEndDrain) {
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.write('data: {"type":"response.created","response":{"id":"controlled-failed-drain"}}\n\n');
+          (response as unknown as { destroy(): void }).destroy();
+          return;
+        }
         if (input.parallelChild && body.includes('call-child-1-end')) finishChildB.resolve();
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.end(frame([
@@ -1685,6 +1692,7 @@ async function textOnlyFixture(
   reviewPerCycle = false,
   badReviewSelector = false,
   scenario?: TextOnlyFixtureScenario,
+  failTurnEndDrain = false,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1702,6 +1710,7 @@ async function textOnlyFixture(
     organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount, reviewPerCycle, badReviewSelector,
     interactionScopeId: `runtime:${paths.projectKey}`,
     ...(scenario === undefined ? {} : { scenario }),
+    ...(failTurnEndDrain ? { failTurnEndDrain: true } : {}),
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
     ...(holdInspectionAfterAdoptOnce === undefined ? {} : { holdInspectionAfterAdoptOnce }),
@@ -3096,6 +3105,63 @@ if (!coldConsumerMode) test('native review child failure preserves primary reaso
     await fixture.upstream.close();
     if (passed) await rm(fixture.root, { recursive: true });
     else console.error(`review failure fixture retained: ${fixture.root}`);
+  }
+});
+
+test('native accepted end with an interrupted drain captures the failed turn and closes without pending executions', async () => {
+  const fixture = await textOnlyFixture(false, false, false, undefined, undefined,
+    undefined, undefined, false, undefined, false, false, undefined, true);
+  let passed = false;
+  try {
+    const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 2);
+    assert.equal(result.code, 0, result.stderr);
+    const receiptStart = result.stdout.indexOf('{');
+    const receiptEnd = result.stdout.lastIndexOf('}');
+    assert.ok(receiptStart >= 0 && receiptEnd > receiptStart, `the native run prints its receipt: ${result.stdout}`);
+    const receipt = JSON.parse(result.stdout.slice(receiptStart, receiptEnd + 1)) as {
+      readonly taskId?: string;
+      readonly state?: string;
+      readonly error?: { readonly code?: string; readonly message?: string; readonly cleanupError?: unknown };
+      readonly output?: string;
+    };
+    assert.equal(receipt.taskId, taskId.value);
+    assert.equal(receipt.state, 'blocked', JSON.stringify(receipt));
+    assert.equal(receipt.error?.cleanupError, undefined,
+      'the interrupted continuation reports the primary failure without a cleanup error');
+    assert.equal(receipt.output, '', 'the interrupted continuation outputs no final public delivery');
+
+    const verified = await fixture.journal.verify();
+    const prepared = new UiRuntimeJournal(fixture.layout.preparedJournalPath).replay()
+      .find((record) => record.kind === 'operation.prepared'
+        && record.allocation.taskId.value === taskId.value);
+    const operationId = prepared?.kind === 'operation.prepared'
+      ? prepared.allocation.operationId.value : undefined;
+    assert.ok(operationId, 'the interrupted continuation keeps its prepared operation');
+    if (operationId === undefined) throw new Error('the interrupted continuation has no prepared operation');
+    const boundaryId = `execution-close:${operationId}`;
+    const capture = verified.records.find((record) => record.payload?.['type'] === 'recovery-assets.phase'
+      && typeof (record.payload as { receipt?: { readonly boundaryId?: unknown } }).receipt === 'object'
+      && (record.payload as { receipt: { readonly boundaryId?: unknown } }).receipt.boundaryId === boundaryId);
+    assert.ok(capture, 'the interrupted continuation keeps its recovery capture');
+    if (capture) {
+      const readback = await createNativeRecoveryAssets({
+        journalPath: fixture.layout.organJournalPath,
+        journal: fixture.journal,
+        assetRoot: join(fixture.paths.artifactsRoot, 'ui-provider-evidence'),
+      }).readRecoveryAssetsExact((capture.payload as { readonly receipt: { readonly receiptRef: string } }).receipt.receiptRef);
+      assert.equal(readback.prepared.body.cut.pauseId, boundaryId);
+    }
+    const closePending = new UiRuntimeJournal(fixture.layout.preparedJournalPath).replay()
+      .flatMap((record) => record.kind === 'operation.event'
+        && record.event.taskId.value === taskId.value ? [record.event] : [])
+      .some((event) => event.kind === 'provider.error'
+        && event.summary.includes('close.pending.executions'));
+    assert.equal(closePending, false, 'the failed-turn close does not report pending provider executions');
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`failed continuation fixture retained: ${fixture.root}`);
   }
 });
 

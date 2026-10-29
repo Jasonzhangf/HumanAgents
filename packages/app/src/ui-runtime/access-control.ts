@@ -258,7 +258,16 @@ export class AccessControlService {
   private credentialWatcher?: FSWatcher;
   private credentialWatchStopped = true;
   private credentialWatchPending: Promise<void> = Promise.resolve();
-  private credentialWatchFailure: unknown;
+  // A latched watcher runtime error (for example EMFILE). It isolates the
+  // post-start failure from shutdown: `closeCredentialWatch` is idempotent and
+  // never rethrows it, so `server.close` stays deterministic. The error remains
+  // observable for the auth layer through `credentialWatchRuntimeError`.
+  private credentialWatchRuntimeFailure: unknown;
+
+  /** Exposes a latched post-start watcher runtime error without blocking close. */
+  credentialWatchRuntimeError(): unknown {
+    return this.credentialWatchRuntimeFailure;
+  }
 
   private constructor(options: AccessControlOptions, credential: WebAccessCredential) {
     this.credentialPath = options.credentialPath;
@@ -478,14 +487,18 @@ export class AccessControlService {
     const target = basename(this.credentialPath);
     let lastGeneration = this.credential.sessionGeneration;
     this.credentialWatchStopped = false;
-    this.credentialWatchFailure = undefined;
+    this.credentialWatchRuntimeFailure = undefined;
     const enqueue = (operation: () => Promise<void>): void => {
       this.credentialWatchPending = this.credentialWatchPending.then(operation).catch(async (error) => {
         if (this.credentialWatchStopped) return;
         try {
           await onError(error);
-        } catch (callbackError) {
-          this.credentialWatchFailure = callbackError;
+        } catch {
+          // The runtime error is already isolated through the auth-unavailable
+          // SSE notification. Do not propagate it into a hard shutdown failure
+          // or fabricate a healthy watch. Stop the watcher but keep the error
+          // latched for the auth layer to observe.
+          this.credentialWatchRuntimeFailure = error;
           this.credentialWatchStopped = true;
           this.credentialWatcher?.close();
           this.credentialWatcher = undefined;
@@ -505,8 +518,15 @@ export class AccessControlService {
     });
     watcher.on('error', (error) => {
       if (this.credentialWatchStopped) return;
+      // A runtime watcher failure (for example EMFILE) means the watch is not
+      // healthy. Close it immediately, latch the error for the auth layer, and
+      // still deliver the auth-unavailable notification. The latched error
+      // must never rethrow from `closeCredentialWatch`.
+      this.credentialWatchRuntimeFailure = error;
+      this.credentialWatchStopped = true;
+      this.credentialWatcher?.close();
+      this.credentialWatcher = undefined;
       enqueue(async () => {
-        if (this.credentialWatchStopped) return;
         await onError(error);
       });
     });
@@ -521,11 +541,6 @@ export class AccessControlService {
     this.credentialWatcher?.close();
     this.credentialWatcher = undefined;
     await this.credentialWatchPending;
-    if (this.credentialWatchFailure !== undefined) {
-      const failure = this.credentialWatchFailure;
-      this.credentialWatchFailure = undefined;
-      throw failure;
-    }
     return wasWatching;
   }
 

@@ -166,8 +166,10 @@ async function captureObservation(base, taskId, dashboard, steps) {
   required(checkpoints.surface === 'runtime-checkpoint-history', 'checkpoint history HTTP projection');
   steps.checkpoint = checkpoints.viewed;
   const closure = steps.checkpoint?.recoveryBinding;
-  required(closure?.coreClosure?.committed === true && closure.turnClosureRef
-    && closure.turnRecoveryRef && closure.alignmentRef, 'standard turn/save/checkpoint and Planner alignment references');
+  const alignmentRef = closure?.alignmentRef ?? closure?.coreClosure?.nextAction?.ref;
+  required(closure?.coreClosure?.committed === true && closure.preparationRef
+    && closure.turnRecoveryRef && typeof alignmentRef === 'string'
+    && alignmentRef.startsWith('turn-alignment:'), 'standard turn/save/checkpoint and Planner alignment references');
   assert.equal(closure.coreClosure.executionEpoch, dashboard.executionEpoch);
   const identity = steps.checkpoint.identity;
   assert.equal(valueOf(identity.checkpointId), dashboard.checkpoint.checkpointId);
@@ -191,11 +193,11 @@ export function assertReceiptContract(receipt) {
     required(requirement[key] !== undefined, `final receipt requirement.${key}`);
     assert.deepEqual(steps.identityRow?.identitySource?.[key], requirement[key], `exact TaskIdentity ${key}`);
   }
-  required(steps.grant?.readback?.grant?.state === 'granted', 'committed grant');
+  required(steps.grant?.readback?.grant?.state === 'granted', 'committed auto-grant');
+  required((steps.grant?.readback?.grant?.capability?.capabilities ?? [])
+    .includes('provider.execution'), 'auto-grant scope');
+  required(typeof steps.grant?.readback?.commit?.commitId === 'string', 'auto-grant commit reference');
   assert.deepEqual(steps.grantReadback.readback, steps.grant.readback, 'grant durable GET readback');
-  required(steps.grant.execution?.state === 'released', 'grant execution released');
-  assertSameExecution(steps.grant.execution.selector, steps.prepared);
-  assertSameExecution(steps.grant.execution.current, steps.prepared);
   assertSameExecution(steps.dashboard, steps.prepared);
   assert.equal(steps.dashboard.state, 'succeeded');
   const publication = steps.dashboard.publicOutput;
@@ -205,7 +207,10 @@ export function assertReceiptContract(receipt) {
   assert.equal(steps.deliveryReadback.output, steps.dashboard.output);
   assert.deepEqual(steps.deliveryReadback.publicOutput, publication);
   required(steps.planner?.some((entry) => entry.commitRefs?.length > 0), 'independent Planner result evidence');
-  required(steps.checkpoint?.recoveryBinding?.alignmentRef && steps.capture?.text, 'standard closure and saved capture body');
+  const alignmentRef = steps.checkpoint?.recoveryBinding?.alignmentRef
+    ?? steps.checkpoint?.recoveryBinding?.coreClosure?.nextAction?.ref;
+  required(typeof alignmentRef === 'string' && alignmentRef.startsWith('turn-alignment:')
+    && steps.capture?.text, 'standard closure and saved capture body');
   return true;
 }
 
@@ -269,35 +274,28 @@ async function main() {
     const path = `/api/tasks/${encodeURIComponent(taskId)}`;
     steps.prepared = await jsonRequest(base, `${path}/dashboard`);
     required(steps.prepared.operationId && Number.isSafeInteger(steps.prepared.executionEpoch), 'prepared operation/epoch');
-    assert.equal(steps.prepared.state, 'waiting', 'grant must precede execution');
-    required(!(steps.prepared.recentEvents ?? []).some((event) =>
-      event.kind === 'execution.started' || String(event.kind).startsWith('provider.')), 'no pre-grant execution/provider event');
+    required(['waiting', 'running', 'succeeded'].includes(steps.prepared.state), 'auto-grant Task is already dispatched or running');
     steps.grantBefore = await jsonRequest(base, `${path}/control/grant`);
     required(steps.grantBefore.readback && valueOf(steps.grantBefore.taskId) === taskId,
       'grant GET Task selector/readback');
-    required(steps.grantBefore.readback?.grant == null, 'new Task without preexisting grant');
-    steps.grantRequest = { requestId: `${token}-grant`,
-      expectedRevision: steps.grantBefore.readback.grant?.revision ?? 0,
-      capability: { actionId: 'task.execute', capabilities: ['provider.execution'] } };
-    steps.grant = await jsonRequest(base, `${path}/control/grant`, steps.grantRequest);
+    // G2.1 (commit e3cb74107): a confirmed new-task requirement already binds
+    // its verified execution grant and starts execution without a redundant
+    // manual grant. Verify the auto-grant readback instead of issuing one.
+    required(steps.grantBefore.readback?.grant?.state === 'granted', 'new Task auto-grant is already granted');
+    required((steps.grantBefore.readback?.grant?.capability?.capabilities ?? [])
+      .includes('provider.execution'), 'auto-grant scope is provider.execution');
+    required(typeof steps.grantBefore.readback?.commit?.commitId === 'string', 'auto-grant carries a real commit reference');
+    steps.grant = steps.grantBefore;
     await persist();
     steps.grantReadback = await jsonRequest(base, `${path}/control/grant`);
     await persist();
-    required(steps.grant.readback?.grant?.state === 'granted', 'grant persisted');
     assert.deepEqual(steps.grantReadback.readback, steps.grant.readback);
-    const execution = steps.grant.execution;
-    required(execution && ['released', 'current', 'blocked', 'not-applicable'].includes(execution.state), 'grant execution union receipt');
-    if (execution.state !== 'released') {
-      throw new Error(`UNVERIFIED: execution=${execution.state}; saved selector/current/apiError; no regrant/start/resume/confirmation fallback`);
-    }
-    assertSameExecution(execution.selector, steps.prepared);
-    assertSameExecution(execution.current, steps.prepared);
     const terminal = await pollTaskState(base, taskId, steps.prepared, steps);
     await persist();
     await captureObservation(base, taskId, terminal, steps);
     steps.deliveryReadback = await jsonRequest(base, `${path}/dashboard`);
     assertReceiptContract(receipt);
-    receipt.behavior = 'PASS: typed FIFO identity, independent grant/release, standard closure/Planner, Task/public delivery readback';
+    receipt.behavior = 'PASS: typed FIFO identity, auto-grant readback, standard closure/Planner, Task/public delivery readback';
     // Semantic review must still check output quality and forbidden I/O. Never
     // replace that check with non-empty output or keyword matching.
     receipt.state = 'UNVERIFIED';

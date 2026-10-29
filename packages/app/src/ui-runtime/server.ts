@@ -876,7 +876,6 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
     () => sseRegistry.revalidateNow(accessControl).then(() => undefined),
     async (error) => {
       await sseRegistry.closeAll('auth.unavailable');
-      throw error;
     },
   );
   let closeReceipt: ListenerShutdownReceipt | undefined;

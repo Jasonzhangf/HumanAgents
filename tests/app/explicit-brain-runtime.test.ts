@@ -1534,6 +1534,22 @@ test('typed final FIFO establishes exact TaskIdentity before execution and prese
       payloadRef: 'asset://source-consumer', requestKind: 'new-task-create' };
     const receipt = await service.confirmExplicitRequirement(confirmation);
     const alias = await service.confirmExplicitRequirement({ ...confirmation, idempotencyKey: 'source-consumer-alias' });
+    const publicReceipt = receipt as unknown as {
+      readonly status?: string;
+      readonly requirement: Readonly<Record<string, unknown>>;
+    };
+    assert.equal(publicReceipt.status, 'submitted', 'the public final-submit receipt exposes its status');
+    assert.equal(publicReceipt.requirement.status, 'submitted', 'the nested requirement exposes the same status');
+    assert.equal(publicReceipt.requirement.requirementId, receipt.requirement.requirementId);
+    assert.equal(publicReceipt.requirement.draftId, preview.draft!.draftId);
+    assert.equal(publicReceipt.requirement.inputRevision, preview.draft!.inputRevision);
+    assert.equal(publicReceipt.requirement.confirmationRef, confirmation.confirmationRef);
+    assert.equal(publicReceipt.requirement.payloadRef, confirmation.payloadRef);
+    assert.ok(Number.isSafeInteger(publicReceipt.requirement.fifoSeq)
+      && Number(publicReceipt.requirement.fifoSeq) > 0, 'the public receipt carries the FIFO sequence');
+    assert.equal(publicReceipt.requirement.draftRevisionVersion, preview.revision!.revisionVersion);
+    assert.equal(publicReceipt.requirement.draftRevisionHash, preview.revision!.revisionHash);
+    assert.equal((alias as unknown as { readonly status?: string }).status, 'duplicate');
     assert.equal(alias.requirement.requirementId, receipt.requirement.requirementId);
     await assert.rejects(() => service.dispatchNextExplicitRequirement(), /controlled identity append failed/);
     assert.equal(admissions, 0, 'failed identity append must precede all execution preparation');

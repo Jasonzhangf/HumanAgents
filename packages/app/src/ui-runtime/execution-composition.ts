@@ -1581,7 +1581,11 @@ export function createDefaultExecutionComposition(input: {
           if (closed) return closed;
           const attempt = (async () => {
             if (capturedStop) return closeOwnedProvider();
-            if (!acceptedEnd) {
+            // A drained standard-end input is only meaningful once `settle()`
+            // froze it. An accepted end whose continuation was interrupted
+            // before settle has no frozen closing input, so it must take the
+            // failed-turn capture path instead of the success save path.
+            if (!acceptedEnd || !closingInput) {
               try {
                 await liveNative.prepareCapture(boundaryId);
               } catch (captureError) {

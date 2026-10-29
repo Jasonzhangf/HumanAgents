@@ -673,7 +673,14 @@ export interface UiRuntimeServiceOptions {
 }
 
 export interface ExplicitBrainReceipt {
-  readonly requirement: RequirementSubmitReceipt;
+  /**
+   * Present on the typed final-submit path; the legacy confirmation path keeps
+   * its historical shape (only `requirement`).
+   */
+  readonly status?: 'submitted' | 'duplicate';
+  readonly requirement:
+    | (AuthorizedRequirement & { readonly status: 'submitted' | 'duplicate' })
+    | RequirementSubmitReceipt;
 }
 
 /**
@@ -6763,11 +6770,10 @@ export class UiRuntimeService {
     this.persistExplicitBrainState();
     this.scheduleImplicitConsumption();
     return {
+      status: submitted.status,
       requirement: {
         status: submitted.status,
-        requirementId: submitted.requirement.requirementId,
-        draftId: submitted.requirement.draftId,
-        inputRevision: submitted.requirement.inputRevision,
+        ...submitted.requirement,
       },
     };
   }
