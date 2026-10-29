@@ -337,23 +337,24 @@ export async function runLocalFileSearchScenario(binding) {
     }
   }
   const requirementReceipt = binding.requirementReceipt ?? null;
-  if ((binding.entry ?? 'dashboard') === 'dashboard') {
-    if (!requirementReceipt?.requirementId
-      || typeof requirementReceipt.draftId !== 'string'
-      || !Number.isInteger(requirementReceipt.inputRevision)) {
-      missing.push('the confirmation response did not identify the submitted requirement (requirementId/draftId/inputRevision)');
-    } else {
-      const confirmationRequest = binding.confirmationRequest ?? null;
-      if (!confirmationRequest) {
-        missing.push('the confirmation request body was not captured');
-      } else if (confirmationRequest.draftId !== requirementReceipt.draftId
-        || confirmationRequest.inputRevision !== requirementReceipt.inputRevision) {
-        missing.push(
-          `the confirmation request (draft ${JSON.stringify(confirmationRequest.draftId)}, `
-          + `revision ${JSON.stringify(confirmationRequest.inputRevision)}) does not match the returned requirement identity `
-          + `(draft ${JSON.stringify(requirementReceipt.draftId)}, revision ${JSON.stringify(requirementReceipt.inputRevision)})`,
-        );
-      }
+  // The homepage single submit confirms the requirement in the same handling, so
+  // the captured confirmation response must identify the one submitted
+  // requirement whether the entry is `/` (homepage) or the task dashboard.
+  if (!requirementReceipt?.requirementId
+    || typeof requirementReceipt.draftId !== 'string'
+    || !Number.isInteger(requirementReceipt.inputRevision)) {
+    missing.push('the confirmation response did not identify the submitted requirement (requirementId/draftId/inputRevision)');
+  } else {
+    const confirmationRequest = binding.confirmationRequest ?? null;
+    if (!confirmationRequest) {
+      missing.push('the confirmation request body was not captured');
+    } else if (confirmationRequest.draftId !== requirementReceipt.draftId
+      || confirmationRequest.inputRevision !== requirementReceipt.inputRevision) {
+      missing.push(
+        `the confirmation request (draft ${JSON.stringify(confirmationRequest.draftId)}, `
+        + `revision ${JSON.stringify(confirmationRequest.inputRevision)}) does not match the returned requirement identity `
+        + `(draft ${JSON.stringify(requirementReceipt.draftId)}, revision ${JSON.stringify(requirementReceipt.inputRevision)})`,
+      );
     }
   }
 

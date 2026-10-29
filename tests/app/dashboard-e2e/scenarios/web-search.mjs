@@ -12,7 +12,14 @@
  * deviation and this attempt stays INCOMPLETE.
  */
 
-import { approvePendingTaskGrant, captureDashboardEvidence, captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
+import {
+  approvePendingTaskGrant,
+  assertEntryInputStage,
+  captureDashboardEvidence,
+  captureScreenshot,
+  submitDirectiveAndConfirmDraft,
+  waitForTerminal,
+} from '../lib/browser.mjs';
 import { countTurnEvidenceFor, journalPathFor, readToolOutputReports } from '../lib/journal.mjs';
 
 export const SCENARIO = 'web-search';
@@ -37,9 +44,16 @@ export async function runWebSearchScenario(binding) {
     `Include the string ${QUERY_MARKER} in your final answer.`,
   ].join(' ');
 
-  await captureScreenshot(binding, '01-input-before-submit');
-  evidence.screenshots.push(`${binding.screenshotsDir}/01-input-before-submit.png`);
-  await submitDirectiveAndConfirmDraft(binding, directive, { clarificationAnswer: CLARIFY_ANSWER });
+  // The input-stage screenshot is captured inside the submit flow: after the
+  // served homepage is on screen with the directive really in its form, and
+  // before the one submit click. It is never captured before the page has
+  // loaded.
+  await submitDirectiveAndConfirmDraft(binding, directive, {
+    clarificationAnswer: CLARIFY_ANSWER,
+    onDirectiveFilled: (stage) => captureInputStage(binding, directive, stage),
+  });
+  const inputStage = binding.inputStage ?? null;
+  if (inputStage?.screenshot) evidence.screenshots.unshift(inputStage.screenshot);
   // UX09 approval: the confirmed submission may wait for its execution grant.
   await approvePendingTaskGrant(binding);
   await captureScreenshot(binding, '02-draft-confirmed');
@@ -92,6 +106,16 @@ export async function runWebSearchScenario(binding) {
     directive,
     topic: TOPIC,
     queryMarker: QUERY_MARKER,
+    inputStage: inputStage
+      ? {
+          entry: inputStage.entry,
+          url: inputStage.url,
+          directive: inputStage.directive,
+          screenshot: inputStage.screenshot,
+          capturedAt: inputStage.capturedAt,
+          dom: inputStage.dom,
+        }
+      : null,
     taskId: binding.taskId,
     terminalState: dashboard.state,
     executionEpoch: dashboard.executionEpoch ?? null,
@@ -136,6 +160,32 @@ export async function runWebSearchScenario(binding) {
 
 function isToolEvent(event) {
   return event.kind === 'provider.tool' || event.kind === 'provider.tool-result';
+}
+
+/**
+ * Assert the real input stage and capture it before the single submit click.
+ * The screenshot only exists when the served homepage really shows the filled
+ * directive: the URL path, directive value, layout box, required attribute,
+ * enabled submit control and absence of any second confirmation control are all
+ * proven first. A failed precondition throws so the runner records the
+ * deviation instead of a green input stage.
+ */
+async function captureInputStage(binding, directive, stage) {
+  const dom = await assertEntryInputStage(binding, {
+    entry: stage.entry,
+    inputSelector: stage.inputSelector,
+    directive,
+  });
+  const screenshot = await captureScreenshot(binding, '01-input-before-submit');
+  binding.inputStage = {
+    entry: stage.entry,
+    url: dom.url,
+    directive,
+    dom,
+    screenshot,
+    capturedAt: new Date().toISOString(),
+  };
+  return binding.inputStage;
 }
 
 function urlsInEvents(events) {

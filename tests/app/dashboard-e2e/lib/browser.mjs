@@ -684,38 +684,28 @@ export async function captureScreenshot(binding, name) {
 }
 
 /**
- * Open the real served entry the attempt selected. The homepage (`/`, served as
- * `index.html`/`entry.js`) submits once and authorizes the new task in the same
- * handling; the dashboard page (`dashboard.html`/`dashboard.js`) is the preview
- * entry. Both are the real served pages, not API substitutes.
+ * Open the real served new-task entry (`/`, served as `index.html`/`entry.js`).
+ * The homepage form submits once and authorizes the new task in that same
+ * handling; it is the real served page, not an API substitute. The retired
+ * `.quick-create-form` (dashboard.html) now hosts the read-only Five-Board index,
+ * so it is never opened for new-task creation.
  */
 async function openEntryPage(binding) {
   const { page } = binding.browser;
-  const entry = binding.entry ?? 'dashboard';
-  if (entry !== 'dashboard' && entry !== 'homepage') {
-    throw new Error(`unknown entry ${JSON.stringify(entry)}; expected homepage or dashboard`);
+  const entry = binding.entry ?? 'homepage';
+  if (entry !== 'homepage') {
+    throw new Error(`new-task submit entry must be homepage; received ${JSON.stringify(entry)}`);
   }
-  const entryUrl = entry === 'homepage' ? `${binding.serveBaseUrl}/` : `${binding.serveBaseUrl}/dashboard.html`;
+  const entryUrl = `${binding.serveBaseUrl}/`;
   const response = await page.goto(entryUrl, { waitUntil: 'domcontentloaded' });
   if (!response || !response.ok()) {
     throw new Error(`served UI entry did not load: ${entryUrl} status=${response?.status()}`);
   }
   binding.entryUrl = entryUrl;
-  if (entry === 'homepage') {
-    await page.waitForSelector('#entry-form textarea[name="rawInput"]', { timeout: 15_000 });
-    const directiveBox = await page.locator('#entry-form textarea[name="rawInput"]').boundingBox();
-    if (!directiveBox || directiveBox.width <= 0 || directiveBox.height <= 0) {
-      throw new Error(`real homepage input was not laid out with a positive bbox: ${JSON.stringify(directiveBox)}`);
-    }
-    binding.entryLayout = { directive: directiveBox };
-    return entryUrl;
-  }
-  await page.waitForSelector('.quick-create-form textarea[name="directive"]', { timeout: 15_000 });
-  // The rendered entry control is proven by its real layout. New-task submit
-  // itself authorizes the task, so the Dashboard has no confirmation checkbox.
-  const directiveBox = await page.locator('.quick-create-form textarea[name="directive"]').boundingBox();
+  await page.waitForSelector('#entry-form textarea[name="rawInput"]', { timeout: 15_000 });
+  const directiveBox = await page.locator('#entry-form textarea[name="rawInput"]').boundingBox();
   if (!directiveBox || directiveBox.width <= 0 || directiveBox.height <= 0) {
-    throw new Error(`real browser input was not laid out with a positive bbox: ${JSON.stringify(directiveBox)}`);
+    throw new Error(`real homepage input was not laid out with a positive bbox: ${JSON.stringify(directiveBox)}`);
   }
   binding.entryLayout = { directive: directiveBox };
   return entryUrl;
@@ -926,175 +916,202 @@ export async function readExistingChangeDom(binding) {
 }
 
 /**
- * Drive the real task input on the selected entry and return the dispatched task.
- *
- * Dashboard entry: 输入 -> 显式草稿 -> 用户点击确认 (the preview flow). Clarifying
- * questions are answered in-page, up to a bounded number of attempts.
- *
- * Homepage entry: a single submit authorizes the new task; the explicit brain
- * organizes and FIFO-enqueues the requirement in the same handling, so there is
- * no second visible confirmation.
+ * Read one homepage submission stage on `/`. While the browser is still on the
+ * entry page, report a clarification prompt, a visible submission error, or a
+ * status-only (direct answer) result. A task-scoped navigation is signalled by
+ * `page.url()` and is handled by the parallel navigation observer, so this
+ * predicate returns null once the page has navigated.
+ */
+async function readHomepageSubmissionOutcome(binding) {
+  const { page } = binding.browser;
+  if (taskScopedNavigation(page.url(), binding.serveBaseUrl)) return null;
+  return page.evaluate(() => {
+    const clarification = document.querySelector('#entry-draft form input[name="answer"]');
+    if (clarification) return { kind: 'clarification' };
+    const error = document.querySelector('#entry-error');
+    if (error && !error.hidden) {
+      return { kind: 'error', text: (error.textContent || '').trim().slice(0, 800) };
+    }
+    const banner = document.querySelector('.status-banner');
+    const tone = banner?.dataset?.tone ?? null;
+    const text = (banner?.textContent || '').trim();
+    // The confirmed path writes a "…正在刷新任务进展…/已刷新" success banner right
+    // before it navigates; only a genuine status-only reply is a non-task result.
+    const isConfirmationRefresh = text.includes('正在刷新任务进展') || text.includes('任务进展已刷新');
+    if (tone === 'success' && text && !isConfirmationRefresh) {
+      return { kind: 'status-only', reply: text };
+    }
+    return null;
+  });
+}
+
+/**
+ * Observe a non-navigation homepage outcome in the background so a status-only
+ * classification or a clarification prompt never waits out the full navigation
+ * window. Returns a cancellable handle: `cancel()` stops the poll once the
+ * navigation observer has won the race.
+ */
+function waitForHomepageNonNavigationOutcome(binding, timeoutMs) {
+  const { page } = binding.browser;
+  let cancelled = false;
+  const promise = waitForDom(page, 'homepage non-navigation outcome', async () => {
+    if (cancelled) return { kind: 'cancelled' };
+    return readHomepageSubmissionOutcome(binding);
+  }, timeoutMs, 200).catch(() => null);
+  return { promise, cancel: () => { cancelled = true; } };
+}
+
+/**
+ * Drive the real new-task input on the homepage (`/`) and return the dispatched
+ * task. One submit authorizes the new task: the explicit brain organizes the
+ * input, confirms it, FIFO-enqueues the requirement and lands on the task-scoped
+ * page, so there is no second visible confirmation. The confirmation POST, the
+ * returned requirement identity, a status-only classification and clarification
+ * prompts are all observed from the real served page. This function owns no task
+ * API reads: the identity comes only from the accepted navigation.
  */
 export async function submitDirectiveAndConfirmDraft(binding, directive, options = {}) {
   const { page } = binding.browser;
-  const base = binding.serveBaseUrl;
+  const timeout = Number(options.confirmTimeoutMs ?? confirmTimeoutMs());
   const maxClarifications = options.maxClarifications ?? 3;
   const clarificationAnswer = options.clarificationAnswer ?? 'Do not clarify. Proceed directly with the tools available in the workspace and finish.';
   binding.submissionStartedAt = binding.submissionStartedAt ?? new Date().toISOString();
 
   await openEntryPage(binding);
-  if ((binding.entry ?? 'dashboard') === 'homepage') {
-    await page.fill('#entry-form textarea[name="rawInput"]', directive);
-    // The single authorization action is the click below. The caller gets the
-    // filled-but-unsubmitted stage here, so an input-stage screenshot proves the
-    // real directive, URL and control before the submit.
-    await options.onDirectiveFilled?.({
-      entry: 'homepage',
-      url: page.url(),
-      inputSelector: '#entry-form textarea[name="rawInput"]',
-      directive,
-    });
-    binding.formalEntryStarted = true;
-    // Register the wait before the click so a fast submission cannot race past
-    // the observation. The selected identity comes only from this navigation.
-    const navigationPromise = waitForTaskScopedNavigation(
-      binding,
-      Number(options.confirmTimeoutMs ?? confirmTimeoutMs()),
-    );
-    try {
-      await page.click('#entry-form button[type="submit"]');
-    } catch (error) {
-      await navigationPromise.catch(() => {});
-      throw error;
-    }
-    const navigation = await navigationPromise;
-    binding.taskId = navigation.taskId;
-    binding.submissionNavigation = navigation;
-    // The homepage renders its read-only organization feedback on the same page;
-    // capture the intent it reports without requiring a second confirmation.
-    binding.draft = { intent: 'create', proposal: '', metaRows: [], entry: 'homepage', submittedOnce: true };
-    binding.confirmStatus = 'single-submit';
-    binding.draftRowsBeforeConfirm = 0;
-    return binding;
-  }
-
-  const tasksBeforeSubmit = await jsonRequest(`${base}/api/tasks`, {}, binding.auth);
-  const taskIdsBeforeSubmit = new Set(taskGroups(tasksBeforeSubmit)
-    .map((task) => task?.taskId?.value)
-    .filter((taskId) => typeof taskId === 'string' && taskId.length > 0));
-  await page.fill('.quick-create-form textarea[name="directive"]', directive);
-  // The one user authorization action is the click below. The caller gets the
-  // filled-but-unsubmitted stage here, so the input-stage screenshot proves the
-  // visible directive, the served URL and the single submit control before it is
-  // used. It must never be taken before this page has loaded.
+  await page.fill('#entry-form textarea[name="rawInput"]', directive);
+  // The single authorization action is the click below. The caller gets the
+  // filled-but-unsubmitted stage here, so an input-stage screenshot proves the
+  // real directive, URL and control before the submit.
   await options.onDirectiveFilled?.({
-    entry: 'dashboard',
+    entry: 'homepage',
     url: page.url(),
-    inputSelector: '.quick-create-form textarea[name="directive"]',
+    inputSelector: '#entry-form textarea[name="rawInput"]',
     directive,
   });
   binding.formalEntryStarted = true;
-  const confirmationResponsePromise = page.waitForResponse((response) =>
-    response.url().includes('/api/explicit/interactions/')
-    && response.url().endsWith('/confirmation')
-    && response.request().method() === 'POST',
-  { timeout: Number(options.confirmTimeoutMs ?? confirmTimeoutMs()) }).catch((error) => ({ waitError: error }));
 
+  // Register both observations before the click so a fast submission cannot race
+  // past them. The single submit confirms the new requirement and then navigates
+  // to its task-scoped page; the confirmation POST is observed in parallel with
+  // that navigation and the selected identity comes only from the navigation.
+  const navigationPromise = waitForTaskScopedNavigation(binding, timeout);
+  const captureConfirmation = typeof page.waitForResponse === 'function';
+  const confirmationResponsePromise = captureConfirmation
+    ? page.waitForResponse((response) =>
+        response.url().includes('/api/explicit/interactions/')
+        && response.url().endsWith('/confirmation')
+        && response.request().method() === 'POST',
+      { timeout })
+      .then((response) => ({
+        response,
+        // The homepage reads the requirement and then navigates to its task
+        // page. Once the page navigates, Playwright can no longer resolve this
+        // response body by CDP resource id, so read it now while `/` is still
+        // showing. Settle the body promise so it never surfaces as an unhandled
+        // rejection if the caller never awaits it.
+        bodyResult: response.text().then((text) => ({ text }), (error) => ({ error: error.message })),
+      }))
+      .catch((error) => ({ waitError: error }))
+    : null;
+  const canDiagnoseNonNavigation = typeof page.evaluate === 'function';
+
+  let navigation = null;
   const clarificationLog = [];
-  let confirmationResponse;
   for (let attempt = 0; attempt <= maxClarifications; attempt += 1) {
-    if (attempt === 0) {
-      // This is the one user authorization action for a new Dashboard task.
-      await page.click('#dashboard-create-submit');
-    } else {
-      await page.fill('#dashboard-create-clarification input[name="answer"]', clarificationAnswer);
-      await page.click('#dashboard-create-clarification button[type="submit"]');
+    try {
+      if (attempt === 0) {
+        await page.click('#entry-form button[type="submit"]');
+      } else {
+        await page.fill('#entry-draft form input[name="answer"]', clarificationAnswer);
+        await page.click('#entry-draft form button[type="submit"]');
+      }
+    } catch (error) {
+      // A refused click cannot land a submission. Consume the observers
+      // registered before the click so their eventual timeouts are not left as
+      // unhandled rejections; the click error is the real deviation.
+      navigationPromise.catch(() => {});
+      confirmationResponsePromise?.catch(() => {});
+      throw error;
     }
+    const diagnosis = canDiagnoseNonNavigation ? waitForHomepageNonNavigationOutcome(binding, timeout) : null;
     let outcome;
     try {
-      outcome = await waitForDom(page, 'single-submit acceptance or clarification', async () => {
-        const clarification = await page.$('#dashboard-create-clarification');
-        if (clarification) return { kind: 'clarification' };
-        const progressText = (await page.textContent('.quick-create-progress .progress-phase'))?.trim() ?? '';
-        if (progressText.includes('已入队')) return { kind: 'accepted', progressText };
-        if (progressText === '已处理') {
-          return {
-            kind: 'status-only',
-            progressText,
-            reply: (await page.textContent('.quick-create-progress .progress-detail'))?.trim() ?? '',
-          };
-        }
-        const errorText = (await page.textContent('#dashboard-create-error'))?.trim() ?? '';
-        if (errorText) return { kind: 'error', errorText };
-        return null;
-      }, Number(options.draftTimeoutMs ?? 180_000));
-    } catch (error) {
-      const stage = await describeDraftStage(binding).catch(() => null);
-      binding.entryDiagnostics = stage;
-      throw new Error(`${error.message}; dashboard-submit runtime state=${JSON.stringify(stage).slice(0, 2400)}`);
+      outcome = await Promise.race([
+        navigationPromise,
+        diagnosis ? diagnosis.promise : new Promise(() => {}),
+      ]);
+    } finally {
+      diagnosis?.cancel();
     }
-    if (outcome.kind === 'accepted') {
-      confirmationResponse = await confirmationResponsePromise;
-      if (confirmationResponse?.waitError) {
-        throw new Error(`Dashboard showed queue acceptance without its confirmation response: ${confirmationResponse.waitError.message}`);
+    if (outcome && outcome.kind === 'clarification') {
+      clarificationLog.push({ attempt: attempt + 1, kind: 'clarification' });
+      if (!clarificationAnswer || attempt >= maxClarifications) {
+        navigationPromise.catch(() => {});
+        throw new Error(`Homepage requested clarification before accepting the task: ${JSON.stringify(clarificationLog)}`);
       }
-      if (confirmationResponse.status() < 200 || confirmationResponse.status() >= 300) {
-        throw new Error(`Dashboard confirmation POST returned non-2xx status=${confirmationResponse.status()}`);
-      }
-      // The exact authorization request is part of the evidence: its draftId and
-      // inputRevision must agree with the requirement identity the runtime
-      // returns, so a receipt can show which revision the human authorized.
-      const confirmationRequest = confirmationResponse.request?.() ?? null;
-      binding.confirmationRequest = confirmationRequest ? readRequestJson(confirmationRequest) : null;
-      binding.confirmationRequestUrl = confirmationResponse.url?.() ?? null;
-      binding.confirmationResponseStatus = confirmationResponse.status();
-      break;
+      continue;
     }
-    if (outcome.kind === 'error') {
-      throw new Error(`Dashboard new-task submission was refused or failed visibly: ${outcome.errorText}`);
+    if (outcome && outcome.kind === 'error') {
+      navigationPromise.catch(() => {});
+      throw new Error(`Homepage new-task submission was refused or failed visibly: ${outcome.text}`);
     }
-    if (outcome.kind === 'status-only') {
+    if (outcome && outcome.kind === 'status-only') {
       binding.submissionDisposition = { kind: 'status-only', reply: outcome.reply };
       binding.entryDiagnostics = await describeDraftStage(binding).catch((error) => ({ diagnosticError: error.message }));
-      throw new Error(`Dashboard explicit brain classified new-task input as status-only; no requirement was authorized: ${outcome.reply}`);
+      navigationPromise.catch(() => {});
+      throw new Error(`Homepage explicit brain classified new-task input as status-only; no requirement was authorized: ${outcome.reply}`);
     }
-    clarificationLog.push({ attempt: attempt + 1, kind: 'clarification' });
-    if (!clarificationAnswer || attempt >= maxClarifications) {
-      throw new Error(`Dashboard requested clarification before accepting the task: ${JSON.stringify(clarificationLog)}`);
-    }
+    // The navigation observer won (or a diagnosis timeout resolved null): await
+    // the navigation, which is the only accepted success signal.
+    navigation = await navigationPromise;
+    break;
   }
-  if (!confirmationResponse) {
-    throw new Error(`Dashboard did not accept one new-task submission: ${JSON.stringify(clarificationLog).slice(0, 500)}`);
+  if (!navigation) {
+    navigationPromise.catch(() => {});
+    throw new Error(`Homepage did not accept one new-task submission: ${JSON.stringify(clarificationLog).slice(0, 500)}`);
+  }
+  binding.taskId = navigation.taskId;
+  binding.submissionNavigation = navigation;
+
+  let confirmStatus = 'single-submit';
+  if (captureConfirmation) {
+    const capture = await confirmationResponsePromise;
+    if (capture?.waitError) {
+      throw new Error(`Homepage accepted the task without its confirmation response: ${capture.waitError.message}`);
+    }
+    const confirmationResponse = capture.response;
+    if (confirmationResponse.status() < 200 || confirmationResponse.status() >= 300) {
+      throw new Error(`Homepage confirmation POST returned non-2xx status=${confirmationResponse.status()}`);
+    }
+    // The exact authorization request is part of the evidence: its draftId and
+    // inputRevision must agree with the requirement identity the runtime
+    // returns, so a receipt can show which revision the human authorized.
+    const confirmationRequest = confirmationResponse.request?.() ?? null;
+    binding.confirmationRequest = confirmationRequest ? readRequestJson(confirmationRequest) : null;
+    binding.confirmationRequestUrl = confirmationResponse.url?.() ?? null;
+    binding.confirmationResponseStatus = confirmationResponse.status();
+    confirmStatus = confirmationResponse.status();
+    const bodyResult = await capture.bodyResult;
+    if (bodyResult.error) {
+      throw new Error(`Homepage confirmation response body was unavailable: ${bodyResult.error}`);
+    }
+    let confirmationBody = null;
+    try {
+      confirmationBody = JSON.parse(bodyResult.text);
+    } catch (error) {
+      throw new Error(`Homepage confirmation response body was not JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const requirement = confirmationBody?.requirement;
+    if (!requirement?.requirementId || !requirement?.draftId || !Number.isInteger(requirement?.inputRevision)) {
+      throw new Error(`Homepage confirmation receipt did not identify one submitted requirement: ${JSON.stringify(confirmationBody).slice(0, 1000)}`);
+    }
+    binding.requirementReceipt = requirement;
+    binding.explicitInteractionId = decodeURIComponent(new URL(confirmationResponse.url()).pathname.split('/').at(-2));
   }
 
-  const confirmationBody = await confirmationResponse.text().then((text) => JSON.parse(text));
-  const requirement = confirmationBody?.requirement;
-  if (!requirement?.requirementId || !requirement?.draftId || !Number.isInteger(requirement?.inputRevision)) {
-    throw new Error(`Dashboard confirmation receipt did not identify one submitted requirement: ${JSON.stringify(confirmationBody).slice(0, 1000)}`);
-  }
-  binding.requirementReceipt = requirement;
-  binding.explicitInteractionId = decodeURIComponent(new URL(confirmationResponse.url()).pathname.split('/').at(-2));
-
-  const taskId = await waitForDom(page, 'unique task created by submitted requirement', async () => {
-    const tasks = await jsonRequest(`${base}/api/tasks`, {}, binding.auth);
-    const created = taskGroups(tasks).filter((task) => {
-      const id = task?.taskId?.value;
-      return typeof id === 'string' && !taskIdsBeforeSubmit.has(id);
-    });
-    if (created.length > 1) {
-      throw new Error(`one Dashboard submission created ${created.length} new tasks: ${created.map((task) => task.taskId.value).join(', ')}`);
-    }
-    return created.length === 1 ? created[0].taskId.value : null;
-  }, Number(options.confirmTimeoutMs ?? confirmTimeoutMs()));
-  const taskProbe = await jsonRequest(`${base}/api/tasks/${encodeURIComponent(taskId)}/dashboard`, {}, binding.auth);
-  if (!sameId(taskProbe.taskId, taskId)) {
-    throw new Error(`new-task Dashboard API identity mismatch: expected ${taskId}, received ${JSON.stringify(taskProbe.taskId ?? null)}`);
-  }
-
-  binding.taskId = taskId;
-  binding.draft = { intent: 'create', proposal: '', metaRows: [], entry: 'dashboard', submittedOnce: true };
-  binding.draftRowsBeforeConfirm = (tasksBeforeSubmit.draft ?? []).length;
-  binding.confirmStatus = confirmationResponse.status();
+  binding.draft = { intent: 'create', proposal: '', metaRows: [], entry: 'homepage', submittedOnce: true };
+  binding.confirmStatus = confirmStatus;
+  binding.draftRowsBeforeConfirm = 0;
   return binding;
 }
 

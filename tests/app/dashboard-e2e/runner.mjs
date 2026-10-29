@@ -19,7 +19,8 @@
  *
  * Options (parsed by parseOptions):
  *   --scenario <web-search|local-file-search|existing-task-change>
- *   --entry <homepage|dashboard>                 default dashboard
+ *   --entry <homepage|dashboard>                 default homepage for candidate,
+ *                                                dashboard for installed-attach
  *   --outcome <success|failure|cancel>           default success
  *   --service-mode <candidate|installed-attach>  default candidate
  *   --cli-path <path>                            default <repo>/dist/app/app/src/cli.js
@@ -87,7 +88,7 @@ export const USAGE = [
   '',
   'Options:',
   '  --scenario <web-search|local-file-search|existing-task-change>  required',
-  '  --entry <homepage|dashboard>                                          default dashboard',
+  '  --entry <homepage|dashboard>                                          default homepage (installed-attach: dashboard)',
   '  --outcome <success|failure|cancel>                                    default success',
   '  --service-mode <candidate|installed-attach>                           default candidate',
   '  --cli-path <path>                                                     default <repo>/dist/app/app/src/cli.js',
@@ -109,11 +110,12 @@ export function parseOptions(argv) {
     return value;
   };
   const first = argv[0];
+  const serviceMode = take('--service-mode') ?? 'candidate';
   const options = {
     scenario: take('--scenario') ?? (first && !first.startsWith('--') ? first : null),
-    entry: take('--entry') ?? 'dashboard',
+    entry: take('--entry') ?? (serviceMode === 'installed-attach' ? 'dashboard' : 'homepage'),
     outcome: take('--outcome') ?? 'success',
-    serviceMode: take('--service-mode') ?? 'candidate',
+    serviceMode,
     cliPath: take('--cli-path'),
   };
   assertSupportedCombination(options.scenario, options);
@@ -254,9 +256,9 @@ async function proveNoTaskAttempt(binding) {
  * fails records the first deviation with the raw error.
  */
 export async function runScenario(scenario, options = {}) {
-  const entry = options.entry ?? 'dashboard';
-  const outcome = options.outcome ?? 'success';
   const serviceMode = options.serviceMode ?? 'candidate';
+  const entry = options.entry ?? (serviceMode === 'installed-attach' ? 'dashboard' : 'homepage');
+  const outcome = options.outcome ?? 'success';
   const hooks = options.hooks ?? {};
   assertSupportedCombination(scenario, { entry, outcome, serviceMode });
 

@@ -115,8 +115,14 @@ hand-search plan 更新（覆盖 TinyFish + Dashboard 生命周期边）
 
 - 每次 attempt 先登记：owner、唯一 run ID、候选 SHA/tree、workspace、control root、serve PID 与端口、
   浏览器 profile、临时文件与日志路径（`lib/binding.mjs`）。
-- 真实页面链路：加载 served Dashboard → 在 `.quick-create-form` 输入 → 等待可见草稿 → 点击确认 →
-  任务进入队列 → 打开任务详情。
+- 入口映射：`candidate` 默认 `--entry homepage`，新建任务加载真实首页 `/`（`index.html` +
+  `entry.js`），在 `#entry-form textarea[name="rawInput"]` 输入后点一次
+  `#entry-form button[type="submit"]`，同一次处理完成显式整理、确认、需求入队并落到
+  `./task.html`；`existing-task-change` 用 `/` 创建 seed 任务，再用 `/interaction.html`
+  （`[data-existing-change-intake]`）驱动既有任务变更；`installed-attach` 保持
+  `--entry dashboard`（`/dashboard.html`），只用于五板块只读索引与任务 dashboard 观测。
+- 真实页面链路：加载 served 首页 `/` → 在 `#entry-form textarea[name="rawInput"]` 输入 →
+  （同一提交即确认）等待任务作用域跳转 → 任务进入队列 → 打开任务详情。
 - 计数与终态只取自权威 journal：`<controlRoot>/sessions/<workspace-key>/checkpoints/ui-runtime/<provider>/ui-runtime-journal.jsonl`
   的 `operation.event` 记录；断言 `execution.terminal` 为成功终态、`provider.tool` 轮数 ≥ 2、
   每轮有配对的 `provider.tool-result`。UI 侧另行断言事件行、状态 chip 与终态文案。

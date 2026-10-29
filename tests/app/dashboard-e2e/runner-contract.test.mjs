@@ -147,7 +147,10 @@ test('option surface is reported and accepted combinations parse', () => {
 
   // Documented defaults.
   assert.deepEqual(parseOptions(['--scenario', 'local-file-search']), {
-    scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'candidate', cliPath: null,
+    scenario: 'local-file-search', entry: 'homepage', outcome: 'success', serviceMode: 'candidate', cliPath: null,
+  });
+  assert.deepEqual(parseOptions(['--scenario', 'local-file-search', '--service-mode', 'installed-attach']), {
+    scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'installed-attach', cliPath: null,
   });
   // Explicit accepted combinations.
   assert.deepEqual(
@@ -622,11 +625,15 @@ function fakeAuth(calls, options = {}) {
 
 /**
  * Minimal browser boundary for the real cancel scenario. It implements only
- * the DOM observations that scenario/helper chain actually consumes; all task
- * state still comes through the fake authenticated transport and the public
- * Journal fixtures.
+ * the homepage observations that scenario/helper chain actually consumes; all
+ * task state still comes through the fake authenticated transport and the
+ * public Journal fixtures. The click navigates to the same task-scoped page the
+ * real `/` entry lands on, so the cancellation path keeps its journal-derived
+ * execution identity.
  */
 function fakeBrowserPage() {
+  const base = 'http://127.0.0.1:1';
+  const navigationUrl = `${base}/task.html?task=${CONTRACT_TASK.value}&projectKey=contract&mode=rcc`;
   let url = 'about:blank';
   return {
     url: () => url,
@@ -639,19 +646,28 @@ function fakeBrowserPage() {
       };
     },
     async fill() {},
-    async click() {},
-    async $(selector) {
-      assert.notEqual(String(selector), '.draft-actions button.button--primary');
-      return null;
+    async click(selector) {
+      if (!String(selector).includes('entry-form')) return;
+      url = String(navigationUrl);
     },
-    async textContent(selector) {
-      if (String(selector) === '.quick-create-progress .progress-phase') return '已入队 · 隐式大脑将消费';
-      return '';
+    async waitForURL(predicate, { timeout } = {}) {
+      const deadline = Date.now() + Number(timeout ?? 1000);
+      for (;;) {
+        if (url !== 'about:blank') {
+          try {
+            if (predicate(new URL(url))) return undefined;
+          } catch {
+            // Keep polling until the timeout; invalid navigation is a refusal.
+          }
+        }
+        if (Date.now() > deadline) throw new Error('fixture navigation timeout');
+        await sleep(10);
+      }
     },
     async waitForResponse(predicate) {
       const response = {
         url: () => 'http://127.0.0.1:1/api/explicit/interactions/cancel-interaction/confirmation',
-        request: () => ({ method: () => 'POST' }),
+        request: () => ({ method: () => 'POST', postDataJSON: () => ({ draftId: 'draft-cancel', inputRevision: 1 }) }),
         status: () => 200,
         text: async () => JSON.stringify({ requirement: {
           requirementId: 'requirement-cancel', draftId: 'draft-cancel', inputRevision: 1,
@@ -2248,7 +2264,7 @@ test('real cancel scenario learns identity, stops once, and reassesses read-only
   try {
     const { runScenario } = await import('./runner.mjs');
     const result = await runScenario('local-file-search', {
-      entry: 'dashboard',
+      entry: 'homepage',
       outcome: 'cancel',
       serviceMode: 'candidate',
       attemptIdSuffix: 'cancel-real',
@@ -2335,7 +2351,7 @@ test('cancel identity failures retain recovery and issue zero stop POSTs', async
       try {
         const { runScenario } = await import('./runner.mjs');
         const result = await runScenario('local-file-search', {
-          entry: 'dashboard',
+          entry: 'homepage',
           outcome: 'cancel',
           serviceMode: 'candidate',
           attemptIdSuffix: `cancel-identity-${variant}`,
@@ -2446,37 +2462,20 @@ test('homepage submission binds to its task-scoped navigation, not a newer task 
   assert.equal(calls.some((call) => call.target.includes('task-existing')), false);
 });
 
-test('Dashboard new-task submit uses one authorization click and binds its requirement to one task', async () => {
+test('homepage new-task submit uses one authorization click and binds its requirement to one task', async () => {
   const clicks = [];
   const layoutSelectors = [];
-  let taskReads = 0;
+  const authCalls = [];
   const auth = {
     async fetch(url, init = {}) {
       const target = String(url);
       const method = String(init.method ?? 'GET').toUpperCase();
-      if (target.endsWith('/api/tasks') && method === 'GET') {
-        taskReads += 1;
-        const rows = taskReads === 1
-          ? [{ taskId: { scope: 'task', value: 'task-existing' }, updatedAt: '2999-01-01T00:00:00.000Z' }]
-          : [
-            { taskId: { scope: 'task', value: 'task-existing' }, updatedAt: '2999-01-01T00:00:00.000Z' },
-            { taskId: { scope: 'task', value: 'task-submitted' }, updatedAt: '2999-01-01T00:00:01.000Z' },
-          ];
-        return { ok: true, status: 200, text: async () => JSON.stringify({ running: rows }) };
-      }
-      if (target.endsWith('/api/tasks/task-submitted/dashboard')) {
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify({
-            taskId: { scope: 'task', value: 'task-submitted' },
-            state: 'running',
-          }),
-        };
-      }
-      throw new Error(`unexpected Dashboard test API request: ${method} ${target}`);
+      authCalls.push({ target, method });
+      throw new Error(`homepage submit must not read the task API: ${method} ${target}`);
     },
   };
+  const base = 'http://127.0.0.1:1';
+  const navigationUrl = `${base}/task.html?task=task-submitted`;
   let pageUrl = 'about:blank';
   const page = {
     url: () => pageUrl,
@@ -2488,20 +2487,29 @@ test('Dashboard new-task submit uses one authorization click and binds its requi
       return { boundingBox: async () => ({ x: 0, y: 0, width: 480, height: 72 }) };
     },
     async fill() {},
-    async click(selector) { clicks.push(String(selector)); },
-    async $(selector) {
-      assert.notEqual(String(selector), '.draft-actions button.button--primary', 'Dashboard must not wait for a second confirmation button');
-      return null;
+    async click(selector) {
+      clicks.push(String(selector));
+      if (String(selector).includes('entry-form')) pageUrl = String(navigationUrl);
     },
-    async textContent(selector) {
-      if (String(selector) === '.quick-create-progress .progress-phase') return '已入队 · 隐式大脑将消费';
-      return '';
+    async waitForURL(predicate, { timeout } = {}) {
+      const deadline = Date.now() + Number(timeout ?? 1000);
+      for (;;) {
+        if (pageUrl !== 'about:blank') {
+          try {
+            if (predicate(new URL(pageUrl))) return undefined;
+          } catch {
+            // Keep polling until the timeout.
+          }
+        }
+        if (Date.now() > deadline) throw new Error('fixture navigation timeout');
+        await sleep(10);
+      }
     },
-    async getAttribute() { return null; },
+    async evaluate() { return null; },
     async waitForResponse(predicate) {
       const response = {
-        url: () => 'http://127.0.0.1:1/api/explicit/interactions/interaction-dashboard/confirmation',
-        request: () => ({ method: () => 'POST' }),
+        url: () => 'http://127.0.0.1:1/api/explicit/interactions/interaction-homepage/confirmation',
+        request: () => ({ method: () => 'POST', postDataJSON: () => ({ draftId: 'draft-submitted', inputRevision: 1 }) }),
         status: () => 200,
         text: async () => JSON.stringify({ requirement: {
           requirementId: 'requirement-submitted',
@@ -2515,8 +2523,8 @@ test('Dashboard new-task submit uses one authorization click and binds its requi
     async screenshot() {},
   };
   const binding = {
-    entry: 'dashboard',
-    serveBaseUrl: 'http://127.0.0.1:1',
+    entry: 'homepage',
+    serveBaseUrl: base,
     browser: { page },
     auth,
   };
@@ -2524,29 +2532,25 @@ test('Dashboard new-task submit uses one authorization click and binds its requi
   await submitDirectiveAndConfirmDraft(binding, 'submitted task', { confirmTimeoutMs: 1000 });
 
   assert.equal(clicks.length, 1);
-  assert.deepEqual(clicks, ['#dashboard-create-submit']);
-  assert.deepEqual(layoutSelectors, ['.quick-create-form textarea[name="directive"]']);
+  assert.deepEqual(clicks, ['#entry-form button[type="submit"]']);
+  assert.deepEqual(layoutSelectors, ['#entry-form textarea[name="rawInput"]']);
   assert.equal(binding.taskId, 'task-submitted');
+  assert.equal(binding.submissionNavigation.taskId, 'task-submitted');
+  assert.equal(binding.submissionNavigation.pathname, '/task.html');
   assert.equal(binding.requirementReceipt.requirementId, 'requirement-submitted');
-  assert.equal(binding.explicitInteractionId, 'interaction-dashboard');
-  assert.equal(binding.submissionNavigation, undefined, 'Dashboard identity comes from the exact task API after the requirement receipt');
-  assert.equal(taskReads, 2);
+  assert.equal(binding.confirmationRequest.draftId, 'draft-submitted');
+  assert.equal(binding.confirmationResponseStatus, 200);
+  assert.equal(binding.explicitInteractionId, 'interaction-homepage');
+  assert.equal(authCalls.length, 0, 'homepage identity comes only from the accepted navigation');
 });
 
-test('Dashboard status-only is an immediate non-task result with exact zero-task diagnostics', async () => {
+test('homepage status-only is an immediate non-task result with exact zero-task diagnostics', async () => {
   const clicks = [];
-  const taskCalls = [];
-  const response = {
-    ok: true,
-    status: 200,
-    async text() { return JSON.stringify({ counts: { total: 0 }, running: [], waiting: [], draft: [], completed: [], failed: [] }); },
-    async json() { return { counts: { total: 0 }, running: [], waiting: [], draft: [], completed: [], failed: [] }; },
-  };
   let pageUrl = 'about:blank';
   const binding = {
-    entry: 'dashboard',
+    entry: 'homepage',
     serveBaseUrl: 'http://127.0.0.1:1',
-    auth: { async fetch(url) { taskCalls.push(String(url)); return response; } },
+    auth: { async fetch() { throw new Error('status-only homepage diagnosis must not call the task API'); } },
     browser: {
       page: {
         url: () => pageUrl,
@@ -2555,13 +2559,12 @@ test('Dashboard status-only is an immediate non-task result with exact zero-task
         locator() { return { boundingBox: async () => ({ x: 0, y: 0, width: 480, height: 72 }) }; },
         async fill() {},
         async click(selector) { clicks.push(String(selector)); },
-        async $(selector) { return null; },
-        async textContent(selector) {
-          if (String(selector) === '.quick-create-progress .progress-phase') return '已处理';
-          if (String(selector) === '.quick-create-progress .progress-detail') return 'No task candidates are available.';
-          return '';
+        async evaluate() {
+          return {
+            kind: 'status-only',
+            reply: 'No task candidates are available.',
+          };
         },
-        async waitForResponse() { throw new Error('status-only must not wait for confirmation'); },
       },
     },
   };
@@ -2571,12 +2574,9 @@ test('Dashboard status-only is an immediate non-task result with exact zero-task
     /classified new-task input as status-only; no requirement was authorized/,
   );
 
-  assert.deepEqual(clicks, ['#dashboard-create-submit']);
+  assert.deepEqual(clicks, ['#entry-form button[type="submit"]']);
   assert.equal(binding.taskId ?? null, null);
   assert.deepEqual(binding.submissionDisposition, { kind: 'status-only', reply: 'No task candidates are available.' });
-  assert.equal(binding.entryDiagnostics.tasks.status, 200);
-  assert.equal(binding.entryDiagnostics.tasks.total, 0);
-  assert.equal(taskCalls.length, 2, 'initial and post-status task snapshots are observed through the authenticated API');
 });
 
 test('no-task cleanup requires exact zero snapshot, absent project journal and null task identity', async () => {
@@ -2633,21 +2633,20 @@ test('no-task cleanup requires exact zero snapshot, absent project journal and n
   }
 });
 
-test('status-only Dashboard attempt stays INCOMPLETE but closes exact resources when no task and journal are proven', async () => {
+test('status-only homepage attempt stays INCOMPLETE but closes exact resources when no task and journal are proven', async () => {
   assertResolverAvailable();
   const controlRoot = await makeTempRoot('status-only-no-task-control');
   const owned = spawnIdle();
-  const taskSnapshots = [];
+  const authCalls = [];
   let browserClosed = false;
-  const taskBody = { counts: { total: 0 }, running: [], waiting: [], completed: [], stopped: [], draft: [], failed: [] };
   const auth = {
-    async fetch(url) {
-      taskSnapshots.push(String(url));
+    async fetch(url, init = {}) {
+      authCalls.push({ url: String(url), method: String(init.method ?? 'GET').toUpperCase() });
       return {
         ok: true,
         status: 200,
-        async text() { return JSON.stringify(taskBody); },
-        async json() { return taskBody; },
+        async text() { return JSON.stringify({ counts: { total: 0 }, running: [], waiting: [], draft: [], completed: [], stopped: [], failed: [] }); },
+        async json() { return { counts: { total: 0 }, running: [], waiting: [], draft: [], completed: [], stopped: [], failed: [] }; },
       };
     },
   };
@@ -2661,28 +2660,28 @@ test('status-only Dashboard attempt stays INCOMPLETE but closes exact resources 
     async fill(selector, value) { directiveValue = String(value); },
     async click() {},
     async $(selector) { return null; },
-    // The real input-stage read goes through `page.evaluate`. This fake reports
-    // the URL it really navigated to and the directive it really received, so the
-    // harness validates this page's own stage state instead of a hardcoded pass.
-    async evaluate() {
-      return {
-        url: pageUrl,
-        pathname: new URL(pageUrl).pathname,
-        value: directiveValue,
-        visible: true,
-        bbox: { x: 0, y: 0, width: 480, height: 72 },
-        readOnly: false,
-        required: true,
-        submitId: 'dashboard-create-submit',
-        submitLabel: '创建任务',
-        submitEnabled: true,
-        secondConfirmationControls: 0,
-      };
-    },
-    async textContent(selector) {
-      if (String(selector) === '.quick-create-progress .progress-phase') return '已处理';
-      if (String(selector) === '.quick-create-progress .progress-detail') return 'No task candidates are available.';
-      return '';
+    // The real input-stage read goes through `page.evaluate(selector)`; the
+    // non-navigation diagnosis calls `page.evaluate()` with no selector. Report
+    // the homepage input stage for the former and the status-only banner for the
+    // latter.
+    async evaluate(_fn, arg) {
+      const pathname = new URL(pageUrl).pathname;
+      if (typeof arg === 'string') {
+        return {
+          url: pageUrl,
+          pathname,
+          value: directiveValue,
+          visible: true,
+          bbox: { x: 0, y: 0, width: 480, height: 72 },
+          readOnly: false,
+          required: true,
+          submitId: 'entry-form submit',
+          submitLabel: '提交任务',
+          submitEnabled: true,
+          secondConfirmationControls: 0,
+        };
+      }
+      return { kind: 'status-only', reply: 'No task candidates are available.' };
     },
     async waitForResponse() { throw new Error('status-only result has no confirmation request'); },
     async screenshot() {},
@@ -2691,7 +2690,7 @@ test('status-only Dashboard attempt stays INCOMPLETE but closes exact resources 
 
   try {
     const result = await (await import('./runner.mjs')).runScenario('local-file-search', {
-      entry: 'dashboard',
+      entry: 'homepage',
       outcome: 'success',
       serviceMode: 'candidate',
       attemptIdSuffix: 'status-only-no-task',
@@ -2713,6 +2712,7 @@ test('status-only Dashboard attempt stays INCOMPLETE but closes exact resources 
     });
 
     assert.equal(result.receipt.result, 'INCOMPLETE');
+    assert.equal(result.receipt.entry, 'homepage');
     assert.equal(result.receipt.task.taskId, null);
     assert.equal(result.receipt.deviation.stage, 'attempt');
     assert.match(result.receipt.deviation.error, /classified new-task input as status-only/);
@@ -2725,7 +2725,7 @@ test('status-only Dashboard attempt stays INCOMPLETE but closes exact resources 
     assert.equal(browserClosed, true);
     assert.equal(await isAlive(owned.pid), false);
     assert.equal(existsSync(bindingRef.attemptRoot), false);
-    assert.ok(taskSnapshots.filter((url) => url.endsWith('/api/tasks')).length >= 3);
+    assert.equal(authCalls.filter((call) => call.url.endsWith('/api/tasks')).length >= 1, true);
     assert.ok(result.stageErrors.some((stage) => stage.stage === 'no_task_proof' && stage.ok));
   } finally {
     await stopChild(owned);
