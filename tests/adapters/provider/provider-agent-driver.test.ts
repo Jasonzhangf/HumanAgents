@@ -1134,7 +1134,7 @@ test('provider driver preserves explicit non-success executor states without emi
   assert.deepEqual(observed.map((result) => result.fact), statuses.map(() => undefined));
 });
 
-test('provider agent driver continues after a persisted reserved standard-turn-end refusal', async () => {
+test('provider agent driver retains tools after a standard-turn-end refusal and drains an accepted end without tools', async () => {
   const refusedOutput = JSON.stringify({
     owner: 'humanagent.app',
     kind: 'standard-turn-end',
@@ -1259,12 +1259,19 @@ test('provider agent driver continues after a persisted reserved standard-turn-e
   const events: ProviderAgentEvent[] = [];
   for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
 
-  // The corrected round ends the turn: the accepted end settles the observation
-  // stream, so the refused round's replay continuation is the only dispatch.
   assert.deepEqual(executedCallIds, ['call-turn-end-refused', 'call-turn-end-corrected']);
-  assert.equal(submissions.length, 1);
+  assert.equal(submissions.length, 2);
+  assert.deepEqual(submissions[0]?.tools?.map((tool) => tool.toolId), [STANDARD_TURN_END_WIRE_TOOL_ID]);
   assert.equal(submissions[0]?.toolContinuations?.[0]?.output, refusedOutput);
   assert.equal(submissions[0]?.toolContinuations?.[0]?.callId, 'call-turn-end-refused');
+  assert.equal(submissions[1]?.tools, undefined);
+  assert.deepEqual(
+    submissions[1]?.toolContinuations?.map((continuation) => [continuation.callId, continuation.output]),
+    [
+      ['call-turn-end-refused', refusedOutput],
+      ['call-turn-end-corrected', correctedOutput],
+    ],
+  );
   assert.deepEqual(
     submissions.map((submission) => ({
       runtimeId: submission.runtimeId,
@@ -1290,14 +1297,10 @@ test('provider agent driver continues after a persisted reserved standard-turn-e
     ['failed', 'call-turn-end-refused'],
     ['succeeded', 'call-turn-end-corrected'],
   ]);
-  // The accepted corrected end is the last observed fact; no post-end model
-  // round runs to produce a further succeeded terminal event.
-  assert.equal(events.at(-1)?.providerEvent.toolResult?.callId, 'call-turn-end-corrected');
-  assert.equal(events.at(-1)?.providerEvent.toolResult?.status, 'succeeded');
-  assert.equal(events.at(-1)?.terminalState, undefined);
+  assert.equal(events.at(-1)?.terminalState, 'succeeded');
 });
 
-test('provider agent driver settles after an accepted standard-turn-end without a post-end continuation', async () => {
+test('provider agent driver stops a same-batch tool after an accepted standard-turn-end and drains without tools', async () => {
   const acceptedOutput = JSON.stringify({
     owner: 'humanagent.app',
     kind: 'standard-turn-end',
@@ -1337,37 +1340,9 @@ test('provider agent driver settles after an accepted standard-turn-end without 
         };
         return;
       }
-      // A post-end model continuation would replay the tool result and let the
-      // model run another tool (the observed post-end file.list). Reaching this
-      // branch proves the driver wrongly dispatched a continuation. Bound the
-      // buggy replay so the assertion fails cleanly instead of looping forever.
-      if (observeCalls <= 3) {
-        yield {
-          ...identity,
-          eventId: `event-post-end-${observeCalls}`,
-          kind: 'tool',
-          summary: 'file.list',
-          outputRefs: [`artifact://post-end-${observeCalls}`],
-          evidenceRefs: [evidence],
-          toolCall: {
-            callId: `call-post-end-${observeCalls}`,
-            toolId: 'file.list',
-            arguments: { path: '.' },
-            continuationRef: `response-post-end-${observeCalls}`,
-          },
-        };
-        yield {
-          ...identity,
-          eventId: `event-post-end-waiting-${observeCalls}`,
-          kind: 'terminal',
-          terminalState: 'waiting',
-          evidenceRefs: [evidence],
-          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
-        };
-        return;
-      }
-      yield { ...identity, eventId: `event-post-end-complete-${observeCalls}`, kind: 'output', summary: 'post-end completion', outputRefs: ['output-final'], evidenceRefs: [evidence] };
-      yield { ...identity, eventId: `event-post-end-terminal-${observeCalls}`, kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+      // The tool-less drain continuation observes only transport completion.
+      yield { ...identity, eventId: 'event-drain-complete', kind: 'output', summary: 'drain completed', outputRefs: ['output-final'], evidenceRefs: [evidence] };
+      yield { ...identity, eventId: 'event-drain-terminal', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
     },
     submit: async (input): Promise<ProviderSubmitResult> => {
       continuationSubmits.push(input);
@@ -1389,6 +1364,7 @@ test('provider agent driver settles after an accepted standard-turn-end without 
       { toolId: 'file.list', description: 'list files', inputSchema: { type: 'object' } },
     ],
     executeTool: {
+      canRunConcurrently: () => true,
       async execute({ call }) {
         executedCallIds.push(call.callId);
         return {
@@ -1406,16 +1382,21 @@ test('provider agent driver settles after an accepted standard-turn-end without 
   const events: ProviderAgentEvent[] = [];
   for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
 
-  // The accepted end settles the observation stream: no post-end model
-  // continuation, no extra model request, and no tool run past the end.
-  assert.equal(observeCalls, 1);
+  assert.equal(observeCalls, 2);
   assert.deepEqual(executedCallIds, ['call-turn-end']);
-  assert.equal(continuationSubmits.length, 0);
+  assert.equal(continuationSubmits.length, 1);
+  assert.equal(continuationSubmits[0]?.tools, undefined);
+  assert.deepEqual(
+    continuationSubmits[0]?.toolContinuations?.map((continuation) => continuation.callId),
+    ['call-turn-end'],
+  );
   assert.deepEqual(
     events.flatMap((event) => event.providerEvent.toolResult === undefined
       ? [] : [[event.providerEvent.toolResult.status, event.providerEvent.toolResult.callId]]),
     [['succeeded', 'call-turn-end']],
   );
+  assert.equal(events.at(-1)?.terminalState, 'succeeded');
+  assert.equal((await instance.settle({ runtimeId: identity.runtimeId, executionEpoch: 1 })).state, 'succeeded');
 });
 
 test('preserves prior results and stops a Responses tool batch at the first owned-tool failure', async () => {
