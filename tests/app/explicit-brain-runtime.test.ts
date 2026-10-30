@@ -585,6 +585,55 @@ class RejectedAcceptanceJournal implements InteractionParentTurnRawJournalPort, 
     return this.inner.readScopeExecutionFailures(scope);
   }
 }
+
+/**
+ * A real JSONL parent journal whose matching durable append kind is rejected.
+ * Every other read and write is the real journal, so a failed parse-failure or
+ * close append exercises the production cleanup boundary instead of a mock.
+ */
+class RejectingAppendJournal implements InteractionParentTurnRawJournalPort, InteractionParentOpenedTurnScopeReadPort {
+  constructor(
+    private readonly inner: JsonlInteractionParentTurnJournal,
+    private readonly rejectKind: InteractionParentTurnAppend['kind'],
+  ) {}
+
+  transactTurn<TResult>(
+    turn: InteractionTurnIdentity,
+    plan: (snapshot: InteractionParentTurnSnapshot) => {
+      readonly append?: InteractionParentTurnAppend;
+      readonly result: TResult;
+    },
+  ): Promise<{ readonly committed?: JournalCommitRef; readonly result: TResult }> {
+    return this.inner.transactTurn<TResult>(turn, (snapshot) => {
+      const planned = plan(snapshot);
+      if (planned.append !== undefined && planned.append.kind === this.rejectKind) {
+        throw new Error(`durable ${this.rejectKind} append is temporarily unavailable`);
+      }
+      return planned;
+    });
+  }
+
+  readTurnSnapshot(turn: InteractionTurnIdentity): Promise<InteractionParentTurnSnapshot> {
+    return this.inner.readTurnSnapshot(turn);
+  }
+
+  readScopeOpenedTurns(scope: { readonly organId: OrganId; readonly interactionScopeId: string }) {
+    return this.inner.readScopeOpenedTurns(scope);
+  }
+
+  readScopeAbandonedTurns(scope: { readonly organId: OrganId; readonly interactionScopeId: string }) {
+    return this.inner.readScopeAbandonedTurns(scope);
+  }
+
+  readScopeParseFailures(scope: { readonly organId: OrganId; readonly interactionScopeId: string }) {
+    return this.inner.readScopeParseFailures(scope);
+  }
+
+  readScopeExecutionFailures(scope: { readonly organId: OrganId; readonly interactionScopeId: string }) {
+    return this.inner.readScopeExecutionFailures(scope);
+  }
+}
+
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
 import { TaskIdentityConsumer } from '../../packages/runtime/src/orchestration/task-identity.js';
 import type { TaskGrantControlReceipt } from '../../packages/app/src/ui-runtime/task-control.js';
@@ -6075,10 +6124,11 @@ test('provider explicit brain interpreter closes an unparseable cold terminal ou
 
 // Failure basis: the same production shape, but the two complete assistant-text
 // items arrive inside one live Provider response instead of being re-read from a
-// closed turn. The catch path already records the real close, then rethrows with
-// no durable closure, so the whole scope stays bricked. Impact: every later
-// input on the interaction fails with the unclosed-turn error. Cost: one real UI
-// consumer run with a two-item Provider response and two follow-up inputs.
+// closed turn. The fresh batch is rejected and durably closed, then the same
+// committed input is re-answered exactly once inside the same public call, so
+// the scope stays usable and the first parse-failure fact is not duplicated.
+// Cost: one real UI consumer run with a two-item Provider response and one
+// follow-up input.
 test('provider explicit brain interpreter closes an unparseable live epoch and keeps the scope usable', async () => {
   const root = join(parentFixtureRoot, `parse-failure-live-${randomUUID()}`);
   await mkdir(root, { recursive: true });
@@ -6132,15 +6182,18 @@ test('provider explicit brain interpreter closes an unparseable live epoch and k
     const helpers = new JsonlInteractionHelperJournal(new JsonlOrganJournal(journalFile));
     const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
 
-    // RED: the two-item terminal output cannot be parsed into a decision.
-    await assert.rejects(
-      () => runtime!.service.interpretExplicitInput({ interactionId }),
-      (error: unknown) => error instanceof Error
-        && error.message.includes('interaction agent returned invalid JSON'),
-    );
+    // The fresh two-item batch is rejected and durably closed, then the same
+    // committed input is re-answered exactly once inside this one service call.
+    const answered = await runtime.service.interpretExplicitInput({ interactionId });
+    assert.equal(answered.state, 'answered');
+    assert.equal(answered.reply, '8');
+    assert.equal(providerRequests, 2, 'one rejected batch plus one replacement generation');
+
     const opened = await parent.readScopeOpenedTurns(scope);
-    assert.equal(opened.length, 1);
-    const turn = opened[0]!.fact.turn;
+    assert.equal(opened.length, 2, 'the rejected batch and the replacement each open a physical turn');
+    const failures = await parent.readScopeParseFailures(scope);
+    assert.equal(failures.length, 1, 'the rejected batch is closed by exactly one parse-failure fact');
+    const turn = failures[0]!.fact.turn;
     const closed = await parent.readTurnSnapshot(turn);
     // The real close is recorded, and the turn is closed by its own honest fact.
     assert.equal(closed.resourceClose?.fact.result.state, 'closed');
@@ -6148,14 +6201,9 @@ test('provider explicit brain interpreter closes an unparseable live epoch and k
     assert.equal(closed.parseFailure?.fact.terminalRequestId,
       closed.requests.at(-1)!.fact.request.requestId);
     assert.equal(await helpers.readSemanticCheckpointExact(turn), null);
-    assert.equal((await parent.readScopeParseFailures(scope)).length, 1);
-
-    // GREEN requirement: the same interaction retries without any brick.
-    const answered = await runtime.service.interpretExplicitInput({ interactionId });
-    assert.equal(answered.state, 'answered');
-    assert.equal(answered.reply, '8');
-    assert.equal(providerRequests, 2);
-    assert.equal((await parent.readScopeParseFailures(scope)).length, 1);
+    const replacementTurn = opened.find(({ fact }) => fact.turn.turnId !== turn.turnId)!.fact.turn;
+    assert.ok(await helpers.readSemanticCheckpointExact(replacementTurn),
+      'the replacement generation commits exactly one semantic checkpoint');
 
     // A brand new input on the same scope is interpreted normally afterwards.
     const otherId = await runtime.service.receiveExplicitInput({ sourceRef: 'ui:parse-live-next', rawInput, channel: 'business' });
@@ -6299,6 +6347,220 @@ test('provider explicit brain interpreter names two complete decisions instead o
   if (retried.kind !== 'answer') throw new Error('expected an answer');
   assert.equal(retried.answer, '7 加 7 等于 14。');
   assert.equal(providerStarts, 1);
+});
+
+// Failure basis: a fresh locally executed batch holds two complete decision
+// objects, so the whole batch is rejected. Without an orchestrated repair the
+// one public intake request fails even though one more generation could answer
+// the same committed input correctly. Impact: a valid public intake request
+// fails before confirmation/FIFO. Cost: two recorded generations on one input.
+test('provider explicit brain interpreter re-answers a fresh two-decision batch once with a repair instruction', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-reanswer-ok', providerId: 'provider-reanswer-ok', protocol: 'responses',
+    endpointRef: 'recorded://reanswer-ok', modelRef: 'model-reanswer-ok',
+    configDigest: 'sha256:reanswer-ok-config', capabilityDigest: 'sha256:reanswer-ok-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const rawInput = '帮我整理发布步骤';
+  const request = {
+    interactionId: 'interaction-reanswer-ok', inputRevision: 1, sourceRef: 'ui:reanswer-ok',
+    rawInput, clarifications: [], taskCandidates: [],
+  };
+  const proposal = (title: string, objective: string, deliverable: string) => ({
+    revision: 1, intent: 'create' as const, title, objective, deliverable,
+    deliveryConditions: ['步骤完整'], evidenceRefs: ['README'], blockingGaps: [],
+  });
+  // Each of these shapes is a complete legal decision object. The provider
+  // codec preserves them as separate assistant-message items, and the intake
+  // contract requires exactly one decision object per terminal batch.
+  const rewritten = JSON.stringify({
+    kind: 'requirement', normalizedInput: '重写后的发布请求', knownFacts: [], decisionRefs: ['decision:rewritten'],
+    proposal: proposal('重写标题', '重写目标', '重写交付物'),
+  });
+  const invented = JSON.stringify({
+    kind: 'requirement', normalizedInput: '继续完成上轮提出的交付', knownFacts: [], decisionRefs: ['decision:invented'],
+    proposal: proposal('上轮标题', '上轮目标', '上轮交付物'),
+  });
+  const replacement = JSON.stringify({
+    kind: 'requirement', normalizedInput: rawInput, knownFacts: ['README exists'], decisionRefs: ['decision:replacement'],
+    proposal: proposal('整理发布步骤', '整理项目发布步骤', '发布步骤清单'),
+  });
+  const requests: Array<{ readonly instructions: string; readonly input: unknown }> = [];
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire: any) => {
+    requests.push({ instructions: wire.instructions, input: wire.input });
+    if (requests.length === 1) {
+      return [
+        { type: 'response.output_text.done', item_id: 'item-rewritten', text: rewritten },
+        { type: 'response.output_text.done', item_id: 'item-invented', text: invented },
+      ];
+    }
+    return [{ type: 'response.output_text.done', item_id: 'final', text: replacement }];
+  } });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
+  });
+
+  const result = await interpreter.interpret(request);
+  assert.equal(result.kind, 'requirement');
+  if (result.kind !== 'requirement') throw new Error('expected a requirement');
+  assert.deepEqual(result.decisionRefs, ['decision:replacement'],
+    'the returned interpretation comes from the replacement generation');
+
+  assert.equal(requests.length, 2, 'one rejected batch plus one replacement generation');
+  const repairInstruction = 'The preceding generation was rejected because it emitted multiple intake decisions.';
+  assert.equal(requests[0]!.instructions.includes(repairInstruction), false,
+    'the first attempt carries no repair instruction');
+  assert.equal(requests[1]!.instructions.includes(repairInstruction), true,
+    'the second attempt carries the repair instruction');
+  assert.deepEqual(requests[1]!.input, requests[0]!.input,
+    'the committed business input is unchanged across both generations');
+  assert.equal(JSON.stringify(requests[1]!.input).includes(rawInput), true);
+
+  const opened = await deps.parentJournal.readScopeOpenedTurns(scope);
+  assert.equal(opened.length, 2, 'the rejected batch and the replacement each open a physical turn');
+  const failures = await deps.parentJournal.readScopeParseFailures(scope);
+  assert.equal(failures.length, 1, 'the rejected batch is closed by exactly one parse-failure fact');
+  const rejectedTurn = failures[0]!.fact.turn;
+  assert.equal(await deps.checkpointJournal.readSemanticCheckpointExact(rejectedTurn), null,
+    'the rejected batch commits no semantic claim');
+  const replacementTurn = opened.find(({ fact }) => fact.turn.turnId !== rejectedTurn.turnId)!.fact.turn;
+  const checkpoint = await deps.checkpointJournal.readSemanticCheckpointExact(replacementTurn);
+  assert.ok(checkpoint, 'the replacement generation commits exactly one semantic checkpoint');
+  const checkpointText = JSON.stringify(checkpoint);
+  assert.equal(checkpointText.includes('重写后的发布请求'), false, 'no rejected decision is written to a checkpoint');
+  assert.equal(checkpointText.includes('继续完成上轮提出的交付'), false, 'no invented decision is written to a checkpoint');
+  assert.equal(checkpointText.includes('decision:rewritten'), false);
+  assert.equal(checkpointText.includes('decision:invented'), false);
+  assert.equal(checkpointText.includes('整理发布步骤'), true, 'the accepted replacement reaches the checkpoint');
+});
+
+// Failure basis: the first generation is ambiguous and the replacement is also
+// ambiguous. The honest result is a rejection with no accepted decision; any
+// selection by equality, position or relevance would be a guess. Impact: a
+// fabricated requirement or a silently merged decision. Cost: two recorded
+// generations and no third request.
+test('provider explicit brain interpreter rejects two ambiguous generations without guessing or a third request', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-reanswer-bad', providerId: 'provider-reanswer-bad', protocol: 'responses',
+    endpointRef: 'recorded://reanswer-bad', modelRef: 'model-reanswer-bad',
+    configDigest: 'sha256:reanswer-bad-config', capabilityDigest: 'sha256:reanswer-bad-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const rawInput = '7 加 7 等于几？';
+  const request = {
+    interactionId: 'interaction-reanswer-bad', inputRevision: 1, sourceRef: 'ui:reanswer-bad',
+    rawInput, clarifications: [], taskCandidates: [],
+  };
+  const proposal = (title: string) => ({
+    revision: 1, intent: 'create' as const, title, objective: title, deliverable: `${title}交付`,
+    deliveryConditions: [], evidenceRefs: [], blockingGaps: [],
+  });
+  const batchOf = (firstRef: string, secondRef: string) => ([
+    { type: 'response.output_text.done', item_id: 'item-first', text: JSON.stringify({
+      kind: 'requirement', normalizedInput: rawInput, knownFacts: [], decisionRefs: [firstRef], intent: 'create', proposal: proposal('就地') }) },
+    { type: 'response.output_text.done', item_id: 'item-second', text: JSON.stringify({
+      kind: 'requirement', normalizedInput: '另一个改写', knownFacts: [], decisionRefs: [secondRef], intent: 'create', proposal: proposal('另起') }) },
+  ]);
+  let generations = 0;
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => {
+    generations += 1;
+    return batchOf(`decision:a${generations}`, `decision:b${generations}`);
+  } });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
+  });
+
+  await assert.rejects(
+    () => interpreter.interpret(request),
+    (error: unknown) => error instanceof Error
+      && error.message.includes('interaction agent returned invalid JSON')
+      && error.message.includes('2 top-level JSON decision objects'),
+  );
+  assert.equal(generations, 2, 'exactly two generations: one rejected batch and one rejected replacement');
+
+  const opened = await deps.parentJournal.readScopeOpenedTurns(scope);
+  assert.equal(opened.length, 2, 'each rejected generation opens exactly one physical turn');
+  const failures = await deps.parentJournal.readScopeParseFailures(scope);
+  assert.equal(failures.length, 2, 'both generations are closed by their own parse-failure fact');
+  for (const { fact } of failures) {
+    assert.equal(await deps.checkpointJournal.readSemanticCheckpointExact(fact.turn), null,
+      'an ambiguous generation commits no semantic checkpoint');
+  }
+});
+
+// Failure basis: the first ambiguous batch cannot be closed durably (the
+// parse-failure append is rejected), so release and honest closure are not
+// proven. Impact: a replacement generation would duplicate execution while the
+// rejected turn could still be pending. Cost: one rejected append and no second
+// provider request.
+test('provider explicit brain interpreter keeps the parse error and starts no replacement when closing the first batch fails', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-reanswer-close-fault', providerId: 'provider-reanswer-close-fault', protocol: 'responses',
+    endpointRef: 'recorded://reanswer-close-fault', modelRef: 'model-reanswer-close-fault',
+    configDigest: 'sha256:reanswer-close-fault-config', capabilityDigest: 'sha256:reanswer-close-fault-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const rawInput = '帮我整理发布步骤';
+  const request = {
+    interactionId: 'interaction-reanswer-close-fault', inputRevision: 1, sourceRef: 'ui:reanswer-close-fault',
+    rawInput, clarifications: [], taskCandidates: [],
+  };
+  const proposal = (title: string) => ({
+    revision: 1, intent: 'create' as const, title, objective: title, deliverable: `${title}交付`,
+    deliveryConditions: [], evidenceRefs: [], blockingGaps: [],
+  });
+  let generations = 0;
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => {
+    generations += 1;
+    return [
+      { type: 'response.output_text.done', item_id: 'item-first', text: JSON.stringify({
+        kind: 'requirement', normalizedInput: '改写一', knownFacts: [], decisionRefs: ['decision:one'], intent: 'create', proposal: proposal('一') }) },
+      { type: 'response.output_text.done', item_id: 'item-second', text: JSON.stringify({
+        kind: 'requirement', normalizedInput: '改写二', knownFacts: [], decisionRefs: ['decision:two'], intent: 'create', proposal: proposal('二') }) },
+    ];
+  } });
+  const faultyParent = new RejectingAppendJournal(deps.parentJournal, 'turn-parse-failure');
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: faultyParent, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
+  });
+
+  await assert.rejects(
+    () => interpreter.interpret(request),
+    (error: unknown) => {
+      if (!(error instanceof AggregateError)) throw error;
+      const primary: unknown = error.errors[0];
+      if (!(primary instanceof Error)) throw new Error('the primary failure must stay an Error');
+      assert.ok(primary.message.includes('interaction agent returned invalid JSON'),
+        'the original parse error stays the primary failure');
+      assert.ok(error.errors.some((cause) => cause instanceof Error
+        && cause.message.includes('turn-parse-failure append is temporarily unavailable')),
+        'the close failure is retained in the error chain');
+      return true;
+    },
+  );
+  assert.equal(generations, 1, 'no replacement generation starts when the first batch cannot be closed');
+  assert.equal((await deps.parentJournal.readScopeOpenedTurns(scope)).length, 1,
+    'no replacement turn is opened');
+  assert.equal((await deps.parentJournal.readScopeParseFailures(scope)).length, 0,
+    'the rejected parse-failure append did not commit');
 });
 
 // Failure basis: the interpret wire opened with the task-execution framing

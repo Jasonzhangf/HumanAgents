@@ -95,6 +95,26 @@ function digestArguments(args: Readonly<Record<string, unknown>>): string {
   return `sha256:${createHash('sha256').update(stable).digest('hex')}`;
 }
 
+/**
+ * A terminal batch holds more than one complete intake decision object. The
+ * intake contract requires exactly one, so the batch is rejected as a whole.
+ * The private identity lets the interpreter recognize this exact ambiguous
+ * shape for its one re-answer allowance without matching error text, and it
+ * keeps every other parse failure on its existing non-retryable lane.
+ */
+class MultipleIntakeDecisionsError extends ExplicitBrainOperationalToolError {
+  readonly decisionCount: number;
+
+  constructor(decisionCount: number) {
+    super(
+      'unsupported-tool',
+      `interaction agent returned invalid JSON: the terminal output holds ${decisionCount} top-level JSON decision objects, and the intake contract requires exactly one`,
+    );
+    this.name = 'MultipleIntakeDecisionsError';
+    this.decisionCount = decisionCount;
+  }
+}
+
 export interface ExplicitBrainRuntimeOptions {
   readonly workspaceRoot: string;
   readonly projectKey: string;
@@ -570,11 +590,10 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
     const decisions = objects.filter((entry) => typeof entry.kind === 'string');
     record = decisions.length === 1 ? decisions[0] : undefined;
     if (record === undefined) {
+      if (decisions.length > 1) throw new MultipleIntakeDecisionsError(decisions.length);
       throw new ExplicitBrainOperationalToolError(
         'unsupported-tool',
-        decisions.length > 1
-          ? `interaction agent returned invalid JSON: the terminal output holds ${decisions.length} top-level JSON decision objects, and the intake contract requires exactly one`
-          : `interaction agent returned invalid JSON: the terminal output holds ${objects.length} top-level JSON objects and none of them is a decision object`,
+        `interaction agent returned invalid JSON: the terminal output holds ${objects.length} top-level JSON objects and none of them is a decision object`,
       );
     }
   } else {
@@ -842,8 +861,19 @@ export function createProviderExplicitBrainInterpreter(input: {
     retained = undefined;
     return interpretation;
   };
-  return {
-    async interpret(request) {
+  /**
+   * One bounded interpretation attempt. It returns either the accepted
+   * interpretation or, on a freshly rejected multiple-decision batch that has
+   * been honestly closed, a private re-answer handoff. The public `interpret`
+   * is the only caller that may consume that handoff and start the single
+   * replacement generation.
+   */
+  type ReanswerNeeded = { readonly kind: 'reanswer-needed'; readonly request: ExplicitBrainInterpretationInput };
+  type InterpretAttempt = { readonly allowReanswer: boolean; readonly repair: boolean };
+  const interpretOnce = async (
+    request: ExplicitBrainInterpretationInput,
+    attempt: InterpretAttempt,
+  ): Promise<ExplicitBrainInterpretation | ReanswerNeeded> => {
       const activeLease = typeof input.lease === 'function' ? input.lease() : input.lease;
       let continuation: {
         readonly fact: NonNullable<Awaited<ReturnType<typeof input.parentJournal.readTurnSnapshot>>['turnInput']>['fact'];
@@ -1197,6 +1227,12 @@ export function createProviderExplicitBrainInterpreter(input: {
        * explicit error and its own recovery lane.
        */
       let unparseableOutput = false;
+      /**
+       * True only when the freshly executed batch above is unparseable because
+       * it carried more than one complete decision object. This is the one
+       * ambiguous shape the public `interpret` may re-answer once.
+       */
+      let freshMultipleIntakeDecisions = false;
       let interpretation: ExplicitBrainInterpretation;
       let live: NonNullable<typeof retained>;
       try {
@@ -1215,7 +1251,14 @@ export function createProviderExplicitBrainInterpreter(input: {
             turn, execution, scope, initialInput, providerBinding: turnProviderBinding,
             ...(executionOwner === undefined ? {} : { executionOwner }),
             journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
-            instructions: async () => ({ text: interpreterPrompt(effectiveRequest, await loadPromptSegments()), toolSurface: 'intake-decision' }),
+            instructions: async () => {
+              const text = interpreterPrompt(effectiveRequest, await loadPromptSegments());
+              if (!attempt.repair) return { text, toolSurface: 'intake-decision' };
+              return {
+                text: `${text}\n\nThe preceding generation was rejected because it emitted multiple intake decisions. Re-answer the same committed input from scratch. Return exactly one complete decision object in one assistant message. Do not continue or summarize either rejected decision.`,
+                toolSurface: 'intake-decision',
+              };
+            },
           });
           owner = createdOwner;
           openedExecutionOwner = executionOwner ?? null;
@@ -1429,6 +1472,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             // catch below can close the turn honestly after the provider close,
             // instead of leaving it pending forever.
             unparseableOutput = true;
+            freshMultipleIntakeDecisions = parseError instanceof MultipleIntakeDecisionsError;
             throw parseError;
           }
           // Only the simple-answer path carries the authoritative settlement receipt;
@@ -1586,11 +1630,44 @@ export function createProviderExplicitBrainInterpreter(input: {
             `interaction execution failed: ${describeFailure(failure)}`,
           );
         }
+        // One replacement generation is allowed only after a freshly executed
+        // batch produced two complete decisions and was fully closed: real
+        // settle, real close receipt, durable parse-failure, no dispatched
+        // helper, no cleanup or journal acknowledgement error. The turn is
+        // durably rejected, so re-answering the same committed input cannot
+        // replay a side effect.
+        if (attempt.allowReanswer && unparseableOutput && freshMultipleIntakeDecisions
+          && owner !== undefined && committedInput && compositionClosed
+          && observationDrained && settleAttempted) {
+          const heldReason = input.turnHelperJournal === undefined
+            ? 'the durable helper turn read port is unavailable'
+            : await holdsDispatchedHelper(input.turnHelperJournal, owner.turn);
+          if (heldReason === undefined) {
+            return { kind: 'reanswer-needed', request: effectiveRequest };
+          }
+        }
         throw failure;
       } finally {
         await observations?.close();
       }
       return finish(live, effectiveRequest);
+  };
+  return {
+    async interpret(request) {
+      const first = await interpretOnce(request, { allowReanswer: true, repair: false });
+      if (first.kind !== 'reanswer-needed') return first;
+      // The rejected batch is already durably closed; give the same committed
+      // input exactly one replacement generation on a brand-new parent turn.
+      const replacement = await interpretOnce(first.request, { allowReanswer: false, repair: true });
+      if (replacement.kind === 'reanswer-needed') {
+        // A repair attempt carries no re-answer allowance, so another retry
+        // request is an internal contract violation, never a third generation.
+        throw new ExplicitBrainOperationalToolError(
+          'unsupported-tool',
+          'interaction replacement generation requested a second re-answer',
+        );
+      }
+      return replacement;
     },
   };
 }

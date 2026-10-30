@@ -22,7 +22,7 @@
       "contextMaterializerOwnerPath": "packages/runtime/src/context/active-turn-materializer.ts",
       "contextMaterializerOwnerRel": "packages/runtime/src/context/active-turn-materializer.ts",
       "interpreterOwnerSymbol": "createProviderExplicitBrainInterpreter",
-      "designNote": "既有 materializer 汇集前序检查点、当前原文与请求记录；实际 interpreter prompt/parser 在 packages/app/src/explicit-brain-runtime.ts 推理 requirement 的 taskFlow 与 structuredProposal.title。字段复用 TaskFlowBinding；没有可靠结果时保持缺省，不生成 unknown 伪分类。用户 selector、executionPolicy 或固定触发模式不得提供分类。 恢复只允许 taskCandidates 与原资产不同，且用原资产的 taskCandidates 重组后序列化结果与原资产每字节相等；其他任何输入差异仍走原有不同输入边界及 abandon 说明，不放宽。"
+      "designNote": "既有 materializer 汇集前序检查点、当前原文与请求记录；实际 interpreter prompt/parser 在 packages/app/src/explicit-brain-runtime.ts 推理 requirement 的 taskFlow 与 structuredProposal.title。字段复用 TaskFlowBinding；没有可靠结果时保持缺省，不生成 unknown 伪分类。用户 selector、executionPolicy 或固定触发模式不得提供分类。 恢复只允许 taskCandidates 与原资产不同，且用原资产的 taskCandidates 重组后序列化结果与原资产每字节相等；其他任何输入差异仍走原有不同输入边界及 abandon 说明，不放宽。 fresh 本地执行的多 decision 批次整体拒绝并诚实关闭后，最多一次 replacement generation 仍由 route 内的 interpreter 编排：新 parent turn、复用同一 role/provider/model/route、仅第二次构造追加 repair 指令；不改 parser 语义，不按相等/位置/相关度选取被拒对象。"
     },
     "outcome": {
       "ownerPath": "packages/runtime/src/explicit-brain/index.ts",
@@ -42,7 +42,7 @@
       "ownerPath": "packages/app/src/explicit-brain-runtime.ts",
       "ownerRel": "packages/app/src/explicit-brain-runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "返回 ExplicitBrainInterpretation（answer/clarification/status-query/requirement）或显式错误；失败、未决请求与 ProviderSettlement 证据独立保留。正式 composition 复用现有 JsonlInteractionParentTurnJournal：fresh/continuation answer 经现有 callback 向同一 parent Journal 追加一条 provider-settlement 控制记录，App 只增加一个独立只读 control GET 读取该记录。除既有 continue owner-reconciliation 分支外，physical close 后仅新增允许该控制记录追加，request/raw fact 仍冻结；已完成 answer 的旧历史无 receipt 不回归，缺失 receipt 的 incomplete recovery 显式失败，不伪造、不重放、不建立第二真源。详见 docs/architecture/taskless-provider-settlement-design-2026-10-18.md。"
+      "designNote": "返回 ExplicitBrainInterpretation（answer/clarification/status-query/requirement）或显式错误；失败、未决请求与 ProviderSettlement 证据独立保留。正式 composition 复用现有 JsonlInteractionParentTurnJournal：fresh/continuation answer 经现有 callback 向同一 parent Journal 追加一条 provider-settlement 控制记录，App 只增加一个独立只读 control GET 读取该记录。除既有 continue owner-reconciliation 分支外，physical close 后仅新增允许该控制记录追加，request/raw fact 仍冻结；已完成 answer 的旧历史无 receipt 不回归，缺失 receipt 的 incomplete recovery 显式失败，不伪造、不重放、不建立第二真源。多 decision 批次以 parse-failure 事实诚实关闭且不写 semantic checkpoint；单次 replacement generation 成功后只为有效替代写入恰好一个 semantic checkpoint，被拒对象不进入任何 checkpoint；第二次仍多 decision 时传播其 parse error，无第三次、无合成成功。详见 docs/architecture/taskless-provider-settlement-design-2026-10-18.md。"
     }
   }
 }
