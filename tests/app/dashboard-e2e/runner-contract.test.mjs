@@ -1819,6 +1819,10 @@ test('runScenario writes a config-rooted receipt and retains resources when it c
   // resolver canonicalizes symlinked roots (e.g. /tmp -> /private/tmp).
   assert.ok(result.receipt.runtime.controlRoot.startsWith(await realpath(controlRoot)));
   assert.ok(result.receipt.runtime.runNotesRoot.includes('run-notes'));
+  // Dropping requestedModel/resolvedModel/binaryPath silently erases which model actually ran and which binary served it.
+  for (const field of ['requestedModel', 'resolvedModel', 'binaryPath']) {
+    assert.ok(field in result.receipt.runtime, `runtime receipt must carry ${field}`);
+  }
   assert.equal(dirname(result.receiptPaths.jsonPath), result.receiptPaths.markdownPath.replace(/\/receipt\.md$/, ''));
   // The unsettled attempt retained its recovery resources and named the owner.
   assert.equal(result.receipt.cleanup.branch, 'unsettled-recovery-retained');

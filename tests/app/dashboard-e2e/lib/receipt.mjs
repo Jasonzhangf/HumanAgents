@@ -9,11 +9,28 @@
  * written.
  */
 
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const RESULT_SUCCESS = 'SUCCESS';
 const RESULT_INCOMPLETE = 'INCOMPLETE';
+
+// The serve `--model` flag only reaches the execution binding. Intake/agent
+// roles resolve their model from the control root config.toml, so the requested
+// value is not proof of what actually ran. Read the config truth when present
+// and keep null when it is absent: never echo the request as the resolved model.
+function resolvedModelFromControlRoot(controlRoot) {
+  if (!controlRoot) return null;
+  try {
+    const path = join(controlRoot, 'config.toml');
+    if (!existsSync(path)) return null;
+    const match = readFileSync(path, 'utf8').match(/^\s*model\s*=\s*"([^"]*)"/m);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
 
 export function buildReceipt(binding, evidence = {}) {
   const result = evidence.result === RESULT_SUCCESS ? RESULT_SUCCESS : RESULT_INCOMPLETE;
@@ -42,7 +59,12 @@ export function buildReceipt(binding, evidence = {}) {
       projectRoot: binding.projectRoot ?? null,
       workspace: binding.workspace,
       rccBaseUrl: process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444',
-      model: process.env.HUMANAGENT_UI_MODEL ?? 'gpt-5.5',
+      requestedModel: process.env.HUMANAGENT_UI_MODEL ?? 'gpt-5.5',
+      resolvedModel: resolvedModelFromControlRoot(binding.serveControlRoot ?? binding.controlRoot),
+      // The binary that actually served the attempt. Null when this attempt did
+      // not spawn one (attached) or the path was never observed: the receipt
+      // must not imply a default dist path that may not have been used.
+      binaryPath: binding.serveCliPath ?? null,
     },
     task: {
       taskId: binding.executionTaskId ?? binding.taskId ?? null,
@@ -102,8 +124,9 @@ function renderReceiptMarkdown(receipt) {
   lines.push('## Runtime');
   lines.push('');
   lines.push(`- Mode/protocol: \`${receipt.runtime.mode}/${receipt.runtime.protocol}\``);
-  lines.push(`- RCC: \`${receipt.runtime.rccBaseUrl}\` (model \`${receipt.runtime.model}\`)`);
+  lines.push(`- RCC: \`${receipt.runtime.rccBaseUrl}\` (requested model \`${receipt.runtime.requestedModel}\`, resolved \`${receipt.runtime.resolvedModel ?? 'unknown'}\`)`);
   lines.push(`- Serve: \`${receipt.runtime.serveBaseUrl ?? 'n/a'}\` (pid \`${receipt.runtime.servePid ?? 'n/a'}\`, port \`${receipt.runtime.servePort ?? 'n/a'}\`)`);
+  lines.push(`- Binary: \`${receipt.runtime.binaryPath ?? 'n/a'}\``);
   lines.push(`- Control root: \`${receipt.runtime.controlRoot}\``);
   lines.push(`- Run notes root: \`${receipt.runtime.runNotesRoot ?? 'n/a'}\``);
   lines.push(`- Project root: \`${receipt.runtime.projectRoot ?? 'n/a'}\``);

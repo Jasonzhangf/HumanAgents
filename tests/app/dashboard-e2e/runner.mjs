@@ -604,13 +604,23 @@ export async function main(argv, runOptions = {}) {
 
 // Fail closed: a direct `node runner.mjs --scenario <name>` invocation must exit
 // non-zero whenever the attempt is not SUCCESS.
+//
+// A retained recovery serve is deliberately left running for the recovery owner,
+// and its stdio pipes keep this process's event loop alive. The receipt is
+// already written and the summary is printed at that point, so a retained child
+// must not stall the caller: flush stdout and exit explicitly. The child is a
+// separate process and keeps running for recovery; only this runner exits.
 const invokedDirectly = process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
+  let exitCode = process.exitCode ?? 0;
   try {
     await main(process.argv.slice(2));
+    exitCode = process.exitCode ?? 0;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
+    exitCode = 1;
   }
+  await new Promise((done) => process.stdout.write('', done));
+  process.exit(exitCode);
 }

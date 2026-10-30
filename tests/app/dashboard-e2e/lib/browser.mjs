@@ -662,11 +662,46 @@ export async function launchBrowserSession(binding) {
   page.on('console', (message) => {
     if (message.type() === 'error') consoleErrors.push(`console: ${message.text()}`);
   });
+  // Passive record of the explicit-interaction calls the page itself makes. A
+  // homepage submission resolves entirely inside the navigation wait, so the
+  // receipt needs the real request/response pair for interpret and confirmation
+  // to tell a slow provider round apart from a non-2xx answer, a direct reply, or
+  // a confirmation that never navigated. This only observes traffic the product
+  // already issues; it adds no retries or polling of its own.
+  const explicitHttp = [];
+  page.on('response', (response) => {
+    const url = String(response.url());
+    if (!url.includes('/api/explicit/interactions/')) return;
+    let pathname;
+    try {
+      pathname = new URL(url).pathname;
+    } catch {
+      return;
+    }
+    const entry = {
+      at: new Date().toISOString(),
+      method: String(response.request()?.method?.() ?? 'GET').toUpperCase(),
+      pathname,
+      status: response.status(),
+    };
+    explicitHttp.push(entry);
+    // The body carries the interaction id and the runtime state the request
+    // settled at; recording it separates "answered directly" from "confirmed"
+    // without issuing a second query.
+    response.json().then((body) => {
+      if (body && typeof body === 'object') {
+        if (typeof body.interactionId === 'string') entry.interactionId = body.interactionId;
+        if (typeof body.state === 'string') entry.state = body.state;
+        if (typeof body.nextAction === 'string') entry.nextAction = body.nextAction;
+      }
+    }).catch(() => {});
+  });
   binding.browser = {
     browser,
     page,
     context,
     consoleErrors,
+    explicitHttp,
     close: async () => {
       await context.close().catch(() => {});
       await browser.close().catch(() => {});
@@ -744,6 +779,16 @@ export function taskScopedNavigation(value, baseUrl) {
 
 async function waitForTaskScopedNavigation(binding, timeoutMs) {
   const page = binding.browser.page;
+  // Appended to a timeout so the first deviation carries what the page actually
+  // asked the runtime and what it got back. A slow interpret, a refused status,
+  // and a confirmed submission that never navigated then stay distinguishable.
+  const observedExplicitHttp = () => {
+    const entries = binding.browser?.explicitHttp ?? [];
+    if (entries.length === 0) return ' (no explicit-interaction request was issued)';
+    return ` (observed explicit HTTP: ${entries
+      .map((entry) => `${entry.method} ${entry.pathname} -> ${entry.status}${entry.state ? ` state=${entry.state}` : ''}`)
+      .join('; ')})`;
+  };
   if (typeof page.waitForURL === 'function') {
     try {
       // `page.waitForURL` returns `Promise<void>`: it synchronizes on the
@@ -756,12 +801,12 @@ async function waitForTaskScopedNavigation(binding, timeoutMs) {
       );
     } catch (error) {
       throw new Error(
-        `homepage submission did not navigate to a same-origin task-scoped observation: ${error.message}`,
+        `homepage submission did not navigate to a same-origin task-scoped observation: ${error.message}${observedExplicitHttp()}`,
       );
     }
     const navigation = taskScopedNavigation(page.url(), binding.serveBaseUrl);
     if (!navigation) {
-      throw new Error('homepage submission settled on an invalid task-scoped navigation');
+      throw new Error(`homepage submission settled on an invalid task-scoped navigation${observedExplicitHttp()}`);
     }
     return navigation;
   }
@@ -771,7 +816,7 @@ async function waitForTaskScopedNavigation(binding, timeoutMs) {
     const navigation = taskScopedNavigation(page.url(), binding.serveBaseUrl);
     if (navigation) return navigation;
     if (Date.now() > deadline) {
-      throw new Error('homepage submission did not navigate to a same-origin task-scoped observation before timeout');
+      throw new Error(`homepage submission did not navigate to a same-origin task-scoped observation before timeout${observedExplicitHttp()}`);
     }
     await sleep(50);
   }
