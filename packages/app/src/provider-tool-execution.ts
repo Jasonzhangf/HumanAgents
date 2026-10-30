@@ -1479,25 +1479,16 @@ async function executeWebSearch(
   const report = await params.service.execute(input, { signal: request.signal });
   const outputId = safeId(`provider-tool-web-search-${request.execution.taskId.value}-${request.call.callId}`);
   const { outputRef, outputDigest } = await params.assets.writeReport({ outputId, report });
-  const summary = {
-    status: report.status,
-    resultsFound: report.resultsFound,
-    providerPagesFetched: report.providerPagesFetched,
-    resultsScope: report.resultsScope,
-    searchComplete: report.searchComplete,
-    unresolvedSources: report.unresolvedSources,
-    summary: report.summary,
-  };
-  const top = report.results.slice(0, 5).map((result) => ({
-    url: result.url,
-    title: result.title,
-    snippet: result.snippet,
-    sourceName: result.sourceName ?? null,
-  }));
   const evidenceRefs = [taskEvidence(request, 'web-search')];
   if (report.status === 'succeeded') {
     return {
-      output: JSON.stringify({ ...summary, top }),
+      // Deliver the same report artifact that `writeReport` stored, like
+      // `file.read`/`file.write`. The provider adapter persists `output` as the
+      // raw bytes and copies `outputDigest`, so a compacted projection here
+      // would make `output` and `outputDigest` name two different artifacts and
+      // fail the standard-turn inspect readback invariant. The report is already
+      // bounded by the service (`maxResults` <= 50), so this is not unbounded.
+      output: JSON.stringify(report),
       outputRefs: [outputRef],
       evidenceRefs,
       status: 'succeeded',
@@ -1506,7 +1497,7 @@ async function executeWebSearch(
     };
   }
   return {
-    output: JSON.stringify({ ...summary, top }),
+    output: JSON.stringify(report),
     outputRefs: [outputRef],
     evidenceRefs,
     status: 'failed',
