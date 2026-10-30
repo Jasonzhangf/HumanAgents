@@ -701,6 +701,15 @@ export class ProviderAgentDriver<
       if (this.stopping) return;
       await this.commitObservedCompletion(request);
       if (this.stopping) return;
+      // A verified successful standard-turn end accepts the bound turn close.
+      // The end executor reports `succeeded` only after the control edge locks
+      // the accepted end, so the observation stream settles here instead of
+      // replaying the tool result into another model continuation. A refused
+      // end is a failed result and keeps the existing correction continuation.
+      if (toolHistory.some(({ call, result }) =>
+        isStandardTurnEndToolId(call.toolId) && this.toolStatus(result) === 'succeeded')) {
+        return;
+      }
       let completeContinuation!: () => void;
       const continuationCompletion = new Promise<void>((resolve) => { completeContinuation = resolve; });
       this.continuationCompletion = continuationCompletion;
