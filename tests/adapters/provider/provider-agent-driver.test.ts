@@ -1134,7 +1134,7 @@ test('provider driver preserves explicit non-success executor states without emi
   assert.deepEqual(observed.map((result) => result.fact), statuses.map(() => undefined));
 });
 
-test('provider agent driver continues after a persisted reserved standard-turn-end refusal', async () => {
+test('provider agent driver retains tools after a standard-turn-end refusal and drains an accepted end without tools', async () => {
   const refusedOutput = JSON.stringify({
     owner: 'humanagent.app',
     kind: 'standard-turn-end',
@@ -1261,8 +1261,10 @@ test('provider agent driver continues after a persisted reserved standard-turn-e
 
   assert.deepEqual(executedCallIds, ['call-turn-end-refused', 'call-turn-end-corrected']);
   assert.equal(submissions.length, 2);
+  assert.deepEqual(submissions[0]?.tools?.map((tool) => tool.toolId), [STANDARD_TURN_END_WIRE_TOOL_ID]);
   assert.equal(submissions[0]?.toolContinuations?.[0]?.output, refusedOutput);
   assert.equal(submissions[0]?.toolContinuations?.[0]?.callId, 'call-turn-end-refused');
+  assert.equal(submissions[1]?.tools, undefined);
   assert.deepEqual(
     submissions[1]?.toolContinuations?.map((continuation) => [continuation.callId, continuation.output]),
     [
@@ -1296,6 +1298,105 @@ test('provider agent driver continues after a persisted reserved standard-turn-e
     ['succeeded', 'call-turn-end-corrected'],
   ]);
   assert.equal(events.at(-1)?.terminalState, 'succeeded');
+});
+
+test('provider agent driver stops a same-batch tool after an accepted standard-turn-end and drains without tools', async () => {
+  const acceptedOutput = JSON.stringify({
+    owner: 'humanagent.app',
+    kind: 'standard-turn-end',
+    turnId: 'active-turn-ui-operation-1',
+    accepted: true,
+  });
+  let observeCalls = 0;
+  const continuationSubmits: ProviderSubmitInput[] = [];
+  const executedCallIds: string[] = [];
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      observeCalls += 1;
+      if (observeCalls === 1) {
+        // The model reaches the bound standard-turn end; the executor returns a
+        // succeeded result only after the runtime locks the accepted end.
+        yield {
+          ...identity,
+          eventId: 'event-turn-end-call',
+          kind: 'tool',
+          summary: STANDARD_TURN_END_WIRE_TOOL_ID,
+          outputRefs: ['artifact://turn-end'],
+          evidenceRefs: [evidence],
+          toolCall: {
+            callId: 'call-turn-end',
+            toolId: STANDARD_TURN_END_WIRE_TOOL_ID,
+            arguments: { summary: { result: 'deliver the result' }, deliveryRefs: [] },
+            continuationRef: 'response-round-1',
+          },
+        };
+        yield {
+          ...identity,
+          eventId: 'event-turn-end-waiting',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      // The tool-less drain continuation observes only transport completion.
+      yield { ...identity, eventId: 'event-drain-complete', kind: 'output', summary: 'drain completed', outputRefs: ['output-final'], evidenceRefs: [evidence] };
+      yield { ...identity, eventId: 'event-drain-terminal', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      continuationSubmits.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [
+      { toolId: STANDARD_TURN_END_WIRE_TOOL_ID, description: 'end the current turn', inputSchema: { type: 'object' } },
+      { toolId: 'file.list', description: 'list files', inputSchema: { type: 'object' } },
+    ],
+    executeTool: {
+      canRunConcurrently: () => true,
+      async execute({ call }) {
+        executedCallIds.push(call.callId);
+        return {
+          output: call.toolId === STANDARD_TURN_END_WIRE_TOOL_ID ? acceptedOutput : JSON.stringify({ files: [] }),
+          outputRefs: [`asset://provider-tool/${call.callId}`],
+          evidenceRefs: [evidence],
+          status: 'succeeded',
+        };
+      },
+    },
+  });
+
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'end the turn' } });
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+
+  assert.equal(observeCalls, 2);
+  assert.deepEqual(executedCallIds, ['call-turn-end']);
+  assert.equal(continuationSubmits.length, 1);
+  assert.equal(continuationSubmits[0]?.tools, undefined);
+  assert.deepEqual(
+    continuationSubmits[0]?.toolContinuations?.map((continuation) => continuation.callId),
+    ['call-turn-end'],
+  );
+  assert.deepEqual(
+    events.flatMap((event) => event.providerEvent.toolResult === undefined
+      ? [] : [[event.providerEvent.toolResult.status, event.providerEvent.toolResult.callId]]),
+    [['succeeded', 'call-turn-end']],
+  );
+  assert.equal(events.at(-1)?.terminalState, 'succeeded');
+  assert.equal((await instance.settle({ runtimeId: identity.runtimeId, executionEpoch: 1 })).state, 'succeeded');
 });
 
 test('preserves prior results and stops a Responses tool batch at the first owned-tool failure', async () => {
