@@ -1136,12 +1136,9 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       active.summaryStarted = true;
       return;
     }
-    this.reasoningMismatch(
-      context,
-      active === undefined
-        ? 'responses reasoning summary started without an active reasoning item'
-        : 'responses reasoning summary started for a different item than the active item',
-    );
+    if (active !== undefined) {
+      this.reasoningMismatch(context, 'responses reasoning summary started for a different item than the active item');
+    }
   }
 
   private closeReasoningItem<TIdentity extends AnyProviderExecutionIdentityRef>(
@@ -1149,15 +1146,11 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     itemId?: string,
   ): void {
     const active = this.activeReasoningItem(context);
-    if (itemId !== undefined && (active === undefined || active.itemId !== itemId)) {
-      this.reasoningMismatch(
-        context,
-        active === undefined
-          ? 'responses reasoning item closed without an active reasoning item'
-          : 'responses reasoning item closed with a different identity than the active item',
-      );
+    if (active === undefined) return;
+    if (itemId !== undefined && active.itemId !== itemId) {
+      this.reasoningMismatch(context, 'responses reasoning item closed with a different identity than the active item');
     }
-    if (active !== undefined) this.activeReasoningItems.delete(context);
+    this.activeReasoningItems.delete(context);
   }
 
   private activeSummaryItemId<TIdentity extends AnyProviderExecutionIdentityRef>(
@@ -1167,11 +1160,8 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     const wireItemId = record.item_id;
     const active = this.activeReasoningItem(context);
     if (typeof wireItemId === 'string' && wireItemId.trim() !== '') {
-      if (active === undefined || active.itemId !== wireItemId) {
+      if (active !== undefined && active.itemId !== wireItemId) {
         this.reasoningMismatch(context, 'responses reasoning summary delta for a different item than the active item');
-      }
-      if (!active.summaryStarted) {
-        this.reasoningMismatch(context, 'responses reasoning summary delta before the active summary started');
       }
       return wireItemId;
     }
@@ -1694,13 +1684,10 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
         const active = this.activeReasoningItem(context);
-        if (active === undefined || active.itemId !== itemId) {
+        if (active !== undefined && active.itemId !== itemId) {
           this.reasoningMismatch(context, 'responses reasoning summary done for an item that is not the active reasoning item');
         }
-        if (!active.summaryStarted) {
-          this.reasoningMismatch(context, 'responses reasoning summary done before the active summary started');
-        }
-        active.summaryStarted = false;
+        if (active !== undefined && active.itemId === itemId) active.summaryStarted = false;
         this.rememberCompletedText(context, 'reasoningSummary', itemId, text);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
         return {

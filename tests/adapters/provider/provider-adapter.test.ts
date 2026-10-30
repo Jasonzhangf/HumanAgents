@@ -1922,86 +1922,171 @@ test('responses codec rejects item-less reasoning summary deltas without an acti
   );
 });
 
-test('responses codec enforces fail-closed reasoning lifecycle (RULING 3.2.1)', async () => {
+test('responses codec treats explicit item_id as self-identifying and keeps item-less deltas fail-closed', async () => {
   const codec = new ResponsesProviderCodec();
   const context = codecContext();
   const decode = (raw: Record<string, unknown>) =>
     codec.decodeEvent({ protocol: 'responses', ...raw } as unknown as ProviderWireEvent, context);
-
-  // 1. reasoning_summary_part.added with no active reasoning item throws.
-  await assert.rejects(
-    () => decode({
-      type: 'response.reasoning_summary_part.added',
-      item_id: 'rs-orphan',
-      part: { type: 'reasoning_summary', summary: [] },
-    }),
-    (error: unknown) => {
-      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
+  const expectCode = async (work: () => Promise<unknown>, code: string) =>
+    assert.rejects(work, (error: unknown) => {
+      assert.equal((error as ProviderAdapterError).providerError.code, code);
+      assert.match((error as Error).message, /missing item_id/);
       return true;
-    },
+    });
+
+  // 1. An explicit summary-part start with no active item is accepted, but it
+  // does not invent an active item.
+  const partContext = codecContext();
+  const part = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_summary_part.added',
+    item_id: 'rs-part-standalone',
+    part: { type: 'reasoning_summary', summary: [] },
+  } as unknown as ProviderWireEvent, partContext);
+  assert.equal(contentFactOf(part.rawFacts).contentUnitId, 'responses:reasoning-summary:rs-part-standalone');
+  await assert.rejects(
+    () => codec.decodeEvent({
+      protocol: 'responses',
+      type: 'response.reasoning_summary_text.delta',
+      delta: 'still item-less',
+    } as unknown as ProviderWireEvent, partContext),
+    /missing item_id/,
   );
 
-  // Open one reasoning item, start its summary.
+  // 2. An explicit summary delta with no active item keeps the wire identity.
+  const delta = await decode({
+    type: 'response.reasoning_summary_text.delta',
+    item_id: 'rs-delta-standalone',
+    delta: 'standalone reasoning',
+  });
+  assert.equal(contentFactOf(delta.rawFacts).contentUnitId, 'responses:reasoning-summary:rs-delta-standalone');
+
+  // 3. An explicit summary-text done with no active item is accepted and its
+  // text is remembered for the one legal item-less duplicate tail.
+  const standaloneDone = await decode({
+    type: 'response.reasoning_summary_text.done',
+    item_id: 'rs-done-standalone',
+    text: 'completed standalone reasoning',
+  });
+  assert.equal(
+    contentFactOf(standaloneDone.rawFacts).contentUnitId,
+    'responses:reasoning-summary:rs-done-standalone',
+  );
+  await assert.rejects(
+    () => decode({
+      type: 'response.reasoning_summary_text.delta',
+      delta: 'not a completed suffix',
+    }),
+    /missing item_id/,
+  );
+  const duplicateTail = await decode({
+    type: 'response.reasoning_summary_text.delta',
+    delta: 'standalone reasoning',
+  });
+  assert.deepEqual(duplicateTail.rawFacts, []);
+
+  // 4. An explicit output-item done with no active item is accepted.
+  const standaloneItemDone = await decode({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: {
+      type: 'reasoning',
+      id: 'rs-item-done-standalone',
+      status: 'completed',
+      summary: [{ type: 'summary_text', text: 'standalone item done' }],
+    },
+  });
+  assert.equal(
+    contentFactOf(standaloneItemDone.rawFacts).contentUnitId,
+    'responses:reasoning-summary:rs-item-done-standalone',
+  );
+
+  // 5. Item-less deltas have no identity before an active item exists.
+  const orphanContext = codecContext();
+  await expectCode(
+    () => codec.decodeEvent({
+      protocol: 'responses',
+      type: 'response.reasoning_summary_text.delta',
+      delta: 'orphan',
+    } as unknown as ProviderWireEvent, orphanContext),
+    'missing.field',
+  );
+
+  // Open one reasoning item without starting its summary.
   await decode({
     type: 'response.output_item.added',
     output_index: 0,
     item: { type: 'reasoning', id: 'rs-1', status: 'in_progress', summary: [] },
   });
+
+  // 6. Item-less deltas stay fail-closed before the summary starts. An
+  // explicit identity for the active item is legal and self-identifying.
+  await expectCode(
+    () => decode({ type: 'response.reasoning_summary_text.delta', delta: 'x' }),
+    'missing.field',
+  );
+  const explicitActiveDelta = await decode({
+    type: 'response.reasoning_summary_text.delta',
+    item_id: 'rs-1',
+    delta: 'explicit active',
+  });
+  assert.equal(contentFactOf(explicitActiveDelta.rawFacts).contentUnitId, 'responses:reasoning-summary:rs-1');
+
+  // 7. Once the matching summary starts, item-less deltas inherit its identity.
   await decode({
     type: 'response.reasoning_summary_part.added',
     item_id: 'rs-1',
     part: { type: 'reasoning_summary', summary: [] },
   });
+  const itemlessDelta = await decode({ type: 'response.reasoning_summary_text.delta', delta: 'active' });
+  assert.equal(contentFactOf(itemlessDelta.rawFacts).contentUnitId, 'responses:reasoning-summary:rs-1');
 
-  // 2a. An explicit-item-id delta for a different active item throws.
-  await assert.rejects(
-    () => decode({ type: 'response.reasoning_summary_text.delta', item_id: 'rs-other', delta: 'x' }),
-    (error: unknown) => {
-      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
-      return true;
+  // 8. Every explicit cross-item identity conflicts with the active item.
+  for (const raw of [
+    {
+      type: 'response.reasoning_summary_part.added',
+      item_id: 'rs-other',
+      part: { type: 'reasoning_summary', summary: [] },
     },
-  );
-
-  // 2b. An explicit-item-id delta for the active item but before summaryStarted throws.
-  // Close and re-open cleanly, then send a delta without having started the summary.
-  await decode({
-    type: 'response.output_item.done',
-    output_index: 0,
-    item: { type: 'reasoning', id: 'rs-1', status: 'completed', summary: [] },
-  });
-  await decode({
-    type: 'response.output_item.added',
-    output_index: 1,
-    item: { type: 'reasoning', id: 'rs-2', status: 'in_progress', summary: [] },
-  });
-  await assert.rejects(
-    () => decode({ type: 'response.reasoning_summary_text.delta', item_id: 'rs-2', delta: 'x' }),
-    (error: unknown) => {
-      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
-      return true;
+    { type: 'response.reasoning_summary_text.delta', item_id: 'rs-other', delta: 'x' },
+    { type: 'response.reasoning_summary_text.done', item_id: 'rs-other', text: 'x' },
+    {
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: { type: 'reasoning', id: 'rs-other', status: 'completed', summary: [] },
     },
-  );
+  ]) {
+    await assert.rejects(
+      () => decode(raw),
+      (error: unknown) => {
+        assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
+        return true;
+      },
+    );
+  }
 
-  // 3. reasoning_summary_text.done must match the active item and require a started summary.
-  await assert.rejects(
-    () => decode({ type: 'response.reasoning_summary_text.done', item_id: 'rs-3', text: 'x' }),
-    (error: unknown) => {
-      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
-      return true;
-    },
-  );
-
-  // 4. output_item.done for a reasoning item with an explicit id must match the active item.
+  // 9. Opening a second different reasoning item is still an overlap.
   await assert.rejects(
     () => decode({
-      type: 'response.output_item.done',
+      type: 'response.output_item.added',
       output_index: 1,
-      item: { type: 'reasoning', id: 'rs-other', status: 'completed', summary: [] },
+      item: { type: 'reasoning', id: 'rs-second', status: 'in_progress', summary: [] },
     }),
     (error: unknown) => {
-      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
+      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-overlap');
       return true;
     },
+  );
+
+  // 10. After summary-text done, an item-less delta still has no identity.
+  await decode({
+    type: 'response.reasoning_summary_text.done',
+    item_id: 'rs-1',
+    text: 'active reasoning',
+  });
+  await assert.rejects(
+    () => decode({ type: 'response.reasoning_summary_text.delta', delta: 'after done' }),
+    /missing item_id/,
   );
 });
 
