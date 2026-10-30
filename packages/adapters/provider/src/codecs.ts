@@ -977,26 +977,6 @@ function responsesReasoningLocator(itemId: string, record: Record<string, unknow
   return contentIndex === undefined ? itemId : `${itemId}:${contentIndex}`;
 }
 
-/**
- * Reasoning stream events are model metadata, not tool calls. Some upstream
- * Responses streams omit the top-level item_id while still identifying the
- * item through item.id or output/summary indexes. Derive a stable local
- * identity instead of aborting the stream. Tool-call identity stays fail-closed
- * in the tool-argument branch.
- */
-function resolveReasoningItemId(record: Record<string, unknown>): string {
-  const itemId = record.item_id;
-  if (typeof itemId === 'string' && itemId.trim() !== '') return itemId;
-  const item = record.item;
-  if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
-    const nestedId = (item as Record<string, unknown>).id;
-    if (typeof nestedId === 'string' && nestedId.trim() !== '') return nestedId;
-  }
-  const outputIndex = typeof record.output_index === 'number' ? record.output_index : 0;
-  const summaryIndex = typeof record.summary_index === 'number' ? record.summary_index : 0;
-  return `reasoning-${outputIndex}-${summaryIndex}`;
-}
-
 function asRecord(raw: ProviderWireEvent): Record<string, unknown> {
   if (!raw || typeof raw !== 'object') {
     throw new ProviderAdapterError({
@@ -1098,6 +1078,176 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     this.completedToolArguments.delete(context);
   }
 
+  // Item-less reasoning summary deltas bind to the active reasoning item opened
+  // by `response.output_item.added`. A completed reasoning-summary or
+  // assistant-text unit may repeat its exact suffix without item_id after the
+  // item is done; that duplicate tail is consumed once and emits no content
+  // fact. This mirrors the tool-argument state machine below.
+  private readonly activeReasoningItems = new WeakMap<object, { itemId: string; summaryStarted: boolean }>();
+  private readonly completedTextUnits = new WeakMap<object, {
+    reasoningSummary?: { readonly itemId: string; readonly text: string; duplicateTailConsumed: boolean };
+    assistantText?: { readonly itemId: string; readonly text: string; duplicateTailConsumed: boolean };
+  }>();
+
+  private activeReasoningItem<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+  ): { itemId: string; summaryStarted: boolean } | undefined {
+    return this.activeReasoningItems.get(context);
+  }
+
+  private reasoningMismatch<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    message: string,
+  ): never {
+    throw new ProviderAdapterError({
+      code: 'protocol.reasoning-mismatch',
+      category: 'protocol',
+      phase: 'observe',
+      message,
+      scope: context.execution,
+    });
+  }
+
+  private openReasoningItem<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    itemId: string,
+  ): void {
+    const active = this.activeReasoningItem(context);
+    if (active !== undefined) {
+      if (active.itemId === itemId) return;
+      throw new ProviderAdapterError({
+        code: 'protocol.reasoning-overlap',
+        category: 'protocol',
+        phase: 'observe',
+        message: 'responses reasoning item opened while another reasoning item is active',
+        scope: context.execution,
+      });
+    }
+    this.activeReasoningItems.set(context, { itemId, summaryStarted: false });
+    this.clearCompletedText(context, 'reasoningSummary');
+  }
+
+  private markReasoningSummaryStarted<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    itemId: string,
+  ): void {
+    const active = this.activeReasoningItem(context);
+    if (active?.itemId === itemId) {
+      active.summaryStarted = true;
+      return;
+    }
+    this.reasoningMismatch(
+      context,
+      active === undefined
+        ? 'responses reasoning summary started without an active reasoning item'
+        : 'responses reasoning summary started for a different item than the active item',
+    );
+  }
+
+  private closeReasoningItem<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    itemId?: string,
+  ): void {
+    const active = this.activeReasoningItem(context);
+    if (itemId !== undefined && (active === undefined || active.itemId !== itemId)) {
+      this.reasoningMismatch(
+        context,
+        active === undefined
+          ? 'responses reasoning item closed without an active reasoning item'
+          : 'responses reasoning item closed with a different identity than the active item',
+      );
+    }
+    if (active !== undefined) this.activeReasoningItems.delete(context);
+  }
+
+  private activeSummaryItemId<TIdentity extends AnyProviderExecutionIdentityRef>(
+    record: Record<string, unknown>,
+    context: DecodeContext<TIdentity>,
+  ): string | undefined {
+    const wireItemId = record.item_id;
+    const active = this.activeReasoningItem(context);
+    if (typeof wireItemId === 'string' && wireItemId.trim() !== '') {
+      if (active === undefined || active.itemId !== wireItemId) {
+        this.reasoningMismatch(context, 'responses reasoning summary delta for a different item than the active item');
+      }
+      if (!active.summaryStarted) {
+        this.reasoningMismatch(context, 'responses reasoning summary delta before the active summary started');
+      }
+      return wireItemId;
+    }
+    return active !== undefined && active.summaryStarted ? active.itemId : undefined;
+  }
+
+  private completedText<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+  ): {
+    reasoningSummary?: { readonly itemId: string; readonly text: string; duplicateTailConsumed: boolean };
+    assistantText?: { readonly itemId: string; readonly text: string; duplicateTailConsumed: boolean };
+  } {
+    const existing = this.completedTextUnits.get(context);
+    if (existing !== undefined) return existing;
+    const created = {};
+    this.completedTextUnits.set(context, created);
+    return created;
+  }
+
+  private rememberCompletedText<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    channel: 'reasoningSummary' | 'assistantText',
+    itemId: string,
+    text: string,
+  ): void {
+    if (itemId.trim() === '' || text.length === 0) return;
+    this.completedText(context)[channel] = { itemId, text, duplicateTailConsumed: false };
+  }
+
+  private clearCompletedText<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    channel: 'reasoningSummary' | 'assistantText',
+  ): void {
+    delete this.completedText(context)[channel];
+  }
+
+  private duplicateTail<TIdentity extends AnyProviderExecutionIdentityRef>(
+    context: DecodeContext<TIdentity>,
+    channel: 'reasoningSummary' | 'assistantText',
+    type: string,
+    delta: string,
+  ): string {
+    // Only a suffix already covered by the completed unit is safe to drop;
+    // repeated or conflicting tails would lose or merge real content.
+    const completed = this.completedText(context)[channel];
+    if (completed === undefined) {
+      throw new ProviderAdapterError({
+        code: 'missing.field',
+        category: 'protocol',
+        phase: 'observe',
+        message: `${type} event missing item_id`,
+        scope: context.execution,
+      });
+    }
+    if (delta.length === 0 || !completed.text.endsWith(delta)) {
+      throw new ProviderAdapterError({
+        code: 'protocol.duplicate-tail',
+        category: 'protocol',
+        phase: 'observe',
+        message: `${type} event missing item_id and its text is not a duplicate suffix of the completed ${channel}`,
+        scope: context.execution,
+      });
+    }
+    if (completed.duplicateTailConsumed) {
+      throw new ProviderAdapterError({
+        code: 'protocol.duplicate-tail',
+        category: 'protocol',
+        phase: 'observe',
+        message: `${type} event repeated a duplicate tail already covered by the completed ${channel}`,
+        scope: context.execution,
+      });
+    }
+    completed.duplicateTailConsumed = true;
+    return completed.itemId;
+  }
+
   encodeStart(input: AnyProviderStartInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
     return this.encodeRequest(binding, routeRef, input, input.payload);
   }
@@ -1182,6 +1332,8 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         if (raw.type === 'response.created') {
           context.responsesStreamRound.count += 1;
           this.clearToolArguments(context);
+          this.activeReasoningItems.delete(context);
+          this.completedTextUnits.delete(context);
         }
         context.responsesCurrentResponseId?.set('current', responseId);
         const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`, response)];
@@ -1205,8 +1357,23 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
           const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}/started`, item)];
           return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `tool/${callId}/started`), evidenceRefs)] };
         }
+        if (itemType === 'message') {
+          this.clearCompletedText(context, 'assistantText');
+        }
         if (itemType === 'reasoning') {
           const itemId = stringOrGenerated(item, 'id', `rcc-reasoning-${record.output_index}`);
+          const explicitItemId = typeof item.id === 'string' && item.id.trim() !== '' ? itemId : undefined;
+          if (explicitItemId !== undefined) {
+            this.openReasoningItem(context, explicitItemId);
+          } else if (this.activeReasoningItem(context) !== undefined) {
+            throw new ProviderAdapterError({
+              code: 'protocol.reasoning-overlap',
+              category: 'protocol',
+              phase: 'observe',
+              message: 'responses reasoning item opened while another reasoning item is active',
+              scope: context.execution,
+            });
+          }
           const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, item)];
           const summaryText = responsesReasoningSummaryText(item);
           return {
@@ -1243,25 +1410,30 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.output_text.delta': {
-        const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
         const contentIndex = typeof record.content_index === 'number' ? record.content_index : undefined;
+        const lateTail = record.item_id === undefined && delta.length > 0
+          ? this.duplicateTail(context, 'assistantText', raw.type, delta)
+          : undefined;
+        const itemId = lateTail ?? requireString(record, 'item_id', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `text/${itemId}`, delta)];
+        const summary = lateTail === undefined ? responsesTextSummary(context, itemId, delta, 'delta') : undefined;
         return {
-          events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, delta, 'delta'))],
-          rawFacts: [contentFact({
+          events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, summary)],
+          rawFacts: lateTail === undefined ? [contentFact({
             contentUnitId: unitId('responses', 'assistant-text', contentIndex === undefined ? itemId : `${itemId}:${contentIndex}`),
             channel: 'assistant-text',
             update: 'delta',
             content: rawAsset(evidenceRefs[0], { kind: 'utf8-text' }),
             complete: false,
-          })],
+          })] : [],
         };
       }
       case 'response.output_text.done': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
         const contentIndex = typeof record.content_index === 'number' ? record.content_index : undefined;
+        this.rememberCompletedText(context, 'assistantText', itemId, text);
         const evidenceRefs = [await captureEvidence(context, raw.type, `text/${itemId}`, text)];
         return {
           events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))],
@@ -1303,6 +1475,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             scope: context.execution,
           });
         }
+        if (partType === 'output_text') this.clearCompletedText(context, 'assistantText');
         return {
           events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))],
           rawFacts: [contentFact({
@@ -1418,8 +1591,13 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         }
         if (itemType === 'reasoning') {
           const itemId = stringOrGenerated(item, 'id', `rcc-reasoning-${record.output_index}`);
+          this.closeReasoningItem(
+            context,
+            typeof item.id === 'string' && item.id.trim() !== '' ? itemId : undefined,
+          );
           const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, item)];
           const summaryText = responsesReasoningSummaryText(item);
+          this.rememberCompletedText(context, 'reasoningSummary', itemId, summaryText);
           return {
             events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
             rawFacts: summaryText.length === 0 ? [] : [contentFact({
@@ -1440,6 +1618,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         if (text === undefined || text === '') {
           return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), evidenceRefs)] };
         }
+        this.rememberCompletedText(context, 'assistantText', itemId, text);
         const replacesUnitIds = responsesItemPartUnitIds(itemId, item);
         return {
           events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))],
@@ -1455,10 +1634,16 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       }
       case 'response.reasoning_summary_part.added':
       case 'response.reasoning_summary_part.done': {
-        const itemId = resolveReasoningItemId(record);
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        if (raw.type === 'response.reasoning_summary_part.added') {
+          this.markReasoningSummaryStarted(context, itemId);
+        }
         const part = requireObject(record, 'part', context.execution, raw.type);
         const text = responsesReasoningSummaryText(part);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
+        if (raw.type === 'response.reasoning_summary_part.done') {
+          this.rememberCompletedText(context, 'reasoningSummary', itemId, text);
+        }
         return {
           events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
           rawFacts: [contentFact({
@@ -1471,7 +1656,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.reasoning_summary_part.delta': {
-        const itemId = resolveReasoningItemId(record);
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireObject(record, 'delta', context.execution, raw.type);
         const text = responsesReasoningSummaryText(delta);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
@@ -1487,23 +1672,36 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.reasoning_summary_text.delta': {
-        const itemId = resolveReasoningItemId(record);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
+        const activeItemId = this.activeSummaryItemId(record, context);
+        const lateTail = activeItemId === undefined && record.item_id === undefined
+          ? this.duplicateTail(context, 'reasoningSummary', raw.type, delta)
+          : undefined;
+        const itemId = lateTail ?? activeItemId ?? requireString(record, 'item_id', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, delta })];
         return {
           events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
-          rawFacts: [contentFact({
+          rawFacts: lateTail === undefined ? [contentFact({
             contentUnitId: unitId('responses', 'reasoning-summary', responsesReasoningLocator(itemId, record)),
             channel: 'reasoning-summary',
             update: 'delta',
             content: rawAsset(evidenceRefs[0], { kind: 'text-field', field: 'delta' }),
             complete: false,
-          })],
+          })] : [],
         };
       }
       case 'response.reasoning_summary_text.done': {
-        const itemId = resolveReasoningItemId(record);
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
+        const active = this.activeReasoningItem(context);
+        if (active === undefined || active.itemId !== itemId) {
+          this.reasoningMismatch(context, 'responses reasoning summary done for an item that is not the active reasoning item');
+        }
+        if (!active.summaryStarted) {
+          this.reasoningMismatch(context, 'responses reasoning summary done before the active summary started');
+        }
+        active.summaryStarted = false;
+        this.rememberCompletedText(context, 'reasoningSummary', itemId, text);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
         return {
           events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)],
@@ -1517,7 +1715,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.reasoning_text.delta': {
-        const itemId = resolveReasoningItemId(record);
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, delta })];
         return {
@@ -1532,7 +1730,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         };
       }
       case 'response.reasoning_text.done': {
-        const itemId = resolveReasoningItemId(record);
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
         return {

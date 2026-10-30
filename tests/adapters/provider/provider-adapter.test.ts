@@ -599,6 +599,12 @@ test('responses codec marks request starts once per response id regardless of li
 test('responses reasoning output item remains model evidence and does not become user-visible output text', async () => {
   const codec = new ResponsesProviderCodec();
   const context = codecContext();
+  await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'reasoning-1', summary: [] },
+  } as unknown as ProviderWireEvent, context);
   const decoded = await codec.decodeEvent({
     protocol: 'responses',
     type: 'response.output_item.done',
@@ -613,6 +619,12 @@ test('responses codec maps reasoning summary wire events as model evidence', asy
   const codec = new ResponsesProviderCodec();
   const context = codecContext();
   const events: readonly ProviderWireEvent[] = [
+    {
+      protocol: 'responses',
+      type: 'response.output_item.added',
+      output_index: 0,
+      item: { type: 'reasoning', id: 'item-1', summary: [] },
+    },
     {
       protocol: 'responses',
       type: 'response.reasoning_summary_part.added',
@@ -655,6 +667,18 @@ test('responses codec maps reasoning summary wire events as model evidence', asy
     },
     {
       protocol: 'responses',
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: { type: 'reasoning', id: 'item-1', summary: [] },
+    },
+    {
+      protocol: 'responses',
+      type: 'response.output_item.added',
+      output_index: 1,
+      item: { type: 'reasoning', id: 'item-empty', summary: [] },
+    },
+    {
+      protocol: 'responses',
       type: 'response.reasoning_summary_part.added',
       item_id: 'item-empty',
       output_index: 1,
@@ -685,41 +709,6 @@ test('responses codec maps reasoning summary wire events as model evidence', asy
     assert.match(decoded.events[0].summary ?? '', /^provider (prepared|provided) model /);
     assert.equal(decoded.events[0].evidenceRefs.length, 1);
   }
-});
-
-test('responses codec derives reasoning identity when reasoning events omit item_id', async () => {
-  const codec = new ResponsesProviderCodec();
-  const context = codecContext();
-  const reader = providerRawContentReader(context.evidence);
-  const readContent = async (fact: Extract<ProviderRawFact, { kind: 'content' }>): Promise<string> =>
-    new TextDecoder().decode(await reader.read({ scope: operationScope, content: fact.content }));
-
-  const delta = await codec.decodeEvent({
-    protocol: 'responses',
-    type: 'response.reasoning_summary_text.delta',
-    output_index: 2,
-    summary_index: 3,
-    delta: 'itemless reasoning delta',
-  } as unknown as ProviderWireEvent, context);
-  const deltaFact = contentFactOf(delta.rawFacts);
-  assert.equal(delta.events[0].kind, 'model');
-  assert.equal(deltaFact.channel, 'reasoning-summary');
-  assert.equal(deltaFact.update, 'delta');
-  assert.equal(deltaFact.contentUnitId, 'responses:reasoning-summary:reasoning-2-3');
-  assert.equal(await readContent(deltaFact), 'itemless reasoning delta');
-
-  const done = await codec.decodeEvent({
-    protocol: 'responses',
-    type: 'response.reasoning_text.done',
-    output_index: 4,
-    item: { id: 'nested-reasoning-item' },
-    text: 'nested reasoning text',
-  } as unknown as ProviderWireEvent, context);
-  const doneFact = contentFactOf(done.rawFacts);
-  assert.equal(doneFact.channel, 'reasoning-text');
-  assert.equal(doneFact.update, 'full');
-  assert.equal(doneFact.contentUnitId, 'responses:reasoning-text:nested-reasoning-item');
-  assert.equal(await readContent(doneFact), 'nested reasoning text');
 });
 
 test('responses codec gives every visible model event a semantic summary', async () => {
@@ -1829,5 +1818,332 @@ test('responses codec still rejects a function_call_arguments.done without any c
       arguments: '{"path":"README.md"}',
     }, context),
     /missing item_id or call_id/,
+  );
+});
+
+test('responses codec binds item-less reasoning summary deltas to the active summary unit', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const reader = providerRawContentReader(context.evidence);
+
+  await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'reasoning-before', status: 'in_progress', summary: [] },
+  } as unknown as ProviderWireEvent, context);
+  await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_summary_part.added',
+    item_id: 'reasoning-before',
+    part: { type: 'reasoning_summary', summary: [{ type: 'summary_text', text: '' }] },
+  } as unknown as ProviderWireEvent, context);
+
+  const deltaOne = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_summary_text.delta',
+    delta: ' blocking',
+  } as unknown as ProviderWireEvent, context);
+  const deltaTwo = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_summary_text.delta',
+    delta: 'ness',
+  } as unknown as ProviderWireEvent, context);
+  const done = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_summary_text.done',
+    item_id: 'reasoning-before',
+    text: ' blockingness',
+  } as unknown as ProviderWireEvent, context);
+
+  const firstFact = contentFactOf(deltaOne.rawFacts);
+  const secondFact = contentFactOf(deltaTwo.rawFacts);
+  const doneFact = contentFactOf(done.rawFacts);
+  assert.equal(firstFact.contentUnitId, 'responses:reasoning-summary:reasoning-before');
+  assert.equal(secondFact.contentUnitId, firstFact.contentUnitId);
+  assert.equal(doneFact.contentUnitId, firstFact.contentUnitId);
+  assert.equal(firstFact.complete, false);
+  assert.equal(secondFact.complete, false);
+  assert.equal(doneFact.complete, true);
+  assert.equal(new TextDecoder().decode(await reader.read({ scope: operationScope, content: firstFact.content })), ' blocking');
+  assert.equal(new TextDecoder().decode(await reader.read({ scope: operationScope, content: secondFact.content })), 'ness');
+  await assert.rejects(
+    () => codec.decodeEvent({
+      protocol: 'responses',
+      type: 'response.reasoning_summary_text.delta',
+      delta: ' after done',
+    } as unknown as ProviderWireEvent, context),
+    /missing item_id/,
+  );
+
+  await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: {
+      type: 'reasoning',
+      id: 'reasoning-before',
+      status: 'completed',
+      summary: [{ type: 'summary_text', text: ' blockingness' }],
+    },
+  } as unknown as ProviderWireEvent, context);
+  await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.added',
+    output_index: 1,
+    item: { type: 'reasoning', id: 'reasoning-after', status: 'in_progress', summary: [] },
+  } as unknown as ProviderWireEvent, context);
+  await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_summary_part.added',
+    item_id: 'reasoning-after',
+    part: { type: 'reasoning_summary', summary: [{ type: 'summary_text', text: '' }] },
+  } as unknown as ProviderWireEvent, context);
+  const nextDelta = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_summary_text.delta',
+    delta: 'next',
+  } as unknown as ProviderWireEvent, context);
+  const nextFact = contentFactOf(nextDelta.rawFacts);
+  assert.equal(nextFact.contentUnitId, 'responses:reasoning-summary:reasoning-after');
+  assert.notEqual(nextFact.contentUnitId, firstFact.contentUnitId);
+});
+
+test('responses codec rejects item-less reasoning summary deltas without an active summary', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  await assert.rejects(
+    () => codec.decodeEvent({
+      protocol: 'responses',
+      type: 'response.reasoning_summary_text.delta',
+      delta: 'orphan',
+    } as unknown as ProviderWireEvent, context),
+    /missing item_id/,
+  );
+});
+
+test('responses codec enforces fail-closed reasoning lifecycle (RULING 3.2.1)', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const decode = (raw: Record<string, unknown>) =>
+    codec.decodeEvent({ protocol: 'responses', ...raw } as unknown as ProviderWireEvent, context);
+
+  // 1. reasoning_summary_part.added with no active reasoning item throws.
+  await assert.rejects(
+    () => decode({
+      type: 'response.reasoning_summary_part.added',
+      item_id: 'rs-orphan',
+      part: { type: 'reasoning_summary', summary: [] },
+    }),
+    (error: unknown) => {
+      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
+      return true;
+    },
+  );
+
+  // Open one reasoning item, start its summary.
+  await decode({
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'rs-1', status: 'in_progress', summary: [] },
+  });
+  await decode({
+    type: 'response.reasoning_summary_part.added',
+    item_id: 'rs-1',
+    part: { type: 'reasoning_summary', summary: [] },
+  });
+
+  // 2a. An explicit-item-id delta for a different active item throws.
+  await assert.rejects(
+    () => decode({ type: 'response.reasoning_summary_text.delta', item_id: 'rs-other', delta: 'x' }),
+    (error: unknown) => {
+      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
+      return true;
+    },
+  );
+
+  // 2b. An explicit-item-id delta for the active item but before summaryStarted throws.
+  // Close and re-open cleanly, then send a delta without having started the summary.
+  await decode({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'rs-1', status: 'completed', summary: [] },
+  });
+  await decode({
+    type: 'response.output_item.added',
+    output_index: 1,
+    item: { type: 'reasoning', id: 'rs-2', status: 'in_progress', summary: [] },
+  });
+  await assert.rejects(
+    () => decode({ type: 'response.reasoning_summary_text.delta', item_id: 'rs-2', delta: 'x' }),
+    (error: unknown) => {
+      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
+      return true;
+    },
+  );
+
+  // 3. reasoning_summary_text.done must match the active item and require a started summary.
+  await assert.rejects(
+    () => decode({ type: 'response.reasoning_summary_text.done', item_id: 'rs-3', text: 'x' }),
+    (error: unknown) => {
+      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
+      return true;
+    },
+  );
+
+  // 4. output_item.done for a reasoning item with an explicit id must match the active item.
+  await assert.rejects(
+    () => decode({
+      type: 'response.output_item.done',
+      output_index: 1,
+      item: { type: 'reasoning', id: 'rs-other', status: 'completed', summary: [] },
+    }),
+    (error: unknown) => {
+      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.reasoning-mismatch');
+      return true;
+    },
+  );
+});
+
+test('responses codec rejects a reasoning summary that spans a different active item', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'reasoning-active', status: 'in_progress', summary: [] },
+  } as unknown as ProviderWireEvent, context);
+  await assert.rejects(
+    () => codec.decodeEvent({
+      protocol: 'responses',
+      type: 'response.reasoning_summary_part.added',
+      item_id: 'reasoning-other',
+      part: { type: 'reasoning_summary', summary: [] },
+    } as unknown as ProviderWireEvent, context),
+    /different item/,
+  );
+});
+
+test('responses codec accepts the exact late item-less duplicate tails after completed units', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const decode = (raw: Record<string, unknown>) =>
+    codec.decodeEvent({ protocol: 'responses', ...raw } as unknown as ProviderWireEvent, context);
+  const completedSummary = 'The tool is unavailable, but listing it is non-blocking. I\'ll include it.\n\nNo helper dispatch needed.';
+  const lateSummaryTail = 'ng. I\'ll include it.\n\nNo helper dispatch needed.';
+  const completedOutput = '{"kind":"requirement","proposal":{"blockingGaps":["The execution environment must provide a web search capability equivalent to the web_search function."]},"taskFlowKind":"one-shot"}';
+  const lateOutputTail = 'b_search function."]},"taskFlowKind":"one-shot"}';
+
+  await decode({
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'rs-late', status: 'in_progress', summary: [] },
+  });
+  await decode({
+    type: 'response.reasoning_summary_part.added',
+    item_id: 'rs-late',
+    part: { type: 'reasoning_summary', summary: [] },
+  });
+  await decode({ type: 'response.reasoning_summary_text.delta', item_id: 'rs-late', delta: completedSummary });
+  await decode({ type: 'response.reasoning_summary_text.done', item_id: 'rs-late', text: completedSummary });
+  await decode({
+    type: 'response.reasoning_summary_part.done',
+    item_id: 'rs-late',
+    part: { type: 'reasoning_summary', summary: [{ type: 'summary_text', text: completedSummary }] },
+  });
+  await decode({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'rs-late', status: 'completed', summary: [{ type: 'summary_text', text: completedSummary }] },
+  });
+  await decode({
+    type: 'response.output_item.added',
+    output_index: 1,
+    item: { type: 'message', id: 'msg-late', role: 'assistant', content: [] },
+  });
+  await decode({
+    type: 'response.content_part.added',
+    item_id: 'msg-late',
+    output_index: 1,
+    content_index: 0,
+    part: { type: 'output_text', text: '' },
+  });
+  await decode({ type: 'response.output_text.delta', item_id: 'msg-late', content_index: 0, delta: completedOutput });
+  await decode({ type: 'response.output_text.done', item_id: 'msg-late', content_index: 0, text: completedOutput });
+  await decode({
+    type: 'response.content_part.done',
+    item_id: 'msg-late',
+    output_index: 1,
+    content_index: 0,
+    part: { type: 'output_text', text: completedOutput },
+  });
+  await decode({
+    type: 'response.output_item.done',
+    output_index: 1,
+    item: { type: 'message', id: 'msg-late', role: 'assistant', content: [{ type: 'output_text', text: completedOutput }] },
+  });
+
+  const lateSummary = await decode({ type: 'response.reasoning_summary_text.delta', delta: lateSummaryTail });
+  const lateOutput = await decode({ type: 'response.output_text.delta', delta: lateOutputTail });
+
+  assert.deepEqual(lateSummary.rawFacts, []);
+  assert.equal(lateSummary.events[0]?.kind, 'model');
+  assert.match(lateSummary.events[0]?.eventId ?? '', /response\.reasoning_summary_text\.delta/);
+  assert.equal(lateSummary.events[0]?.evidenceRefs.length, 1);
+  assert.deepEqual(lateOutput.rawFacts, []);
+  assert.equal(lateOutput.events[0]?.kind, 'output');
+  assert.match(lateOutput.events[0]?.eventId ?? '', /response\.output_text\.delta/);
+  assert.equal(lateOutput.events[0]?.evidenceRefs.length, 1);
+  assert.equal(lateOutput.events[0]?.summary, undefined);
+});
+
+test('responses codec rejects repeated and conflicting item-less tails after completion', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const decode = (raw: Record<string, unknown>) =>
+    codec.decodeEvent({ protocol: 'responses', ...raw } as unknown as ProviderWireEvent, context);
+  const completedSummary = 'Reasoning ends here.\n\nNo helper dispatch needed.';
+  const completedOutput = 'The final answer includes the literal string humanagent-e2e-web-search.';
+
+  await decode({
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'rs-repeat', status: 'in_progress', summary: [] },
+  });
+  await decode({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'rs-repeat', status: 'completed', summary: [{ type: 'summary_text', text: completedSummary }] },
+  });
+  await decode({
+    type: 'response.output_item.added',
+    output_index: 1,
+    item: { type: 'message', id: 'msg-repeat', role: 'assistant', content: [] },
+  });
+  await decode({
+    type: 'response.output_item.done',
+    output_index: 1,
+    item: { type: 'message', id: 'msg-repeat', role: 'assistant', content: [{ type: 'output_text', text: completedOutput }] },
+  });
+
+  await decode({ type: 'response.reasoning_summary_text.delta', delta: 'No helper dispatch needed.' });
+  await assert.rejects(
+    () => decode({ type: 'response.reasoning_summary_text.delta', delta: 'No helper dispatch needed.' }),
+    (error: unknown) => {
+      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.duplicate-tail');
+      assert.match((error as Error).message, /already covered/);
+      return true;
+    },
+  );
+
+  await decode({ type: 'response.output_text.delta', delta: 'humanagent-e2e-web-search.' });
+  await assert.rejects(
+    () => decode({ type: 'response.output_text.delta', delta: 'not present in the completed output' }),
+    (error: unknown) => {
+      assert.equal((error as ProviderAdapterError).providerError.code, 'protocol.duplicate-tail');
+      assert.match((error as Error).message, /not a duplicate suffix/);
+      return true;
+    },
   );
 });

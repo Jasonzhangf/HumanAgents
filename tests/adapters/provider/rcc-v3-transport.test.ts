@@ -2181,3 +2181,145 @@ test('HTTP source keeps the top-level instructions without folding into input', 
   assert.ok(firstUser, 'wire body must carry a user message');
   assert.equal(firstUser!.content[0].text, JSON.stringify({ prompt: 'summarize the failing build log' }), 'http source must not fold instructions into input');
 });
+
+test('RCC v3 Responses counts item-less summary deltas as one active summary unit', async () => {
+  const built = adapter(async () => response(chunks([
+    `data: ${JSON.stringify({ type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'reasoning-live', status: 'in_progress', summary: [] } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.reasoning_summary_part.added', item_id: 'reasoning-live', part: { type: 'reasoning_summary', summary: [] } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.reasoning_summary_text.delta', delta: ' blocking' })}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.reasoning_summary_text.delta', delta: 'ness' })}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.reasoning_summary_text.done', item_id: 'reasoning-live', text: ' blockingness' })}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: { type: 'reasoning', id: 'reasoning-live', status: 'completed', summary: [{ type: 'summary_text', text: ' blockingness' }] } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.output_item.added', output_index: 1, item: { type: 'reasoning', id: 'reasoning-next', status: 'in_progress', summary: [] } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.reasoning_summary_part.added', item_id: 'reasoning-next', part: { type: 'reasoning_summary', summary: [] } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.reasoning_summary_text.delta', delta: 'next' })}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-reasoning-live' } })}\n\n`,
+  ])));
+  await built.adapter.start(startInput());
+  const rawFacts: Array<{ readonly kind: string; readonly contentUnitId?: string }> = [];
+  const observed = [];
+  for await (const event of built.adapter.observe({ ...execution, onRawFacts: async (facts) => {
+    for (const fact of facts) rawFacts.push({ kind: fact.kind, ...(fact.kind === 'content' ? { contentUnitId: fact.contentUnitId } : {}) });
+  } })) observed.push(event);
+  assert.deepEqual(rawFacts.filter((fact) => fact.kind === 'content').map((fact) => fact.contentUnitId), [
+    'responses:reasoning-summary:reasoning-live',
+    'responses:reasoning-summary:reasoning-live',
+    'responses:reasoning-summary:reasoning-live',
+    'responses:reasoning-summary:reasoning-live',
+    'responses:reasoning-summary:reasoning-live',
+    'responses:reasoning-summary:reasoning-next',
+    'responses:reasoning-summary:reasoning-next',
+  ]);
+  assert.equal(observed.at(-1)?.terminalState, 'succeeded');
+});
+
+test('RCC v3 observe bounds item-less summary deltas as one no-progress unit', async () => {
+  const frames = [
+    frame('response.created', { response: { id: 'response-reasoning-budget' } }),
+    frame('response.output_item.added', {
+      output_index: 0,
+      item: { type: 'reasoning', id: 'reasoning-budget', status: 'in_progress', summary: [] },
+    }),
+    frame('response.reasoning_summary_part.added', {
+      item_id: 'reasoning-budget',
+      part: { type: 'reasoning_summary', summary: [] },
+    }),
+  ];
+  for (let index = 0; index < 8; index += 1) {
+    frames.push(frame('response.reasoning_summary_text.delta', { delta: '' }));
+  }
+  let clockMs = Date.parse('2026-10-25T07:00:00Z');
+  const body: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      const encoder = new TextEncoder();
+      for (const value of frames) {
+        clockMs += 10_000;
+        yield encoder.encode(value);
+      }
+    },
+  };
+  const built = transportHarness({ now: () => new Date(clockMs), noProgressBudgetMs: 60_000 });
+  seedActive(built.transport, body);
+
+  await assert.rejects(async () => {
+    for await (const event of built.transport.observe(execution)) void event;
+  }, (error: unknown) => {
+    const failure = (error as ProviderAdapterError).providerError;
+    assert.equal(failure.code, 'stream.no-progress');
+    assert.match(failure.message, /content:reasoning-budget/);
+    return true;
+  });
+});
+
+test('RCC v3 Responses keeps exact late item-less duplicate tails out of content units', async () => {
+  const completedSummary = 'The tool is unavailable, but listing it is non-blocking. I\'ll include it.\n\nNo helper dispatch needed.';
+  const completedOutput = '{"kind":"requirement","proposal":{"blockingGaps":["The execution environment must provide a web search capability equivalent to the web_search function."]},"taskFlowKind":"one-shot"}';
+  const built = adapter(async () => response(chunks([
+    frame('response.output_item.added', {
+      output_index: 0,
+      item: { type: 'reasoning', id: 'rs-late', status: 'in_progress', summary: [] },
+    }),
+    frame('response.reasoning_summary_part.added', {
+      item_id: 'rs-late',
+      part: { type: 'reasoning_summary', summary: [] },
+    }),
+    frame('response.reasoning_summary_text.delta', { item_id: 'rs-late', delta: completedSummary }),
+    frame('response.reasoning_summary_text.done', { item_id: 'rs-late', text: completedSummary }),
+    frame('response.reasoning_summary_part.done', {
+      item_id: 'rs-late',
+      part: { type: 'reasoning_summary', summary: [{ type: 'summary_text', text: completedSummary }] },
+    }),
+    frame('response.output_item.done', {
+      output_index: 0,
+      item: { type: 'reasoning', id: 'rs-late', status: 'completed', summary: [{ type: 'summary_text', text: completedSummary }] },
+    }),
+    frame('response.output_item.added', {
+      output_index: 1,
+      item: { type: 'message', id: 'msg-late', role: 'assistant', content: [] },
+    }),
+    frame('response.content_part.added', {
+      item_id: 'msg-late',
+      output_index: 1,
+      content_index: 0,
+      part: { type: 'output_text', text: '' },
+    }),
+    frame('response.output_text.delta', { item_id: 'msg-late', content_index: 0, delta: completedOutput }),
+    frame('response.output_text.done', { item_id: 'msg-late', content_index: 0, text: completedOutput }),
+    frame('response.content_part.done', {
+      item_id: 'msg-late',
+      output_index: 1,
+      content_index: 0,
+      part: { type: 'output_text', text: completedOutput },
+    }),
+    frame('response.output_item.done', {
+      output_index: 1,
+      item: { type: 'message', id: 'msg-late', role: 'assistant', content: [{ type: 'output_text', text: completedOutput }] },
+    }),
+    frame('response.reasoning_summary_text.delta', { delta: 'ng. I\'ll include it.\n\nNo helper dispatch needed.' }),
+    frame('response.output_text.delta', { delta: 'b_search function."]},"taskFlowKind":"one-shot"}' }),
+    frame('response.completed', { response: { id: 'response-late-tails' } }),
+  ])));
+  await built.adapter.start(startInput());
+  const rawFacts: Array<{ readonly kind: string; readonly contentUnitId?: string }> = [];
+  const observed = [];
+  for await (const event of built.adapter.observe({ ...execution, onRawFacts: async (facts) => {
+    for (const fact of facts) rawFacts.push({ kind: fact.kind, ...(fact.kind === 'content' ? { contentUnitId: fact.contentUnitId } : {}) });
+  } })) observed.push(event);
+
+  assert.deepEqual(rawFacts.filter((fact) => fact.kind === 'content').map((fact) => fact.contentUnitId), [
+    'responses:reasoning-summary:rs-late',
+    'responses:reasoning-summary:rs-late',
+    'responses:reasoning-summary:rs-late',
+    'responses:reasoning-summary:rs-late',
+    'responses:reasoning-summary:rs-late',
+    'responses:assistant-text:msg-late:0',
+    'responses:assistant-text:msg-late:0',
+    'responses:assistant-text:msg-late:0',
+    'responses:assistant-text:msg-late:0',
+    'responses:assistant-text:msg-late',
+  ]);
+  assert.match(observed.at(-3)?.eventId ?? '', /response\.reasoning_summary_text\.delta/);
+  assert.match(observed.at(-2)?.eventId ?? '', /response\.output_text\.delta/);
+  assert.match(observed.at(-1)?.eventId ?? '', /response\.completed/);
+  assert.equal(observed.at(-1)?.terminalState, 'succeeded');
+});

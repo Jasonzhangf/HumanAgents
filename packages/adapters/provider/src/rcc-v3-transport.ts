@@ -447,6 +447,7 @@ function contentDeltaUnit(
   protocol: 'responses' | 'anthropic' | 'openai',
   type: string,
   record: Record<string, unknown>,
+  activeReasoningItemId?: string,
 ): ContentDeltaUnit | undefined {
   if (protocol === 'responses') {
     if (type === 'response.function_call_arguments.delta') {
@@ -455,8 +456,13 @@ function contentDeltaUnit(
         : typeof record.call_id === 'string' && record.call_id !== '' ? record.call_id : undefined;
       return itemId === undefined ? undefined : { kind: 'tool-arguments', key: `tool-arguments:${itemId}` };
     }
-    if (type === 'response.output_text.delta' || type === 'response.reasoning_text.delta' || type === 'response.reasoning_summary_text.delta') {
-      return typeof record.item_id === 'string' ? { kind: 'content', key: `content:${record.item_id}` } : undefined;
+    if (type === 'response.output_text.delta' || type === 'response.reasoning_text.delta') {
+      const itemId = typeof record.item_id === 'string' ? record.item_id : undefined;
+      return itemId === undefined ? undefined : { kind: 'content', key: `content:${itemId}` };
+    }
+    if (type === 'response.reasoning_summary_text.delta') {
+      const itemId = typeof record.item_id === 'string' ? record.item_id : activeReasoningItemId;
+      return itemId === undefined ? undefined : { kind: 'content', key: `content:${itemId}` };
     }
     return undefined;
   }
@@ -1040,6 +1046,11 @@ export class RccV3ProviderTransport<
     // True once this stream decoded a terminal outcome reported by the
     // provider itself. Any later transport close only releases the stream.
     let observedTerminal = false;
+    // RCC may omit item_id on deltas while a reasoning item is open. Keep only
+    // that pre-completion no-progress identity; late duplicate tails are the
+    // codec's request-local duplicate check, not a new content unit.
+    let activeReasoningItemId: string | undefined;
+    let reasoningSummaryStarted = false;
     // Open content-unit delta streams of this observation. A unit leaves the
     // map when its own done event arrives, and every unit is dropped once the
     // stream reports a terminal event.
@@ -1082,8 +1093,34 @@ export class RccV3ProviderTransport<
         const normalized = active.protocol === 'responses' && type === 'response.output_item.done'
           ? (this.source === 'http' ? record : normalizeServertoolCall(record))
           : record;
+        if (active.protocol === 'responses' && type === 'response.created') {
+          activeReasoningItemId = undefined;
+          reasoningSummaryStarted = false;
+        }
+        if (active.protocol === 'responses' && type === 'response.output_item.added') {
+          const item = readRecord(record.item);
+          if (item.type === 'reasoning' && typeof item.id === 'string' && item.id.trim() !== '') {
+            if (activeReasoningItemId !== undefined && activeReasoningItemId !== item.id) {
+              const error = this.providerError(active.evidenceScope, 'observe', 'protocol.reasoning-overlap', 'responses reasoning item opened while another reasoning item is active', 'protocol');
+              active.terminalError = error;
+              active.terminalState = 'failed';
+              throw new ProviderAdapterError({ code: error.code, category: 'protocol', phase: 'observe', message: error.message, scope: input });
+            }
+            activeReasoningItemId = item.id;
+            reasoningSummaryStarted = false;
+          }
+        }
+        if (active.protocol === 'responses' && type === 'response.reasoning_summary_part.added') {
+          reasoningSummaryStarted = activeReasoningItemId !== undefined
+            && (typeof record.item_id !== 'string' || record.item_id === activeReasoningItemId);
+        }
         const raw = { protocol: active.protocol, ...normalized, type } as unknown as ProviderWireEvent;
-        const unit = contentDeltaUnit(active.protocol, type, record);
+        const unit = contentDeltaUnit(
+          active.protocol,
+          type,
+          record,
+          type === 'response.reasoning_summary_text.delta' && reasoningSummaryStarted ? activeReasoningItemId : undefined,
+        );
         const nowMs = this.now().getTime();
         let progressed = false;
         if (unit !== undefined) {
@@ -1158,13 +1195,24 @@ export class RccV3ProviderTransport<
             openUnits.delete(`tool-arguments:${item.id}`);
             openUnits.delete(`content:${item.id}`);
           }
+          if (item.type === 'reasoning'
+            && (typeof item.id !== 'string' || item.id === activeReasoningItemId)) {
+            activeReasoningItemId = undefined;
+            reasoningSummaryStarted = false;
+          }
         }
         if (active.protocol === 'responses' && (type === 'response.function_call_arguments.done' || type === 'response.output_text.done'
           || type === 'response.reasoning_text.done' || type === 'response.reasoning_summary_text.done')) {
           // The unit completed, so its no-progress budget no longer applies.
-          if (typeof record.item_id === 'string') {
-            openUnits.delete(`tool-arguments:${record.item_id}`);
-            openUnits.delete(`content:${record.item_id}`);
+          const completedItemId = typeof record.item_id === 'string'
+            ? record.item_id
+            : type === 'response.reasoning_summary_text.done' && reasoningSummaryStarted ? activeReasoningItemId : undefined;
+          if (completedItemId !== undefined) {
+            openUnits.delete(`tool-arguments:${completedItemId}`);
+            openUnits.delete(`content:${completedItemId}`);
+          }
+          if (type === 'response.reasoning_summary_text.done' && completedItemId !== undefined) {
+            reasoningSummaryStarted = false;
           }
         }
         if (active.protocol === 'anthropic' && type === 'content_block_stop') {
