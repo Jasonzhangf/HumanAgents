@@ -30,7 +30,8 @@ export type ResponsesWireEvent =
   | { readonly protocol: 'responses'; readonly type: 'response.created'; readonly response: { readonly id: string; readonly model?: string } }
   | { readonly protocol: 'responses'; readonly type: 'response.in_progress'; readonly response: { readonly id: string } }
   | { readonly protocol: 'responses'; readonly type: 'response.output_item.added'; readonly output_index: number; readonly item: ResponsesWireOutputItem }
-  | { readonly protocol: 'responses'; readonly type: 'response.output_text.delta'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly delta: string }
+  // RCC omits item_id on a late delta that repeats a completed unit's suffix.
+  | { readonly protocol: 'responses'; readonly type: 'response.output_text.delta'; readonly item_id?: string; readonly output_index?: number; readonly content_index?: number; readonly delta: string }
   | { readonly protocol: 'responses'; readonly type: 'response.output_text.done'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly text: string }
   | { readonly protocol: 'responses'; readonly type: 'response.content_part.added'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: ResponsesWireContentPart }
   | { readonly protocol: 'responses'; readonly type: 'response.content_part.done'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: ResponsesWireContentPart }
@@ -40,7 +41,8 @@ export type ResponsesWireEvent =
   | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_part.added'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly part: ResponsesWireReasoningSummaryPart }
   | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_part.delta'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly delta: ResponsesWireReasoningSummaryDelta }
   | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_part.done'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly part: ResponsesWireReasoningSummaryPart }
-  | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_text.delta'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly delta: string }
+  // RCC omits item_id on a late delta that repeats a completed unit's suffix.
+  | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_text.delta'; readonly item_id?: string; readonly output_index?: number; readonly content_index?: number; readonly delta: string }
   | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_text.done'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly text: string }
   // Live providers may omit `item_id` and identify the call by call_id.
   | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.delta'; readonly item_id?: string; readonly call_id?: string; readonly output_index?: number; readonly delta: string }
@@ -63,7 +65,10 @@ export type ResponsesWireOutputItem =
     }
   // Responses providers may omit `id` on function_call output items; call_id
   // is the required identity (see the codecs function_call branches).
-  | { readonly type: 'function_call'; readonly id?: string; readonly call_id: string; readonly name: string; readonly arguments: string };
+  | { readonly type: 'function_call'; readonly id?: string; readonly call_id: string; readonly name: string; readonly arguments: string }
+  // Live providers use an opaque id for reasoning items. The id opens the
+  // active summary identity; `summary` may be empty while the item is added.
+  | { readonly type: 'reasoning'; readonly id: string; readonly status?: string; readonly summary?: readonly { readonly type?: 'summary_text'; readonly text?: string }[] };
 
 export type ResponsesWireReasoningSummaryPart =
   | { readonly type: 'reasoning_summary'; readonly summary?: readonly { readonly type?: 'summary_text'; readonly text?: string }[]; readonly text?: string }

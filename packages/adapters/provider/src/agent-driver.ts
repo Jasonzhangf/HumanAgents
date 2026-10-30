@@ -688,19 +688,26 @@ export class ProviderAgentDriver<
           continue;
         }
         const batch = [call];
-        if (this.options.executeTool.canRunConcurrently?.(call) === true) {
+        if (!isStandardTurnEndToolId(call.toolId) && this.options.executeTool.canRunConcurrently?.(call) === true) {
           for (const candidate of toolCalls.slice(callIndex + 1)) {
+            if (isStandardTurnEndToolId(candidate.toolId)) break;
             if (!(this.options.tools ?? []).some((tool) => tool.toolId === candidate.toolId)) break;
             if (this.options.executeTool.canRunConcurrently?.(candidate) !== true) break;
             batch.push(candidate);
           }
         }
         yield* this.executeToolBatch(request, batch, this.options.executeTool, toolHistory);
+        if (toolHistory.some(({ call: executed, result }) =>
+          isStandardTurnEndToolId(executed.toolId) && this.toolStatus(result) === 'succeeded')) {
+          break;
+        }
         callIndex += batch.length;
       }
       if (this.stopping) return;
       await this.commitObservedCompletion(request);
       if (this.stopping) return;
+      const acceptedStandardTurnEnd = toolHistory.some(({ call, result }) =>
+        isStandardTurnEndToolId(call.toolId) && this.toolStatus(result) === 'succeeded');
       let completeContinuation!: () => void;
       const continuationCompletion = new Promise<void>((resolve) => { completeContinuation = resolve; });
       this.continuationCompletion = continuationCompletion;
@@ -718,7 +725,7 @@ export class ProviderAgentDriver<
           inputRefs: [...this.options.inputRefs],
           evidenceRefs: toolHistory.flatMap(({ result }) => result.evidenceRefs),
           payload: this.initialPayload ?? inputPayloadMissing(),
-          ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
+          ...(!acceptedStandardTurnEnd && this.options.tools !== undefined ? { tools: this.options.tools } : {}),
           ...(context === undefined
             ? {
                 toolContinuations: toolHistory.map(({ call, result }) => ({
