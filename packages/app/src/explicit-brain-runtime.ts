@@ -1558,11 +1558,24 @@ export function createProviderExplicitBrainInterpreter(input: {
         // Attempt physical close even after a cleanup failure, but record only
         // its real receipt and retain recovery until all release evidence exists.
         let compositionClosed = owned === undefined;
+        // A REAL owned close receipt was recorded in this batch. A borrowed
+        // provider never reaches the owned branch, so this stays false and no
+        // close is attested. Only a physically owned composition that closed
+        // with a resolved receipt counts as evidence for the one-time re-answer,
+        // which the accepted contract ties to an owned close receipt.
+        // `compositionClosed` stays the "no open owned composition remains"
+        // fact used by the failed-epoch close; it starts true for a borrowed
+        // port because there is nothing this process owns to leave open.
+        let closedWithReceipt = false;
         if (owned !== undefined) {
           let receipt: Awaited<ReturnType<typeof closeAgentProvider>> | undefined;
           try {
             receipt = await closeAgentProvider(owned, { returnReceipt: true });
             compositionClosed = true;
+            // A resolved close is `state: 'closed'` or it threw; the throw path
+            // keeps `compositionClosed`/`closedWithReceipt` false and records a
+            // cleanup failure instead of a fabricated success.
+            closedWithReceipt = true;
           } catch (closeError) {
             cleanupFailures.push(closeError);
           }
@@ -1637,7 +1650,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         // durably rejected, so re-answering the same committed input cannot
         // replay a side effect.
         if (attempt.allowReanswer && unparseableOutput && freshMultipleIntakeDecisions
-          && owner !== undefined && committedInput && compositionClosed
+          && owner !== undefined && committedInput && closedWithReceipt
           && observationDrained && settleAttempted) {
           const heldReason = input.turnHelperJournal === undefined
             ? 'the durable helper turn read port is unavailable'

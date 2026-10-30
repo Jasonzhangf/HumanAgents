@@ -6440,6 +6440,68 @@ test('provider explicit brain interpreter re-answers a fresh two-decision batch 
   assert.equal(checkpointText.includes('整理发布步骤'), true, 'the accepted replacement reaches the checkpoint');
 });
 
+// Failure basis: a borrowed provider (no prepareAgentProvider) rejects a fresh
+// two-decision batch, but there is no owned composition and therefore no real
+// close receipt. The accepted re-answer contract ties eligibility to an owned
+// close receipt, so the interpreter must not start a replacement generation and
+// must surface the original multiple-decision parse error unchanged. This was
+// the S1 P1#1 defect: `compositionClosed` started true for a borrowed port
+// (`owned === undefined`), so the gate wrongly returned `reanswer-needed` and
+// ran a second generation. Impact: a duplicate provider request from an
+// unclosed borrowed composition. Cost: one rejected generation and no
+// replacement request.
+test('provider explicit brain interpreter does not re-answer a fresh two-decision batch on a borrowed port without an owned close receipt', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-reanswer-borrowed', providerId: 'provider-reanswer-borrowed', protocol: 'responses',
+    endpointRef: 'recorded://reanswer-borrowed', modelRef: 'model-reanswer-borrowed',
+    configDigest: 'sha256:reanswer-borrowed-config', capabilityDigest: 'sha256:reanswer-borrowed-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const rawInput = '7 加 7 等于几？';
+  const request = {
+    interactionId: 'interaction-reanswer-borrowed', inputRevision: 1, sourceRef: 'ui:reanswer-borrowed',
+    rawInput, clarifications: [], taskCandidates: [],
+  };
+  const proposal = (title: string) => ({
+    revision: 1, intent: 'create' as const, title, objective: title, deliverable: `${title}交付`,
+    deliveryConditions: [], evidenceRefs: [], blockingGaps: [],
+  });
+  const batchOf = (firstRef: string, secondRef: string) => ([
+    { type: 'response.output_text.done', item_id: 'item-first', text: JSON.stringify({
+      kind: 'requirement', normalizedInput: rawInput, knownFacts: [], decisionRefs: [firstRef], intent: 'create', proposal: proposal('就地') }) },
+    { type: 'response.output_text.done', item_id: 'item-second', text: JSON.stringify({
+      kind: 'requirement', normalizedInput: '另一个改写', knownFacts: [], decisionRefs: [secondRef], intent: 'create', proposal: proposal('另起') }) },
+  ]);
+  let generations = 0;
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => {
+    generations += 1;
+    return batchOf(`decision:a${generations}`, `decision:b${generations}`);
+  } });
+  // Borrowed wiring: `port` is supplied directly with NO prepareAgentProvider,
+  // so `owned === undefined` and no owned close receipt can ever be recorded.
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+  });
+
+  await assert.rejects(
+    () => interpreter.interpret(request),
+    (error: unknown) => error instanceof Error
+      && error.message.includes('interaction agent returned invalid JSON')
+      && error.message.includes('2 top-level JSON decision objects'),
+  );
+  assert.equal(generations, 1, 'a borrowed port with no owned close receipt must not start a replacement generation');
+
+  const opened = await deps.parentJournal.readScopeOpenedTurns(scope);
+  assert.equal(opened.length, 1, 'only the rejected batch opens a physical turn; no replacement turn exists');
+  const failures = await deps.parentJournal.readScopeParseFailures(scope);
+  assert.equal(failures.length, 1, 'the rejected batch is closed by exactly one parse-failure fact');
+  assert.equal(await deps.checkpointJournal.readSemanticCheckpointExact(failures[0]!.fact.turn), null,
+    'an ambiguous borrowed batch commits no semantic checkpoint and selects no decision');
+});
+
 // Failure basis: the first generation is ambiguous and the replacement is also
 // ambiguous. The honest result is a rejection with no accepted decision; any
 // selection by equality, position or relevance would be a guess. Impact: a
