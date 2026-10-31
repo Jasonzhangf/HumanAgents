@@ -531,3 +531,27 @@ main a474cf109 上 `pnpm build:runtime` 的 ui-runtime tsc 步骤出现类型回
 - `code-handoff.ts` 用局部 `restart` 变量，使 loaded-source guard 完成穷尽收窄，运行语义不变。
 
 验证：`pnpm build:runtime` 全链 exit 0；worktree 内 ui-runtime 54/54、supervisor 37/37 通过。合入后 main 复跑 ui-runtime tsc exit 0。worktree remove + prune（TREE_GONE）、branch 已删。现存 5 个 worktree（main + 4 locked provider，未动）。
+
+## 2026-10-31 Master 交付清单与巡检台账
+
+用户纠正 master 不能只汇报状态。已将当前所有开放交付项、owner、证据、下一动作、验收和停止条件固化为 [`docs/goals/master-delivery-checklist-2026-10-31.md`](docs/goals/master-delivery-checklist-2026-10-31.md)，并把该文件列为每轮 `project-patrol` 的必读检查项。
+
+本轮 board 调度：
+
+- `real-entry-e2e-main-rerun-20261031`：邀请 Bob，当前 `invited`；master 验收 current main 的真实首页输入→草稿确认→FIFO→executor→succeeded receipt。
+- `work-card-proof-dashboard-alignment-20261031`：Carol 已接单，当前 `working`；目标是浏览器 proof 39/39、absence 文案无 undefined、activity-dot 断言语义不回退。
+- `9d2dc60-journal-snapshot-20261031`：邀请 Alice，当前 `invited`；处理 342MB 全量 snapshot journal，要求 retained append-only recovery、focused tests 与 before/after parse/RSS 证据。
+- `0d6fcc7-restart-ready-20261031`、`62dd888-fc-final-20261031`、`054d2d7-appsdk-upgrade-20261031`：已发布为待分配交付任务；在现有 P1/P2 owner 释放前不虚报为进行中。
+
+巡检记录还需继续核对：官方真实 E2E 是否在当前 main 通过；`21b1c11`、`7cecfc8`、`e3b8584` 是否有关闭证据；全量 `pnpm build:release` 的 14 项基线与环境缺口；spinner 12/12 之外 work-card 的剩余四断言；5 个 worktree（4 个 locked provider `PROTECTED_HOLD`）与生产 10086 只读边界。
+
+## 2026-10-31 D2 work-card 证明交付与 UX/动画复验
+
+本轮把 Carol 的 `work-card-proof-dashboard-alignment-20261031` 真正验收、合入、推送并收口，同时复验动画/交互。
+
+- 根因（master 复核）：不是投影缺陷。`dashboard.html` 是 467B 动态产品壳（module entry + runtime.css + 由 `dashboard.js` 挂五板块），旧测试的 3 条静态 work-card 挂载断言对它永不成立；absence 的 `task=undefined:undefined`/`operation=undefined:undefined` 来自 fixture 传裸字符串 id，违反 `ScopedId { scope, value }` 契约（运行期/contracts 与真实页 `normalizeScopedId` 都只产出 ScopedId，DOM `scopedValue` 只收已校验 ScopedId）；且 `<dl>` 的 textContent 不含 `=`，旧 `statusDetails.includes('传输状态=未提供')` 结构性永假。故只需修 fixture 与断言，不改 `packages/ui/projection`。
+- 交付与集成：候选 dea61873e（仅 `tests/ui/interaction-work-card-browser.mjs`）master 对 main dist 复跑 39/39（含 activity-dot stall/working、absence 无 undefined、动态壳挂载、静态 task.html 契约）。ff 合入 main（f8e65672a→dea61873e），push origin/main，`collab task integrated`+`close`，worktree/branch 已删。
+- UX/动画复验（当前 main dist）：`entry-submit-progress-browser.mjs` 12/12 —— 提交中 `progress-spin` spinner 可见且不透明、文案「正在整理并提交任务…」、结算后移除、user turn 真实 receipt time、decision turn 保留「时间未提供」、两页无 runtime error；`interaction-work-card-browser.mjs` 39/39 —— 工作态 activity-dot 出现、stall 态不出现、absence 详情无 undefined。
+- 调度：D1（当前 main 真实入口 E2E）原邀 Bob，超一巡检周期未接单，已 withdraw 并改派 Carol（invited，`dsh-wake-enqueued`，revision 6）；Bob 转为空闲待派。Alice 仍在 D6（`9d2dc60-journal-snapshot-20261031`，working）。
+- 现态：goal `active=true`/`observed=subscribed`/trigger_ms 1793459354246；project patrol armed（900000ms，目标 1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未对齐不声称）；worktree 6 个（main + 4 locked provider + Alice 9d2dc60 树），未超 10；生产 10086 PID 13505 只读未动。
+- 仍未交付：当前 main 真实入口 E2E（D1）未出 receipt，故 Q「前端输入→任务正式完成」尚不能宣称已在当前 main 成立；`pnpm build:release` 全量门禁仍红（`test:compiled:services` 14 项 + adapter 缺 `@types/node`），不可声称全量 release 已绿。
