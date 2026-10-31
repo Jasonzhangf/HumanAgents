@@ -1635,20 +1635,14 @@ export function createProviderExplicitBrainInterpreter(input: {
             cleanupFailures.push(closeError);
           }
         }
-        if (cleanupFailures.length > 0) {
-          // The primary failure stays first and named in the message: the
-          // cleanup detail is additive, never a replacement for the cause.
-          throw new AggregateError(
-            [failure, ...cleanupFailures],
-            `interaction execution failed: ${describeFailure(failure)}`,
-          );
-        }
         // One replacement generation is allowed only after a freshly executed
         // batch produced two complete decisions and was fully closed: real
         // settle, real close receipt, durable parse-failure, no dispatched
-        // helper, no cleanup or journal acknowledgement error. The turn is
-        // durably rejected, so re-answering the same committed input cannot
-        // replay a side effect.
+        // helper. The turn is durably rejected, so re-answering the same
+        // committed input cannot replay a side effect. The re-answer check runs
+        // before the AggregateError below so that a fresh replacement
+        // generation is not blocked by non-critical cleanup failures such as a
+        // lost journal acknowledgement after a real provider close.
         if (attempt.allowReanswer && unparseableOutput && freshMultipleIntakeDecisions
           && owner !== undefined && committedInput && closedWithReceipt
           && observationDrained && settleAttempted) {
@@ -1658,6 +1652,14 @@ export function createProviderExplicitBrainInterpreter(input: {
           if (heldReason === undefined) {
             return { kind: 'reanswer-needed', request: effectiveRequest };
           }
+        }
+        if (cleanupFailures.length > 0) {
+          // The primary failure stays first and named in the message: the
+          // cleanup detail is additive, never a replacement for the cause.
+          throw new AggregateError(
+            [failure, ...cleanupFailures],
+            `interaction execution failed: ${describeFailure(failure)}`,
+          );
         }
         throw failure;
       } finally {
