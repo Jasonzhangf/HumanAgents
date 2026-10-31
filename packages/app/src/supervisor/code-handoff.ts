@@ -228,6 +228,11 @@ function unrefChild(child: ChildProcessLike): void {
   (child as ChildProcessLike & { unref?: () => void }).unref?.();
 }
 
+function replacementCouldStillComplete(child: ChildProcessLike | undefined): boolean {
+  if (child === undefined || spawnFailures.has(child)) return false;
+  return child.exitCode === null && child.signalCode === null;
+}
+
 function restartFailure(error: unknown): {
   readonly errorCode: string;
   readonly ownerId: string;
@@ -275,6 +280,7 @@ export function startDaemonCodeHandoff(
   };
   const timeoutMs = input.timeoutMs ?? DEFAULT_HANDOFF_TIMEOUT_MS;
   const completion = (async (): Promise<DaemonRestartCompletionReceipt> => {
+    let child: ChildProcessLike | undefined;
     const transition: SupervisorRestartTransition = {
       requestId,
       requestedAt: acceptedAt,
@@ -287,7 +293,7 @@ export function startDaemonCodeHandoff(
       assertStartupDeclaration(input.startup);
       const current = assertExpectedLease(await readDaemonLease(paths), input.expected);
       await recordDaemonRestartTransition(paths, leaseIdentity(current), transition);
-      const child = spawnReplacement(input.startup, requestId);
+      child = spawnReplacement(input.startup, requestId);
       const replacement = await waitForNewOwner({
         paths,
         previous: current,
@@ -337,6 +343,12 @@ export function startDaemonCodeHandoff(
         legacyCloseReceipt: legacyCloseReceipt(replacement, current),
       };
     } catch (error) {
+      // A live replacement may still commit its generation and publish
+      // readiness. Recording a terminal failure beside it would make the
+      // replacement's own restart marker unrecoverable, so the caller keeps
+      // the explicit timeout error while the lease stays pending for the real
+      // outcome. The lease's completedAt/failure marker remains authoritative.
+      if (replacementCouldStillComplete(child)) throw error;
       const failure = restartFailure(error);
       await recordDaemonRestartFailure(paths, requestId, failure).catch(() => undefined);
       throw error;

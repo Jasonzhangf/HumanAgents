@@ -218,6 +218,28 @@ if (mode === 'never') {
   delete committed.readyAt;
   await writeLease(committed);
   setInterval(() => {}, 1_000);
+} else if (mode === 'late-commit') {
+  for (;;) {
+    try {
+      await readFile(${JSON.stringify(launcher.gateFile)});
+      break;
+    } catch {}
+    await sleep(5);
+  }
+  const latest = JSON.parse(await readFile(leasePath, 'utf8'));
+  if (latest.restart?.failure !== undefined) process.exit(4);
+  const leaseId = randomUUID();
+  const processStartToken = 'node:fake-' + randomUUID();
+  const generation = latest.generation + 1;
+  const writeLease = async (record) => {
+    const tempPath = leasePath + '.tmp-fake';
+    await writeFile(tempPath, JSON.stringify(record) + '\\n', 'utf8');
+    await rename(tempPath, leasePath);
+  };
+  await writeLease({ ...latest, leaseId, generation, pid: process.pid, processStartToken,
+    readyAt: new Date().toISOString(),
+    restart: { ...latest.restart, completedAt: new Date().toISOString() } });
+  setInterval(() => {}, 1_000);
 } else {
   const leaseId = randomUUID();
   const processStartToken = 'node:fake-' + randomUUID();
@@ -266,7 +288,7 @@ if (mode === 'never') {
 function fakeServeStartup(
   paths: RuntimePaths,
   launcher: FakeServeLauncher,
-  mode: 'ready' | 'exit' | 'never' | 'commit' = 'ready',
+  mode: 'ready' | 'exit' | 'never' | 'commit' | 'late-commit' = 'ready',
 ) {
   return {
     launcherPath: launcher.launcherPath,
@@ -340,10 +362,13 @@ test('code handoff keeps a replacement that becomes ready after the old 30s boun
   }
 });
 
-// Failure basis: raising the bound must not hide a replacement that commits the
-// new lease and then never publishes readiness. Cost: one fake child that dies
-// only on SIGTERM.
-test('code handoff still fails explicitly when a committed replacement never becomes ready', async () => {
+// Failure basis: production observability showed a replacement's authoritative
+// lease readiness publishing after the client backstop elapsed (0d6fcc7
+// result.md). A live replacement that already committed its generation can still
+// finish, so a terminal failure written now both misreports the outcome and
+// blocks the replacement's restart marker. The client must still fail explicitly
+// as a backstop. Cost: one fake child that dies only on SIGTERM.
+test('code handoff red-A: live committed replacement has no terminal failure at client timeout', async () => {
   const paths = await fixture();
   let launcher: FakeServeLauncher | undefined;
   try {
@@ -361,8 +386,82 @@ test('code handoff still fails explicitly when a committed replacement never bec
     });
     const persisted = await readDaemonLease(paths);
     assert.equal(persisted?.generation, owner.record.generation + 1);
-    assert.equal(persisted?.restart?.failure?.errorCode, 'daemon-restart.ready-timeout');
+    assert.equal(persisted?.restart?.failure, undefined, 'a live committed replacement must not carry a terminal failure');
     assert.equal(persisted?.restart?.completedAt, undefined, 'a failed handoff must not also complete');
+    const replacementPid = Number(await readFile(launcher.pidFile, 'utf8'));
+    assert.equal(processIsAliveForTest(replacementPid), true, 'the replacement process must still be running');
+  } finally {
+    if (launcher !== undefined) await stopFakeServe(launcher).catch(() => undefined);
+    await rm(dirname(paths.controlRoot), { recursive: true, force: true });
+  }
+});
+
+// Failure basis: after a client timeout the replacement may still finish and
+// publish readiness; that readiness is the authoritative restart outcome and
+// must not coexist with a caller-side failure. Cost: one fake child gated by
+// the test.
+test('code handoff red-B: replacement readiness after client timeout clears the marker failure', async () => {
+  const paths = await fixture();
+  let launcher: FakeServeLauncher | undefined;
+  try {
+    launcher = await writeFakeServeLauncher(dirname(paths.controlRoot));
+    const startup = fakeServeStartup(paths, launcher, 'ready');
+    const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+    const handoff = startDaemonCodeHandoff(paths, {
+      expected: owner.record,
+      startup,
+      timeoutMs: 400,
+    });
+    await assert.rejects(() => handoff.completion, (error: any) => {
+      assert.equal(error.code, 'daemon-restart.ready-timeout');
+      return true;
+    });
+    await writeFile(launcher.gateFile, 'ready');
+    let persisted = await readDaemonLease(paths);
+    for (let attempt = 0; attempt < 600 && persisted?.restart?.completedAt === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      persisted = await readDaemonLease(paths);
+    }
+    assert.equal(typeof persisted?.restart?.completedAt, 'string', 'the replacement eventually publishes readiness');
+    assert.equal(persisted?.restart?.failure, undefined, 'readiness must not coexist with the caller timeout');
+  } finally {
+    if (launcher !== undefined) await stopFakeServe(launcher).catch(() => undefined);
+    await rm(dirname(paths.controlRoot), { recursive: true, force: true });
+  }
+});
+
+// Failure basis: a premature client failure must not block a replacement that
+// commits its generation later (0d6fcc7 result.md section 1). The replacement
+// re-reads the marker and refuses to commit when a failure is present, so the
+// client must not write one while the replacement is alive. Cost: one fake child
+// gated by the test, mirroring the replacement's own marker check.
+test('code handoff red-C: premature client failure does not block a late replacement commit', async () => {
+  const paths = await fixture();
+  let launcher: FakeServeLauncher | undefined;
+  try {
+    launcher = await writeFakeServeLauncher(dirname(paths.controlRoot));
+    const startup = fakeServeStartup(paths, launcher, 'late-commit');
+    const owner = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve', startup });
+    const handoff = startDaemonCodeHandoff(paths, {
+      expected: owner.record,
+      startup,
+      timeoutMs: 300,
+    });
+    await assert.rejects(() => handoff.completion, (error: any) => {
+      assert.equal(error.code, 'daemon-restart.ready-timeout');
+      return true;
+    });
+    const beforeCommit = await readDaemonLease(paths);
+    assert.equal(beforeCommit?.generation, owner.record.generation, 'the replacement has not committed yet at client timeout');
+    await writeFile(launcher.gateFile, 'ready');
+    let persisted = await readDaemonLease(paths);
+    for (let attempt = 0; attempt < 600 && persisted?.generation === owner.record.generation; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      persisted = await readDaemonLease(paths);
+    }
+    assert.equal(persisted?.generation, owner.record.generation + 1, 'the replacement commits its generation after the client timeout');
+    assert.equal(typeof persisted?.restart?.completedAt, 'string', 'the replacement publishes readiness');
+    assert.equal(persisted?.restart?.failure, undefined, 'the lease must not stay stuck on a failure marker');
   } finally {
     if (launcher !== undefined) await stopFakeServe(launcher).catch(() => undefined);
     await rm(dirname(paths.controlRoot), { recursive: true, force: true });
@@ -388,7 +487,7 @@ test('code handoff still fails explicitly when the replacement never publishes r
       return true;
     });
     const persisted = await readDaemonLease(paths);
-    assert.equal(persisted?.restart?.failure?.errorCode, 'daemon-restart.ready-timeout');
+    assert.equal(persisted?.restart?.failure, undefined, 'a live replacement must not carry a terminal failure');
     assert.equal(persisted?.restart?.completedAt, undefined, 'a failed handoff must not also complete');
   } finally {
     if (launcher !== undefined) await stopFakeServe(launcher).catch(() => undefined);
