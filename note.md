@@ -507,3 +507,18 @@ Carol 的 request-numbering-error-no-consume-20261025 经 Alice 局部复核 ACC
 任务板已记录 integrated（commit 54eec9ec0）并 close，cleanup verified；worktree 与 branch codex/request-numbering-error-no-consume-20261025 已删除（TREE_GONE）。issue 6725903 已关闭并附同一 live 回执。
 
 生产 10086 的 interaction-139/140 仍被 parent turn（explicit-interpret-0d94c7e7-c3a0-412d-b828-82207254f7c6）的 owner reconciliation 永久阻断，任何新 explicit 输入都报 requires its exact prior input。该缺陷属 parent-turn/owner 域，与编号语义无因果，已在独立缺陷记录中跟踪；本次未改生产 journal。
+
+## 2026-10-31 task-17 提交进度/回执时间与真实入口 E2E 收口
+
+本轮主线：显式输入提交时的实时进度提示与回执时间投影已进 main 并落到运行实例。以下均为当前可复核证据，未新增需求，未改控制/业务语义。
+
+- task-17（feature a032fc390，merge b4f722a8b，proof addaaa318）：提交中的 live banner 带 spinner（runtime.css `progress-spin 0.9s linear infinite`）与阶段文案「正在整理并提交任务…」，结算后移除；user turn 显示真实 receipt time，decision turn 保留「时间未提供」fallback。浏览器证明 tests/ui/entry-submit-progress-browser.mjs 本日对当前 build 复跑 12/12：spinner 动画名、可见性、不透明度、结算后移除、两页无 runtime error 均逐项断言。
+- 真实入口 E2E：10-30 `web-search-20261030-111746-30kbf3` receipt Result SUCCESS。真实首页输入 → 草稿确认 → 运行队列 → 任务结果；runtime 终态 succeeded、settled=true、checkpoint committed、planner aligned；RCC 4444 responses，release 0.1.0043，4 张截图，资源收口 verified complete。该 receipt 属于候选 batch-20261026-1-evidence-20261030，不是当前 main 重建，但真实入口业务链已证明。
+- 交付解析修复：d5be671f3 resolve labelled evidenceId= delivery refs（merge edb34f3cc；task fix-standard-turn-end-delivery-unresolved-20261031 integrated），解决 real-ei-acceptance-20261031 首个 blocker standard-turn-end.delivery-unresolved（evidenceId 无法解析到本 admitted turn）。
+- 多决策输出修复：90ac6a922 re-answer before AggregateError（merge 92602ad7a；task fix-real-ei-multi-json-20261031 integrated a1274d880）。组合后 fresh combined real E2E behavior PASS、dashboard.succeeded、publicOutput.committed journalSeq 2492、deliveryReadback.succeeded。
+- 只读验收：provider-reasoning-delta-acceptance-20261031（5/5 PASS，根因外部 monid/tinyfish 瞬态 fetch failed，非代码缺陷）与 web-search-e2e-isolated-rerun-20261031 均已关闭。
+- 运行态：PID 13505 @ 127.0.0.1:10086，dist 01:17 重建、serve 01:21 起，头部即含以上全部产品修复；唯 addaaa318（03:00）只是证明文件合并，非产品代码，故生产实例无需再次重建。
+
+未过门禁（沿用 10-26 记录，本轮未重跑）：`test:compiled:services` 14 项原生 run/checkpoint/memory 路径失败，`pnpm build:release` 全量门禁不过；a1274d880 记录全仓 build 在缺失 @types/node 的 adapter 包上失败（环境性，非本次接触），serve 产物 build:app 干净。故当前可交付的是产品真实入口与本轮增量，不是“全量 release 门禁已绿”。
+
+资源：main 加 4 个 locked worktree（provider-*-r1-2026101x，note 明确 “Root owns lifecycle; no external cleanup”，且为 dirty 的 PROTECTED_HOLD），合计 5 个，未超 10 上限；本轮未删除、未触碰。collab task registry 5 项全部 closed，board 无 open 任务。
