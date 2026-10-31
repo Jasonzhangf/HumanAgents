@@ -126,3 +126,21 @@ unknown, working, expired, cancelled, consumed, or exhausted message produces
 App Server input. Every wait stores waiter, blocking task owner, reason, deadline,
 resume events, and P2P escalation. Timeout changes state without unsolicited
 messages; resource release notifies only an exact active subscriber.
+
+## Master patrol duty
+
+The project master keeps patrol armed while this project has an unclosed task
+that can advance, or a worker that is running. Re-open patrol immediately when a
+task becomes runnable again, a new task arrives, or a wait for input is
+released. Reuse the same subscription; do not start a second timer.
+
+The master may cancel project patrol only when there is no task progress and
+that state was already reported to the CEO or requester, or when the project is
+waiting for user or external input and that state was already reported. Record
+the reason, the affected tasks, and the resume condition. Keep the
+direct-message lease. Cancelling patrol never replaces closing a task, reporting
+a block, or delivering work.
+
+If the running build has no public entry to cancel the selected patrol entry,
+the master stops its own limited patrol and reports the exact runtime gap. It
+must not claim that the subscription was cancelled.
