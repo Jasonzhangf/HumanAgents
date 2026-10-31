@@ -522,3 +522,12 @@ Carol 的 request-numbering-error-no-consume-20261025 经 Alice 局部复核 ACC
 未过门禁（沿用 10-26 记录，本轮未重跑）：`test:compiled:services` 14 项原生 run/checkpoint/memory 路径失败，`pnpm build:release` 全量门禁不过；a1274d880 记录全仓 build 在缺失 @types/node 的 adapter 包上失败（环境性，非本次接触），serve 产物 build:app 干净。故当前可交付的是产品真实入口与本轮增量，不是“全量 release 门禁已绿”。
 
 资源：main 加 4 个 locked worktree（provider-*-r1-2026101x，note 明确 “Root owns lifecycle; no external cleanup”，且为 dirty 的 PROTECTED_HOLD），合计 5 个，未超 10 上限；本轮未删除、未触碰。collab task registry 5 项全部 closed，board 无 open 任务。
+
+## 2026-10-31 构建门禁回归修复（build:runtime ui-runtime）
+
+main a474cf109 上 `pnpm build:runtime` 的 ui-runtime tsc 步骤出现类型回归：`tests/runtime/ui-runtime/tsconfig.json` 只编译 runtime/contracts，但 runtime 源码已传递引入 app/config/agent-templates 的 node API，而该 tsconfig 未带对应 node 声明，导致大量 `Cannot find module 'node:*'`；另有 3 个真实类型错误。修复（候选 b7ec02f34，merge 38e59d1fa，push origin/main）：
+- `tests/runtime/ui-runtime/tsconfig.json` 增列 agent-templates/app/app-ui-runtime/config 的 `node-modules.d.ts`（app 的声明已覆盖 adapters 的 child_process/zlib/fs-promises，故无需再引 tests/adapters 声明）。
+- `node-modules.d.ts` 的 `assert.throws` 补 `message?: string`，对齐 delete-task 用例的三参调用。
+- `code-handoff.ts` 用局部 `restart` 变量，使 loaded-source guard 完成穷尽收窄，运行语义不变。
+
+验证：`pnpm build:runtime` 全链 exit 0；worktree 内 ui-runtime 54/54、supervisor 37/37 通过。合入后 main 复跑 ui-runtime tsc exit 0。worktree remove + prune（TREE_GONE）、branch 已删。现存 5 个 worktree（main + 4 locked provider，未动）。
