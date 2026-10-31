@@ -1997,6 +1997,86 @@ test('interaction card forwards a genuine dashboard task identity and fabricates
   assert.equal(invalidEpoch.cardMetadata.source.executionEpoch, 0);
 });
 
+/**
+ * A minimal DOM double for the document surfaces the page code expects. It lives
+ * at module scope because the work-card render test and the entry submit banner
+ * test both drive real page code that needs a document.
+ */
+class FakeClassList {
+  private readonly names = new Set<string>();
+  add(...names: string[]): void { for (const name of names) this.names.add(name); }
+  remove(...names: string[]): void { for (const name of names) this.names.delete(name); }
+  contains(name: string): boolean { return this.names.has(name); }
+}
+
+class FakeNode {
+  readonly nodeType = 1;
+  textContent = '';
+  className = '';
+  hidden = false;
+  href = '';
+  name = '';
+  value = '';
+  disabled = false;
+  type = '';
+  readonly dataset: Record<string, string> = {};
+  readonly classList = new FakeClassList();
+  readonly children: FakeNode[] = [];
+  parentNode: FakeNode | null = null;
+  private readonly attributes = new Map<string, string>();
+
+  constructor(readonly tagName: string) {}
+
+  get firstChild(): FakeNode | undefined { return this.children[0]; }
+  append(...nodes: FakeNode[]): void {
+    for (const node of nodes) { node.parentNode = this; this.children.push(node); }
+  }
+  replaceChildren(...nodes: FakeNode[]): void {
+    for (const child of this.children) child.parentNode = null;
+    this.children.length = 0;
+    this.append(...nodes);
+  }
+  removeChild(node: FakeNode): void {
+    const index = this.children.indexOf(node);
+    if (index >= 0) { this.children.splice(index, 1); node.parentNode = null; }
+  }
+  remove(): void { this.parentNode?.removeChild(this); }
+  focus(): void {}
+  setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+  getAttribute(name: string): string | undefined { return this.attributes.get(name); }
+  removeAttribute(name: string): void { this.attributes.delete(name); }
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  contains(node: FakeNode): boolean {
+    return this.children.some((child) => child === node || child.contains(node));
+  }
+  querySelector(selector: string): FakeNode | null {
+    for (const child of this.children) {
+      if (matchesFakeSelector(child, selector)) return child;
+      const found = child.querySelector(selector);
+      if (found) return found;
+    }
+    return null;
+  }
+}
+
+const matchesFakeSelector = (node: FakeNode, selector: string): boolean => {
+  const attribute = /^\[([a-zA-Z-]+)(?:="([^"]*)")?\]$/.exec(selector);
+  if (attribute) {
+    const name = attribute[1]!;
+    const expected = attribute[2];
+    const datasetKey = name.startsWith('data-')
+      ? name.slice(5).replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase())
+      : undefined;
+    const actual = node.getAttribute(name) ?? (datasetKey === undefined ? undefined : node.dataset[datasetKey]);
+    return expected === undefined ? actual !== undefined : actual === expected;
+  }
+  if (selector.startsWith('.')) return node.className.split(/\s+/).includes(selector.slice(1));
+  return node.tagName === selector;
+};
+
+const fakeText = (node: FakeNode): string => node.textContent + node.children.map(fakeText).join('');
+
 type InteractionWorkCardAdapter = {
   readonly mountInteractionWorkCard: (target: unknown, options?: unknown) => {
     readonly update: (projection: unknown) => void;
@@ -2008,76 +2088,6 @@ test('interaction card DOM shows a declared lifecycle label after the requiremen
     `file://${join(process.cwd(), 'docs/ui/interaction-work-card.js')}`,
   ).href) as InteractionWorkCardAdapter;
 
-  class FakeClassList {
-    private readonly names = new Set<string>();
-    add(...names: string[]): void { for (const name of names) this.names.add(name); }
-    remove(...names: string[]): void { for (const name of names) this.names.delete(name); }
-    contains(name: string): boolean { return this.names.has(name); }
-  }
-
-  class FakeNode {
-    readonly nodeType = 1;
-    textContent = '';
-    className = '';
-    hidden = false;
-    href = '';
-    name = '';
-    value = '';
-    disabled = false;
-    type = '';
-    readonly dataset: Record<string, string> = {};
-    readonly classList = new FakeClassList();
-    readonly children: FakeNode[] = [];
-    private readonly attributes = new Map<string, string>();
-
-    constructor(readonly tagName: string) {}
-
-    get firstChild(): FakeNode | undefined { return this.children[0]; }
-    append(...nodes: FakeNode[]): void { this.children.push(...nodes); }
-    replaceChildren(...nodes: FakeNode[]): void {
-      this.children.length = 0;
-      this.children.push(...nodes);
-    }
-    removeChild(node: FakeNode): void {
-      const index = this.children.indexOf(node);
-      if (index >= 0) this.children.splice(index, 1);
-    }
-    remove(): void {}
-    focus(): void {}
-    setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
-    getAttribute(name: string): string | undefined { return this.attributes.get(name); }
-    removeAttribute(name: string): void { this.attributes.delete(name); }
-    addEventListener(): void {}
-    removeEventListener(): void {}
-    contains(node: FakeNode): boolean {
-      return this.children.some((child) => child === node || child.contains(node));
-    }
-    querySelector(selector: string): FakeNode | null {
-      for (const child of this.children) {
-        if (matchesFakeSelector(child, selector)) return child;
-        const found = child.querySelector(selector);
-        if (found) return found;
-      }
-      return null;
-    }
-  }
-
-  const matchesFakeSelector = (node: FakeNode, selector: string): boolean => {
-    const attribute = /^\[([a-zA-Z-]+)(?:="([^"]*)")?\]$/.exec(selector);
-    if (attribute) {
-      const name = attribute[1]!;
-      const expected = attribute[2];
-      const datasetKey = name.startsWith('data-')
-        ? name.slice(5).replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase())
-        : undefined;
-      const actual = node.getAttribute(name) ?? (datasetKey === undefined ? undefined : node.dataset[datasetKey]);
-      return expected === undefined ? actual !== undefined : actual === expected;
-    }
-    if (selector.startsWith('.')) return node.className.split(/\s+/).includes(selector.slice(1));
-    return node.tagName === selector;
-  };
-
-  const fakeText = (node: FakeNode): string => node.textContent + node.children.map(fakeText).join('');
   // The lifecycle chip is the first `交互`/`任务`/`节点` state chip in the card.
   const lifecycleChip = (node: FakeNode): string => {
     let found = '';
@@ -2147,8 +2157,16 @@ test('interaction card DOM shows a declared lifecycle label after the requiremen
 });
 
 type EntrySubmissionHarness = {
-  readonly run: (submission: unknown, api: unknown) => Promise<unknown>;
-  readonly cardStates: readonly { readonly kind: string; readonly state: string }[];
+  readonly run: (submission: unknown, api: unknown, receipt?: unknown) => Promise<unknown>;
+  readonly cardStates: readonly {
+    readonly kind: string;
+    readonly state: string;
+    readonly sourceKind?: string;
+    readonly text?: string;
+    readonly eventKey?: string;
+    readonly interactionId?: string;
+    readonly occurredAt?: string;
+  }[];
   readonly draftedStates: readonly string[];
   readonly status: { readonly dataset: Record<string, string>; readonly textContent: string };
   readonly state: () => string;
@@ -2184,7 +2202,13 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     'const draftedStates = [];',
     'const status = { dataset: {}, textContent: "" };',
     'const window = { location: { assign() {} } };',
-    'function appendCardEvent(kind, text, sourceKind) { cardStates.push({ kind, state: latestState, text }); }',
+    // Record the exact arguments the page hands to the card event, including the
+    // detail object, and mirror the real appendCardEvent's interactionId
+    // fallback so the captured entries can be projected like the page's own.
+    'function appendCardEvent(kind, text, sourceKind, detail) {',
+    '  const eventDetail = detail || {};',
+    '  cardStates.push(Object.assign({ kind, state: latestState, text, sourceKind, interactionId: eventDetail.interactionId || interactionId }, eventDetail));',
+    '}',
     'function appendCardError() {}',
     'function renderDraft(snapshot) { draftedStates.push(snapshot.state); }',
     'async function waitForTask() { return "task-1"; }',
@@ -2200,9 +2224,9 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     'function identityFromReceipt(requirement) { return requirement ?? null; }',
     'function identityFromConfirmedSnapshot(snapshot) { return snapshot?.confirmation ?? null; }',
     'return {',
-    '  async run(submission, nextApi) {',
-    '    api = nextApi;',
-    '    interactionId = "interaction-entry";',
+    '  async run(submission, nextApi, receipt) {',
+    '    api = receipt === undefined ? nextApi : Object.assign({}, nextApi, { async receiveExplicitInput() { return receipt; } });',
+    '    interactionId = receipt === undefined ? "interaction-entry" : undefined;',
     '    latestState = "received";',
     '    cardStates.length = 0;',
     '    draftedStates.length = 0;',
@@ -2264,6 +2288,164 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
     assert.equal(harness.cardStates[0]!.kind, 'decision');
     assert.equal(harness.cardStates[0]!.state, expected);
     assert.equal(harness.cardStates[0]!.state === 'awaiting-confirmation', false);
+  }
+});
+
+/*
+ * The user turn must carry the real occurrence time the runtime returned on the
+ * 201 receipt. Failure mode: executeSubmission appended the raw-input card event
+ * without the occurredAt the receipt carried, so the work card fell back to
+ * 「时间未提供」 even though the server already reported a timestamp. The harness
+ * drives the receive branch (no pre-set interactionId) and inspects the exact
+ * detail the page passed to appendCardEvent.
+ */
+test('entry page attaches the receipt occurrence time to the user turn', async () => {
+  const source = await readFile('docs/ui/entry.js', 'utf8');
+  const buildHarness = compileEntrySubmissionHarness(source);
+
+  const receipt = {
+    interactionId: 'interaction-receipt',
+    occurredAt: '2026-10-27T07:28:58.639Z',
+  };
+  const submission = { rawInput: '读取 README', executionPolicy: { executionMode: 'once' } };
+  const api = {
+    async inspectExplicitInteraction() {
+      return { state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, normalizedInput: '读取 README', proposal: '读取 README 并汇报' } };
+    },
+    async confirmExplicitRequirement() {
+      return { requirement: { requirementId: 'requirement:draft-1:1', fifoSeq: 1 } };
+    },
+  };
+
+  const withTime = buildHarness();
+  await withTime.run(submission, api, receipt);
+  const userTurn = withTime.cardStates.find((entry) => entry.kind === 'user');
+  assert.ok(userTurn, 'the receive branch must append a user turn');
+  assert.equal(userTurn!.occurredAt, '2026-10-27T07:28:58.639Z', 'the user turn must carry the receipt occurredAt');
+
+  // A receipt that omits occurredAt must not fabricate a time; the explicit
+  // missing semantics stay intact so the card still reports 「时间未提供」.
+  const withoutTime = buildHarness();
+  await withoutTime.run(submission, api, { interactionId: 'interaction-receipt' });
+  const sparseTurn = withoutTime.cardStates.find((entry) => entry.kind === 'user');
+  assert.ok(sparseTurn, 'the receive branch must append a user turn');
+  assert.equal(sparseTurn!.occurredAt, undefined, 'no occurredAt must be fabricated when the receipt omits it');
+});
+
+/*
+ * The rendered work card must surface the real user-turn time, never the
+ * 「时间未提供」 fallback, when the entry carried an occurredAt. Failure mode:
+ * the entry.js card event dropped the receipt time, so the projection produced a
+ * turn with occurredAt undefined and the card printed 「时间未提供」. The test
+ * feeds the captured detail through the same projection the page uses and renders
+ * the card with the FakeNode DOM double. The second half keeps the explicit
+ * missing semantics correct: a turn without a time still reports 「时间未提供」.
+ */
+test('entry work card shows the receipt time instead of 「时间未提供」', async () => {
+  const { mountInteractionWorkCard } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/interaction-work-card.js')}`,
+  ).href) as InteractionWorkCardAdapter;
+  const { formatTime } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/runtime-api.js')}`,
+  ).href) as { formatTime: (value: string) => string };
+
+  const source = await readFile('docs/ui/entry.js', 'utf8');
+  const receipt = { interactionId: 'interaction-receipt', occurredAt: '2026-10-27T07:28:58.639Z' };
+  const entryApi = {
+    async inspectExplicitInteraction() {
+      return { state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, normalizedInput: '读取 README', proposal: '读取 README 并汇报' } };
+    },
+    async confirmExplicitRequirement() {
+      return { requirement: { requirementId: 'requirement:draft-1:1', fifoSeq: 1 } };
+    },
+  };
+  const harness = compileEntrySubmissionHarness(source)();
+  await harness.run({ rawInput: '读取 README', executionPolicy: { executionMode: 'once' } }, entryApi, receipt);
+
+  const scope = globalThis as unknown as { document?: unknown };
+  const previousDocument = scope.document;
+  scope.document = {
+    activeElement: null,
+    createElement: (tag: string) => new FakeNode(tag),
+    createTextNode: (text: string) => {
+      const node = new FakeNode('#text');
+      node.textContent = text;
+      return node;
+    },
+  };
+  try {
+    // The page's own entries, projected and rendered exactly as the page does.
+    const entries = harness.cardStates.map((entry) => ({ ...entry }));
+    const withTimeHost = new FakeNode('div');
+    mountInteractionWorkCard(withTimeHost).update(
+      interactionCardPage.projectInteractionCardFromEntries(entries, 'awaiting-confirmation'),
+    );
+    // The user turn is the first conversation turn; its time must be the real
+    // receipt time, never the 「时间未提供」 fallback.
+    const userTime = withTimeHost.querySelector('.iwc-time')?.textContent;
+    assert.equal(userTime, formatTime('2026-10-27T07:28:58.639Z'), 'the user turn must render the real receipt time');
+    assert.ok(userTime !== '时间未提供', 'the user turn must not fall back to 「时间未提供」');
+    assert.ok(withTimeHost.querySelector('.iwc-time') !== null, 'the card must render a time element for the user turn');
+
+    // The fallback must stay correct when the runtime genuinely reported no time.
+    const withoutTimeHost = new FakeNode('div');
+    mountInteractionWorkCard(withoutTimeHost).update(
+      interactionCardPage.projectInteractionCardFromEntries(
+        [{ kind: 'user', sourceKind: 'user', eventKey: 'explicit.raw-input', text: '读取 README', interactionId: 'interaction-receipt' }],
+        'awaiting-confirmation',
+      ),
+    );
+    assert.equal(fakeText(withoutTimeHost).includes('时间未提供'), true, 'a user turn without occurredAt must show 「时间未提供」');
+  } finally {
+    scope.document = previousDocument;
+  }
+});
+
+/*
+ * The submit status must show a visible in-progress indicator while the run
+ * settles and clear it afterwards. Failure mode: the page wrote a static
+ * 「正在整理并提交任务…」 string that replaced the live progress block, so no
+ * animation or phase survived an SSE step write and nothing was cleared on
+ * settle. The test drives the new createSubmitStatusBanner seam (built lazily so
+ * it stays import-safe in Node via the FakeNode document double).
+ */
+test('entry submit status shows a live progress indicator that clears on settle', async () => {
+  const { createSubmitStatusBanner } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/entry.js')}`,
+  ).href) as { createSubmitStatusBanner: (status: unknown) => {
+    mount: () => void;
+    text: (copy: string) => void;
+    clear: () => void;
+    isLive: () => boolean;
+  } };
+
+  const scope = globalThis as unknown as { document?: unknown };
+  const previousDocument = scope.document;
+  scope.document = {
+    createElement: (tag: string) => new FakeNode(tag),
+    createTextNode: (text: string) => { const node = new FakeNode('#text'); node.textContent = text; return node; },
+  };
+  try {
+    const status = new FakeNode('div');
+    const banner = createSubmitStatusBanner(status);
+    assert.equal(banner.isLive(), false, 'the banner must be idle before mount');
+    banner.mount();
+    banner.text('正在整理并提交任务…');
+    assert.equal(banner.isLive(), true, 'the banner must be live after mount + text');
+    const block = status.querySelector('.progress--live');
+    assert.ok(block !== null, 'the live status must contain a .progress--live block');
+    assert.equal(block!.className.split(/\s+/).includes('progress'), true, 'the live block must reuse the shared .progress style');
+    assert.ok(status.querySelector('.progress-spinner') !== null, 'the live status must show a spinner');
+    assert.ok(status.querySelector('.progress-phase') !== null, 'the live status must show a phase label');
+    // A later SSE step write must keep the progress block instead of wiping it.
+    banner.text('正在整理输入…');
+    assert.ok(status.querySelector('.progress--live') !== null, 'a step copy update must preserve the progress block');
+    assert.equal(status.querySelector('.progress-phase')?.textContent, '正在整理输入…', 'the step copy must land in the live phase');
+    banner.clear();
+    assert.equal(banner.isLive(), false, 'the banner must be idle after clear');
+    assert.equal(status.querySelector('.progress--live'), null, 'the progress block must be removed on settle');
+  } finally {
+    scope.document = previousDocument;
   }
 });
 

@@ -221,6 +221,53 @@ export async function readEntryQueue(api) {
   return { runtimeStatus, tasks }
 }
 
+/**
+ * The live submit progress banner.
+ *
+ * While a submission is in flight the status region shows one live block: the
+ * shell's existing progress spinner plus the phase the page currently knows
+ * about. Copy writes go into the block's phase so a later step summary replaces
+ * the phase instead of destroying the live block. The block is removed on
+ * settle. The page mints no step: the phase starts with the page's own waiting
+ * copy and the runtime's real step summaries replace it.
+ *
+ * Nothing touches the document until the returned methods are called, so the
+ * seam stays import-safe in Node.
+ */
+export function createSubmitStatusBanner(target) {
+  let block = null
+  let phase = null
+  const mount = () => {
+    if (!block) {
+      block = element('div', undefined, 'progress progress--live')
+      block.dataset.tone = 'active'
+      block.append(element('span', undefined, 'progress-spinner'))
+      phase = element('span', undefined, 'progress-phase')
+      block.append(phase)
+    }
+    clearNode(target)
+    target.append(block)
+  }
+  const text = (copy) => {
+    if (typeof copy !== 'string' || copy.trim() === '') return
+    if (block && phase) {
+      phase.textContent = copy
+      return
+    }
+    target.textContent = copy
+  }
+  const clear = () => {
+    if (!block) return
+    const stale = block
+    block = null
+    phase = null
+    if (typeof stale.remove === 'function') stale.remove()
+    else if (target && typeof target.removeChild === 'function') target.removeChild(stale)
+  }
+  const isLive = () => block !== null
+  return { mount, text, clear, isLive }
+}
+
 // The page seams above are pure and import-safe in Node. Everything below owns
 // the real DOM surface and only runs when the page is actually mounted in a
 // browser, so the product consumer can exercise the seams without a document.
@@ -238,6 +285,7 @@ const template = mountPageTemplate(pageRoot, {
   lede: '接受用户任务、展示只读整理反馈，并在提交后显示任务进展与执行入口。',
 })
 const { status } = template.hosts
+const submitBanner = createSubmitStatusBanner(status)
 let interactionCard = null
 let pageLeaving = false
 const submissionGate = createSubmissionGate()
@@ -917,7 +965,9 @@ function subscribeExplicitStepStream(activeId) {
           interactionId: activeId,
         })
         status.dataset.tone = 'warning'
-        status.textContent = step.summary
+        // Same summary copy as before; while the submit is in flight it lands in
+        // the live banner's phase so the progress block survives the update.
+        submitBanner.text(step.summary)
       }
     } catch {
       // Ignore malformed step event payloads
@@ -953,7 +1003,13 @@ async function executeSubmission(submission, clarificationAnswer) {
       requestKind: 'new-task-preview',
     })
     interactionId = received.interactionId
-    appendCardEvent('user', submission.rawInput, 'user', { eventKey: 'explicit.raw-input', interactionId })
+    appendCardEvent('user', submission.rawInput, 'user', {
+      eventKey: 'explicit.raw-input',
+      interactionId,
+      ...(typeof received.occurredAt === 'string' && received.occurredAt.trim() !== ''
+        ? { occurredAt: received.occurredAt }
+        : {}),
+    })
   }
 
   let snapshot = await api.inspectExplicitInteraction(interactionId)
@@ -1238,10 +1294,12 @@ function renderForm() {
     textarea.readOnly = true
     clearEntryError()
     status.dataset.tone = 'warning'
-    status.textContent = '正在整理并提交任务…'
+    submitBanner.mount()
+    submitBanner.text('正在整理并提交任务…')
     void run.result.catch((error) => handleSubmissionError(error, submitButton)).finally(() => {
       submitting = false
       submitButton.disabled = false
+      submitBanner.clear()
       if (interactionId) {
         freezeCreationInputs()
       } else {
