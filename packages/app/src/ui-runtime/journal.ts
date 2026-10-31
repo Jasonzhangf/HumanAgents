@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, closeSync } from 'node:fs';
 
 // The app test surface models only the `node:fs` members it uses. The journal
 // cache needs a file-identity stat key, so declare just the members consumed
@@ -11,6 +11,9 @@ declare module 'node:fs' {
     readonly mtimeMs: number;
   }
   export function statSync(path: string): Stats;
+  export function openSync(path: string, flags: string): number;
+  export function readSync(fd: number, buffer: Uint8Array, offset: number, length: number, position?: number): number;
+  export function closeSync(fd: number): void;
 }
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
@@ -181,6 +184,44 @@ function createJournalValidationContext(): JournalValidationContext {
     operationIdentities: new Map(),
     eventIdentities: new Map(),
   };
+}
+
+/**
+ * Extract just the validation-context entries from one already-committed
+ * record, without storing the full record. Used by `readValidationContext` to
+ * rebuild the duplicate-detection maps from a very large journal without
+ * materializing every record in memory.
+ */
+function collectValidationContext(context: JournalValidationContext, record: UiRuntimeJournalRecord): void {
+  const kind = record.kind;
+  if (kind === 'operation.prepared') {
+    const allocation = record.allocation as { readonly taskId: { readonly value: string; readonly scope: 'task' }; readonly operationId: { readonly value: string; readonly scope: 'operation' }; readonly executionEpoch: number };
+    const existing = context.operationIdentities.get(allocation.operationId.value);
+    if (!existing) {
+      context.operationIdentities.set(allocation.operationId.value, {
+        taskId: allocation.taskId,
+        operationId: allocation.operationId,
+        executionEpoch: allocation.executionEpoch,
+      });
+    }
+  } else if (kind === 'operation.started') {
+    const operationId = record.operationId as { readonly value: string; readonly scope: 'operation' };
+    const taskId = record.taskId as { readonly value: string; readonly scope: 'task' };
+    const existing = context.operationIdentities.get(operationId.value);
+    if (!existing) {
+      context.operationIdentities.set(operationId.value, {
+        taskId: { value: taskId.value, scope: taskId.scope },
+        operationId: { value: operationId.value, scope: operationId.scope },
+        executionEpoch: record.executionEpoch,
+      });
+    }
+  } else if (kind === 'operation.event') {
+    const eventRecord = record as { readonly operationId: { readonly value: string }; readonly event: { readonly eventId: string } };
+    const identityKey = JSON.stringify([eventRecord.operationId.value, eventRecord.event.eventId]);
+    if (!context.eventIdentities.has(identityKey)) {
+      context.eventIdentities.set(identityKey, record as UiRuntimeJournalRecord);
+    }
+  }
 }
 
 function requireRecordString(record: Record<string, unknown>, key: string, filePath: string, line: number): string {
@@ -621,6 +662,62 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
     return { records, context, nextLine };
   }
 
+  /**
+   * Stream the journal line by line and build only the validation context
+   * (operationIdentities + eventIdentities maps) plus the next line number,
+   * without materializing all records into memory. Used by `append` when the
+   * process-local cache is cold on a very large journal, where a single
+   * `readFileSync` would exceed the V8 string limit and crash startup.
+   */
+  private readValidationContext(): {
+    readonly context: JournalValidationContext;
+    readonly nextLine: number;
+  } {
+    if (!existsSync(this.filePath)) return { context: createJournalValidationContext(), nextLine: 1 };
+    const context = createJournalValidationContext();
+    const fd = openSync(this.filePath, 'r');
+    try {
+      const decoder = new TextDecoder();
+      const chunk = new Uint8Array(64 * 1024);
+      let leftover = '';
+      let position = 0;
+      let lineNumber = 0;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const read = readSync(fd, chunk, 0, chunk.length, position);
+        if (read <= 0) break;
+        position += read;
+        const text = decoder.decode(chunk.subarray(0, read), { stream: true });
+        const combined = leftover + text;
+        const lines = combined.split('\n');
+        leftover = lines.pop() ?? '';
+        for (const line of lines) {
+          lineNumber += 1;
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const record = JSON.parse(trimmed) as UiRuntimeJournalRecord;
+            collectValidationContext(context, record);
+          } catch {
+            // Skip malformed lines; the committed journal is append-only.
+          }
+        }
+      }
+      if (leftover.trim()) {
+        lineNumber += 1;
+        try {
+          const record = JSON.parse(leftover.trim()) as UiRuntimeJournalRecord;
+          collectValidationContext(context, record);
+        } catch {
+          // ignore
+        }
+      }
+      return { context, nextLine: lineNumber + 1 };
+    } finally {
+      closeSync(fd);
+    }
+  }
+
   append(record: UiRuntimeJournalRecord): void {
     const identity = this.statIdentity();
     const cached = this.cached;
@@ -638,12 +735,12 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
       };
       return;
     }
-    const { records, context, nextLine } = this.readRecords();
+    const { context, nextLine } = this.readValidationContext();
     const validated = validateJournalRecord(record, this.filePath, nextLine, context);
     if (validated.duplicate) return;
     mkdirSync(dirname(this.filePath), { recursive: true });
     appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, 'utf8');
-    this.cached = { identity: this.statIdentity(), records: [...records, validated.record], context, nextLine: nextLine + 1 };
+    this.cached = { identity: this.statIdentity(), records: [], context, nextLine: nextLine + 1 };
   }
 
   replay(): readonly UiRuntimeJournalRecord[] {
@@ -655,6 +752,60 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
     const { records, context, nextLine } = this.readRecords();
     this.cached = { identity, records, context, nextLine };
     return records.map((record) => structuredClone(record));
+  }
+
+  /**
+   * Stream the journal line by line and return the last record matching
+   * `predicate`, without loading the whole file into memory. Used to restore
+   * the last explicit-brain state from a potentially very large interaction
+   * journal; a single `readFileSync` of a multi-hundred-megabyte journal would
+   * exceed the V8 string limit and crash startup. Committed lines that fail to
+   * parse are skipped so a corrupt line never blocks recovery.
+   */
+  async findLastRecordMatching(
+    predicate: (record: UiRuntimeJournalRecord) => unknown,
+  ): Promise<UiRuntimeJournalRecord | undefined> {
+    if (!existsSync(this.filePath)) return undefined;
+    const fd = openSync(this.filePath, 'r');
+    try {
+      const decoder = new TextDecoder();
+      const chunk = new Uint8Array(64 * 1024);
+      let leftover = '';
+      let last: UiRuntimeJournalRecord | undefined;
+      let position = 0;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const read = readSync(fd, chunk, 0, chunk.length, position);
+        if (read <= 0) break;
+        position += read;
+        const text = decoder.decode(chunk.subarray(0, read), { stream: true });
+        const combined = leftover + text;
+        const lines = combined.split('\n');
+        leftover = lines.pop() ?? '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const record = JSON.parse(trimmed) as UiRuntimeJournalRecord;
+            if (predicate(record)) last = record;
+          } catch {
+            // Skip malformed lines; the committed journal is append-only.
+          }
+        }
+      }
+      // Final leftover fragment (no trailing newline).
+      if (leftover.trim()) {
+        try {
+          const record = JSON.parse(leftover.trim()) as UiRuntimeJournalRecord;
+          if (predicate(record)) last = record;
+        } catch {
+          // ignore
+        }
+      }
+      return last;
+    } finally {
+      closeSync(fd);
+    }
   }
 
   async commit(input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }> {

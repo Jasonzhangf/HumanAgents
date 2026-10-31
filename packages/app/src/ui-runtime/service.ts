@@ -5937,10 +5937,11 @@ export class UiRuntimeService {
 
   async hydrate(): Promise<void> {
     await this.coordinator.hydrate();
-    const records = (this.options.interactionJournal ?? this.options.journal)?.replay() ?? [];
-    const state = records
-      .filter((record): record is Extract<typeof record, { readonly kind: 'explicit-brain.state' }> => record.kind === 'explicit-brain.state')
-      .at(-1)?.state;
+    const stateRecord = await (this.options.interactionJournal ?? this.options.journal)?.findLastRecordMatching(
+      (record): record is Extract<UiRuntimeJournalRecord, { readonly kind: 'explicit-brain.state' }> =>
+        record.kind === 'explicit-brain.state',
+    );
+    const state = (stateRecord as { readonly state: unknown } | undefined)?.state;
     if (!state) return;
     const restored = state as RuntimeExplicitBrainJournalState;
     this.explicitIntake.restoreState(restored.intake);
