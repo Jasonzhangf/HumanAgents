@@ -889,7 +889,7 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
     if (!('closureKind' in input) || input.closureKind !== 'interaction') {
       throw new Error('UI runtime journal only owns interaction closures');
     }
-    const existing = [...this.replay()].reverse().find((record) => (
+    const existing = await this.findLastRecordMatching((record) => (
       record.kind === 'interaction.closure' && record.closure.closureId === input.closureId
     ));
     if (existing?.kind === 'interaction.closure') {
@@ -903,7 +903,7 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
   }
 
   async read(closureId: string): Promise<ClosureRecord | null> {
-    const record = [...this.replay()].reverse().find((candidate) => candidate.kind === 'interaction.closure' && candidate.closure.closureId === closureId);
+    const record = await this.findLastRecordMatching((candidate) => candidate.kind === 'interaction.closure' && candidate.closure.closureId === closureId);
     return record?.kind === 'interaction.closure' ? structuredClone(record.closure) as InteractionClosureRecord : null;
   }
 }

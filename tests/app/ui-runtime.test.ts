@@ -11872,3 +11872,77 @@ test('UiRuntimeJournal cold append keeps replay complete and restores bounded ex
     await rm(root, { recursive: true, force: true });
   }
 });
+
+class ClosureTailScanJournal extends UiRuntimeJournal {
+  replayCount = 0;
+  tailScanCount = 0;
+
+  override replay(): ReturnType<UiRuntimeJournal['replay']> {
+    this.replayCount += 1;
+    return super.replay();
+  }
+
+  override async findLastRecordMatching(
+    predicate: Parameters<UiRuntimeJournal['findLastRecordMatching']>[0],
+  ): ReturnType<UiRuntimeJournal['findLastRecordMatching']> {
+    this.tailScanCount += 1;
+    return super.findLastRecordMatching(predicate);
+  }
+}
+
+function tailScanClosure(closureId: string, reason: string): Extract<ClosureRecord, { readonly closureKind: 'interaction' }> {
+  return {
+    closureKind: 'interaction',
+    closureId,
+    scope: { organId },
+    reason,
+    evidenceRefs: [evidence(`tail-${closureId}`, { organId })],
+  };
+}
+
+test('UiRuntimeJournal closure commit/read tail-scans without materializing the full journal', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-runtime-closure-tail-'));
+  const file = join(root, 'ui-runtime-journal.jsonl');
+  try {
+    const seed = new UiRuntimeJournal(file);
+    for (let index = 0; index < 2000; index += 1) {
+      seed.append({
+        kind: 'task.deleted',
+        taskId: id('task', `history-${index}`),
+        deletedAt: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}Z`,
+      });
+    }
+    const first = tailScanClosure('closure-tail-a', 'first generation');
+    seed.append({ kind: 'interaction.closure', closure: first });
+    const second = tailScanClosure('closure-tail-a', 'second generation');
+    seed.append({ kind: 'interaction.closure', closure: second });
+    seed.append({ kind: 'interaction.closure', closure: tailScanClosure('closure-tail-other', 'other closure') });
+
+    const journal = new ClosureTailScanJournal(file);
+
+    assert.deepEqual(await journal.read('closure-tail-a'), second, 'read must return the last matching closure');
+    assert.equal(journal.replayCount, 0, 'read must not full-materialize the journal');
+    assert.ok(journal.tailScanCount >= 1, 'read must use the tail scan');
+
+    assert.deepEqual(
+      await journal.commit(second),
+      { closureId: 'closure-tail-a', committed: true },
+      'commit with the identical last closure must be idempotent',
+    );
+    assert.equal(journal.replayCount, 0, 'commit must not full-materialize the journal');
+    assert.ok(journal.tailScanCount >= 2, 'commit must use the tail scan');
+
+    await assert.rejects(
+      () => journal.commit(tailScanClosure('closure-tail-a', 'conflicting generation')),
+      /interaction closure conflict: closure-tail-a/,
+    );
+
+    const fresh = tailScanClosure('closure-fresh', 'brand new');
+    assert.deepEqual(await journal.commit(fresh), { closureId: 'closure-fresh', committed: true });
+    assert.deepEqual(await journal.read('closure-fresh'), fresh);
+    assert.equal(await journal.read('closure-never'), null, 'read must return null for a missing closure');
+    assert.equal(journal.replayCount, 0, 'commit/read must never full-materialize the journal');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
