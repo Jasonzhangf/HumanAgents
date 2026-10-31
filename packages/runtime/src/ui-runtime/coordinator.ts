@@ -1018,6 +1018,24 @@ export interface TaskJournalReplayState {
 }
 
 /**
+ * Removes every operation and scope whose operation belongs to `taskIdValue`.
+ * A deleted task owns the custody end of its execution bindings: neither the
+ * live coordinator nor a cold replay may keep a stale operation that a rebuild
+ * could later silently reuse.
+ */
+function retireTaskOperationBindings(
+  operations: Map<string, OperationRecord>,
+  scopes: Map<string, ScopeRef>,
+  taskIdValue: string,
+): void {
+  for (const [key, operation] of operations) {
+    if (operation.taskId.value !== taskIdValue) continue;
+    operations.delete(key);
+    scopes.delete(key);
+  }
+}
+
+/**
  * Folds task Journal records into projection state. This is the replay rule a
  * cold read-only reader reuses: it restores only identity, inventory, input,
  * output and events. It never claims live running state and never writes.
@@ -1066,11 +1084,16 @@ export function replayTaskJournalRecords(
       case 'task.deleted': {
         state.deletedTaskIds.add(record.taskId.value);
         state.tasks.delete(record.taskId.value);
+        retireTaskOperationBindings(state.operations, state.scopes, record.taskId.value);
         break;
       }
       case 'operation.prepared': {
         state.operationCounter = Math.max(state.operationCounter, record.operationCounter);
         state.cycleCounter = Math.max(state.cycleCounter, record.cycleCounter);
+        // A late preparation for a task the Journal already deleted must not
+        // revive the execution, exactly like the `operation.event` guard below.
+        if (!state.tasks.has(record.allocation.taskId.value)
+          && state.deletedTaskIds.has(record.allocation.taskId.value)) break;
         const existing = state.operations.get(record.allocation.operationId.value);
         if (existing && existing.allocation !== undefined) {
           if (
@@ -1114,6 +1137,9 @@ export function replayTaskJournalRecords(
       case 'operation.started': {
         state.operationCounter = Math.max(state.operationCounter, record.operationCounter);
         state.cycleCounter = Math.max(state.cycleCounter, record.cycleCounter);
+        // A late start for a task the Journal already deleted must not revive the
+        // execution, exactly like the `operation.event` guard below.
+        if (!state.tasks.has(record.taskId.value) && state.deletedTaskIds.has(record.taskId.value)) break;
         const existing = state.operations.get(record.operationId.value);
         if (
           existing
@@ -2124,6 +2150,7 @@ export class RuntimeTaskCoordinator {
     this.journal?.append({ kind: 'task.deleted', taskId, deletedAt });
     this.deletedTaskIds.add(taskId.value);
     this.tasks.delete(taskId.value);
+    retireTaskOperationBindings(this.operations, this.scopes, taskId.value);
     return { taskId, deleted: true };
   }
 
@@ -6211,11 +6238,16 @@ export class RuntimeTaskCoordinator {
         case 'task.deleted': {
           this.deletedTaskIds.add(record.taskId.value);
           this.tasks.delete(record.taskId.value);
+          retireTaskOperationBindings(this.operations, this.scopes, record.taskId.value);
           break;
         }
         case 'operation.prepared': {
           this.operationCounter = Math.max(this.operationCounter, record.operationCounter);
           this.cycleCounter = Math.max(this.cycleCounter, record.cycleCounter);
+          // A late preparation for a task the Journal already deleted must not
+          // revive the execution, exactly like the `operation.event` guard below.
+          if (!this.tasks.has(record.allocation.taskId.value)
+            && this.deletedTaskIds.has(record.allocation.taskId.value)) break;
           const existing = this.operations.get(record.allocation.operationId.value);
           if (existing && existing.allocation !== undefined) {
             if (
@@ -6261,6 +6293,9 @@ export class RuntimeTaskCoordinator {
         case 'operation.started': {
           this.operationCounter = Math.max(this.operationCounter, record.operationCounter);
           this.cycleCounter = Math.max(this.cycleCounter, record.cycleCounter);
+          // A late start for a task the Journal already deleted must not revive the
+          // execution, exactly like the `operation.event` guard below.
+          if (!this.tasks.has(record.taskId.value) && this.deletedTaskIds.has(record.taskId.value)) break;
           const existing = this.operations.get(record.operationId.value);
           if (
             existing
