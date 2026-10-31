@@ -249,15 +249,27 @@ async function withScriptedPage(run) {
 
 const liveBlockState = () => {
   const block = document.querySelector('.status-banner .progress.progress--live');
-  if (!block) return { hasBlock: false, phase: null, animation: null, spinnerOpacity: null, visible: false };
+  if (!block) {
+    return {
+      hasBlock: false, phase: null, animation: null, spinnerOpacity: null, visible: false,
+      rect: null, viewport: null, scrollY: null, intersectsViewport: false,
+    };
+  }
   const phase = block.querySelector('.progress-phase');
   const spinner = block.querySelector('.progress-spinner');
+  const rect = block.getBoundingClientRect();
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
   return {
     hasBlock: true,
     phase: phase ? phase.textContent : null,
     animation: spinner ? getComputedStyle(spinner).animationName : null,
     spinnerOpacity: spinner ? getComputedStyle(spinner).opacity : null,
     visible: block.getClientRects().length > 0,
+    rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
+    viewport,
+    scrollY: window.scrollY,
+    // The user can only see the progress block when it intersects the viewport.
+    intersectsViewport: rect.bottom > 0 && rect.top < viewport.height,
   };
 };
 
@@ -287,6 +299,11 @@ async function runInFlightBanner(page, pageErrors, expectedTime) {
   record('in-flight phase shows the submit copy', inflight.phase === PHASE_COPY, inflight.phase);
   record('in-flight spinner animates with progress-spin', inflight.animation === 'progress-spin', inflight.animation);
   record('in-flight progress block is laid out and visible', inflight.visible === true, inflight.visible);
+  record(
+    'in-flight progress block intersects the viewport',
+    inflight.intersectsViewport === true,
+    { rect: inflight.rect, viewport: inflight.viewport, scrollY: inflight.scrollY },
+  );
   record('in-flight spinner is fully opaque', inflight.spinnerOpacity === '1', inflight.spinnerOpacity);
   record('in-flight submit issues exactly one receive', scripted.receiveCount - receiveBefore === 1, scripted.receiveCount - receiveBefore);
   await page.screenshot({ path: join(evidenceRoot, 'inflight-live-progress.png') });
@@ -341,6 +358,31 @@ async function runUserTurnTime(page, pageErrors, expectedTime) {
   record('card page produced no runtime errors', pageErrors.length === 0, pageErrors);
 }
 
+// The reveal must not hijack the page: when the progress block is already in the
+// viewport from the start, submitting must not force a scroll (no focus/scroll jump).
+async function runVisibleNoForcedScroll(page, pageErrors) {
+  await page.setViewportSize({ width: 1280, height: 2400 });
+  await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#entry-form textarea[name="rawInput"]', { timeout: 10_000 });
+  await page.fill('#entry-form textarea[name="rawInput"]', '读取 README');
+  const scrollBefore = await page.evaluate(() => window.scrollY);
+  record('tall viewport keeps the page unscrolled before submit', scrollBefore === 0, scrollBefore);
+  setGate('receive');
+  await page.click('#entry-form button[type="submit"]');
+  await page.waitForSelector('.status-banner .progress.progress--live', { timeout: 15_000 });
+  const state = await page.evaluate(liveBlockState);
+  observe('already-visible live block', state);
+  record('already-visible block intersects the viewport', state.intersectsViewport === true, { rect: state.rect, viewport: state.viewport });
+  record('already-visible block does not force a scroll', state.scrollY === scrollBefore, { before: scrollBefore, after: state.scrollY });
+  releaseGate('receive');
+  await page.waitForFunction(
+    () => !document.querySelector('.status-banner .progress.progress--live'),
+    undefined,
+    { timeout: 25_000 },
+  );
+  record('visible-block page produced no runtime errors', pageErrors.length === 0, pageErrors);
+}
+
 async function main() {
   const { formatTime } = await import(new URL(`file://${join(repoRoot, 'docs/ui/runtime-api.js')}`).href);
   const expectedTime = formatTime(OCCURRED_AT);
@@ -349,6 +391,7 @@ async function main() {
   const runs = [
     { name: 'run 1 (in-flight banner)', body: runInFlightBanner },
     { name: 'run 2 (user-turn time)', body: runUserTurnTime },
+    { name: 'run 3 (already-visible, no forced scroll)', body: runVisibleNoForcedScroll },
   ];
   for (const run of runs) {
     await withScriptedPage(async (page, pageErrors) => {

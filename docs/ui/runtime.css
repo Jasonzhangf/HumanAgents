@@ -998,6 +998,11 @@ pre {
   opacity: 1;
   animation: progress-spin 0.9s linear infinite;
 }
+/* Keep a live progress block clear of the fixed shell corner controls when
+   scrollIntoView brings it to the top viewport edge. */
+.progress--live {
+  scroll-margin-top: 60px;
+}
 .progress[data-tone="waiting"] .progress-spinner {
   opacity: 0;
   animation: none;

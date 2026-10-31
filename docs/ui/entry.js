@@ -247,6 +247,12 @@ export function createSubmitStatusBanner(target) {
     }
     clearNode(target)
     target.append(block)
+    if (typeof block.scrollIntoView === 'function' && typeof window !== 'undefined') {
+      const rect = block.getBoundingClientRect()
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0
+      const intersects = rect.bottom > 0 && rect.top < viewportHeight
+      if (!intersects) block.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    }
   }
   const text = (copy) => {
     if (typeof copy !== 'string' || copy.trim() === '') return
