@@ -9,6 +9,10 @@
   "include": [
     "node-modules.d.ts",
     "**/*.ts",
+    "../../../packages/agent-templates/src/node-modules.d.ts",
+    "../../../packages/app/src/node-modules.d.ts",
+    "../../../packages/app/src/ui-runtime/node-modules.d.ts",
+    "../../../packages/config/src/node-modules.d.ts",
     "../../../packages/contracts/src/**/*.ts",
     "../../../packages/runtime/src/**/*.ts"
   ]
