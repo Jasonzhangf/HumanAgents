@@ -6440,6 +6440,111 @@ test('provider explicit brain interpreter re-answers a fresh two-decision batch 
   assert.equal(checkpointText.includes('整理发布步骤'), true, 'the accepted replacement reaches the checkpoint');
 });
 
+// Failure basis: the real close receipt commits and the two-decision batch is
+// durably rejected, but the durable acknowledgement of that close is lost.
+// Impact: a valid public intake request fails before confirmation/FIFO even
+// though one more generation could answer the same committed input correctly.
+// Cost: one injected journal acknowledgement fault and two recorded
+// generations on one input.
+test('provider explicit brain interpreter re-answers a fresh two-decision batch once despite a lost journal acknowledgement', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-reanswer-ack', providerId: 'provider-reanswer-ack', protocol: 'responses',
+    endpointRef: 'recorded://reanswer-ack', modelRef: 'model-reanswer-ack',
+    configDigest: 'sha256:reanswer-ack-config', capabilityDigest: 'sha256:reanswer-ack-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const rawInput = '帮我整理发布步骤';
+  const request = {
+    interactionId: 'interaction-reanswer-ack', inputRevision: 1, sourceRef: 'ui:reanswer-ack',
+    rawInput, clarifications: [], taskCandidates: [],
+  };
+  const proposal = (title: string) => ({
+    revision: 1, intent: 'create' as const, title, objective: title, deliverable: `${title}交付`,
+    deliveryConditions: [], evidenceRefs: [], blockingGaps: [],
+  });
+  const rewritten = JSON.stringify({
+    kind: 'requirement', normalizedInput: '重写后的发布请求', knownFacts: [], decisionRefs: ['decision:rewritten'],
+    proposal: proposal('重写标题'),
+  });
+  const invented = JSON.stringify({
+    kind: 'requirement', normalizedInput: '继续完成上轮提出的交付', knownFacts: [], decisionRefs: ['decision:invented'],
+    proposal: proposal('上轮标题'),
+  });
+  const replacement = JSON.stringify({
+    kind: 'requirement', normalizedInput: rawInput, knownFacts: ['README exists'], decisionRefs: ['decision:replacement'],
+    proposal: proposal('整理发布步骤'),
+  });
+  let generations = 0;
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => {
+    generations += 1;
+    if (generations === 1) {
+      return [
+        { type: 'response.output_text.done', item_id: 'item-rewritten', text: rewritten },
+        { type: 'response.output_text.done', item_id: 'item-invented', text: invented },
+      ];
+    }
+    return [{ type: 'response.output_text.done', item_id: 'final', text: replacement }];
+  } });
+  // A real physical close happens, but the durable acknowledgement of that
+  // close (recordProviderClose) is lost: the close fact is written durably, but
+  // the caller sees an error. This cleanup failure must not block the one
+  // replacement generation the accepted contract allows.
+  let ackLost = false;
+  const flakyParentJournal: JsonlInteractionParentTurnJournal = new Proxy(deps.parentJournal, {
+    get(target, prop) {
+      if (prop === 'transactTurn') {
+        return async (
+          turn: Parameters<typeof target.transactTurn>[0],
+          plan: Parameters<typeof target.transactTurn>[1],
+        ) => {
+          const before = await target.readTurnSnapshot(turn);
+          const result = await target.transactTurn(turn, plan);
+          // Detect the resource-close transition: close was durable, ack lost.
+          if (!ackLost && before.resourceClose === null) {
+            const after = await target.readTurnSnapshot(turn);
+            if (after.resourceClose !== null) {
+              ackLost = true;
+              throw new Error('journal ack lost after real close');
+            }
+          }
+          return result;
+        };
+      }
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: flakyParentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
+  });
+
+  const result = await interpreter.interpret(request);
+  assert.equal(result.kind, 'requirement');
+  if (result.kind !== 'requirement') throw new Error('expected a requirement');
+  assert.deepEqual(result.decisionRefs, ['decision:replacement'],
+    'the returned interpretation comes from the replacement generation');
+  assert.equal(generations, 2, 'one rejected batch plus one replacement generation');
+
+  // The close receipt is durable even though its acknowledgement was lost; the
+  // parse-failure closes the rejected turn.
+  const opened = await deps.parentJournal.readScopeOpenedTurns(scope);
+  assert.equal(opened.length, 2, 'the rejected batch and the replacement each open a physical turn');
+  const failures = await deps.parentJournal.readScopeParseFailures(scope);
+  assert.equal(failures.length, 1, 'the rejected batch is closed by exactly one parse-failure fact');
+  const closed = await deps.parentJournal.readTurnSnapshot(failures[0]!.fact.turn);
+  assert.equal(closed.resourceClose?.fact.result.state, 'closed',
+    'the real close receipt is durable despite the lost acknowledgement');
+  assert.equal(closed.parseFailure?.fact.terminalRequestId,
+    closed.requests.at(-1)!.fact.request.requestId,
+    'the parse failure references the committed terminal request');
+});
+
 // Failure basis: a borrowed provider (no prepareAgentProvider) rejects a fresh
 // two-decision batch, but there is no owned composition and therefore no real
 // close receipt. The accepted re-answer contract ties eligibility to an owned
