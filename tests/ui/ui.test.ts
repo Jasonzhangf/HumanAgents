@@ -2022,21 +2022,25 @@ class FakeNode {
   readonly dataset: Record<string, string> = {};
   readonly classList = new FakeClassList();
   readonly children: FakeNode[] = [];
+  parentNode: FakeNode | null = null;
   private readonly attributes = new Map<string, string>();
 
   constructor(readonly tagName: string) {}
 
   get firstChild(): FakeNode | undefined { return this.children[0]; }
-  append(...nodes: FakeNode[]): void { this.children.push(...nodes); }
+  append(...nodes: FakeNode[]): void {
+    for (const node of nodes) { node.parentNode = this; this.children.push(node); }
+  }
   replaceChildren(...nodes: FakeNode[]): void {
+    for (const child of this.children) child.parentNode = null;
     this.children.length = 0;
-    this.children.push(...nodes);
+    this.append(...nodes);
   }
   removeChild(node: FakeNode): void {
     const index = this.children.indexOf(node);
-    if (index >= 0) this.children.splice(index, 1);
+    if (index >= 0) { this.children.splice(index, 1); node.parentNode = null; }
   }
-  remove(): void {}
+  remove(): void { this.parentNode?.removeChild(this); }
   focus(): void {}
   setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
   getAttribute(name: string): string | undefined { return this.attributes.get(name); }
@@ -2334,19 +2338,16 @@ test('entry page attaches the receipt occurrence time to the user turn', async (
  * the entry.js card event dropped the receipt time, so the projection produced a
  * turn with occurredAt undefined and the card printed 「时间未提供」. The test
  * feeds the captured detail through the same projection the page uses and renders
- * the card with the FakeNode DOM double.
- */
-/*
- * End to end from the page's own card events: the entries executeSubmission
- * appended are projected and rendered by the real work card. Failure mode: the
- * raw-input event dropped the receipt occurredAt, so the projected user turn had
- * no time and the card printed 「时间未提供」. The second half keeps the explicit
+ * the card with the FakeNode DOM double. The second half keeps the explicit
  * missing semantics correct: a turn without a time still reports 「时间未提供」.
  */
 test('entry work card shows the receipt time instead of 「时间未提供」', async () => {
   const { mountInteractionWorkCard } = await import(new URL(
     `file://${join(process.cwd(), 'docs/ui/interaction-work-card.js')}`,
   ).href) as InteractionWorkCardAdapter;
+  const { formatTime } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/runtime-api.js')}`,
+  ).href) as { formatTime: (value: string) => string };
 
   const source = await readFile('docs/ui/entry.js', 'utf8');
   const receipt = { interactionId: 'interaction-receipt', occurredAt: '2026-10-27T07:28:58.639Z' };
@@ -2379,7 +2380,11 @@ test('entry work card shows the receipt time instead of 「时间未提供」', 
     mountInteractionWorkCard(withTimeHost).update(
       interactionCardPage.projectInteractionCardFromEntries(entries, 'awaiting-confirmation'),
     );
-    assert.equal(fakeText(withTimeHost).includes('时间未提供'), false, 'a user turn with a real time must not render 「时间未提供」');
+    // The user turn is the first conversation turn; its time must be the real
+    // receipt time, never the 「时间未提供」 fallback.
+    const userTime = withTimeHost.querySelector('.iwc-time')?.textContent;
+    assert.equal(userTime, formatTime('2026-10-27T07:28:58.639Z'), 'the user turn must render the real receipt time');
+    assert.ok(userTime !== '时间未提供', 'the user turn must not fall back to 「时间未提供」');
     assert.ok(withTimeHost.querySelector('.iwc-time') !== null, 'the card must render a time element for the user turn');
 
     // The fallback must stay correct when the runtime genuinely reported no time.
