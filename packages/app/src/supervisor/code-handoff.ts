@@ -296,8 +296,10 @@ export function startDaemonCodeHandoff(
         timeoutMs,
       });
       const source = replacement.startup?.source;
+      const restart = replacement.restart;
       if (
-        replacement.restart?.requestId !== requestId
+        restart === undefined
+        || restart.requestId !== requestId
         || source === undefined
         || source.entryPath !== input.startup.source.entryPath
       ) {
@@ -313,7 +315,7 @@ export function startDaemonCodeHandoff(
       return {
         requestId,
         acceptedAt,
-        completedAt: replacement.restart.completedAt!,
+        completedAt: restart.completedAt!,
         previous: {
           leaseId: current.leaseId,
           generation: current.generation,
