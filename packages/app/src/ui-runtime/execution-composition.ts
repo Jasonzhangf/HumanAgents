@@ -210,6 +210,91 @@ export interface StandardTurnBoundaryLifecycle {
   finishBoundary(): Promise<void>;
 }
 
+/**
+ * The model-owned delivery reference strings and the real evidence candidates a
+ * standard-turn end may resolve them against. The admission evidence and every
+ * accepted tool-result evidence are the candidates; a succeeded tool result is
+ * additionally the producer/carrier of the material its own raw output cites.
+ */
+export interface StandardTurnDeliveryMatchInput {
+  readonly deliveryRefs: readonly string[];
+  readonly candidates: readonly EvidenceRef[];
+  readonly producingTool: ReadonlyMap<string, { readonly toolId: string; readonly conflict: boolean }>;
+  readonly carryingTool: ReadonlyMap<string, string>;
+  readonly allocationScope: ScopeRef;
+  readonly requireDeliveryMaterial?: boolean;
+}
+
+/**
+ * Normalize one model-owned delivery reference to the bare key it must match.
+ * The evidence footer advertises its evidence as `evidenceId=<value>` and its
+ * locator as `locator=<locator>`, and the instruction is to cite an exact value
+ * from that footer. A model therefore cites the labelled token verbatim, which
+ * carries the literal `evidenceId=` / `locator=` label. The resolver keys on the
+ * bare evidenceId value and locator, so the label is not part of the reference
+ * and is stripped here. A bare value or an unknown string is unchanged, so a
+ * truly foreign reference still fails closed.
+ */
+function normalizeDeliveryReference(reference: string): string {
+  if (reference.startsWith('evidenceId=')) return reference.slice('evidenceId='.length);
+  if (reference.startsWith('locator=')) return reference.slice('locator='.length);
+  return reference;
+}
+
+/**
+ * Resolve the model's delivery reference strings against the real accepted
+ * evidence. A reference counts only when it resolves to evidence scoped to this
+ * admitted turn; a foreign or missing reference rejects. When the material is
+ * required, a reference must name a succeeded tool result that can carry
+ * delivery material (a committed file write or an inspection result).
+ */
+export function matchStandardTurnDeliveryReferences(input: StandardTurnDeliveryMatchInput): EvidenceRef[] {
+  const byReference = new Map<string, EvidenceRef>();
+  for (const ref of input.candidates) {
+    byReference.set(ref.evidenceId.value, ref);
+    byReference.set(ref.locator, ref);
+  }
+  const resolved: EvidenceRef[] = [];
+  for (const reference of input.deliveryRefs) {
+    const key = normalizeDeliveryReference(reference);
+    const match = byReference.get(key);
+    if (!match || match.scope.taskId?.value !== input.allocationScope.taskId?.value) {
+      throw new StandardTurnEndError(
+        'standard-turn-end.delivery-unresolved',
+        `delivery reference ${reference} does not resolve to evidence scoped to this admitted turn`,
+      );
+    }
+    // The top-level delivery material must be evidence the settlement readback
+    // can actually commit: a succeeded tool result that carries a completion (a
+    // committed file write or an inspection result). Turn-admission evidence, a
+    // failed call, and every apply-kind result other than a committed file write
+    // have no completion, so citing one would only fail later at settlement with
+    // no recovery. Refuse it here, where the model can still retry with a
+    // text-only delivery.
+    if (input.requireDeliveryMaterial === true) {
+      const producer = input.producingTool.get(key);
+      if (producer?.conflict === true) {
+        throw new StandardTurnEndError(
+          'standard-turn-end.delivery-unresolved',
+          `delivery reference ${reference} resolves to conflicting producing tool results`,
+        );
+      }
+      const toolId = producer?.toolId ?? input.carryingTool.get(key);
+      if (!canCiteDeliveryMaterial(toolId)) {
+        throw new StandardTurnEndError(
+          'standard-turn-end.delivery-unresolved',
+          `delivery reference ${reference} ${toolId === undefined
+            ? 'does not resolve to a succeeded tool result'
+            : `resolves to a ${toolId} result`} that cannot carry delivery material; `
+          + 'deliveryRefs may cite only a committed file write or an inspection result',
+        );
+      }
+    }
+    resolved.push(match);
+  }
+  return resolved;
+}
+
 /** Shared physical owner assembly. Provider selection occurs only after the durable A2 release edge. */
 export function createDefaultExecutionComposition(input: {
   readonly principalOwner: string;
@@ -872,49 +957,14 @@ export function createDefaultExecutionComposition(input: {
               }
             }
           }
-          const byReference = new Map<string, EvidenceRef>();
-          for (const ref of candidates) {
-            byReference.set(ref.evidenceId.value, ref);
-            byReference.set(ref.locator, ref);
-          }
-          const resolved: EvidenceRef[] = [];
-          for (const reference of deliveryRefs) {
-            const match = byReference.get(reference);
-            if (!match || match.scope.taskId?.value !== allocation.scope.taskId?.value) {
-              throw new StandardTurnEndError(
-                'standard-turn-end.delivery-unresolved',
-                `delivery reference ${reference} does not resolve to evidence scoped to this admitted turn`,
-              );
-            }
-            // The top-level delivery material must be evidence the settlement
-            // readback can actually commit: a succeeded tool result that carries
-            // a completion (a committed file write or an inspection result).
-            // Turn-admission evidence, a failed call, and every apply-kind result
-            // other than a committed file write have no completion, so citing one
-            // would only fail later at settlement with no recovery. Refuse it
-            // here, where the model can still retry with a text-only delivery.
-            if (requireDeliveryMaterial === true) {
-              const producer = producingTool.get(reference);
-              if (producer?.conflict === true) {
-                throw new StandardTurnEndError(
-                  'standard-turn-end.delivery-unresolved',
-                  `delivery reference ${reference} resolves to conflicting producing tool results`,
-                );
-              }
-              const toolId = producer?.toolId ?? carryingTool.get(reference);
-              if (!canCiteDeliveryMaterial(toolId)) {
-                throw new StandardTurnEndError(
-                  'standard-turn-end.delivery-unresolved',
-                  `delivery reference ${reference} ${toolId === undefined
-                    ? 'does not resolve to a succeeded tool result'
-                    : `resolves to a ${toolId} result`} that cannot carry delivery material; `
-                  + 'deliveryRefs may cite only a committed file write or an inspection result',
-                );
-              }
-            }
-            resolved.push(match);
-          }
-          return resolved;
+          return matchStandardTurnDeliveryReferences({
+            deliveryRefs,
+            candidates,
+            producingTool,
+            carryingTool,
+            allocationScope: allocation.scope,
+            ...(requireDeliveryMaterial === undefined ? {} : { requireDeliveryMaterial }),
+          });
         },
       };
       const endExecutor = createStandardTurnEndWireExecutor(endOwner, createStandardTurnEndExecutor({
