@@ -555,3 +555,11 @@ main a474cf109 上 `pnpm build:runtime` 的 ui-runtime tsc 步骤出现类型回
 - 调度：D1（当前 main 真实入口 E2E）原邀 Bob，超一巡检周期未接单，已 withdraw 并改派 Carol（invited，`dsh-wake-enqueued`，revision 6）；Bob 转为空闲待派。Alice 仍在 D6（`9d2dc60-journal-snapshot-20261031`，working）。
 - 现态：goal `active=true`/`observed=subscribed`/trigger_ms 1793459354246；project patrol armed（900000ms，目标 1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未对齐不声称）；worktree 6 个（main + 4 locked provider + Alice 9d2dc60 树），未超 10；生产 10086 PID 13505 只读未动。
 - 仍未交付：当前 main 真实入口 E2E（D1）未出 receipt，故 Q「前端输入→任务正式完成」尚不能宣称已在当前 main 成立；`pnpm build:release` 全量门禁仍红（`test:compiled:services` 14 项 + adapter 缺 `@types/node`），不可声称全量 release 已绿。
+
+## 2026-10-31 D1/D4 验收与 typed new-task preview 重派
+
+- D1 `real-entry-e2e-main-rerun-20261031` 已由 master 验收并关闭。候选 `dea61873e` 在隔离 control root、真实 RCC 4444 上完成首页输入→草稿确认→web-search 执行→任务结果；receipt `Result=SUCCESS`，无 deviation/missingEvidence。终态 terminal seq868 `succeeded`、checkpoint seq865 committed、planner seq867 aligned，2 个 provider tool round、40 evidence refs、4 张截图；隔离 serve 与 attempt root 已收口。生产 `10086` 与 `~/.humanagent` 未写。
+- D4 issue `7cecfc8` 已关闭。current-main web-search terminal `succeeded` 且有 committed checkpoint，无 read-byte mismatch；该证据不代替 official explicit/implicit E2E。
+- D3 `21b1c11` 与 D5 `e3b8584` 仍 open。official `real-explicit-implicit-e2e.mjs` 的最终 receipt 为 `state=UNVERIFIED`，`behavior=PASS` 不足以关闭；失败为 `missing or inconsistent public typed new-task preview awaiting-confirmation/create`。已发布并邀请 Carol 的 P1 task `typed-new-task-preview-20261031`，revision 3，status `invited`，reviewer Jenny。合同要求从最新 origin/main 在 `/Volumes/Intel/playground/humanagent/typed-new-task-preview-20261031` 建 clean worktree，补 typed preview，重跑到 receipt `SUCCESS`，并交 terminal/checkpoint/publicOutput、focused tests 与资源回收证据。
+- D7 `0d6fcc7-restart-ready-20261031` 保留 Bob 的 invited 邀请，revision 4，未在等待期内静默改派。D6 `9d2dc60-journal-snapshot-20261031` 仍由 Alice working；master 只接受 append-only 恢复语义、focused tests 与 cold parse/RSS before/after 证据，不接受只改代码。
+- 本轮 goal deadline 已被消费；按持续巡检要求重新订阅并核对 `active=true`、`observed=subscribed`。project patrol 保持 armed，但运行间隔 900000ms、目标 1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 仍存在。worktree 维持 6 个（main + Alice D6 + 4 个 locked provider `PROTECTED_HOLD`），低于 10；生产 10086 PID 13505 继续只读保护。
