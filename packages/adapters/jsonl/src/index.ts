@@ -27,6 +27,9 @@ import type {
   ReadEventInput,
   ReadEventsInput,
 } from '../../../runtime/src/events/ports.js';
+import { JournalIntegrityError } from './errors.js';
+
+export { JournalIntegrityError } from './errors.js';
 
 export type JournalRecordKind = 'checkpoint' | 'event';
 
@@ -66,10 +69,6 @@ export interface JournalVerification {
   readonly records: readonly JournalRecord[];
   readonly error?: string;
   readonly trailingLine?: string;
-}
-
-export class JournalIntegrityError extends Error {
-  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = 'JournalIntegrityError'; }
 }
 
 export class JournalCommitConflictError extends JournalIntegrityError {
@@ -715,3 +714,19 @@ export { JsonlTaskIdentityJournal } from './task-identities.js';
 export type { TaskIdentityAppendInput } from './task-identities.js';
 export { JsonlOperationCompletionJournal } from './operation-completion.js';
 export { JsonlInteractionParentTurnJournal } from './interaction-parent-turn-journal.js';
+export {
+  EXPLICIT_BRAIN_CHECKPOINT_INTERVAL,
+  EXPLICIT_BRAIN_DELTA_ENCODING,
+  EXPLICIT_BRAIN_MAX_DELTA_BYTES,
+  applyExplicitBrainStateRecord,
+  encodeExplicitBrainStateRecord,
+  readLatestExplicitBrainStateFromFile,
+  scanJournalLinesBackwards,
+} from './explicit-brain-state-journal.js';
+export type {
+  DecodedExplicitBrainStateRecord,
+  EncodedExplicitBrainStateRecord,
+  ExplicitBrainStateBaseline,
+  ExplicitBrainStateCodecOptions,
+  ExplicitBrainStateTailRead,
+} from './explicit-brain-state-journal.js';

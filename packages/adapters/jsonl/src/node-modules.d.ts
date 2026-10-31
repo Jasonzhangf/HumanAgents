@@ -8,6 +8,14 @@ declare module 'node:path' {
   export function dirname(path: string): string;
 }
 
+declare module 'node:fs' {
+  export function closeSync(fd: number): void;
+  export function existsSync(path: string): boolean;
+  export function openSync(path: string, flags: string): number;
+  export function readSync(fd: number, buffer: Uint8Array, offset: number, length: number, position?: number): number;
+  export function statSync(path: string): { readonly size: number };
+}
+
 declare module 'node:process' {
   export const pid: number;
   export function kill(processId: number, signal: 0): void;

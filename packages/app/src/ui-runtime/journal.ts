@@ -50,6 +50,11 @@ import type {
 import {
   JournalIntegrityError,
   JsonlOrganJournal,
+  applyExplicitBrainStateRecord,
+  encodeExplicitBrainStateRecord,
+  readLatestExplicitBrainStateFromFile,
+  scanJournalLinesBackwards,
+  type ExplicitBrainStateBaseline,
   type JournalRecord,
 } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
@@ -178,6 +183,12 @@ interface JournalValidationContext {
   readonly operationIdentities: Map<string, ToolExecutionFactOuterIdentity>;
   readonly eventIdentities: Map<string, UiRuntimeJournalRecord>;
 }
+
+const OPERATION_VALIDATION_TOKENS = [
+  '"operation.prepared"',
+  '"operation.started"',
+  '"operation.event"',
+] as const;
 
 function createJournalValidationContext(): JournalValidationContext {
   return {
@@ -595,27 +606,74 @@ function validateJournalRecord(
 function readJournalRecords(
   filePath: string,
   context: JournalValidationContext,
-): { readonly records: readonly UiRuntimeJournalRecord[]; readonly nextLine: number } {
-  if (!existsSync(filePath)) return { records: [], nextLine: 1 };
+): {
+  readonly records: readonly UiRuntimeJournalRecord[];
+  readonly nextLine: number;
+  readonly context: JournalValidationContext;
+  readonly explicitBrainBaseline?: ExplicitBrainStateBaseline;
+} {
+  if (!existsSync(filePath)) return { records: [], nextLine: 1, context };
   const records: UiRuntimeJournalRecord[] = [];
   let nextLine = 1;
-  const lines = readFileSync(filePath, 'utf8').split('\n');
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!;
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    nextLine = index + 2;
-    try {
-      const validated = validateJournalRecord(JSON.parse(trimmed), filePath, index + 1, context);
-      if (!validated.duplicate) records.push(validated.record);
-    } catch (error) {
-      if (error instanceof SyntaxError) {
-        throw new Error(`corrupt UI runtime journal ${filePath}:${index + 1}: invalid JSON`);
+  let explicitBrainBaseline: ExplicitBrainStateBaseline | undefined;
+  const fd = openSync(filePath, 'r');
+  try {
+    const decoder = new TextDecoder();
+    const chunk = new Uint8Array(64 * 1024);
+    let leftover = '';
+    let position = 0;
+    let lineNumber = 0;
+    const consume = (line: string): void => {
+      lineNumber += 1;
+      nextLine = lineNumber + 1;
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch (error) {
+        throw new Error(`corrupt UI runtime journal ${filePath}:${lineNumber}: invalid JSON`);
       }
-      throw error;
+      const validated = validateJournalRecord(parsed, filePath, lineNumber, context);
+      if (validated.duplicate) return;
+      let record = validated.record;
+      if (record.kind === 'explicit-brain.state') {
+        try {
+          const decoded = applyExplicitBrainStateRecord(
+            parsed as unknown as Parameters<typeof applyExplicitBrainStateRecord>[0],
+            explicitBrainBaseline,
+          );
+          explicitBrainBaseline = decoded.baseline;
+          record = decoded.record as unknown as UiRuntimeJournalRecord;
+        } catch (error) {
+          throw new Error(
+            `corrupt UI runtime journal ${filePath}:${lineNumber}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      records.push(record);
+    };
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const read = readSync(fd, chunk, 0, chunk.length, position);
+      if (read <= 0) break;
+      position += read;
+      const text = decoder.decode(chunk.subarray(0, read), { stream: true });
+      const combined = leftover + text;
+      const lines = combined.split('\n');
+      leftover = lines.pop() ?? '';
+      for (const line of lines) consume(line);
     }
+    if (leftover.trim()) consume(leftover);
+    return {
+      records,
+      nextLine,
+      context,
+      ...(explicitBrainBaseline === undefined ? {} : { explicitBrainBaseline }),
+    };
+  } finally {
+    closeSync(fd);
   }
-  return { records, nextLine };
 }
 
 function sameStatIdentity(
@@ -638,9 +696,10 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
   // cache and forces a full read/validate.
   private cached?: {
     readonly identity: ReturnType<UiRuntimeJournal['statIdentity']>;
-    readonly records: readonly UiRuntimeJournalRecord[];
+    readonly records: readonly UiRuntimeJournalRecord[] | null;
     readonly context: JournalValidationContext;
     readonly nextLine: number;
+    readonly explicitBrainBaseline?: ExplicitBrainStateBaseline;
   };
 
   private statIdentity(): { readonly dev: number; readonly ino: number; readonly size: number; readonly mtimeMs: number } | undefined {
@@ -656,10 +715,10 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
     readonly records: readonly UiRuntimeJournalRecord[];
     readonly context: JournalValidationContext;
     readonly nextLine: number;
+    readonly explicitBrainBaseline?: ExplicitBrainStateBaseline;
   } {
     const context = createJournalValidationContext();
-    const { records, nextLine } = readJournalRecords(this.filePath, context);
-    return { records, context, nextLine };
+    return readJournalRecords(this.filePath, context);
   }
 
   /**
@@ -695,6 +754,8 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
           lineNumber += 1;
           const trimmed = line.trim();
           if (!trimmed) continue;
+          if (trimmed.includes('"explicit-brain.state"')) continue;
+          if (!OPERATION_VALIDATION_TOKENS.some((token) => trimmed.includes(token))) continue;
           try {
             const record = JSON.parse(trimmed) as UiRuntimeJournalRecord;
             collectValidationContext(context, record);
@@ -705,14 +766,20 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
       }
       if (leftover.trim()) {
         lineNumber += 1;
-        try {
-          const record = JSON.parse(leftover.trim()) as UiRuntimeJournalRecord;
-          collectValidationContext(context, record);
-        } catch {
-          // ignore
+        const trimmed = leftover.trim();
+        if (!trimmed.includes('"explicit-brain.state"') && OPERATION_VALIDATION_TOKENS.some((token) => trimmed.includes(token))) {
+          try {
+            const record = JSON.parse(trimmed) as UiRuntimeJournalRecord;
+            collectValidationContext(context, record);
+          } catch {
+            // ignore final fragment
+          }
         }
       }
-      return { context, nextLine: lineNumber + 1 };
+      return {
+        context,
+        nextLine: lineNumber + 1,
+      };
     } finally {
       closeSync(fd);
     }
@@ -726,12 +793,19 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
       const validated = validateJournalRecord(record, this.filePath, nextLine, cached.context);
       if (validated.duplicate) return;
       mkdirSync(dirname(this.filePath), { recursive: true });
-      appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, 'utf8');
+      const encoded = record.kind === 'explicit-brain.state'
+        ? encodeExplicitBrainStateRecord({
+          state: record.state,
+          baseline: cached.explicitBrainBaseline ?? readLatestExplicitBrainStateFromFile(this.filePath),
+        })
+        : undefined;
+      appendFileSync(this.filePath, `${encoded?.line ?? JSON.stringify(record)}\n`, 'utf8');
       this.cached = {
         identity: this.statIdentity(),
-        records: [...cached.records, validated.record],
+        records: cached.records === null ? null : [...cached.records, validated.record],
         context: cached.context,
         nextLine: nextLine + 1,
+        explicitBrainBaseline: encoded?.baseline ?? cached.explicitBrainBaseline,
       };
       return;
     }
@@ -739,18 +813,30 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
     const validated = validateJournalRecord(record, this.filePath, nextLine, context);
     if (validated.duplicate) return;
     mkdirSync(dirname(this.filePath), { recursive: true });
-    appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, 'utf8');
-    this.cached = { identity: this.statIdentity(), records: [], context, nextLine: nextLine + 1 };
+    const encoded = record.kind === 'explicit-brain.state'
+      ? encodeExplicitBrainStateRecord({
+        state: record.state,
+        baseline: readLatestExplicitBrainStateFromFile(this.filePath),
+      })
+      : undefined;
+    appendFileSync(this.filePath, `${encoded?.line ?? JSON.stringify(record)}\n`, 'utf8');
+    this.cached = {
+      identity: this.statIdentity(),
+      records: null,
+      context,
+      nextLine: nextLine + 1,
+      explicitBrainBaseline: encoded?.baseline,
+    };
   }
 
   replay(): readonly UiRuntimeJournalRecord[] {
     const identity = this.statIdentity();
     const cached = this.cached;
-    if (cached !== undefined && sameStatIdentity(cached.identity, identity)) {
+    if (cached !== undefined && sameStatIdentity(cached.identity, identity) && cached.records !== null) {
       return cached.records.map((record) => structuredClone(record));
     }
-    const { records, context, nextLine } = this.readRecords();
-    this.cached = { identity, records, context, nextLine };
+    const { records, context, nextLine, explicitBrainBaseline } = this.readRecords();
+    this.cached = { identity, records, context, nextLine, explicitBrainBaseline };
     return records.map((record) => structuredClone(record));
   }
 
@@ -766,46 +852,37 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
     predicate: (record: UiRuntimeJournalRecord) => unknown,
   ): Promise<UiRuntimeJournalRecord | undefined> {
     if (!existsSync(this.filePath)) return undefined;
-    const fd = openSync(this.filePath, 'r');
-    try {
-      const decoder = new TextDecoder();
-      const chunk = new Uint8Array(64 * 1024);
-      let leftover = '';
-      let last: UiRuntimeJournalRecord | undefined;
-      let position = 0;
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const read = readSync(fd, chunk, 0, chunk.length, position);
-        if (read <= 0) break;
-        position += read;
-        const text = decoder.decode(chunk.subarray(0, read), { stream: true });
-        const combined = leftover + text;
-        const lines = combined.split('\n');
-        leftover = lines.pop() ?? '';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            const record = JSON.parse(trimmed) as UiRuntimeJournalRecord;
-            if (predicate(record)) last = record;
-          } catch {
-            // Skip malformed lines; the committed journal is append-only.
-          }
-        }
+    let last: UiRuntimeJournalRecord | undefined;
+    let explicitStateSeen = false;
+    scanJournalLinesBackwards(this.filePath, (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return true;
+      let record: UiRuntimeJournalRecord;
+      try {
+        record = JSON.parse(trimmed) as UiRuntimeJournalRecord;
+      } catch {
+        return true;
       }
-      // Final leftover fragment (no trailing newline).
-      if (leftover.trim()) {
-        try {
-          const record = JSON.parse(leftover.trim()) as UiRuntimeJournalRecord;
-          if (predicate(record)) last = record;
-        } catch {
-          // ignore
+      if (record.kind !== 'explicit-brain.state') {
+        if (predicate(record)) {
+          last = record;
+          return false;
         }
+        return true;
       }
-      return last;
-    } finally {
-      closeSync(fd);
-    }
+      if (explicitStateSeen) return true;
+      explicitStateSeen = true;
+      const latest = readLatestExplicitBrainStateFromFile(this.filePath);
+      if (latest === undefined) return true;
+      const restored = {
+        kind: 'explicit-brain.state' as const,
+        state: latest.state as UiRuntimeJournalRecord extends { readonly state: infer S } ? S : never,
+      };
+      if (!predicate(restored)) return true;
+      last = restored;
+      return false;
+    });
+    return last;
   }
 
   async commit(input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }> {

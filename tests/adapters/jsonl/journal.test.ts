@@ -12,6 +12,9 @@ import {
   JsonlTaskIdentityJournal,
   JournalCommitConflictError,
   JournalIntegrityError,
+  applyExplicitBrainStateRecord,
+  encodeExplicitBrainStateRecord,
+  readLatestExplicitBrainStateFromFile,
 } from '../../../packages/adapters/jsonl/src/index.js';
 import {
   id,
@@ -1372,4 +1375,203 @@ test('interaction parent Journal rejects dishonest or misplaced abandonment reco
   await assert.rejects(() => beforeInputJournal.readTurnSnapshot(turn),
     (error: unknown) => error instanceof JournalIntegrityError
       && /requires the committed turn input before it/.test((error as Error).message));
+});
+
+function explicitBrainFixtureState(step: number): {
+  readonly intake: {
+    readonly nextInteractionSeq: number;
+    readonly nextDraftSeq: number;
+    readonly nextRequestNumber: number;
+    readonly interactions: readonly Record<string, unknown>[];
+  };
+  readonly inbox: {
+    readonly nextFifoSeq: number;
+    readonly pendingDraftIds: readonly string[];
+    readonly envelopes: readonly Record<string, unknown>[];
+    readonly terminalOutcomes: readonly Record<string, unknown>[];
+  };
+  readonly confirmationLedger: {
+    readonly drafts: readonly Record<string, unknown>[];
+    readonly confirmations: readonly Record<string, unknown>[];
+    readonly revisions: readonly Record<string, unknown>[];
+    readonly revisionConfirmations: readonly Record<string, unknown>[];
+    readonly closedDraftIds: readonly string[];
+    readonly finalSubmitBindings: readonly Record<string, unknown>[];
+  };
+  readonly dispatchLedger: readonly Record<string, unknown>[];
+  readonly requirementAdmissions: readonly Record<string, unknown>[];
+  readonly submittedSubmissions: readonly Record<string, unknown>[];
+  readonly finalSubmissions: readonly Record<string, unknown>[];
+  readonly decisionTraces: readonly Record<string, unknown>[];
+  readonly taskInputRevisions: readonly Record<string, unknown>[];
+  readonly stablePayload: string;
+} {
+  const count = step + 1;
+  const taskId = (value: string) => ({ scope: 'task', value });
+  const operationId = (value: string) => ({ scope: 'operation', value });
+  const draftId = (value: string) => `draft-${value}`;
+  const interactionId = (value: string) => `interaction-${value}`;
+  const envelope = (value: string) => ({
+    requirementId: `requirement-${value}`,
+    draftId: draftId(value),
+    inputRevision: 1,
+    intent: 'append',
+    taskRef: taskId(`task-${value}`),
+    normalizedInput: `input-${value}`,
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-31T00:00:00.000Z',
+    fifoSeq: count,
+    payloadRef: `asset://requirements/${value}`,
+  });
+  return {
+    intake: {
+      nextInteractionSeq: count,
+      nextDraftSeq: count,
+      nextRequestNumber: count,
+      interactions: [{
+        interactionId: interactionId('0'),
+        requestNumber: count,
+        inputRevision: 1,
+        sourceRef: 'ui:0',
+        rawInput: 'input-0',
+        state: 'received',
+        owner: 'explicit-intake',
+        nextAction: 'match',
+        steps: [],
+        history: [],
+      }],
+    },
+    inbox: {
+      nextFifoSeq: count,
+      pendingDraftIds: [draftId('0')],
+      envelopes: [envelope('0')],
+      terminalOutcomes: [{
+        requirementId: 'requirement-0',
+        draftId: draftId('0'),
+        fifoSeq: count,
+        outcome: 'retired',
+        code: 'test',
+        message: 'retired 0',
+        retiredAt: '2026-10-31T00:00:00.000Z',
+      }],
+    },
+    confirmationLedger: {
+      drafts: [{ draftId: draftId('0'), inputRevision: count }],
+      confirmations: [{ draftId: draftId('0'), confirmationRef: `confirmation-${step}` }],
+      revisions: [{ draftId: draftId('0'), revisionVersion: count }],
+      revisionConfirmations: [{ draftId: draftId('0'), confirmationRef: `revision-${step}` }],
+      closedDraftIds: [draftId('0')],
+      finalSubmitBindings: [{ idempotencyKey: 'binding-0', revisionKey: 'revision-0', requestDigest: `digest-${step}`, requestIdentity: 'identity-0' }],
+    },
+    dispatchLedger: [{
+      draftId: draftId('0'),
+      taskId: taskId('task-0'),
+      operationId: operationId('operation-0'),
+      executionEpoch: count,
+    }],
+    requirementAdmissions: [{
+      taskId: taskId('task-0'),
+      queue: 'interactive',
+      receipt: {
+        classified: { queue: 'interactive' },
+        decision: { status: 'admitted', queue: 'interactive' },
+        step,
+      },
+    }],
+    submittedSubmissions: [{
+      status: 'submitted',
+      requirementId: 'requirement-0',
+      draftId: draftId('0'),
+      inputRevision: 1,
+      interactionId: interactionId('0'),
+      step,
+    }],
+    finalSubmissions: [{
+      idempotencyKey: 'final-0',
+      revisionKey: 'revision-0',
+      requestDigest: `digest-${step}`,
+      requestIdentity: 'identity-0',
+      requirement: { requirementId: 'requirement-0', draftId: draftId('0'), inputRevision: 1 },
+    }],
+    decisionTraces: [{ decisionRef: 'decision-0' }],
+    taskInputRevisions: [{
+      taskId: taskId('task-0'),
+      state: { revisions: [] },
+      consumedInputRevision: count,
+    }],
+    stablePayload: 'x'.repeat(8192),
+  };
+}
+
+const explicitBrainByteLength = (value: string): number => new TextEncoder().encode(value).byteLength;
+
+test('bounded explicit-brain checkpoint and delta lines restore the latest complete state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-bounded-'));
+  const file = join(root, 'explicit-brain.jsonl');
+  const lines: string[] = [];
+  let baseline: ReturnType<typeof encodeExplicitBrainStateRecord>['baseline'] | undefined;
+  let latest: ReturnType<typeof explicitBrainFixtureState> | undefined;
+  let fullBytes = 0;
+  try {
+    for (let step = 0; step < 75; step += 1) {
+      const state = explicitBrainFixtureState(step);
+      latest = state;
+      const encoded = encodeExplicitBrainStateRecord({ state, baseline });
+      baseline = encoded.baseline;
+      lines.push(encoded.line);
+      fullBytes += explicitBrainByteLength(JSON.stringify({ kind: 'explicit-brain.state', state })) + 1;
+    }
+    await writeFile(file, `${lines.join('\n')}\n`, 'utf8');
+    const raw = await readFile(file, 'utf8');
+    const records = raw.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.ok(records.some((record) => record.kind === 'explicit-brain.state' && record.checkpoint === true), 'checkpoint records must be present');
+    assert.ok(records.some((record) => record.encoding === 'delta-v1'), 'delta-v1 records must be present');
+    assert.ok(records.every((record) => record.kind === 'explicit-brain.state'), 'every written line stays an explicit-brain.state record');
+    assert.ok(explicitBrainByteLength(raw) < fullBytes / 2, `bounded journal must be much smaller than full snapshots (${explicitBrainByteLength(raw)} vs ${fullBytes})`);
+
+    const latestRead = readLatestExplicitBrainStateFromFile(file);
+    assert.ok(latestRead, 'tail reader must recover a baseline');
+    assert.deepEqual(latestRead.state, latest as unknown);
+    assert.equal(latestRead.stateSeq, 75);
+    assert.ok(latestRead.deltasSinceCheckpoint <= 32, `delta chain must stay bounded (${latestRead.deltasSinceCheckpoint})`);
+    assert.ok(latestRead.deltaBytesSinceCheckpoint > 0, 'the trailing chain must carry deltas');
+
+    let decoded: ReturnType<typeof applyExplicitBrainStateRecord>['baseline'] | undefined;
+    for (const record of records) {
+      decoded = applyExplicitBrainStateRecord(
+        record as Parameters<typeof applyExplicitBrainStateRecord>[0],
+        decoded,
+      ).baseline;
+    }
+    assert.deepEqual(decoded?.state, latest as unknown, 'forward folding must equal the in-memory source');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('explicit-brain delta recovery rejects missing and mismatched checkpoints', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-corrupt-'));
+  const missingFile = join(root, 'missing.jsonl');
+  const mismatchFile = join(root, 'mismatch.jsonl');
+  try {
+    const first = encodeExplicitBrainStateRecord({ state: explicitBrainFixtureState(0) });
+    const second = encodeExplicitBrainStateRecord({
+      state: explicitBrainFixtureState(1),
+      baseline: first.baseline,
+    });
+    await writeFile(missingFile, `${second.line}\n`, 'utf8');
+    assert.throws(
+      () => readLatestExplicitBrainStateFromFile(missingFile),
+      (error: unknown) => error instanceof JournalIntegrityError && /no preceding checkpoint/.test((error as Error).message),
+    );
+
+    const delta = JSON.parse(second.line) as Record<string, unknown>;
+    await writeFile(mismatchFile, `${first.line}\n${JSON.stringify({ ...delta, baseStateSeq: 999 })}\n`, 'utf8');
+    assert.throws(
+      () => readLatestExplicitBrainStateFromFile(mismatchFile),
+      (error: unknown) => error instanceof JournalIntegrityError && /baseStateSeq/.test((error as Error).message),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

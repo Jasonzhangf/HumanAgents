@@ -11776,3 +11776,99 @@ test('loopback classification accepts only the two local addresses', () => {
   assert.equal(isLoopbackAddress(''), false);
   assert.equal(isLoopbackAddress(undefined), false);
 });
+
+type UiExplicitBrainState = Extract<RuntimeTaskJournalRecord, { readonly kind: 'explicit-brain.state' }>['state'];
+
+function uiExplicitBrainState(step: number): UiExplicitBrainState {
+  const count = step + 1;
+  return {
+    intake: {
+      nextInteractionSeq: count,
+      nextDraftSeq: count,
+      interactions: Array.from({ length: count }, (_, index) => ({
+        interactionId: `interaction-${index}`,
+        inputRevision: 1,
+        sourceRef: `ui:${index}`,
+        rawInput: `input-${index}`,
+        state: 'received',
+        owner: 'explicit-intake',
+        nextAction: 'match',
+        steps: [],
+        history: [],
+      })),
+    },
+    inbox: {
+      nextFifoSeq: count,
+      pendingDraftIds: [],
+      envelopes: Array.from({ length: count }, (_, index) => ({
+        requirementId: `requirement-${index}`,
+        draftId: `draft-${index}`,
+        inputRevision: 1,
+        intent: 'append',
+        taskRef: `task-${index}`,
+        normalizedInput: `input-${index}`,
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-10-31T00:00:00.000Z',
+        fifoSeq: index + 1,
+        payloadRef: `asset://requirements/${index}`,
+      })),
+      terminalOutcomes: [],
+    },
+    confirmationLedger: {
+      drafts: [],
+      confirmations: [],
+      revisions: [],
+      revisionConfirmations: [],
+      closedDraftIds: [],
+      finalSubmitBindings: [],
+    },
+    dispatchLedger: [],
+    requirementAdmissions: [],
+    submittedSubmissions: [],
+    finalSubmissions: [],
+    decisionTraces: [],
+    taskInputRevisions: [],
+    stablePayload: 'x'.repeat(8192),
+  } as unknown as UiExplicitBrainState;
+}
+
+const uiExplicitBrainByteLength = (value: string): number => new TextEncoder().encode(value).byteLength;
+
+test('UiRuntimeJournal cold append keeps replay complete and restores bounded explicit-brain tails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-runtime-explicit-tail-'));
+  const file = join(root, 'ui-runtime-journal.jsonl');
+  let fullBytes = 0;
+  try {
+    const journal = new UiRuntimeJournal(file);
+    const firstState = uiExplicitBrainState(0);
+    journal.append({ kind: 'explicit-brain.state', state: firstState });
+    fullBytes += uiExplicitBrainByteLength(JSON.stringify({ kind: 'explicit-brain.state', state: firstState })) + 1;
+    const afterColdAppend = journal.replay();
+    assert.equal(afterColdAppend.length, 1, 'a cold append must be visible to the immediately following replay');
+    assert.deepEqual(afterColdAppend[0]?.kind === 'explicit-brain.state' ? afterColdAppend[0].state : undefined, firstState);
+
+    let latest = firstState;
+    for (let step = 1; step < 75; step += 1) {
+      latest = uiExplicitBrainState(step);
+      journal.append({ kind: 'explicit-brain.state', state: latest });
+      fullBytes += uiExplicitBrainByteLength(JSON.stringify({ kind: 'explicit-brain.state', state: latest })) + 1;
+    }
+
+    const raw = await readFile(file, 'utf8');
+    assert.ok(raw.includes('"encoding":"delta-v1"'), 'the on-disk journal must contain deltas');
+    assert.ok(uiExplicitBrainByteLength(raw) < fullBytes / 2, `bounded on-disk state must stay small (${uiExplicitBrainByteLength(raw)} vs ${fullBytes})`);
+
+    const cold = new UiRuntimeJournal(file);
+    const restored = await cold.findLastRecordMatching((record) => record.kind === 'explicit-brain.state');
+    assert.equal(restored?.kind, 'explicit-brain.state');
+    assert.deepEqual(restored?.kind === 'explicit-brain.state' ? restored.state : undefined, latest);
+
+    const replayed = cold.replay();
+    assert.equal(replayed.length, 75);
+    const last = replayed.at(-1);
+    assert.equal(last?.kind, 'explicit-brain.state');
+    assert.deepEqual(last?.kind === 'explicit-brain.state' ? last.state : undefined, latest);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
