@@ -424,6 +424,21 @@ function sameOperationScope(left, right) {
 }
 
 /**
+ * True when `left` starts after `right`: higher executionEpoch first, then a
+ * later `startedAt` string, then stable false so the earlier array position is
+ * kept on an exact tie.
+ */
+function startedLater(left, right) {
+  const leftEpoch = Number.isSafeInteger(left.executionEpoch) ? left.executionEpoch : -Infinity;
+  const rightEpoch = Number.isSafeInteger(right.executionEpoch) ? right.executionEpoch : -Infinity;
+  if (leftEpoch !== rightEpoch) return leftEpoch > rightEpoch;
+  const leftStarted = typeof left.startedAt === 'string' ? left.startedAt : '';
+  const rightStarted = typeof right.startedAt === 'string' ? right.startedAt : '';
+  if (leftStarted !== rightStarted) return leftStarted > rightStarted;
+  return false;
+}
+
+/**
  * Resolve the real execution identity from verified `operation.started`
  * records. This is the only allowed source of organ/cycle identity: it is never
  * guessed from operation names, checkpoint ids, summaries or file names.
@@ -442,10 +457,16 @@ export function executionIdentityFromRecords(records, binding) {
   if (matches.length === 0) {
     return { ok: false, reason: 'no verified operation.started record matches the attempt task/operation' };
   }
-  if (matches.length > 1 && expected.operationId === null) {
-    return { ok: false, reason: 'ambiguous verified operation.started records for the attempt task; operationId is required to disambiguate' };
-  }
-  const record = matches[matches.length - 1];
+  // The binding must never require an externally injected operationId to
+  // disambiguate: several verified operation.started records can legitimately
+  // name the same task across executions (executionEpoch 1, 2, ...).
+  // Deterministically keep the latest start: max executionEpoch, tie-break by
+  // max startedAt, then stable array order. Never reject as ambiguous merely
+  // because operationId is null.
+  const record = matches.reduce(
+    (latest, current) => (startedLater(current, latest) ? current : latest),
+    matches[0],
+  );
   return {
     ok: true,
     identity: {
@@ -454,6 +475,7 @@ export function executionIdentityFromRecords(records, binding) {
       cycleId: record.cycleId ?? null,
       operationId: record.operationId ?? null,
       executionEpoch: record.executionEpoch ?? null,
+      startedAt: record.startedAt ?? null,
       scope: record.scope ?? null,
     },
   };
