@@ -109,6 +109,8 @@ import type { ConfirmationLedgerState, PersistedSubmittedReceipt } from '../expl
 import type { DispatchInput } from '../orchestration/types.js';
 import { resumeColdExecution, type ColdExecutionLifecycleBinding, type PreparedColdExecution,
   type RuntimeColdExecutionProducer, type RuntimeColdExecutionResumeRequest } from './cold-execution-resume.js';
+import { classifyErrorPolicy } from '../../../core/src/error-policy.js';
+import { planBlockedRecovery } from '../../../core/src/tool-execution-lifecycle.js';
 
 const STEP_OWNER = 'humanagent.runtime';
 type TaskStepPublisher = (input: { readonly state: string; readonly summary: string }) => void;
@@ -148,6 +150,7 @@ export type RuntimeTaskEventKind =
   | 'provider.tool-result'
   | 'provider.error'
   | 'execution.settling'
+  | 'execution.retry'
   | 'checkpoint.committed'
   | 'execution.terminal'
   | 'attention.opened'
@@ -2836,7 +2839,7 @@ export class RuntimeTaskCoordinator {
       executionAgent: this.createProviderExecutionAgent(
         (input) => this.executeResumedProviderAttempt(record, operation, scope, input),
       ),
-      maxAttempts: 1,
+      maxAttempts: 2,
     });
     record.taskAssembly = assembly;
     return assembly;
@@ -3875,10 +3878,11 @@ export class RuntimeTaskCoordinator {
     report: ReturnType<RuntimeTaskCoordinator['providerAttemptReport']>,
     input: Parameters<ExecutionAgentPort['execute']>[0],
     reason: string,
-  ): Promise<{ readonly result: WorkResult; readonly closure?: AgentRuntimeClosure }> {
+  ): Promise<{ readonly result: WorkResult; readonly closure?: AgentRuntimeClosure; readonly producedPaths: readonly string[] }> {
     const message = `request budget exceeded: ${reason}`;
     await this.beginRequestBudgetStop(record, operation, reason);
     return {
+      producedPaths: [],
       result: {
         taskId: report.taskId,
         pipelineNodeId: report.pipelineNodeId,
@@ -3934,7 +3938,7 @@ export class RuntimeTaskCoordinator {
     composition: RuntimeExecutionComposition,
     runtime: AgentRuntime,
     completeExecutionReady?: (ready: boolean) => void,
-  ): Promise<{ readonly result: WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] }; readonly closure?: AgentRuntimeClosure }> {
+  ): Promise<{ readonly result: WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] }; readonly closure?: AgentRuntimeClosure; readonly producedPaths: readonly string[] }> {
     const coordinator = this;
     let producedOutput = '';
     const executorEvidence: ExecutorReviewEvidence[] = [];
@@ -3947,6 +3951,7 @@ export class RuntimeTaskCoordinator {
     completeExecutionReady?.(true);
     if (record.stopping || record.postCommitRecoveryPending) {
       return {
+        producedPaths: [],
         result: {
           taskId: report.taskId,
           pipelineNodeId: report.pipelineNodeId,
@@ -3985,6 +3990,7 @@ export class RuntimeTaskCoordinator {
         const observation = step.step.value;
       if (record.postCommitRecoveryPending) {
         return {
+          producedPaths: [],
           result: {
             taskId: report.taskId,
             pipelineNodeId: report.pipelineNodeId,
@@ -4032,6 +4038,7 @@ export class RuntimeTaskCoordinator {
     }
     if (record.postCommitRecoveryPending) {
       return {
+        producedPaths: [],
         result: {
           taskId: report.taskId,
           pipelineNodeId: report.pipelineNodeId,
@@ -4054,6 +4061,7 @@ export class RuntimeTaskCoordinator {
       const closure = runtime.snapshot().closure;
       return {
         closure,
+        producedPaths: [],
         result: {
           taskId: report.taskId,
           pipelineNodeId: report.pipelineNodeId,
@@ -4137,7 +4145,7 @@ export class RuntimeTaskCoordinator {
         ? { failureRef: closure.failureRef ?? `operation://${operation.operationId.value}/failed` }
         : {}),
     };
-    return { closure, result: workResult };
+    return { closure, result: workResult, producedPaths };
   }
 
   /**
@@ -4788,6 +4796,18 @@ export class RuntimeTaskCoordinator {
         this.markExecutionReleased(record, operation);
       }
       let closure: AgentRuntimeClosure | undefined;
+      // Corrective-retry loop state. The provider prompt is captured once by
+      // `prepareExecution`; a corrective attempt must carry the previous
+      // attempt's concrete failure reason instead of blindly re-sending the
+      // original input.
+      let executionPrompt = prompt;
+      // Side effects committed by the latest provider attempt. Only a clean
+      // failure (no tool execution, no produced files, no checkpoint commit)
+      // may be re-executed through the same business operation.
+      let committedSideEffects = false;
+      let firstFailureReason: string | undefined;
+      let firstFailureEvidence: readonly EvidenceRef[] = [];
+      let firstFailureOwnerId: string | undefined;
       if (record.orchestrated && this.options.createTaskAssembly) {
         const outputRef = `operation://${operation.operationId.value}/output`;
         const coordinator = this;
@@ -4883,6 +4903,54 @@ export class RuntimeTaskCoordinator {
                 record.driver = attemptDriver;
                 record.runtime = attemptRuntime;
                 if (record.release?.state === 'prepared') coordinator.markExecutionReleased(record, operation);
+              } else if (attemptNumber > 1) {
+                // 纠正尝试必须使用全新的 driver / composition：前一次 attempt
+                // 已经 settle，对已 settle 的 composition 再次 start 会失败。
+                // 上一轮的 driver 已完成 settle，按 provider-retry 的惯例先将其
+                // 关闭并缓存，避免两轮 driver 残留；新轮 driver 绑定子调用
+                // 管理器，并在执行尾由 close 统一释放。
+                const previousDriver = driver ?? record.driver;
+                if (previousDriver !== undefined) {
+                  const previousCloseResult = await previousDriver.close();
+                  closedRetryDrivers.set(previousDriver, previousCloseResult);
+                }
+                const retryPreparationInput: RuntimeExecutionPreparationInput = {
+                  ...allocation,
+                  runtimeId: `${runtimeId}-corrective-${attemptNumber}`,
+                  operationId: operation.operationId,
+                  executionEpoch: operation.executionEpoch,
+                  assignmentId,
+                  scope,
+                  attemptExecutionEpoch: operation.executionEpoch,
+                };
+                const retryDriver = await coordinator.options.createDriver(retryPreparationInput);
+                coordinator.bindChildCallManager(retryDriver, record.taskAssembly);
+                const retryBoundary = new ContextCheckpointBoundary(
+                  coordinator.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+                  coordinator.now,
+                );
+                const retryComposition = new HarnessExecutionComposition({
+                  driver: retryDriver,
+                  runtimeId: `${runtimeId}-corrective-${attemptNumber}`,
+                  taskId: record.taskId,
+                  assignmentId,
+                  operationId: operation.operationId,
+                  executionEpoch: operation.executionEpoch,
+                  scope,
+                  checkpointBoundary: retryBoundary,
+                  now: coordinator.now,
+                  hookRegistry: coordinator.options.hookRegistry,
+                });
+                attemptDriver = retryDriver;
+                attemptComposition = retryComposition;
+                attemptRuntime = retryComposition.runtime;
+                record.driver = retryDriver;
+                record.composition = retryComposition;
+                record.runtime = retryComposition.runtime;
+                driver = retryDriver;
+                runtime = retryComposition.runtime;
+                composition = retryComposition;
+                if (record.release?.state === 'prepared') coordinator.markExecutionReleased(record, operation);
               } else {
                 attemptComposition = composition!;
                 attemptRuntime = runtime!;
@@ -4892,7 +4960,7 @@ export class RuntimeTaskCoordinator {
                 record,
                 operation,
                 scope,
-                prompt,
+                executionPrompt,
                 outputRef,
                 input,
                 coordinator.providerAttemptReport(input, attemptNumber, attemptEpoch),
@@ -4902,6 +4970,10 @@ export class RuntimeTaskCoordinator {
               );
               closure = attempt.closure;
               let workResult = attempt.result;
+              committedSideEffects =
+                (workResult.executorEvidence?.length ?? 0) > 0
+                || attempt.producedPaths.length > 0
+                || record.checkpointReceipt !== undefined;
               if (!coordinator.options.providerRetry || !retryCycle || !attemptBindingId) {
                 return workResult;
               }
@@ -5009,7 +5081,7 @@ export class RuntimeTaskCoordinator {
           scope,
           checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
           executionAgent: providerExecutionAgent,
-          maxAttempts: 1,
+          maxAttempts: 2,
           ...(childCallPort === undefined ? {} : { childCallPort }),
         });
         this.bindChildCallManager(driver, record.taskAssembly);
@@ -5020,22 +5092,31 @@ export class RuntimeTaskCoordinator {
         record.currentNode = RUNTIME_NODE_MARKERS.orchestrationPlan;
         record.nextStep = '编排执行、审查并合并';
         record.taskAssembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });
-        const dispatch = () => record.taskAssembly!.orchestration.dispatch({
+        const maxAttempts = 2;
+        let attemptNumber = 1;
+        let currentAssignment = assignment;
+        const runDispatch = (workAssignment: WorkAssignment) => record.taskAssembly!.orchestration.dispatch({
           stageNodeId,
-          assignment,
+          assignment: workAssignment,
           agentId: 'humanagent.provider-execution',
           scope,
           reviewKinds: ['quality'],
         });
-        const dispatched = activeTurn ? await activeTurn.runProducer(dispatch) : await dispatch();
-        // C3 accepts the completed review receipts on the retained turn before
-        // the native close. Late reviews that land after the close stay the first
-        // error; the frozen closure is never rewritten to claim completion.
-        await driver?.standardTurn?.acceptReviews(dispatched.reviewCommitRefs ?? []);
-        if (record.stopping || record.postCommitRecoveryPending || record.state === 'stopped') return;
-        if (dispatched.status !== 'merged' && dispatched.status !== 'succeeded') {
+        let dispatched = activeTurn
+          ? await activeTurn.runProducer(() => runDispatch(currentAssignment))
+          : await runDispatch(currentAssignment);
+        // 有界纠正循环：失败、可重试、无已提交副作用且尚未达到尝试上限时，
+        // 用携带上一轮失败原因的纠正 prompt 重新派发；否则显式失败并保留首次原因。
+        // 每次派发（含最终成功/失败）都先接受评审回执，与单次派发语义一致。
+        while (true) {
+          // C3 accepts the completed review receipts on the retained turn before
+          // the native close. Late reviews that land after the close stay the first
+          // error; the frozen closure is never rewritten to claim completion.
+          await driver?.standardTurn?.acceptReviews(dispatched.reviewCommitRefs ?? []);
+          if (record.stopping || record.postCommitRecoveryPending || record.state === 'stopped') return;
+          if (dispatched.status === 'merged' || dispatched.status === 'succeeded') break;
+          const problem = dispatched.issue;
           if (!closure) {
-            const problem = dispatched.issue;
             throw new RuntimeTaskControlError(
               'orchestration.dispatch.failed',
               problem?.ownerId ?? RUNTIME_OWNER,
@@ -5044,7 +5125,7 @@ export class RuntimeTaskCoordinator {
             );
           }
           if (closure.state === 'succeeded') {
-            const problem = dispatched.issue;
+            // 执行已成功收拢但编排未合并：不再纠正，显式失败。
             const evidenceRefs = [...closure.evidenceRefs, ...(problem?.evidenceRefs ?? [])];
             record.error = {
               code: problem?.code ?? 'orchestration.dispatch.failed',
@@ -5060,10 +5141,106 @@ export class RuntimeTaskCoordinator {
               ...closure,
               state: 'blocked',
               evidenceRefs,
-              nextAction: problem?.nextAction ?? { kind: 'recover', ref: `assignment.${assignment.assignmentId}` },
-              conditionRef: problem?.conditionRef ?? `assignment.${assignment.assignmentId}`,
+              nextAction: problem?.nextAction ?? { kind: 'recover', ref: `assignment.${currentAssignment.assignmentId}` },
+              conditionRef: problem?.conditionRef ?? `assignment.${currentAssignment.assignmentId}`,
             };
+            break;
           }
+          const policy = classifyErrorPolicy({
+            layer: 'background',
+            attempt: attemptNumber,
+            maxAttempts,
+            sameCondition: false,
+            changedConditionRef: `execution-corrective-retry:${currentAssignment.attempt + 1}`,
+            affectsUserPromise: false,
+            requiresUserInput: false,
+            recoverable: true,
+            ownerId: problem?.ownerId ?? RUNTIME_OWNER,
+            conditionRef: problem?.conditionRef,
+          });
+          const recovery = planBlockedRecovery({
+            blockedAfter: 'execution',
+            sideEffectState: committedSideEffects ? 'confirmed' : 'none',
+            retryAllowed: policy.retryAllowed,
+          });
+          const remediation = dispatched.remediation;
+          const shouldRetry = policy.disposition === 'retry'
+            && recovery.executionMode === 'execute'
+            && attemptNumber < maxAttempts
+            && remediation !== undefined
+            && !committedSideEffects;
+          if (shouldRetry && remediation !== undefined) {
+            if (firstFailureReason === undefined) {
+              firstFailureReason = problem?.reason ?? `第 ${attemptNumber} 次尝试执行失败`;
+              firstFailureOwnerId = problem?.ownerId ?? RUNTIME_OWNER;
+              firstFailureEvidence = problem?.evidenceRefs ?? [];
+            }
+            const retryReason = problem?.reason ?? `第 ${attemptNumber} 次尝试执行失败`;
+            executionPrompt = `${prompt}
+
+纠正说明：第 ${attemptNumber} 次尝试执行失败，原因：${retryReason}。请根据上一轮失败原因修正后再次执行。`;
+            currentAssignment = remediation;
+            record.assignment = currentAssignment;
+            attemptNumber += 1;
+            this.pushEvent(
+              record,
+              operation,
+              'execution.retry',
+              'retrying',
+              `第 ${attemptNumber} 次尝试（重试原因：${retryReason}）`,
+              firstFailureEvidence,
+              STEP_OWNER,
+              true,
+              toNextActionText({ kind: 'recover', ref: `assignment.retry.${currentAssignment.assignmentId}` }),
+            );
+            dispatched = activeTurn
+              ? await activeTurn.runProducer(() => runDispatch(currentAssignment))
+              : await runDispatch(currentAssignment);
+            continue;
+          }
+          // 尝试上限耗尽、已提交副作用或不可重试：显式失败，保留首次原因与证据。
+          const finalReason = firstFailureReason ?? problem?.reason ?? `执行在 ${maxAttempts} 次尝试后未通过`;
+          const finalEvidence = firstFailureEvidence.length > 0 ? firstFailureEvidence : (problem?.evidenceRefs ?? []);
+          const finalNextAction = problem
+            ? `${problem.nextAction.kind}${problem.nextAction.ref ? `:${problem.nextAction.ref}` : ''}`
+            : `stop:assignment.escalated.${currentAssignment.assignmentId}`;
+          const finalError: RuntimeTaskError = {
+            code: problem?.code ?? 'execution.retry.exhausted',
+            ownerId: firstFailureOwnerId ?? problem?.ownerId ?? RUNTIME_OWNER,
+            message: finalReason,
+            retryable: false,
+            nextAction: finalNextAction,
+            evidenceRefs: finalEvidence,
+          };
+          record.error = finalError;
+          closure = {
+            ...closure,
+            state: 'blocked',
+            evidenceRefs: finalEvidence,
+            nextAction: problem?.nextAction ?? { kind: 'stop', ref: `assignment.escalated.${currentAssignment.assignmentId}` },
+            conditionRef: problem?.conditionRef ?? `assignment.escalated.${currentAssignment.assignmentId}`,
+          };
+          // 只有真正进入第二次尝试才投影 execution.retry/retrying；此处的
+          // blocked 是终止轨迹。区分不重派发的原因：已提交副作用与达到尝试上限
+          // 必须给出不同摘要，不得把前者写成“已达尝试上限”。
+          const blockedSummary = committedSideEffects
+            ? `存在已提交副作用，未重派发；保留首次失败原因：${finalReason}`
+            : attemptNumber >= maxAttempts
+              ? `已达尝试上限（${maxAttempts} 次），保留首次失败原因：${finalReason}`
+              : `错误策略判定不可纠正重试，保留首次失败原因：${finalReason}`;
+          this.pushEvent(
+            record,
+            operation,
+            'execution.retry',
+            'blocked',
+            blockedSummary,
+            finalEvidence,
+            finalError.ownerId,
+            false,
+            finalNextAction,
+            { error: finalError },
+          );
+          break;
         }
       } else {
         if (this.options.providerRetry) {

@@ -25,6 +25,7 @@ const RUNTIME_TRACE_KIND: Readonly<Record<RuntimeTaskEvent['kind'], InteractionT
   'provider.tool-result': 'tool-result',
   'provider.error': 'failure',
   'execution.settling': 'status',
+  'execution.retry': 'status',
   'checkpoint.committed': 'status',
   'execution.terminal': 'status',
   'attention.opened': 'decision',

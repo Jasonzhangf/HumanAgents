@@ -976,6 +976,7 @@ export type RuntimeSseEventKind =
   | 'provider.tool-result'
   | 'provider.error'
   | 'execution.settling'
+  | 'execution.retry'
   | 'checkpoint.committed'
   | 'execution.terminal'
   | 'attention.opened'
