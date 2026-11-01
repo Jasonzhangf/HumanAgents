@@ -39,6 +39,22 @@ next reminder.
      second request carrying the failure reason, terminal result, and cleanup.
    - Owner: Carol. Reviewer: Jenny.
 
+## Peer / Worker DAG
+
+- `Jenny` (master): owns review, integration, delivery records, worktree
+  lifecycle and final acceptance.
+- `Carol` (peer): owns `execution-corrective-retry-20261101` rework. Current
+  work is limited to the candidate worktree
+  `/Volumes/Intel/playground/humanagent/execution-corrective-retry-20261101`.
+  Required next action is rebase onto latest main and a local-file-search or
+  RCC 4444 parameterized real-entry success receipt with retry-step evidence.
+- `Alice` (peer): idle with no active board task or owned worktree. Available
+  for a bounded verification task if a concrete review or observation gap
+  appears; no dispatch while Carol owns the only open candidate.
+- `Bob` (peer): no active board task; do not invent work.
+- `David` (peer, test engineer): no active board task; available for focused
+  test execution when a concrete test gap appears.
+
 ## Standing Patrol
 
 - `project-patrol` (`master-idle`, subject `project-patrol`) must be armed.
@@ -83,3 +99,5 @@ next reminder.
   message `m1793539651471-403`.
 - 2026-11-01 13:32 UTC: renewed the 20-minute goal deadline subscription after
   the one-shot deadline fired.
+- 2026-11-01 13:40 UTC: consumed Alice idle report; no new task was assigned
+  because the only open candidate remains owned by Carol.
