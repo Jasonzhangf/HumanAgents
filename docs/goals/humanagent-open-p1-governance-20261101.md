@@ -26,21 +26,17 @@ next reminder.
    - Worktree and branch removed. No remaining action for this item.
 
 2. `execution-corrective-retry-20261101`
-   - Board status: `rework` after Jenny review.
-   - Candidate: `f83e1f600` in
-     `/Volumes/Intel/playground/humanagent/execution-corrective-retry-20261101`.
-   - Rebase progress: `merge-base(HEAD, origin/main) = 8377e57c8`; the candidate
-     is a single commit directly on top of the current `origin/main`.
-   - Review finding: real web-search E2E is `INCOMPLETE` because `web.search`
-     returns `INSUFFICIENT_BALANCE` from monid. The contract requires a successful
-     real-entry receipt and screenshots, plus observable retry behavior.
-   - Required rework: run the local-file-search dashboard scenario (RCC model +
-     local `file.search`/`file.read`, no monid) and submit a `SUCCESS` receipt
-     with screenshots and settled cleanup. The bounded corrective retry behavior
-     is already locked by the three red/green behavior tests; a real-entry
-     `execution.retry` observation is accepted only if the run naturally fails
-     once and then recovers.
-   - Owner: Carol. Reviewer: Jenny.
+   - Board status: `closed`.
+   - Candidate: `c75ea4de3` rebased onto current main, merged fast-forward as
+     `5d3f20752`.
+   - Real-entry `local-file-search` E2E `SUCCESS` receipt with 4 screenshots and
+     settled cleanup recorded in
+     `docs/evidence/execution-corrective-retry-accept-20261101.md`.
+   - Retry semantics locked by 3 red/green behavior tests; the real-entry
+     retry-step observation is explicitly `UNVERIFIED` and recorded as a future
+     harness-injection item, not a blocker.
+   - Integrated on `origin/main` `5d3f20752`, accept evidence pushed at
+     `d049e9316`. Worktree and branch removed after close.
 
 ## Peer / Worker DAG
 
@@ -119,3 +115,15 @@ next reminder.
   successful local-file-search real-entry receipt and sent Carol a concrete
   `--reply-required` command-level instruction; retry behavior remains covered
   by the 3 red/green behavior tests.
+- 2026-11-01 15:44 UTC: reviewed Carol's delivery. Verified the local-file-search
+  `SUCCESS` receipt, 4 screenshots, settled cleanup and the `04-task-result.png`
+  task dashboard terminal. Re-ran `pnpm build:app` (exit 0),
+  `execution-corrective-retry` (3/3) and `ui-runtime` (177/177) on the rebased
+  candidate. Accepted, merged fast-forward, pushed `origin/main` `5d3f20752`,
+  then pushed accept evidence `d049e9316`. Recorded `collab task review
+  --accept`, `collab task integrated --commit d049e9316`, and closed the task.
+  Worktree removed and branch deleted after verifying it was merged.
+- 2026-11-01 15:53 UTC: no open P1 board task remains. Residual follow-up:
+  deterministic attempt-1-fails/attempt-2-succeeds injection in the dashboard
+  E2E harness so a real-entry `execution.retry` step can be observed. Not a
+  blocker for the accepted candidate.
