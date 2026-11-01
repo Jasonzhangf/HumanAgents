@@ -1,19 +1,20 @@
 # HumanAgent Open P1 Governance
 
-Status: ACTIVE
+Status: COMPLETE
 Date: 2026-11-01
 Owner: Jenny (humanagent master)
 Parent: user-task-explicit-implicit-e2e-20260925.md (COMPLETE)
 
 ## Objective
 
-Keep the HumanAgent UI execution path deliverable and govern the remaining open
-P1 defects under one long-horizon goal. The user requires all open problems to
+Keep the HumanAgent UI execution path deliverable and govern the former open P1
+defects under one long-horizon record. The user requires all open problems to
 live in one continuously updated list; each wake must either make progress,
 update the list, or report the exact blocker without waiting for the next
-reminder. The open P1 list is now empty; the goal remains armed for new tasks.
+reminder. The open P1 list is empty and both accepted fixes are integrated.
+The project patrol remains the standing mechanism for new work.
 
-## Open P1 (update every wake)
+## Resolved P1
 
 1. `new-task-landing-execution-dashboard-20261101` (G1.4)
    - Board status: `closed`.
@@ -134,3 +135,12 @@ reminder. The open P1 list is now empty; the goal remains armed for new tasks.
   attempt-2-succeeds injection in the dashboard E2E harness so a real-entry
   `execution.retry` step can be observed. This does not block any accepted
   candidate.
+- 2026-11-01 17:06 UTC: patrol rechecked the final state. Board tasks and open
+  git-bugs are empty; `appsdk goal status` is cancelled/complete; main and
+  origin/main are `3d30b6a56`; worktrees are 5 (main plus four protected provider
+  holds); production `127.0.0.1:10086` is healthy. Re-read the real
+  `local-file-search` receipt: `SUCCESS`, terminal `succeeded`, checkpoint
+  committed, cleanup settled, four screenshots, and planner alignment
+  `complete`. The only residual non-blocking item is deterministic real-entry
+  injection for observing `execution.retry`; behavior tests already cover the
+  bounded loop.
