@@ -1,7 +1,8 @@
 # User Task Explicit->Implicit->Executor E2E Goal
 
-Status: ACTIVE
+Status: COMPLETE
 Date: 2026-09-25
+Completed: 2026-10-31
 Parent: explicit-brain-e2e-20260922.md
 
 ## Goal
@@ -138,3 +139,37 @@ Next owner work:
    endpoint and keep the receipt under `dist/receipts/`.
 4. Browser-check the WebUI entry and terminal completed projection after the
    runtime gate is green.
+
+## Completion Evidence 2026-10-31
+
+All acceptance items are met on current origin/main. The master delivery
+checklist `docs/goals/master-delivery-checklist-2026-10-31.md` holds the
+evidence per item.
+
+1. UI first screen supports task input, draft, confirm, status and progress.
+   Met by D2 and D14. The browser proofs run 39/39 and 17/17 on main dist.
+2. Explicit brain produces a confirmable draft and nothing enters the queue
+   without confirm. Met by D3. The official real-explicit-implicit receipt
+   shows a typed new-task preview with awaiting-confirmation before FIFO.
+3. Confirmation enters the implicit FIFO under resource admission. Met by D3.
+   The same receipt shows confirm then fifoSeq=1 then grant.
+4. Implicit brain dispatches executor agents and records evidence. Met by D1
+   and D3. The receipts show provider.execution grant and provider tool rounds
+   with non-empty evidence refs.
+5. Multi-round execution and Pipeline Observation. Met by D1. The web-search
+   receipt shows two tool rounds, terminal succeeded and a committed
+   checkpoint.
+6. Real-entry `tests/app/real-explicit-implicit-e2e.mjs` proves a user task
+   from input to completed. Met by D3. The official receipt is state=SUCCESS
+   on current origin/main with an isolated control root and real RCC 4444.
+7. Main stays verifiable. Met by D10. `scripts/build-release.mjs` on a clean
+   detached worktree exits 0 with typecheck, compiled services, release gates
+   and package smoke all green.
+
+All tracked bugs are closed. The board is empty. Four locked provider
+worktrees stay PROTECTED_HOLD under Root ownership. Production
+`127.0.0.1:10086` and `~/.humanagent` stay read-only.
+
+The remaining standing duty is the resource patrol in D12 of the delivery
+checklist. It has no discrete completion point and does not keep this goal
+open. The goal is complete and its one-shot deadline is not renewed.
