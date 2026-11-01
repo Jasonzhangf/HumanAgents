@@ -83,6 +83,7 @@ function freshScripted() {
     mode: 'rcc',
     inspected: 0,
     stepStreamRequests: [],
+    executionStreamRequests: [],
     confirmationCount: 0,
   };
 }
@@ -137,6 +138,19 @@ function handleScriptedApi(state, url, method, body) {
       ],
     };
   }
+  // The execution event stream the landed dashboard subscribes to.
+  const execMatch = /^\/api\/executions\/([^/]+)\/events$/.exec(url.pathname);
+  if (execMatch && method === 'GET') {
+    state.executionStreamRequests.push(execMatch[1]);
+    return {
+      status: 200,
+      sse: true,
+      messages: [
+        `event: execution.started\ndata: ${JSON.stringify({ operationId: 'operation-new-task-1', step: 1, summary: '执行开始', occurredAt: OCCURRED_AT })}\n\n`,
+        `event: execution.step\ndata: ${JSON.stringify({ step: 1, seq: 1, summary: '执行步骤：runtime.queue', occurredAt: OCCURRED_AT })}\n\n`,
+      ],
+    };
+  }
   const confirmMatch = /^\/api\/explicit\/interactions\/([^/]+)\/confirmation$/.exec(url.pathname);
   if (confirmMatch && method === 'POST') {
     state.confirmationCount += 1;
@@ -166,6 +180,7 @@ function handleScriptedApi(state, url, method, body) {
   const taskDashMatch = /^\/api\/tasks\/([^/]+)\/dashboard/.exec(url.pathname);
   if (taskDashMatch && method === 'GET') {
     const taskIdValue = decodeURIComponent(taskDashMatch[1]);
+    const streamed = state.executionStreamRequests.length > 0;
     return {
       status: 200,
       body: {
@@ -176,10 +191,10 @@ function handleScriptedApi(state, url, method, body) {
         currentNode: 'runtime.queue',
         input: 'submission',
         output: '',
-        nextStep: '等待执行',
+        nextStep: streamed ? '执行步骤：runtime.queue（已收到执行事件）' : '等待执行',
         updatedAt: new Date().toISOString(),
         operationId: 'operation-new-task-1',
-        statusSections: { business: '执行中', waiting: '执行步骤' },
+        statusSections: { business: '执行中', waiting: streamed ? '执行步骤·已收到执行事件' : '执行步骤' },
         allowedActions: ['stop'],
         recentEvents: [],
         publicOutput: { state: 'absent', commits: [] },
@@ -315,6 +330,14 @@ async function capture(viewport) {
   record(`${viewport.width}x${viewport.height} submission drives the explicit.step stream`, state.stepStreamRequests.length > 0, { stepStreamRequests: state.stepStreamRequests });
   record(`${viewport.width}x${viewport.height} dashboard renders the live execution state`, /任务投影已同步|执行中/.test(bodyText), bodyText.slice(0, 400));
   record(`${viewport.width}x${viewport.height} no uncaught pageerror`, pageErrors.length === 0, pageErrors);
+
+  // The landed dashboard must subscribe to the real execution event stream,
+  // and at least one execution event must update the displayed state.
+  await waitForCondition(() => state.executionStreamRequests.length > 0, 15000);
+  await page.waitForTimeout(500);
+  const bodyTextAfterStream = await page.evaluate(() => document.body.innerText).catch(() => '');
+  record(`${viewport.width}x${viewport.height} dashboard subscribes to execution event stream`, state.executionStreamRequests.length > 0, { executionStreamRequests: state.executionStreamRequests });
+  record(`${viewport.width}x${viewport.height} execution event updates displayed step/progress`, /执行步骤：runtime.queue|已收到执行事件/.test(bodyTextAfterStream), bodyTextAfterStream.slice(0, 400));
   observe(`${viewport.width}x${viewport.height} final URL`, page.url());
 
   await browser.close();

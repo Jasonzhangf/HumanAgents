@@ -3907,6 +3907,16 @@ async function refresh() {
       }
       markSync()
       renderActiveReadingMode()
+      if (dashboard.operationId && ['running', 'settling'].includes(dashboard.state)) {
+        stopObserving()
+        subscribe(dashboard.operationId)
+      } else {
+        if (subscribedOperationId) {
+          subscribedOperationId = undefined
+          closeStream()
+        }
+        stopObserving()
+      }
       await refreshTaskGrantControl()
       if (pageDisposed) return
       if (!taskGrantDrawerOpen && !taskGrantDrawerDismissed && taskGrantEntry?.isConnected) {
