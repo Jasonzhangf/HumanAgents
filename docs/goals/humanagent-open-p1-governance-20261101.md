@@ -27,17 +27,19 @@ next reminder.
 
 2. `execution-corrective-retry-20261101`
    - Board status: `rework` after Jenny review.
-   - Candidate: `af1125785` in
+   - Candidate: `f83e1f600` in
      `/Volumes/Intel/playground/humanagent/execution-corrective-retry-20261101`.
-   - Rebase progress: Carol rebased the candidate onto `d05c0308e`. Current
-     main is `888127b12`, which adds governance/evidence docs only. Final
-     delivery must still combine with the current main before merge.
+   - Rebase progress: `merge-base(HEAD, origin/main) = 8377e57c8`; the candidate
+     is a single commit directly on top of the current `origin/main`.
    - Review finding: real web-search E2E is `INCOMPLETE` because `web.search`
      returns `INSUFFICIENT_BALANCE` from monid. The contract requires a successful
      real-entry receipt and screenshots, plus observable retry behavior.
-   - Required rework: use local-file-search or an RCC 4444 parameterized
-     real-entry scenario; capture the first failure, `execution.retry` step,
-     second request carrying the failure reason, terminal result, and cleanup.
+   - Required rework: run the local-file-search dashboard scenario (RCC model +
+     local `file.search`/`file.read`, no monid) and submit a `SUCCESS` receipt
+     with screenshots and settled cleanup. The bounded corrective retry behavior
+     is already locked by the three red/green behavior tests; a real-entry
+     `execution.retry` observation is accepted only if the run naturally fails
+     once and then recovers.
    - Owner: Carol. Reviewer: Jenny.
 
 ## Peer / Worker DAG
@@ -111,3 +113,9 @@ next reminder.
 - 2026-11-01 14:37 UTC: third deadline fired and was renewed explicitly.
   Carol's candidate is still `af1125785`; no new E2E evidence appeared. Sent
   Carol a reply-required status request `m1793543854684-523`.
+- 2026-11-01 14:58 UTC: fourth deadline fired and was renewed explicitly.
+  Verified Carol's candidate advanced to `f83e1f600`, rebased directly onto
+  current `origin/main` `8377e57c8`. Narrowed the remaining acceptance gap to a
+  successful local-file-search real-entry receipt and sent Carol a concrete
+  `--reply-required` command-level instruction; retry behavior remains covered
+  by the 3 red/green behavior tests.
