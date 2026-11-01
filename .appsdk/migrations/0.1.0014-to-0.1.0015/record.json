@@ -1,0 +1,44 @@
+{
+  "bundle_digest": "sha256:875817854ec1455ea39381e5e591c2b68729930678edd95a6aed22314ee915f4",
+  "created_at": "2026-11-01T00:22:08.416701+00:00",
+  "frozen_reviews": [],
+  "legacy_reconciled_reviews": [],
+  "maps": [
+    {
+      "canonical_source_digest": null,
+      "canonical_target_digest": null,
+      "name": "resource-map.json",
+      "snapshot_path": ".appsdk/migrations/0.1.0014-to-0.1.0015/maps/resource-map.json",
+      "source_digest": "sha256:18015233a1b50bad56ce619106e39d657bb8f73ea398a0752304416df798cb7d",
+      "target_digest": "sha256:375643cd6f97530acca25084ae0ef996b006a38db2e38682c9a1550010b65a7a"
+    },
+    {
+      "canonical_source_digest": null,
+      "canonical_target_digest": null,
+      "name": "function-map.json",
+      "snapshot_path": ".appsdk/migrations/0.1.0014-to-0.1.0015/maps/function-map.json",
+      "source_digest": "sha256:27a744a16b13c5d4a1966d91a43495bdf756830851f81a62b192dd1e4525e6a8",
+      "target_digest": "sha256:d3fdbf12cb80e1b7fcd98b07f2dbca7c213c773ad8f0afbbb662f8231e5fb780"
+    },
+    {
+      "canonical_source_digest": null,
+      "canonical_target_digest": null,
+      "name": "mainline-call-map.json",
+      "snapshot_path": ".appsdk/migrations/0.1.0014-to-0.1.0015/maps/mainline-call-map.json",
+      "source_digest": "sha256:1fa26a50e5966751838c8209bd14a581203c46d74a283e4207520b48b515002f",
+      "target_digest": "sha256:2f9baa6c38de02a7bf0a2db27475fbc8610bd630c88ab748abc5f8de1f7b8058"
+    },
+    {
+      "canonical_source_digest": null,
+      "canonical_target_digest": null,
+      "name": "verification-map.json",
+      "snapshot_path": ".appsdk/migrations/0.1.0014-to-0.1.0015/maps/verification-map.json",
+      "source_digest": "sha256:518630726f1140baaa1d4530dfb92ac9b90bd96f79b6a043769d3a19e9196327",
+      "target_digest": "sha256:518630726f1140baaa1d4530dfb92ac9b90bd96f79b6a043769d3a19e9196327"
+    }
+  ],
+  "migration_id": "appsdk-0.1.0014-to-0.1.0015",
+  "schema_version": 1,
+  "source_version": "0.1.0014",
+  "target_version": "0.1.0015"
+}

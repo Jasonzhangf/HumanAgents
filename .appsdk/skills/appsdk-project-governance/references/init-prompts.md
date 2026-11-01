@@ -47,8 +47,8 @@ route, or binding. The supplement invocation returns the resulting snapshot.
 Do not choose a worker or run another identity command. If context returns an
 explicit daemon DOWN or runtime error, preserve the exact error and stop;
 daemon lifecycle maintenance is human-authorized. Do not inspect local
-environment/control paths or run any other exploratory command. Registration
-and wake use the internal Codex App Server native thread.
+environment/control paths to guess an identity. Registration and wake use the
+daemon-selected supported adapter; an AppServer binding uses its native thread.
 
 Ordinary AppSDK project initialization runs only in the canonical project main
 checkout. Agent identity bootstrap is `collab context`; it may run from the
@@ -79,8 +79,8 @@ identity, and do not inspect routes or worker state to guess a binding.
 cd /abs/path/project
 collab context                  # verify sessionID binding and role
 # if required_fields are present, provide only those facts once
-# only when the context snapshot has no live master and the user approved
-# this exact peer:
+# only with explicit approval for this exact peer/project; a different online
+# name holder requires the current takeover confirmation:
 collab master promote --approval "<user approval text>"
 collab context
 # only after the plan exists and long-horizon work is approved:
@@ -92,19 +92,33 @@ The master then owns orchestration:
 
 1. Query `collab context` once. It must show the identity, liveness, tasks,
    inbox, `next_actions`, `role_brief`, and master/authority state.
-2. Split the confirmed goal by dependency and unique write scope. Dispatch
-   through `collab subagent dispatch` or `appsdk subagent send`; every
-   assignment needs done-iff, artifacts, forbidden paths, exact tests, and
-   evidence location.
+2. Split the confirmed goal by dependency and unique write scope. Offer each
+   long-horizon slice through `collab board publish` and a revision-checked
+   claim or invitation. The consenting peer owns planning, independent
+   `codex exec --profile gcm` execution/observation, verification, integration,
+   and cleanup for that slice. Every assignment needs goal, scope, authorized
+   actions, resource owner, done-iff, artifacts, forbidden paths, exact tests,
+   evidence location, report channel, and stop conditions.
 3. Before execution or dispatch, run `appsdk bug intake --input <json>` and
    bind the returned `issue_id`; read-only conversation skips this path.
-4. Keep workers saturated from the approved task graph, then from
-   `appsdk bug list --status open --json` in `P0 > P1 > P2` order.
-5. Own blockers, re-dispatch or auditable force-close stuck tasks, integrate
+4. Route by task type from the approved graph and ready bug work: long-horizon
+   goals to consenting autonomous peers; bounded execution/observation directly
+   to independent GCM workers regardless of peer availability. Each master/peer
+   registers and manages its own goal; master does not proxy-register peer goals.
+   Do not start a new managed subagent for production work.
+5. Every patrol converges owned worktrees and stale resources, open P0/P1 work,
+   canonical issue intake, and PROTECTED_HOLD reporting. Close each P0/P1 with
+   evidence or park it with owner, cause, and unblock condition.
+6. Own blockers, re-dispatch or auditable force-close stuck tasks, integrate
    reviewed commits on latest main, and keep source/review/merge/install/
    restart/live-replay evidence separate.
-6. Remove only resources created by this round. Preserve other peers'
-   worktrees, processes, and evidence.
+7. Before a patrol cycle ends, explicitly re-arm a consumed one-shot goal or
+   deadline wake when continued scheduling is required. A read, ACK, summary,
+   or dispatch receipt is not completion.
+   Close owned goal scheduling and patrols when complete or no new task and no
+   actionable work remain. Retain direct-message reception for new assignments.
+8. Remove only resources created by this round after recoverable extraction.
+   Preserve dirty, active, shared, or unknown resources and report them.
 
 Stop normal setup here. Do not run operator diagnostics, read `routes.jsonl`,
 inspect processes, or list `.agent-collab/`. If context explicitly reports
@@ -140,7 +154,7 @@ appsdk bug new --upstream -t "[SDK Bug] <symptom>" -m "<reproduction, expected, 
 appsdk bug show <id> --json --upstream
 ```
 
-Include the source commit, binary version/hash, exact command, first failing
+Include the source commit, installed binary version, exact command, first failing
 layer, and whether the same path fails from a clean project. The upstream bug
 is a report and evidence record; it is not proof that the local delivery
 passed.
@@ -150,7 +164,7 @@ actual symptom, reproduction, expected/observed result, version/commit,
 and relevant logs; do not turn it into a local project bug or a fallback
 workaround.
 
-## Ordinary peer (project already has .appsdk/project.json and a live master)
+## Ordinary peer
 
 ```sh
 cd /abs/path/project
@@ -158,13 +172,14 @@ collab context
 # if required_fields are present, provide only those facts once
 ```
 
-If context reports `role=master`, stop and report the conflict to the master;
-do not promote yourself and do not start a second daemon.
+Both master and peer continue as their accepted goal's orchestrator. Each
+restores or registers and manages its own goal. Do not ask master to register
+the peer's goal, infer master authority, or start a second daemon.
 
-Read master/authority state from the same context snapshot. A live master
-exists iff the returned `master` is an object with `endpoint_live=true`.
-`master: null` means no live master is recorded; a `master` object with
-`endpoint_live=false` is a recorded-but-dead identity and is not a live master.
+Read master authority and endpoint reachability separately from the same
+snapshot. `master: null` means no holder is assigned. A recorded holder keeps
+authority when its endpoint is unreachable; endpoint liveness never decides
+whether another peer owns its goal.
 A worktree normally has no local `.agent-collab/`; that does not mean the peer
 is unregistered or that no master exists. A failed `collab context`, including
 `token mismatch`, is a registration problem, not evidence of no master. If it
@@ -180,16 +195,12 @@ AppSDK line is a reset/reinitialize operation, not ordinary initialization:
 ```sh
 # AppSDK-owned project control plane, from a clean non-main owner worktree
 appsdk init <project> --fresh --discard-legacy
-
-# Collab-owned project control plane, during a controlled maintenance window
-collab down
-collab reset --project --discard-legacy --approval "<user authorization>"
-collab up
-collab context
 ```
 
-Neither reset removes the other owner's state or proves delivery, review,
-install, restart, or live communication.
+Collab project reset belongs to the current project's master and uses the
+current Collab reset contract. Global daemon lifecycle remains user-managed.
+AppSDK reset does not remove Collab state or require a Collab reset. Neither
+reset proves delivery, review, installation or live communication.
 
 ## Identity and route reconciliation
 
@@ -205,8 +216,7 @@ error and stop.
 `~/.collab/server.sock`, `server.pid`, and `daemon.lock` are host-owned runtime
 objects. If `collab context` explicitly reports daemon DOWN or a runtime error,
 preserve the exact output and stop. Starting, stopping, or restarting the host
-daemon is human-authorized maintenance. An authorized human operator may use
-the official `collab down` / `collab up` lifecycle when a maintenance window is
-approved. Never diagnose identity by chaining status commands, remove lock or
+daemon is user-managed maintenance. Lifecycle commands and credentials are
+outside agent guidance. Never remove lock or
 socket files by hand, use broad process-kill commands, or start a project-local
 daemon.

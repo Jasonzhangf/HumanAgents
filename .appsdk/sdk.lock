@@ -1,6 +1,7 @@
 {
-  "bundle_digest": "sha256:868fe60e645e4215c87a511c04f940589d7d1096e1835e8d444da44357a85bd4",
-  "bundle_manifest_digest": "sha256:098e3fc2b0b82006bf064402927b0548aed7bd0231117a8b9b4c8755c736d918",
+  "binary_ref": "project-sdk",
+  "bundle_digest": "sha256:875817854ec1455ea39381e5e591c2b68729930678edd95a6aed22314ee915f4",
+  "bundle_manifest_digest": "sha256:47142ab097093bab968410f4d296009e643fa7fc87acca4c24f8dd2f50a9d40b",
   "bundle_resources": {
     "contracts": [
       "contracts/sdk-bundle.manifest.json",
@@ -28,6 +29,11 @@
       "contracts/migrations/sdk-0.1.0011-to-0.1.0012.json",
       "contracts/migrations/sdk-0.1.0012-to-0.1.0013.json",
       "contracts/migrations/sdk-0.1.0013-to-0.1.0014.json",
+      "contracts/migrations/sdk-0.1.0014-to-0.1.0015.json",
+      "contracts/migrations/0.1.0014/governance-maps/resource-map.json",
+      "contracts/migrations/0.1.0014/governance-maps/function-map.json",
+      "contracts/migrations/0.1.0014/governance-maps/mainline-call-map.json",
+      "contracts/migrations/0.1.0014/governance-maps/verification-map.json",
       "contracts/migrations/0.1.0013/governance-maps/resource-map.json",
       "contracts/migrations/0.1.0013/governance-maps/function-map.json",
       "contracts/migrations/0.1.0013/governance-maps/mainline-call-map.json",
@@ -127,7 +133,9 @@
       "skills/project-memory/SKILL.md"
     ]
   },
+  "compiler_digest": "sha256:3c6ad1d17528c52ef2f06e44867be59b77f7b51b3d26e3eec5b406bb1ae70f74",
   "contract_schema": 1,
+  "digest": "sha256:3c6ad1d17528c52ef2f06e44867be59b77f7b51b3d26e3eec5b406bb1ae70f74",
   "sdk": "appsdk",
-  "version": "0.1.0014"
+  "version": "0.1.0015"
 }

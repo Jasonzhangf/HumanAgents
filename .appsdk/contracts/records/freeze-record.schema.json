@@ -1,18 +1,140 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://appsdk.local/contracts/records/freeze-record.schema.json",
-  "type": "object",
-  "required": ["freeze_id", "module_id", "created_at"],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "freeze_id": {"type": "string"},
-    "issue_id": {"type": "string"},
-    "module_id": {"type": "string"},
-    "promotion_id": {"type": "string"},
-    "artifact_record_id": {"type": "string"},
-    "regression_report_id": {"type": "string"},
-    "active_version": {"type": "string"},
-    "previous_active_version": {"type": ["string", "null"]},
-    "review_id": {"type": "string"},
-    "created_at": {"type": "string"}
-  }
+    "active_version": {
+      "type": "string"
+    },
+    "artifact_record_id": {
+      "type": "string"
+    },
+    "clean_scope": {
+      "properties": {
+        "base_commit": {
+          "type": "string"
+        },
+        "changed_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "generated_policy": {
+          "enum": [
+            "tracked_hash",
+            "excluded_from_source_clean"
+          ]
+        },
+        "ignored_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "base_commit",
+        "changed_paths",
+        "ignored_paths",
+        "generated_policy"
+      ],
+      "type": "object"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "freeze_id": {
+      "type": "string"
+    },
+    "git_clean": {
+      "type": "boolean"
+    },
+    "issue_id": {
+      "type": "string"
+    },
+    "library_hash": {
+      "type": "string"
+    },
+    "module_id": {
+      "type": "string"
+    },
+    "owners": {
+      "properties": {
+        "api_extractor": {
+          "type": "string"
+        },
+        "artifact_registry": {
+          "type": "string"
+        },
+        "compiler": {
+          "type": "string"
+        },
+        "review": {
+          "type": "string"
+        },
+        "vcs": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "vcs",
+        "compiler",
+        "api_extractor",
+        "review",
+        "artifact_registry"
+      ],
+      "type": "object"
+    },
+    "previous_active_immutable": {
+      "type": "boolean"
+    },
+    "previous_active_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "promotion_id": {
+      "type": "string"
+    },
+    "promotion_record_hash": {
+      "type": "string"
+    },
+    "public_api_hash": {
+      "type": "string"
+    },
+    "regression_report_hash": {
+      "type": "string"
+    },
+    "regression_report_id": {
+      "type": "string"
+    },
+    "review_id": {
+      "type": "string"
+    },
+    "source_commit_or_tag": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "freeze_id",
+    "issue_id",
+    "module_id",
+    "promotion_id",
+    "promotion_record_hash",
+    "artifact_record_id",
+    "regression_report_id",
+    "regression_report_hash",
+    "source_commit_or_tag",
+    "active_version",
+    "library_hash",
+    "public_api_hash",
+    "review_id",
+    "previous_active_immutable",
+    "git_clean",
+    "clean_scope",
+    "owners",
+    "created_at"
+  ],
+  "type": "object"
 }
