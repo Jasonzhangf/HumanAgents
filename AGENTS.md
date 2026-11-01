@@ -47,6 +47,14 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - DSH 源码只作为外部依赖证据读取；不得把本项目代码写入 `/Volumes/extension/code/dsh`。
 - 后续实现必须在 `/Volumes/Intel/playground/humanagent/<task>` 下的独立 clean worktree 中进行，并遵守全局 AGENTS L2 的 **Worktree SESE 先关后开生命周期与存量治理规则**（严禁在仓库内新建 `<repo>/playground/<task>`）。
 
+## 符号探索
+
+  探索 TypeScript/JavaScript 符号的调用关系、追踪给定入口的被调用链，
+  或审计相关代码依赖时，使用全局 `nn-code` Skill。
+
+  发现结果遗漏、错误或执行异常时，按该 Skill 的问题反馈流程处理并报告 bug。
+  不得将手工补齐的结果冒称为工具输出。
+
 ## Git 交付流程
 
 - 默认流程是标准交付，视为已授权，不需要逐项申请：候选提交 -> merge 到 main ->
