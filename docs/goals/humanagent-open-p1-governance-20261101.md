@@ -27,10 +27,11 @@ next reminder.
 
 2. `execution-corrective-retry-20261101`
    - Board status: `rework` after Jenny review.
-   - Candidate: `f641096b9` in
+   - Candidate: `3c1bdc5a6` in
      `/Volumes/Intel/playground/humanagent/execution-corrective-retry-20261101`.
-   - Review finding: the candidate merge base is `42ad8e69c`, while current
-     `origin/main` is `d268a2dd1`. Rebase/merge the candidate onto latest main.
+   - Rebase progress: Carol rebased the candidate onto `d268a2dd1`. Current
+     main is `d05c0308e`, which adds governance/evidence docs only. Final
+     delivery must still combine with the current main before merge.
    - Review finding: real web-search E2E is `INCOMPLETE` because `web.search`
      returns `INSUFFICIENT_BALANCE` from monid. The contract requires a successful
      real-entry receipt and screenshots, plus observable retry behavior.
@@ -101,3 +102,6 @@ next reminder.
   the one-shot deadline fired.
 - 2026-11-01 13:40 UTC: consumed Alice idle report; no new task was assigned
   because the only open candidate remains owned by Carol.
+- 2026-11-01 13:49 UTC: deadline fired and was renewed explicitly. Carol's
+  retry worktree advanced to `3c1bdc5a6` on top of `d268a2dd1`; the board still
+  reports rework and no new successful E2E receipt exists yet.
