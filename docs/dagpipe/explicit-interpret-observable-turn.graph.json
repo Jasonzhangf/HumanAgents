@@ -1,0 +1,312 @@
+{
+  "id": "humanagent-explicit-interpret-observable-turn",
+  "version": "1",
+  "meta": {
+    "title": "显式 interpret 轮次的可观测提交进度、协议事件容差与失败恢复",
+    "designStatus": "candidate",
+    "capabilityStatus": "partial",
+    "implementationStatus": "UNVERIFIED",
+    "requirements_version": 19,
+    "requirements": [
+      "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+      "humanagent-explicit-brain-semantic-turn-context",
+      "humanagent-task-list-truthful-result-and-action-boundary",
+      "humanagent-human-readable-semantic-layered-ux-and-necessary-display",
+      "humanagent-continuation-oriented-by-explicit-dispatch-template"
+    ],
+    "ownerContract": {
+      "progressProjection": "packages/ui + packages/app/src/ui-runtime：提交进度步骤只投影真实 explicit.step 事件，不伪造步骤或总步数；页面提交观察计时只基于本地单调时钟（总耗时从 banner mount 起算、本步耗时从真实 step 到达起算），不补算挂载前时间",
+      "interactionReceipt": "packages/app/src/ui-runtime/server.ts：POST /api/explicit/inputs 回执携带真实 occurredAt",
+      "protocolTolerance": "packages/adapters/provider：Responses 协议 codec 对 provider 真实事件的 item_id/call_id 身份容差",
+      "failureRecovery": "packages/runtime explicit-intake：interpret 失败不永久锁定 intake，保留恢复责任"
+    },
+    "observedDefects": {
+      "staticProgress": "docs/ui/entry.js 提交状态只显示 spinner 与「正在整理并提交任务…」，无真实步骤、无总耗时、无本步耗时；其 subscribeExplicitStepStream 监听事件名 `step`，而真实服务端发 `explicit.step`（server.ts:2460-2474），因此真实步骤从未进入页面",
+      "missingTurnTime": "server.ts:1461 的 201 回执丢弃服务端已计算的 occurredAt；entry.js:883 未传时间；interaction-work-card.js:511 退化为「时间未提供」",
+      "protocolFatal": "codecs.ts:1366 response.reasoning_summary_text.delta 缺 item_id 即抛 missing.field，导致整个 interpret 失败；用户侧表现为「输入已接收，本次处理未完成」且无重试入口",
+      "intakeLock": "interpret 失败后 interaction 停在 matching，无恢复路径，需重启"
+    },
+    "progressContract": "提交进度步骤必须来自真实 explicit.step 事件（seq、summary、occurredAt）。interpret 是长请求，UI 必须能在等待期间看到状态推进（received -> matching -> ...）。无真实 step 时保持显式缺失，不猜、不合成步骤或总步数；页面提交观察计时只基于本地单调时钟，总耗时从 banner mount 起算、本步耗时从当前真实 step 到达时刻起算，不补算挂载前时间。",
+    "protocolToleranceContract": "Provider 真实流式事件可能省略 item_id。content/reasoning 类事件在 item_id 缺失时应退化为可寻址的稳定占位身份并继续消费，不得让单个非关键事件终止整个 interpret。function-call 类事件沿用既有 requireToolEventIdentity（item_id 或 call_id 至少其一）。",
+    "recoveryContract": "interpret 失败保留原错与恢复责任：interaction 必须回到可重试状态，且 UI 必须给出可执行的重试入口，不得要求用户重启。",
+    "nonGoal": "不改交互状态机语义、不改 explicit brain 路由与分类、不改设计系统、不改 scheduler 巡逻规则、不处理队列区显示无关历史任务。"
+  },
+  "inputs": [
+    {
+      "id": "user_submission",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "receive_input",
+      "operator": "humanagent-explicit-intake-receive",
+      "operator_version": "1",
+      "inputs": [
+        "user_submission"
+      ],
+      "output": {
+        "id": "input_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_submission_progress",
+      "operator": "humanagent-submission-progress-projection",
+      "operator_version": "1",
+      "inputs": [
+        "input_receipt"
+      ],
+      "output": {
+        "id": "progress_view",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "observe_interaction_state",
+      "operator": "humanagent-interaction-state-observer",
+      "operator_version": "1",
+      "inputs": [
+        "input_receipt"
+      ],
+      "output": {
+        "id": "observed_state",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "interpret_turn",
+      "operator": "humanagent-explicit-brain-interpret",
+      "operator_version": "1",
+      "inputs": [
+        "observed_state"
+      ],
+      "output": {
+        "id": "interpretation",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "decode_provider_events",
+      "operator": "humanagent-provider-responses-codec",
+      "operator_version": "1",
+      "inputs": [
+        "interpretation"
+      ],
+      "output": {
+        "id": "decoded_events",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "advance_interaction_state",
+      "operator": "humanagent-explicit-intake-advance",
+      "operator_version": "1",
+      "inputs": [
+        "interpretation"
+      ],
+      "output": {
+        "id": "advanced_state",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_turn_result",
+      "operator": "humanagent-interaction-card-projection",
+      "operator_version": "1",
+      "inputs": [
+        "advanced_state"
+      ],
+      "output": {
+        "id": "result_view",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "recover_failed_turn",
+      "operator": "humanagent-explicit-intake-recovery",
+      "operator_version": "1",
+      "inputs": [
+        "interpretation"
+      ],
+      "output": {
+        "id": "recovery_view",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "turn_result",
+      "operator": "humanagent-explicit-interpret-turn-result",
+      "operator_version": "1",
+      "inputs": [
+        "progress_view",
+        "decoded_events",
+        "result_view",
+        "recovery_view"
+      ],
+      "output": {
+        "id": "interpret_turn_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "receive_input",
+      "to": "project_submission_progress",
+      "arc_id": "input_receipt"
+    },
+    {
+      "from": "receive_input",
+      "to": "observe_interaction_state",
+      "arc_id": "input_receipt"
+    },
+    {
+      "from": "observe_interaction_state",
+      "to": "interpret_turn",
+      "arc_id": "observed_state"
+    },
+    {
+      "from": "interpret_turn",
+      "to": "decode_provider_events",
+      "arc_id": "interpretation"
+    },
+    {
+      "from": "interpret_turn",
+      "to": "advance_interaction_state",
+      "arc_id": "interpretation"
+    },
+    {
+      "from": "decode_provider_events",
+      "to": "turn_result",
+      "arc_id": "decoded_events"
+    },
+    {
+      "from": "advance_interaction_state",
+      "to": "project_turn_result",
+      "arc_id": "advanced_state"
+    },
+    {
+      "from": "project_turn_result",
+      "to": "turn_result",
+      "arc_id": "result_view"
+    },
+    {
+      "from": "project_submission_progress",
+      "to": "turn_result",
+      "arc_id": "progress_view"
+    },
+    {
+      "from": "interpret_turn",
+      "to": "recover_failed_turn",
+      "arc_id": "interpretation"
+    },
+    {
+      "from": "recover_failed_turn",
+      "to": "turn_result",
+      "arc_id": "recovery_view"
+    }
+  ],
+  "outputs": [
+    "interpret_turn_result"
+  ]
+}

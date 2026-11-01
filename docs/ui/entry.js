@@ -225,11 +225,13 @@ export async function readEntryQueue(api) {
  * The live submit progress banner.
  *
  * While a submission is in flight the status region shows one live block: the
- * shell's existing progress spinner plus the phase the page currently knows
- * about. Copy writes go into the block's phase so a later step summary replaces
- * the phase instead of destroying the live block. The block is removed on
- * settle. The page mints no step: the phase starts with the page's own waiting
- * copy and the runtime's real step summaries replace it.
+ * shell's existing progress spinner, the current real turn step, the total
+ * elapsed time and the current step's elapsed time. The step label starts with
+ * the page's own waiting copy; each real `explicit.step` event replaces it with
+ * `步骤 <seq>` plus the runtime summary and resets the per-step timer. The
+ * timers are observation-only: they start at mount and at the last real step,
+ * never recompute time that elapsed before the banner was mounted. The block and
+ * its timer are removed on settle.
  *
  * Nothing touches the document until the returned methods are called, so the
  * seam stays import-safe in Node.
@@ -237,16 +239,64 @@ export async function readEntryQueue(api) {
 export function createSubmitStatusBanner(target) {
   let block = null
   let phase = null
+  let detail = null
+  let totalTimer = null
+  let stepTimer = null
+  let tick = null
+  let startedAt = 0
+  let stepStartedAt = 0
+
+  // A monotonic clock keeps the elapsed labels stable across clock changes.
+  const elapsedNow = () => (
+    typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now()
+  )
+  const formatElapsed = (milliseconds) => {
+    const wholeSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+    const minutes = Math.floor(wholeSeconds / 60)
+    const seconds = wholeSeconds % 60
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  }
+  const paintTimers = () => {
+    if (!totalTimer || !stepTimer) return
+    const now = elapsedNow()
+    totalTimer.textContent = `总耗时 ${formatElapsed(now - startedAt)}`
+    stepTimer.textContent = `本步 ${formatElapsed(now - stepStartedAt)}`
+  }
+  const startTimer = () => {
+    if (tick !== null) return
+    paintTimers()
+    tick = setInterval(paintTimers, 1000)
+  }
+  const stopTimer = () => {
+    if (tick === null) return
+    clearInterval(tick)
+    tick = null
+  }
   const mount = () => {
     if (!block) {
       block = element('div', undefined, 'progress progress--live')
       block.dataset.tone = 'active'
       block.append(element('span', undefined, 'progress-spinner'))
       phase = element('span', undefined, 'progress-phase')
+      phase.setAttribute('aria-live', 'polite')
       block.append(phase)
+      detail = element('span', undefined, 'progress-detail')
+      detail.setAttribute('aria-live', 'polite')
+      block.append(detail)
+      totalTimer = element('span', undefined, 'progress-timer')
+      totalTimer.setAttribute('aria-hidden', 'true')
+      block.append(totalTimer)
+      stepTimer = element('span', undefined, 'progress-timer')
+      stepTimer.setAttribute('aria-hidden', 'true')
+      block.append(stepTimer)
     }
     clearNode(target)
     target.append(block)
+    startedAt = elapsedNow()
+    stepStartedAt = startedAt
+    startTimer()
     if (typeof block.scrollIntoView === 'function' && typeof window !== 'undefined') {
       const rect = block.getBoundingClientRect()
       const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0
@@ -262,16 +312,31 @@ export function createSubmitStatusBanner(target) {
     }
     target.textContent = copy
   }
+  // A real `explicit.step` arrived: show its number and summary and reset the
+  // per-step timer. Number and summary are the runtime's; the page adds none.
+  const step = (event) => {
+    if (!block || !phase) return
+    const seq = event?.seq
+    const summary = typeof event?.summary === 'string' ? event.summary.trim() : ''
+    if (Number.isFinite(seq)) phase.textContent = `步骤 ${seq}`
+    if (summary !== '' && detail) detail.textContent = summary
+    stepStartedAt = elapsedNow()
+    paintTimers()
+  }
   const clear = () => {
+    stopTimer()
     if (!block) return
     const stale = block
     block = null
     phase = null
+    detail = null
+    totalTimer = null
+    stepTimer = null
     if (typeof stale.remove === 'function') stale.remove()
     else if (target && typeof target.removeChild === 'function') target.removeChild(stale)
   }
   const isLive = () => block !== null
-  return { mount, text, clear, isLive }
+  return { mount, text, step, clear, isLive }
 }
 
 // The page seams above are pure and import-safe in Node. Everything below owns
@@ -948,10 +1013,11 @@ const POST_CONFIRMATION_STATES = new Set(['confirmed', 'dispatched'])
 
 /**
  * Subscribe to the runtime's explicit-intake step stream while the brain is
- * still organizing the input. The page only mirrors progress summaries; it
- * never mints steps or a second confirmation. In a non-browser (or non-SSE)
- * environment the call degrades to a no-op so tests and server slices stay
- * side-effect free.
+ * still organizing the input. The page only mirrors the runtime's real steps —
+ * their `seq` and `summary` — and never mints steps or a second confirmation.
+ * The server emits these frames as the SSE event `explicit.step`
+ * (server.ts:2460-2474). In a non-browser (or non-SSE) environment the call
+ * degrades to a no-op so tests and server slices stay side-effect free.
  */
 function subscribeExplicitStepStream(activeId) {
   if (!activeId || typeof EventSource === 'undefined') return () => {}
@@ -961,7 +1027,7 @@ function subscribeExplicitStepStream(activeId) {
   } catch {
     return () => {}
   }
-  stream.addEventListener('step', (event) => {
+  stream.addEventListener('explicit.step', (event) => {
     try {
       const payload = JSON.parse(event.data || '{}')
       const step = payload?.step ?? payload
@@ -971,9 +1037,9 @@ function subscribeExplicitStepStream(activeId) {
           interactionId: activeId,
         })
         status.dataset.tone = 'warning'
-        // Same summary copy as before; while the submit is in flight it lands in
-        // the live banner's phase so the progress block survives the update.
-        submitBanner.text(step.summary)
+        // Show the real step number and summary in the live banner and reset
+        // its per-step timer; the progress block survives each step update.
+        submitBanner.step({ seq: step.seq, summary: step.summary })
       }
     } catch {
       // Ignore malformed step event payloads

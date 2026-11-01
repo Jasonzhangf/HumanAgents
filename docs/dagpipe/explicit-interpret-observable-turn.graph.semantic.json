@@ -1,0 +1,36 @@
+{
+  "graph": "humanagent-explicit-interpret-observable-turn",
+  "requirements_version": 19,
+  "labels": {
+    "receive_input": "接收用户提交并落成真实 interaction 与回执时间",
+    "project_submission_progress": "把真实 explicit.step 投影为可读提交进度与观察计时；步骤只来自真实 step，计时只基于本次页面提交观察起点与真实 step 到达时刻",
+    "observe_interaction_state": "只读观察 interaction 真实状态机推进",
+    "interpret_turn": "按既有显式大脑语义路由执行一次 interpret 轮次",
+    "decode_provider_events": "容差解码 Provider 真实流式事件，非关键事件不终止整轮",
+    "advance_interaction_state": "按解释结果推进 interaction 到下一真实状态",
+    "project_turn_result": "把真实轮次结果投影为可读对话与结果视图",
+    "recover_failed_turn": "失败时保留原错与恢复责任并给出可重试入口",
+    "turn_result": "汇总进度、结果与恢复视图形成单出口"
+  },
+  "owners": {
+    "receive_input": "packages/app",
+    "project_submission_progress": "packages/ui",
+    "observe_interaction_state": "packages/app",
+    "interpret_turn": "packages/runtime",
+    "decode_provider_events": "packages/adapters/provider",
+    "advance_interaction_state": "packages/runtime",
+    "project_turn_result": "packages/ui",
+    "recover_failed_turn": "packages/runtime",
+    "turn_result": "packages/app"
+  },
+  "contracts": {
+    "inputs": "一次用户提交携带原始输入、sourceRef 与 inputRevision，进入既有 explicit intake。",
+    "progress": "提交进度步骤只来自真实 explicit.step 事件（seq、summary、occurredAt）。interpret 是长请求，页面必须能在等待期间看到真实推进；无真实 step 时只显示提交中与初始本步计时，不猜步骤、不伪造序号或总步数。",
+    "time": "服务端 201 回执携带的真实 occurredAt 是服务端业务时间真源；页面提交观察计时只基于本地单调时钟：总耗时从 banner mount 起算，本步耗时从当前真实 step 到达时刻起算，不补算页面挂载前时间，不得用服务端 occurredAt 反算挂载前耗时。",
+    "protocolTolerance": "Provider 真实流式事件可能省略 item_id。content 与 reasoning 类事件在 item_id 缺失时退化为稳定占位身份并继续消费；function-call 类事件仍要求 item_id 或 call_id 至少其一。单个非关键事件不得终止整轮 interpret。",
+    "failure": "interpret 失败保留原错与恢复责任。interaction 必须回到可重试状态，页面必须给出可执行重试入口；不得要求用户重启服务才能继续。",
+    "outputs": "单出口返回本次交互真实结果、真实进度视图或真实失败与恢复视图。",
+    "ablation": "receive_input、project_submission_progress、observe_interaction_state、interpret_turn、decode_provider_events、advance_interaction_state、project_turn_result、recover_failed_turn、turn_result 各有独立产品责任；本图未删除节点，物理删除数为 0。",
+    "nonGoal": "本图不改交互状态机语义、不改显式大脑路由与分类、不改设计系统、不改 scheduler 巡逻规则，也不处理队列区显示无关历史任务。"
+  }
+}

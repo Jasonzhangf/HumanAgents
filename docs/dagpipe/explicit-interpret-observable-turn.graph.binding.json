@@ -1,0 +1,67 @@
+{
+  "graph": "humanagent-explicit-interpret-observable-turn",
+  "operator": {
+    "operator": "humanagent-explicit-interpret-observable-turn",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-UNVERIFIED",
+  "nodes": {
+    "receive_input": {
+      "ownerPath": "packages/app/src/ui-runtime/server.ts",
+      "ownerRel": "packages/app/src/ui-runtime/server.ts",
+      "implementationStatus": "exists-verified",
+      "designNote": "POST /api/explicit/inputs 接收提交并调用 service.receiveExplicitInput。缺口：201 回执只写 interactionId，丢弃服务端已计算的真实 occurredAt（server.ts:1461）。"
+    },
+    "project_submission_progress": {
+      "ownerPath": "docs/ui/entry.js",
+      "ownerRel": "docs/ui/entry.js",
+      "implementationStatus": "exists-defective",
+      "designNote": "提交进度投影。缺口：createSubmitStatusBanner 只有 spinner 与「正在整理并提交任务…」，无步骤序号、无总耗时、无本步耗时；subscribeExplicitStepStream 监听事件名 `step`，而真实服务端发 `explicit.step`（server.ts:2460-2474），真实步骤从未进入页面。必须改为监听真实 `explicit.step`，用 seq/summary 显示步骤并显示总耗时（banner mount 起算）与本步耗时（step 到达起算），clear() 清理计时器，复用现有 .progress 样式。"
+    },
+    "observe_interaction_state": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "implementationStatus": "exists-verified",
+      "designNote": "GET /api/explicit/interactions/<id> 与 interpretExplicitInput 中的状态推进（beginMatching / recordMatch / propose）。状态机本身已真实可用。"
+    },
+    "interpret_turn": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "implementationStatus": "exists-defective",
+      "designNote": "interpretExplicitInput（service.ts:6052）整段同步调用 explicitBrainInterpreter.interpret。缺口：失败后 interaction 停在 matching，无恢复路径，需重启。"
+    },
+    "decode_provider_events": {
+      "ownerPath": "packages/adapters/provider/src/codecs.ts",
+      "ownerRel": "packages/adapters/provider/src/codecs.ts",
+      "implementationStatus": "exists-defective",
+      "designNote": "Responses 协议事件解码。缺口：codecs.ts:1366 response.reasoning_summary_text.delta 对缺 item_id 的真实事件直接抛 missing.field，终止整轮 interpret。需对 content/reasoning 类事件做身份容差，function-call 类沿用既有 requireToolEventIdentity。"
+    },
+    "advance_interaction_state": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "implementationStatus": "exists-verified",
+      "designNote": "explicit intake 的状态推进与持久化。accept 时已写入真实 occurredAt（explicit-intake.ts:447-457）。"
+    },
+    "project_turn_result": {
+      "ownerPath": "docs/ui/interaction-work-card.js",
+      "ownerRel": "docs/ui/interaction-work-card.js",
+      "implementationStatus": "exists-defective",
+      "designNote": "对话轮次投影。缺口：interaction-work-card.js:511 在 turn.occurredAt 缺失时显示「时间未提供」，因为 entries 路径的 user 轮次未携带时间。"
+    },
+    "recover_failed_turn": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "失败恢复。interpret 失败必须保留原错与恢复责任，使 interaction 回到可重试状态，并让页面给出可执行重试入口。"
+    },
+    "turn_result": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "单出口汇总真实进度视图、真实结果视图与真实恢复视图。"
+    }
+  },
+  "requestLifetimeOwner": {
+    "contract": "interpret 是长请求。等待期间只做只读状态观察，不新增业务取消；失败保留原错与恢复责任，不伪造完成。"
+  }
+}

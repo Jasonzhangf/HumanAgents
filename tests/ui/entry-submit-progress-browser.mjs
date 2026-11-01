@@ -35,6 +35,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const uiRoot = resolve(process.env.T22C_UI_ROOT ?? join(repoRoot, 'dist', 'app', 'ui'));
@@ -283,6 +284,183 @@ const readTurns = () => {
   }));
 };
 
+// A real loopback SSE server for the `explicit.step` stream. `route.fulfill`
+// cannot stream, so the step replay needs a real socket: the page's own
+// EventSource connects here and receives two spaced frames (the second resets
+// the per-step timer). Every other request stays on the scripted origin.
+const STEP_ONE = { seq: 1, kind: 'request.dispatching', summary: '正在分派模型请求', occurredAt: '2026-10-27T07:28:59.000Z' };
+const STEP_TWO = { seq: 2, kind: 'response.reasoning', summary: '已收到模型推理摘要', occurredAt: '2026-10-27T07:29:03.000Z' };
+const STEP_TWO_DELAY_MS = 3_600;
+
+function stepFrame(step) {
+  return `id: explicit-step-${step.seq}\nevent: explicit.step\ndata: ${JSON.stringify(step)}\n\n`;
+}
+
+async function startExplicitStepServer() {
+  const sockets = new Set();
+  let connections = 0;
+  const server = createServer((_request, response) => {
+    connections += 1;
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'access-control-allow-origin': '*',
+    });
+    sockets.add(response.socket);
+    response.write(stepFrame(STEP_ONE));
+    const second = setTimeout(() => {
+      try { response.write(stepFrame(STEP_TWO)); } catch {}
+    }, STEP_TWO_DELAY_MS);
+    const heartbeat = setInterval(() => {
+      try { response.write(': keep-alive\n\n'); } catch {}
+    }, 1_000);
+    response.on('close', () => {
+      clearTimeout(second);
+      clearInterval(heartbeat);
+      sockets.delete(response.socket);
+    });
+  });
+  await new Promise((settle) => server.listen(0, '127.0.0.1', settle));
+  return {
+    origin: `http://127.0.0.1:${server.address().port}`,
+    get connections() { return connections; },
+    async close() {
+      for (const socket of sockets) socket.destroy();
+      await new Promise((settle) => server.close(settle));
+    },
+  };
+}
+
+// Repoint ONLY the entry page's explicit-step EventSource at the real SSE
+// server; every other request stays on the scripted origin.
+function repointExplicitStepStream(origin) {
+  const Real = window.EventSource;
+  window.EventSource = function (url, init) {
+    let target = String(url);
+    try {
+      const resolved = new URL(target, location.href);
+      if (/^\/api\/explicit\/interactions\/[^/]+\/events$/.test(resolved.pathname)) {
+        target = `${origin}${resolved.pathname}${resolved.search}`;
+      }
+    } catch {
+      // A URL the page cannot resolve is left untouched.
+    }
+    return new Real(target, init);
+  };
+}
+
+const stepBlockState = () => {
+  const parse = (copy) => {
+    const match = /(\d{2}):(\d{2})/.exec(String(copy ?? ''));
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  };
+  const block = document.querySelector('.status-banner .progress.progress--live');
+  if (!block) {
+    return { hasBlock: false, phase: null, detail: null, timers: [], timerCount: 0, totalSeconds: null, stepSeconds: null, rect: null, intersectsViewport: false, overflowX: false };
+  }
+  const phase = block.querySelector('.progress-phase');
+  const detail = block.querySelector('.progress-detail');
+  const timers = [...block.querySelectorAll('.progress-timer')].map((node) => node.textContent);
+  const rect = block.getBoundingClientRect();
+  return {
+    hasBlock: true,
+    phase: phase ? phase.textContent : null,
+    detail: detail ? detail.textContent : null,
+    timers,
+    timerCount: timers.length,
+    totalSeconds: parse(timers[0]),
+    stepSeconds: parse(timers[1]),
+    rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
+    intersectsViewport: rect.bottom > 0 && rect.top < window.innerHeight,
+    overflowX: block.scrollWidth > block.clientWidth + 1,
+  };
+};
+
+async function runStepProgress(page, pageErrors) {
+  const server = await startExplicitStepServer();
+  try {
+    await page.addInitScript(repointExplicitStepStream, server.origin);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#entry-form textarea[name="rawInput"]', { timeout: 10_000 });
+    await page.fill('#entry-form textarea[name="rawInput"]', '读取 README');
+    setGate('interpret');
+    await page.click('#entry-form button[type="submit"]');
+
+    // First real step: the label carries its seq, the summary carries its text.
+    await page.waitForFunction(
+      () => document.querySelector('.status-banner .progress--live .progress-phase')?.textContent === '步骤 1',
+      undefined,
+      { timeout: 20_000 },
+    );
+    const first = await page.evaluate(stepBlockState);
+    observe('first explicit.step state', first);
+    record('real step summary from explicit.step is rendered', first.detail === STEP_ONE.summary, first.detail);
+    record('step label number comes from seq', first.phase === '步骤 1', first.phase);
+    record('progress block shows total and step timers', first.timerCount === 2, first.timerCount);
+    record('first step reaches the real EventSource server', server.connections >= 1, server.connections);
+
+    // Let the per-step timer grow, then the second step must reset it.
+    await page.waitForFunction(
+      () => {
+        const text = document.querySelectorAll('.status-banner .progress--live .progress-timer')[1]?.textContent ?? '';
+        const match = /(\d{2}):(\d{2})/.exec(text);
+        return match ? Number(match[2]) >= 1 : false;
+      },
+      undefined,
+      { timeout: 20_000 },
+    );
+    const grown = await page.evaluate(stepBlockState);
+    observe('per-step timer grown', grown);
+
+    await page.waitForFunction(
+      () => document.querySelector('.status-banner .progress--live .progress-phase')?.textContent === '步骤 2',
+      undefined,
+      { timeout: 20_000 },
+    );
+    const second = await page.evaluate(stepBlockState);
+    observe('second explicit.step state', second);
+    record('second step summary replaces the first', second.detail === STEP_TWO.summary, second.detail);
+    record('second step label number comes from seq', second.phase === '步骤 2', second.phase);
+    record(
+      'total elapsed grows across steps',
+      second.totalSeconds !== null && grown.totalSeconds !== null && second.totalSeconds > grown.totalSeconds,
+      { grown: grown.totalSeconds, second: second.totalSeconds },
+    );
+    record(
+      'per-step timer resets on the second step',
+      second.stepSeconds !== null && grown.stepSeconds !== null && second.stepSeconds < grown.stepSeconds,
+      { grown: grown.stepSeconds, second: second.stepSeconds },
+    );
+
+    // Dual-viewport screenshots while the live block shows step + both timers.
+    await page.setViewportSize({ width: 1280, height: 720 });
+    const wide = await page.evaluate(stepBlockState);
+    record('1280x720 live block intersects the viewport', wide.intersectsViewport === true, wide.rect);
+    record('1280x720 live block has no horizontal overflow', wide.overflowX === false, wide.overflowX);
+    await page.screenshot({ path: join(evidenceRoot, 'step-progress-1280x720.png') });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const narrow = await page.evaluate(stepBlockState);
+    record('390x844 live block intersects the viewport', narrow.intersectsViewport === true, narrow.rect);
+    record('390x844 live block has no horizontal overflow', narrow.overflowX === false, narrow.overflowX);
+    await page.screenshot({ path: join(evidenceRoot, 'step-progress-390x844.png') });
+
+    releaseGate('interpret');
+    await page.waitForFunction(
+      () => !document.querySelector('.status-banner .progress.progress--live'),
+      undefined,
+      { timeout: 25_000 },
+    );
+    const settled = await page.evaluate(stepBlockState);
+    observe('post-settle step block', settled);
+    record('progress block and timers are removed on settle', settled.hasBlock === false, settled.hasBlock);
+    record('step-progress page produced no runtime errors', pageErrors.length === 0, pageErrors);
+  } finally {
+    await server.close();
+  }
+}
+
 async function runInFlightBanner(page, pageErrors, expectedTime) {
   void expectedTime;
   await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
@@ -392,6 +570,7 @@ async function main() {
     { name: 'run 1 (in-flight banner)', body: runInFlightBanner },
     { name: 'run 2 (user-turn time)', body: runUserTurnTime },
     { name: 'run 3 (already-visible, no forced scroll)', body: runVisibleNoForcedScroll },
+    { name: 'run 4 (real explicit.step + timers)', body: runStepProgress },
   ];
   for (const run of runs) {
     await withScriptedPage(async (page, pageErrors) => {
