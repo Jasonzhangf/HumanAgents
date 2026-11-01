@@ -1766,8 +1766,12 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     'productController',
     `let detail; ${interactionSource}; return renderInteraction('interaction-confirm', undefined)`,
   )(element, main, primary, composer, pageLeaving, activeInteractionId, api, advance, window, document, clearNode, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard, technicalDetailTrigger, productController);
-  const confirm = nodes.find((node) => node.textContent === '按此方案继续');
+  const confirm = nodes.find((node) => node.textContent === '确认提交');
   if (!confirm) throw new Error('expected confirmation controls');
+  // The pending confirmation offers an explicit abandon control alongside the
+  // submit, not an ambiguous continue, so the human can close it deliberately.
+  const abandon = nodes.find((node) => node.textContent === '放弃' && node.attrs['data-task-action'] === 'abandon');
+  if (!abandon) throw new Error('expected an abandon control');
   await confirm.handlers.click();
   // The controller re-renders the interaction panel after the confirmation, so
   // read the receipt from the node produced by that render.

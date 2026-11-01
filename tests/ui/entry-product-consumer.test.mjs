@@ -22,6 +22,7 @@ import {
   resolveTaskLanding,
   resolveSubmittedTaskScope,
   shouldDisposeEntryPage,
+  submittedTaskLandingHref,
   taskLandingHref,
   taskScopeFromSystemRead,
 } from '../../docs/ui/entry.js'
@@ -126,6 +127,20 @@ test('a confirmed task lands on the interaction task page with exact scope', () 
   assert.equal(url.searchParams.get('projectKey'), 'project-a')
   assert.equal(url.searchParams.get('mode'), 'rcc')
   assert.equal(url.searchParams.get('interaction'), 'interaction-1')
+})
+
+test('a confirmed new-task submission lands on the live dashboard, not the static confirm page', () => {
+  // The entry form submit is the single human confirmation. A new task must
+  // land on the live execution dashboard so the human sees real steps, never on
+  // task.html?interaction=... where task.js renders a static confirm dead page.
+  const href = submittedTaskLandingHref(taskId, taskScope)
+  const url = new URL(href, 'https://product.invalid/')
+
+  assert.equal(url.pathname, '/task-dashboard.html')
+  assert.equal(url.searchParams.get('task'), 'task-1')
+  assert.equal(url.searchParams.get('projectKey'), 'project-a')
+  assert.equal(url.searchParams.get('mode'), 'rcc')
+  assert.equal(url.searchParams.get('interaction'), null)
 })
 
 test('the exact task scope comes from the committed project read, never from a guess', () => {

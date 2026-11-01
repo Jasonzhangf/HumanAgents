@@ -258,13 +258,19 @@ export function createTaskProductController(options = {}) {
       submit.addEventListener('click', () => void clarify())
       actions.append(answer, submit)
     } else if (state.snapshot?.state === 'awaiting-confirmation' && state.snapshot.draft) {
-      const confirm = make('button', '按此方案继续', 'button button--primary')
+      const confirm = make('button', '确认提交', 'button button--primary')
       confirm.type = 'button'
       confirm.id = 'task-confirm-button'
       confirm.setAttribute('data-task-action', 'confirm')
       confirm.disabled = state.submitting
       confirm.addEventListener('click', () => void confirmInteraction(confirm))
-      actions.append(confirm)
+      const abandon = make('button', '放弃', 'button')
+      abandon.type = 'button'
+      abandon.id = 'task-abandon-button'
+      abandon.setAttribute('data-task-action', 'abandon')
+      abandon.disabled = state.submitting
+      abandon.addEventListener('click', () => void abandonInteraction(abandon))
+      actions.append(confirm, abandon)
     }
     panel.append(actions)
 
@@ -353,6 +359,42 @@ export function createTaskProductController(options = {}) {
       showError(error, '本次确认提交未获成功回执。')
       renderInteraction()
     }
+  }
+
+  async function abandonInteraction(button) {
+    if (state.submitting || state.confirmed || !state.snapshot?.draft) return
+    if (typeof transport.rejectExplicitDraft !== 'function') {
+      showError(Object.assign(new Error('缺少正式放弃入口。'), {
+        code: 'task.abandon.transport-unavailable',
+        ownerId: 'humanagent.ui',
+        nextAction: 'inject the runtime-api rejection surface',
+      }))
+      renderInteraction()
+      return
+    }
+    state.submitting = true
+    if (button) button.disabled = true
+    state.notice = '正在放弃本次确认…'
+    renderInteraction()
+    try {
+      await transport.rejectExplicitDraft(state.interactionId, {
+        reason: 'human abandoned the pending confirmation',
+        rejectionId: `ui:rejection:${state.interactionId}`,
+        closedAt: new Date().toISOString(),
+      })
+      state.submitting = false
+      state.confirmed = true
+      state.error = undefined
+      state.notice = '已放弃本次确认，交互已关闭。'
+      if (status) {
+        status.textContent = state.notice
+        status.removeAttribute?.('data-status')
+      }
+    } catch (error) {
+      state.submitting = false
+      showError(error, '本次放弃未获成功回执。')
+    }
+    renderInteraction()
   }
 
   async function clarify() {

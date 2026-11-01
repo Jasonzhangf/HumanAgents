@@ -194,6 +194,17 @@ export function taskLandingHref(taskId, scope, interactionId) {
   return `./task.html?${params.toString()}`
 }
 
+/**
+ * The confirmed new-task submission lands on the live execution dashboard. The
+ * entry form submit is the single human confirmation, so the page must show the
+ * real execution steps immediately; it never sends the human to the static
+ * task.html confirm page. `task.html?interaction=...` stays the
+ * existing-task-change entry for a genuine confirm/clarify/abandon decision.
+ */
+export function submittedTaskLandingHref(taskId, scope) {
+  return taskDashboardHref(taskId, scope)
+}
+
 function taskScopeUnresolved() {
   return Object.assign(new Error('任务已提交，但无法定位本次任务的确切读取范围。'), {
     code: 'entry.task-scope-unresolved',
@@ -719,10 +730,11 @@ async function refreshQueue() {
 }
 
 /**
- * Move a confirmed new-task submission into the interaction main line. It
- * resolves the exact task scope and lands on the interaction task page. A read
- * that cannot find the scope stays an explicit landing failure; it never falls
- * back to an unscoped task read or a second create.
+ * Move a confirmed new-task submission into the live execution main line. It
+ * resolves the exact task scope and lands on the live task dashboard so the
+ * human sees the real execution steps. A read that cannot find the scope stays
+ * an explicit landing failure; it never falls back to an unscoped task read or
+ * a second create.
  */
 async function landOnSubmittedTask(identity) {
   let taskIdValue
@@ -750,7 +762,10 @@ async function landOnSubmittedTask(identity) {
       interactionId,
     })
     if (pageLeaving) return
-    window.location.assign(landing.href)
+    // A confirmed new-task submission lands on the live execution dashboard:
+    // the form submit is the only confirmation, so the human must see the real
+    // steps, not the static task.html confirm page.
+    window.location.assign(submittedTaskLandingHref(taskIdValue, landing.scope))
   } catch (error) {
     if (lookupError) throw lookupError
     throw error

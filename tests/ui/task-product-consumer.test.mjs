@@ -285,6 +285,47 @@ test('one explicit confirmation submits exactly once', async () => {
   assert.equal(calls.confirm[0][1].inputRevision, 3)
 })
 
+test('an awaiting-confirmation interaction offers explicit confirm and abandon controls', () => {
+  const { controller, interactionHost } = createController()
+
+  controller.setInteraction({
+    interactionId: 'interaction-1',
+    snapshot: snapshot('awaiting-confirmation'),
+  })
+  const confirm = find(interactionHost, '#task-confirm-button')[0]
+  assert.ok(confirm, 'the confirmation control exists')
+  assert.equal(confirm.textContent, '确认提交')
+
+  const abandon = find(interactionHost, '[data-task-action="abandon"]')[0]
+  assert.ok(abandon, 'the pending confirmation offers an explicit abandon control')
+  assert.equal(abandon.textContent, '放弃')
+})
+
+test('abandoning a pending confirmation closes the interaction through the reject API', async () => {
+  const calls = { reject: [] }
+  const { controller, interactionHost } = createController({
+    transport: {
+      rejectExplicitDraft: async (...args) => {
+        calls.reject.push(args)
+        return { state: 'rejected' }
+      },
+    },
+  })
+
+  controller.setInteraction({
+    interactionId: 'interaction-1',
+    snapshot: snapshot('awaiting-confirmation'),
+  })
+  const abandon = find(interactionHost, '[data-task-action="abandon"]')[0]
+  abandon.click()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  assert.equal(calls.reject.length, 1)
+  assert.equal(calls.reject[0][0], 'interaction-1')
+  assert.equal(typeof calls.reject[0][1].reason, 'string')
+  assert.ok(calls.reject[0][1].reason.length > 0)
+})
+
 test('a clarification failure keeps the typed answer and the original input', async () => {
   const { controller, interactionHost } = createController({
     transport: {
