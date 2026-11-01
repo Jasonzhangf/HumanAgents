@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { runAppsdkAdmissionGate } from './appsdk-admission-gate.mjs';
 
 function option(args, name, fallback) {
   const index = args.indexOf(name);
@@ -10,3 +11,4 @@ const projectRoot = resolve(option(process.argv.slice(2), '--project-root', proc
 for (const script of ['typecheck', 'build:raw', 'test:compiled:services']) {
   execFileSync('pnpm', ['run', script], { cwd: projectRoot, stdio: 'inherit' });
 }
+runAppsdkAdmissionGate(projectRoot);

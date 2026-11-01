@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { runAppsdkAdmissionGate } from './appsdk-admission-gate.mjs';
 import { configuredReleaseVersion } from './release-version.mjs';
 
 function option(args, name, fallback) {
@@ -30,6 +31,7 @@ for (const script of releaseScripts) {
     env: { ...process.env, HUMANAGENT_RELEASE_VERSION: releaseVersion },
   });
 }
+runAppsdkAdmissionGate(projectRoot);
 
 const packageArtifactPath = join(projectRoot, 'dist', 'release', `humanagent-cli-${releaseVersion}.tgz`);
 try {
