@@ -108,3 +108,6 @@ next reminder.
 - 2026-11-01 14:12 UTC: second deadline fired and was renewed explicitly.
   Carol advanced to `af1125785` on top of `d05c0308e`; the board still reports
   rework, and no new local-file-search success receipt is present yet.
+- 2026-11-01 14:37 UTC: third deadline fired and was renewed explicitly.
+  Carol's candidate is still `af1125785`; no new E2E evidence appeared. Sent
+  Carol a reply-required status request `m1793543854684-523`.
