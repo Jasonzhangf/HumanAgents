@@ -131,7 +131,8 @@ for new work.
 - D39 P1 `a7f56b9` direct answer leaves entry queue saying no task submitted.
 - D40 P1 `486ddd4` execution step copy leaks internal English phrase.
 - D41 P1 `28c9738` corner floating buttons occlude content.
-- D42 P1 `60d2e73` homepage submission can stay at received with no task.
+- D42 P1 `60d2e73` homepage submission can stay at received with no task
+  (closed 2026-11-02 after accepted real-RCC receipt).
 - D43 P2 `8000805` entry exposes feature copy and internal labels.
 - D44 P2 `db32833` semantic observation renders 1069 repeated evidence buttons.
 
@@ -154,10 +155,10 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 | M | 交付物 | 状态 | 证据 / 缺口 | 下一动作 | 验收与停止条件 |
 |---|---|---|---|---|---|
 | M1 | 常驻 longhorizon 目标与 open bug 真源维护 | `active`：goal `ad967f01…` 每 20m 显式重 arm；`appsdk bug list` 当前 32 项 open，其中 P0 4、P1 9、P2 6，另有 13 项未分级审计/UX/通信项 | `appsdk goal status` 返回 armed/subscribed；`appsdk bug list --json` 已核对四项 P0；`60d2e73` 已在真实 RCC 入口和截图证据后关闭 | 每轮刷新；未分级项补 owner；Alice 修复后同步 bug 状态 | 目标持续 active；所有 open 项有 owner、证据路径、下一动作；不能把旧队列冒称全部 |
-| M2 | 项目巡检（四项） | `armed`：project-patrol `sub-m1793413132850-18`，interval 900000ms，目标 1500000ms；`collab notify status` 仍为 `PATROL_CADENCE_RUNTIME_GAP`；goal deadline `m1793651994627-1409` 已消费并按 20m 重新武装为 `sub-m1793652337880-1413` | `collab notify status`；`appsdk goal status --json`；worktree 7（main + W2-A 集成树 + real-path-dispatch + 4 locked provider `PROTECTED_HOLD`）；本轮已成功读取 `/Volumes/Intel` worktree、运行测试并核对证据 | 每轮核对 worker、未关闭 board、资源和权限真源；不声称节奏已对齐；继续推进 Alice 的 clarification 与 W2-B rework | 四项均核对并有回执；gap 未解除时如实报告 |
+| M2 | 项目巡检（四项） | `armed`：project-patrol `sub-m1793413132850-18`，interval 900000ms，目标 1500000ms；`collab notify status` 仍为 `PATROL_CADENCE_RUNTIME_GAP`；goal deadline `m1793651994627-1409` 已消费并按 20m 重新武装为 `sub-m1793652337880-1413` | `collab notify status`；`appsdk goal status --json`；worktree 7（main + W2-A/W2-B 集成树 + real-path-dispatch + 4 locked provider `PROTECTED_HOLD`）；W2-B 返工树有三处未提交修改，尚未验收 | 每轮核对 worker、未关闭 board、资源和权限真源；不声称节奏已对齐；继续推进 Alice 的 clarification 与 W2-B rework | 四项均核对并有回执；gap 未解除时如实报告；未提交的 W2-B diff 不得当作完成 |
 | M3 | W1-A/W1-B 结果转交 Alice，不再续派或合并 | `已进入 origin/main`：W1-A `3c0b49f89`/`626969fb3` 与 W1-B `37c38dd56` 均为 `origin/main` 祖先 | `git merge-base --is-ancestor` 实测三个提交均 `yes`；Alice 工作树已由她收走 | 保持不续派；后续 W1 相关 P0 由 Alice 按 W1-W3 计划验收 | W1 提交已入 main；剩余 P0 状态以 `appsdk bug list` 为准，不重复合并 |
-| M4 | W2/W3 证据接收与核对 | W2-A 实现已入 main（`7b51b8076` 与返工 `0e9696a9e` 均为 `origin/main` 祖先，集成 commit `351a17ca0` 也在 main）；board 任务 `mvp-w2a-implicit-orchestration-20261102` rev16 `merged`，但独立审查记录了两项后续：w2a-result.md 图描述回边需更正、Planner 决策端口未在 `packages/app` 接线；W2-B `879332f5a` 不是 main 祖先，board rev8 `rework` | `collab board show`；`git merge-base --is-ancestor`；`collab worker snapshot` | W2-B 完成真实中断/效果恢复证据后由 Alice 交回；W2-A 两项后续和 W2-B 都不得因“已入集成分支”标完成 | W2-A 可交付面已入 main，但两项后续未闭环；W2-B 未并入 main，真实 mutating/recovery 证据缺失时标 `UNVERIFIED` |
-| M5 | 自有 worktree 与资源收口 | `open`：main、`mvp-real-path-dispatch-20261102`、`mvp-w2a-orch-20261102` 与 4 个 locked provider 树 `PROTECTED_HOLD`，共 7/10 | `git worktree list` 实测 7 个，未超 10 | 每轮核对；W2-B 收口后移除 `mvp-w2a-orch`；`mvp-real-path-dispatch` 由 Alice 完成后关闭 | 每个候选合入后 remove+prune；不触他人树 |
+| M4 | W2/W3 证据接收与核对 | W2-A 实现已入 main（`7b51b8076` 与返工 `0e9696a9e` 均为 `origin/main` 祖先，集成 commit `351a17ca0` 也在 main）；board 任务 `mvp-w2a-implicit-orchestration-20261102` rev16 `merged`，但独立审查记录了两项后续：w2a-result.md 图描述回边需更正、Planner 决策端口未在 `packages/app` 接线；W2-B `879332f5a` 不是 main 祖先，board rev8 `rework`；当前返工 diff 已加入 `unknown` settle 状态、保留 latest typed receipt、无 settle 时读取既有 recovery fact，并补真实子进程 SIGKILL mutating-effect 测试 | `collab board show`；`git merge-base --is-ancestor`；`collab worker snapshot`；`git diff --stat` 与三文件 diff 只读核对（未运行测试、未提交） | W2-B 完成真实中断/效果恢复证据后由 Alice 交回；W2-A 两项后续和 W2-B 都不得因“已入集成分支”标完成 | W2-A 可交付面已入 main，但两项后续未闭环；W2-B 当前为 `working/UNVERIFIED`，未并入 main 前不得标完成 |
+| M5 | 自有 worktree 与资源收口 | `open`：main、`mvp-real-path-dispatch-20261102`、`mvp-w2a-orch-20261102` 与 4 个 locked provider 树 `PROTECTED_HOLD`，共 7/10；`mvp-w2a-orch` 还有未提交 W2-B 返工改动 | `git worktree list` 实测 7 个，未超 10；不能把 dirty owner 树当作可回收资源 | 每轮核对；W2-B 收口并清空/提交所有者改动后移除 `mvp-w2a-orch`；`mvp-real-path-dispatch` 由 Alice 完成后关闭 | 每个候选合入后 remove+prune；不触他人树；dirty/active 资源保留并报告 |
 | M6 | 用户最近问题的清单映射 | `已映射且有截图`：动画 step/计时截图实际位于 `/Volumes/Intel/playground/humanagent/.worker-runs/entry-progress-step-timers-20261101/worker-1/evidence/step-progress-1280x720.png` 与 `.../step-progress-390x844.png`，已目视确认显示步骤、总耗时、本步耗时；无二次确认（D20 `f3b63887f` 已入 main，真实 RCC 80/80）、容错循环（D17 `ede3189ba` 已入 main，真实 RCC 4444 once-503 receipt SUCCESS、`execution.retry` seq=4）、nn-code（AGENTS.md `## 符号探索` 第 50 行已存在；类方法解析缺口报告已 durable enqueue 到 `NNAnything.Bob`，msg_id `m1793575205675-2`）、Carol 无 snapshot（`22a689b` 已按「直接问 Carol」关闭） | 均已映射；后续发现新问题即 `appsdk bug intake` 登记 | 每项有 bug id 或证据路径；不把未验证结果当完成；截图阶段不等于 W2/W3 全链路验收 |
 
 ### P 列：当前未关闭问题（按优先级，全部在 `appsdk bug list` 为 open）
@@ -181,6 +182,19 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - **Bob / Carol / David**：可用 peer。Carol 无 tmux snapshot 能力时按「直接问 Carol」方式发 durable message（上次 `m1793534323235-241`），不把 snapshot 缺失当阻塞；无 ready 长程目标时不空邀请。
 
 ## Update Log
+
+- 2026-11-02 20:50 UTC: 消费 goal deadline `m1793651994627-1409` 后，
+  `appsdk goal status --json` 显示目标仍 active，已重新武装后续一次性 deadline
+  `sub-m1793652337880-1413`（20m）；`collab notify status` 仍报告
+  `PATROL_CADENCE_RUNTIME_GAP`（运行 900000ms，目标 1500000ms），未声称已对齐。
+  board 仍是四项 Alice 任务：real-lane P0 `merged` 待 owner close，W2-A P0
+  `merged` 待 owner close，clarification P1 `working`，W2-B P0 `rework`。只读核对
+  `/Volumes/Intel/playground/humanagent/mvp-w2a-orch-20261102` 的三文件未提交
+  W2-B 返工：`ProviderSettleState` 增加 `unknown`，恢复事实保留最新 typed
+  `ProviderSettleReceipt`，无 settle 输入时先复用既有事实、否则记录 `unknown` 而非伪造
+  `not-sent`；测试新增真实子进程 SIGKILL、mutating effect、hydrate hold 与同 turn
+  recover 路径。该 diff 尚未运行 focused tests、尚未 commit，状态仍是
+  `working/UNVERIFIED`；不抢 owner 的树，也不因此关闭 W2-A 或资源。
 
 - 2026-11-02 20:45 UTC: consumed `m1793651911372-1408` and deadline
   `m1793651994627-1409`. Reviewed Alice's delivered
