@@ -185,6 +185,36 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ## Update Log
 
+- 2026-11-02 15:40 UTC: CORRECTION — the real RCC path is NOT delivered. Emma's
+  boundary review of proof6 is correct: `80/80` only proves the assertions
+  fired, not that the task succeeded. proof6 `once observation pipeline state`
+  is `blocked`, and the live-card detail ends with `步骤 494 provider request
+  failed` and `步骤 495 terminated (cause: SocketError [UND_ERR_SOCKET]: other
+  side closed)` at 11/02 07:27; no usable output is proven. proof7 (same main
+  `f5f13f05d`+dist, re-run after the 10086 rebuild) scored `56/57`: `real RCC
+  section completed` FAILed with `the committed task row never rendered in
+  #entry-live`, i.e. the user's original symptom returned. So the real-lane
+  symptom is intermittent: proof5 rendered the row and reached `succeeded`,
+  proof6 rendered the row but the provider stream died as `blocked`, and
+  proof7/proof3/proof4 never rendered the row. The one-line dashboard-link fix
+  `f5f13f05d` is necessary but NOT sufficient; the entry submission and the
+  native provider execution are still unreliable. Evidence:
+  `/Volumes/Intel/playground/humanagent/.worker-runs/master-ui-proof6-20261102/checks.json`
+  and `.../master-ui-proof7-20261102/checks.json`. The `80/80` claim in the
+  15:25 entry above must not be read as end-to-end success. Extant bugs remain
+  relevant: `60d2e73` (submission stays at received with no task), `a9dc797`
+  (completed native task leaves public output empty), `45f92c8` (native lane
+  bypasses implicit Brain orchestration). M-column correction: item 3 (MVP
+  real path) is still `未达成`; treat proof6 as partial evidence only. The
+  10086 daemon was rebuilt onto `f5f13f05d` and is live on pid 10275
+  (`http://127.0.0.1:10086` root 200) after a failed formal `humanagent
+  restart` (`daemon-restart.child-exited`, replacement code=1) had briefly
+  interrupted it. Next: dispatch a real-lane reliability diagnosis+fix for the
+  intermittent entry submit (task row within the timeout) AND the provider
+  stream `SocketError` terminal without a usable output, then re-run T22c on the
+  new build and require a `succeeded` pipeline with non-empty output, not just
+  assertion count.
+
 - 2026-11-02 15:25 UTC: fifth main-tree real-RCC run
   (`tests/ui/entry-flow-browser.mjs` T22c, isolated `serve --mode rcc` on
   `127.0.0.1:4444`, model `goaichat.glm-5.3`) scored `77/78`. The once
