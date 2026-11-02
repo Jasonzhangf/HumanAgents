@@ -783,3 +783,31 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   中断、真实 mutating 副作用和同 turn 恢复。要求补最小红测（settled /
   not-sent / unknown）和真实进程中断回执，保留 W2-B 为 open，不合并 main。
   Bug `180f971` 已写入同一证据边界。
+
+- 2026-11-02 19:12-19:17 UTC: goal deadline `m1793646660675-1343`
+  consumed (LAST_REMINDER; `appsdk goal status` had returned
+  active=false/consumed) and explicitly re-armed via `appsdk goal subscribe
+  --goal docs/goals/humanagent-open-p1-governance-20261101.md --interval 20m`
+  (one-shot armed; project patrol `sub-m1793413132850-18` still armed at
+  900000 ms). Project patrol `m1793647059942-1347` consumed in the same pass.
+  Re-verified user evidence directly: the four PNGs under
+  `docs/ui/evidence/mvp-progress-20261102/` exist, and
+  `step-progress-1280x720.png` visibly shows `步骤 2 · 调用工具: file.read ·
+  总耗时 00:01 · 本步 00:00 · 详情`, so the step label, total timer and
+  per-step timer are real on `main`; the project `AGENTS.md` already carries
+  `## 符号探索` for nn-code at line 50. Patrol facts: workers Jenny=working,
+  Emma=idle, Alice/Bob/Carol/David=unknown (recorded, no blind wake);
+  `project_board_patrol` shows Alice's 3 open tasks eligible and no
+  cancellations (daemon dispatcher owns the actual wake); worktrees 7/10
+  (main, `mvp-real-path-dispatch`, `mvp-w2a-orch`, plus 4 locked provider
+  PROTECTED_HOLD), none deleted; CEO configured as Alice, `is_current=false`,
+  not reachable for delivery (known limitation). Board unchanged: W2-A
+  merged/needs close, W2-B rework/needs review evidence, entry-task-row P0
+  working. 33 open bugs (4 P0 `45f92c8`/`a9dc797`/`4c21e74`/`47b26dd`); the
+  remaining explicit user complaint `db7f3ba6` (clarification/confirm only
+  free text, no selectable options) is still open and unowned. Production
+  `127.0.0.1:10086` remains down and the global `humanagent-cli@0.1.43`
+  predates the 2026-11-01 UI fixes; the single release gate is explicit
+  one-time human approval to install `dist/release/humanagent-cli-0.1.0043.tgz`
+  and restart. No merge, install, worktree delete or process kill was
+  performed this wake.
