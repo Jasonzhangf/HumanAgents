@@ -21,7 +21,9 @@
  *   B. Real RCC proof. An isolated `serve --mode rcc` process (never the shared
  *      10086 instance) drives the served entry page against the live RCC
  *      endpoint on 127.0.0.1:4444 and records:
- *        - a real once execution reaching observation with a provider tool trace;
+ *        - a real once execution that stays on the entry index with a live
+ *          progress card, mirrored execution steps, total and per-step timers,
+ *          and an in-place detail layer with the explicit full-dashboard link;
  *        - a scheduled plan persisted as a real subscription;
  *        - a recurring plan persisted with real time/zone/period parameters.
  *
@@ -789,6 +791,23 @@ async function pairContext(context, base, workspace, controlRoot) {
   await context.addCookies([{ name, value, domain: '127.0.0.1', path: '/' }]);
 }
 
+// A context close also ends Chromium under `--single-process`, so each real
+// RCC case owns a fresh browser just like the deterministic section cases.
+async function withRccPage(base, workspace, controlRoot, options, run) {
+  const browser = await playwright.chromium.launch({ headless: true, args: browserArgs });
+  let context;
+  try {
+    context = await browser.newContext(options);
+    await pairContext(context, base, workspace, controlRoot);
+    const page = await context.newPage();
+    page.__base = base;
+    return await run(page, context);
+  } finally {
+    if (context) await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
 async function submitThroughEntry(page, { rawInput, mode, startAt }) {
   await page.goto(`${page.__base}/index.html`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#entry-form textarea[name="rawInput"]');
@@ -805,24 +824,33 @@ async function submitThroughEntry(page, { rawInput, mode, startAt }) {
  * backend rejection into an opaque 90 s wait.
  */
 async function waitForPlanReceipt(page, mode, timeoutMs = 90_000) {
-  await page.waitForSelector('#entry-draft', { timeout: 20_000 });
   const deadline = Date.now() + timeoutMs;
-  let last = { panelText: '', statusText: '' };
+  let last = { draftVisible: false, panelText: '', statusText: '' };
   while (Date.now() < deadline) {
     const state = await page.evaluate((expectedMode) => {
+      const draftVisible = Boolean(document.querySelector('#entry-draft'));
+      const status = document.querySelector('[role="status"]');
       const panel = document.querySelector('#entry-error');
       const panelText = panel && !panel.hidden ? (panel.textContent || '').trim() : '';
-      const statusText = (document.querySelector('[role="status"]')?.textContent || '').trim();
+      const statusText = (status?.textContent || '').trim();
       return {
+        draftVisible,
         panelText,
         statusText,
-        hasReceipt: statusText.includes(expectedMode === 'once' ? '正在打开执行观测' : '执行计划已保存'),
+        liveProgress: Boolean(status?.querySelector('.progress--live')),
+        hasReceipt: draftVisible && statusText.includes(expectedMode === 'once' ? '正在打开执行观测' : '执行计划已保存'),
       };
-    }, mode).catch(() => ({ panelText: '', statusText: '', hasReceipt: false }));
+    }, mode).catch(() => ({
+      draftVisible: false,
+      panelText: '',
+      statusText: '',
+      liveProgress: false,
+      hasReceipt: false,
+    }));
     last = state;
     if (state.hasReceipt) return;
     if (state.panelText) throw new Error(`plan receipt was not produced: ${state.panelText}`);
-    if (state.statusText && !/等待|保存|正在/.test(state.statusText)) {
+    if (state.statusText && !state.liveProgress && !/等待|保存|正在|整理|提交/.test(state.statusText)) {
       throw new Error(`plan receipt was not produced; page status: ${state.statusText}`);
     }
     await page.waitForTimeout(500);
@@ -830,29 +858,8 @@ async function waitForPlanReceipt(page, mode, timeoutMs = 90_000) {
   throw new Error(
     `plan receipt was not produced within ${timeoutMs} ms; `
     + `the explicit brain may have answered status-only instead of saving a plan `
-    + `(status: ${last.statusText || 'empty'}; error: ${last.panelText || 'none'})`,
+    + `(draft visible: ${last.draftVisible}; status: ${last.statusText || 'empty'}; error: ${last.panelText || 'none'})`,
   );
-}
-
-/**
- * Wait until the entry submission lands on the observation surface, or fail
- * fast with the error the page actually shows. A blind navigation wait turns
- * every upstream failure into an opaque timeout.
- */
-async function waitForObservationNavigation(page, timeoutMs = 180_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (/observation\.html\?task=/.test(page.url())) return;
-    const failure = await page.evaluate(() => {
-      const panel = document.querySelector('#entry-error');
-      const panelText = panel && !panel.hidden ? (panel.textContent || '').trim() : '';
-      const statusText = (document.querySelector('[role="status"]')?.textContent || '').trim();
-      return panelText || (/owner=|next=/.test(statusText) ? statusText : '');
-    }).catch(() => '');
-    if (failure) throw new Error(`entry submission did not reach the observation surface: ${failure}`);
-    await page.waitForTimeout(500);
-  }
-  throw new Error(`entry submission never reached the observation surface (url=${page.url()})`);
 }
 
 /**
@@ -878,8 +885,11 @@ async function waitForObservationTrace(context, base, taskId, timeoutMs = 420_00
       const toolSteps = projection.selectedNode?.toolSteps ?? [];
       const line = `+${Math.round((Date.now() - started) / 1000)}s ${node?.state ?? 'missing'}/tools=${toolSteps.length}`;
       if (line !== last) { timeline.push(line); last = line; }
-      if (node && ['succeeded', 'failed', 'stopped'].includes(node.state) && toolSteps.length > 0) {
-        return timeline.join(' ');
+      // `blocked` is a real final terminal state (a terminal event with
+      // terminalPhase `final`), so a provider failure must not be treated as a
+      // missing projection.
+      if (node && ['succeeded', 'failed', 'stopped', 'blocked'].includes(node.state) && toolSteps.length > 0) {
+        return { timeline: timeline.join(' '), state: node.state, toolSteps };
       }
     } else {
       last = `observation http ${response.status()}`;
@@ -890,7 +900,137 @@ async function waitForObservationTrace(context, base, taskId, timeoutMs = 420_00
   throw new Error(`real observation never projected a terminal tool trace: ${timeline.join(' ')}`);
 }
 
-async function sectionB(browser, artifactDir, root) {
+// D20: the confirmed once task stays on the single entry page, so the real
+// proof reads the in-place live submit card instead of an observation page.
+const readLiveCard = () => {
+  const banner = document.querySelector('.status-banner');
+  const block = banner?.querySelector('.progress.progress--live') ?? null;
+  if (!block) return { hasBlock: false, tone: banner?.dataset?.tone ?? null };
+  const phase = block.querySelector('.progress-phase');
+  const detail = block.querySelector('.progress-detail');
+  const timers = [...block.querySelectorAll('.progress-timer')].map((node) => node.textContent);
+  const rect = block.getBoundingClientRect();
+  return {
+    hasBlock: true,
+    phase: phase ? phase.textContent : null,
+    detail: detail ? detail.textContent : null,
+    timers,
+    timerCount: timers.length,
+    interactive: block.dataset.interactive === 'true',
+    tone: banner?.dataset?.tone ?? null,
+    rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
+    intersectsViewport: rect.bottom > 0 && rect.top < window.innerHeight,
+    overflowX: block.scrollWidth > block.clientWidth + 1,
+  };
+};
+
+const readEntryFailureSurface = () => {
+  const banner = document.querySelector('[role="status"]');
+  const panel = document.querySelector('#entry-error');
+  return {
+    tone: banner?.dataset?.tone ?? null,
+    panelText: panel && !panel.hidden ? (panel.textContent || '').trim() : '',
+    statusText: (banner?.textContent || '').trim(),
+  };
+};
+
+/**
+ * Wait until the in-place live progress card carries a real runtime step
+ * (`步骤 <seq>`) with the total and per-step timers. This polls from Node so an
+ * upstream rejection surfaces the page's own reason instead of an opaque
+ * timeout.
+ */
+async function waitForLiveExecutionCard(page, timeoutMs = 300_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = { hasBlock: false };
+  while (Date.now() < deadline) {
+    last = await page.evaluate(readLiveCard).catch(() => ({ hasBlock: false }));
+    if (last.hasBlock && /^步骤 \d+$/.test(last.phase ?? '') && last.timerCount === 2) return last;
+    const failure = await page.evaluate(readEntryFailureSurface).catch(() => null);
+    if (failure && (failure.tone === 'danger' || failure.panelText)) {
+      throw new Error(
+        `once submit did not reach a live execution step: `
+        + `${failure.panelText || failure.statusText} (tone=${failure.tone ?? 'none'})`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(
+    `once submit never showed a live execution step `
+    + `(phase=${last.phase ?? 'none'}, tone=${last.tone ?? 'none'}, url=${page.url()})`,
+  );
+}
+
+async function waitForCommittedTaskId(page, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const taskId = await page.evaluate(() => (
+      document.querySelector('#entry-live a.task-row-link[data-task-id]')?.dataset?.taskId ?? null
+    )).catch(() => null);
+    if (taskId) return taskId;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  throw new Error('the committed task row never rendered in #entry-live');
+}
+
+/**
+ * The committed once task is a queued parent; the real execution runs on the
+ * current-execution child the runtime grouped under that row. Resolve the child
+ * so the independent observation oracle reads the task that actually carries
+ * the operation and the provider tool trace.
+ */
+async function waitForExecutionChildId(context, base, parentTaskId, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await context.request.get(`${base}/api/tasks`);
+    if (response.ok()) {
+      const body = await response.json();
+      const rows = [
+        ...(body?.draft ?? []),
+        ...(body?.waiting ?? []),
+        ...(body?.running ?? []),
+        ...(body?.completed ?? []),
+        ...(body?.stopped ?? []),
+        ...(body?.failed ?? []),
+      ];
+      const row = rows.find((candidate) => candidate.taskId?.value === parentTaskId);
+      const rawChild = row?.currentExecutionTaskId;
+      const childId = rawChild && typeof rawChild === 'object' ? rawChild.value : rawChild;
+      if (childId && childId !== parentTaskId) return childId;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return parentTaskId;
+}
+
+/**
+ * Clicking the live card opens the shell detail layer. Read the real task
+ * identity, the mirrored execution steps and the explicit full-dashboard link.
+ */
+async function openLiveCardDetail(page) {
+  await page.locator('.status-banner .progress.progress--live').first().click();
+  const dialog = page.locator('dialog.shell-layer[open]').first();
+  await dialog.waitFor({ state: 'visible', timeout: 10_000 });
+  const state = await dialog.evaluate((node) => ({
+    text: (node.innerText || '').replace(/\s+/g, ' ').trim(),
+    facts: [...node.querySelectorAll('.draft-receipt > div')].map((row) => ({
+      label: (row.querySelector('dt')?.textContent || '').trim(),
+      value: (row.querySelector('dd')?.textContent || '').trim(),
+    })),
+    steps: [...node.querySelectorAll('.progress-step')].map((item) => ({
+      seq: (item.querySelector('.progress-step-seq')?.textContent || '').trim(),
+      summary: (item.querySelector('.progress-step-summary')?.textContent || '').trim(),
+      time: (item.querySelector('.progress-step-time')?.textContent || '').trim(),
+    })),
+    links: [...node.querySelectorAll('a[href]')].map((anchor) => ({
+      text: (anchor.textContent || '').trim(),
+      href: anchor.getAttribute('href'),
+    })),
+  }));
+  return { dialog, state };
+}
+
+async function sectionB(artifactDir, root) {
   let serve;
   const run = { ok: false };
   try {
@@ -903,95 +1043,147 @@ async function sectionB(browser, artifactDir, root) {
     const workspace = join(root, 'workspace');
     const controlRoot = join(root, 'control');
 
-    // Once: full submit -> real observation with a provider tool trace.
+    // Once: the submit is the single confirmation and the page stays on the
+    // single entry interface while the live card mirrors the real execution
+    // steps. The runtime observation projection is read only as an independent
+    // oracle that the real provider tool execution happened; there is no
+    // observation navigation anymore.
     {
-      const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-      await pairContext(context, base, workspace, controlRoot);
-      const page = await context.newPage();
-      page.__base = base;
-      let confirmationBody;
-      page.on('request', (request) => {
-        if (request.url().endsWith('/confirmation') && request.method() === 'POST') confirmationBody = request.postDataJSON();
-      });
-      const pageErrors = [];
-      page.on('pageerror', (error) => pageErrors.push(error.message));
-      await submitThroughEntry(page, {
-        rawInput: 'Do not ask questions. Create exactly one task: read marker.txt in the workspace root and report its contents, then finish with COMPLETE.',
-        mode: 'once',
-      });
-      await waitForObservationNavigation(page);
-      const taskId = new URL(page.url()).searchParams.get('task');
-      const timeline = await waitForObservationTrace(context, base, taskId);
-      observe('once observation settlement timeline', timeline);
-      await page.reload({ waitUntil: 'domcontentloaded' });
-      await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 20_000 });
-      const nodeCount = await page.locator('.flow-node').count();
-      const pipelineChip = (await page.textContent('.flow-node[data-node-id="pipeline.execute"] .state-chip'))?.trim();
-      observe('once observation url', page.url());
-      observe('once pipeline chip', pipelineChip);
-      await page.locator('.flow-node[data-node-id="pipeline.execute"]').click();
-      await page.waitForSelector('.node-drawer[open] .iwc-card', { timeout: 20_000 });
-      await page.click('#iwc-tab-trace');
-      await page.waitForTimeout(250);
-      const traceText = await page.evaluate(() => {
-        const trace = document.querySelector('.iwc-panel--trace');
-        return trace?.innerText ?? document.querySelector('.node-drawer')?.innerText ?? '';
-      });
-      const turnLabels = await page.evaluate(() => {
-        const trace = document.querySelector('.iwc-panel--trace');
-        return [...(trace?.querySelectorAll('.iwc-trace-group') ?? [])].map((group) => ({
-          turnKey: group.dataset.turnKey,
-          turnId: group.dataset.turnId,
-          chip: group.querySelector('.iwc-turn-id')?.textContent ?? '',
-          chipTurnId: group.querySelector('.iwc-turn-id')?.dataset.turnId,
-          unprojected: Boolean(group.querySelector('.iwc-turn-unprojected')),
-        }));
-      });
-      // The independent oracle: the runtime's own public history for this real
-      // task. The drawer may only show turn ids that this surface reported.
-      const historyResponse = await context.request.get(
-        `${base}/api/tasks/${encodeURIComponent(taskId)}/history?limit=200`,
+      await withRccPage(
+        base,
+        workspace,
+        controlRoot,
+        { viewport: { width: 1280, height: 720 } },
+        async (page, context) => {
+          let confirmationBody;
+          page.on('request', (request) => {
+            if (request.url().endsWith('/confirmation') && request.method() === 'POST') confirmationBody = request.postDataJSON();
+          });
+          const pageErrors = [];
+          page.on('pageerror', (error) => pageErrors.push(error.message));
+          await submitThroughEntry(page, {
+            rawInput: 'Do not ask questions. Create exactly one task: read marker.txt in the workspace root and report its contents, then finish with COMPLETE.',
+            mode: 'once',
+          });
+          const taskId = await waitForCommittedTaskId(page);
+          await waitForLiveExecutionCard(page);
+          await page.waitForTimeout(1_200);
+          const card = await page.evaluate(readLiveCard);
+          const confirmSurface = await page.evaluate(() => ({
+            secondConfirmButton: document.querySelectorAll('#entry-confirm-button, [data-entry-confirm]').length,
+            confirmLabels: [...document.querySelectorAll('button')]
+              .map((button) => (button.textContent || '').trim())
+              .filter((label) => /确认|审批|二次/.test(label)),
+          }));
+          observe('once task id', taskId);
+          observe('once url after submit', page.url());
+          observe('once live card', card);
+          record('once submit stays on the entry index', new URL(page.url()).pathname === '/index.html', page.url());
+          record('once live card is visible after confirmation', card.hasBlock === true, card.hasBlock);
+          record('once live card shows a real execution step', /^步骤 \d+$/.test(card.phase ?? ''), card.phase);
+          record('once live card shows the real runtime summary', (card.detail ?? '').trim().length > 0, card.detail);
+          record(
+            'once live card shows total and per-step timers',
+            card.timerCount === 2 && card.timers.every((timer) => /总耗时|本步/.test(timer ?? '')),
+            card.timers,
+          );
+          record('once live card is interactive', card.interactive === true, card.interactive);
+          record(
+            'once submit sends a once execution policy',
+            confirmationBody?.executionPolicy?.executionMode === 'once'
+              && Boolean(confirmationBody?.executionPolicy?.dueAt),
+            confirmationBody,
+          );
+          record(
+            'once submit shows no second confirmation control',
+            confirmSurface.secondConfirmButton === 0 && confirmSurface.confirmLabels.length === 0,
+            confirmSurface,
+          );
+
+          // Independent real-RCC oracle: the runtime's own observation projection
+          // must settle with a provider tool trace for the task that actually runs
+          // the operation (the current-execution child of the committed parent).
+          const executionTaskId = await waitForExecutionChildId(context, base, taskId);
+          observe('once execution task id', executionTaskId);
+          const traceSettlement = await waitForObservationTrace(context, base, executionTaskId);
+          observe('once observation settlement timeline', traceSettlement?.timeline);
+          observe('once observation pipeline state', traceSettlement?.state);
+          observe('once observation provider tool steps', traceSettlement?.toolSteps);
+          const historyResponse = await context.request.get(
+            `${base}/api/tasks/${encodeURIComponent(executionTaskId)}/history?limit=200`,
+          );
+          const historyBody = historyResponse.ok() ? await historyResponse.json() : null;
+          const reportedTurnIds = [...new Set(
+            (historyBody?.page?.items ?? [])
+              .map((entry) => entry.turnId)
+              .filter((value) => typeof value === 'string' && value.length > 0),
+          )];
+          observe('once runtime history status', historyResponse.status());
+          observe('once reported turn ids', reportedTurnIds);
+          record('once real task reported a provider turn id', reportedTurnIds.length > 0, reportedTurnIds);
+
+          // Real-RCC screenshots of the live card with step and timers.
+          await page.setViewportSize({ width: 1280, height: 720 });
+          const wide = await page.evaluate(readLiveCard);
+          record('1280x720 live card intersects the viewport', wide.intersectsViewport === true, wide.rect);
+          await page.screenshot({ path: join(proofEvidenceDir, 'real-rcc-live-card-1280x720.png') });
+          await page.setViewportSize({ width: 390, height: 844 });
+          const narrow = await page.evaluate(readLiveCard);
+          record('390x844 live card intersects the viewport', narrow.intersectsViewport === true, narrow.rect);
+          record(
+            '390x844 live card stays inside the viewport',
+            narrow.rect.left >= 0 && narrow.rect.right <= 390,
+            narrow.rect,
+          );
+          record('390x844 live card has no horizontal overflow', narrow.overflowX === false, narrow.overflowX);
+          await page.screenshot({ path: join(proofEvidenceDir, 'real-rcc-live-card-390x844.png') });
+
+          // The live card opens the in-place detail layer: real task identity,
+          // mirrored real steps and the explicit full-dashboard link.
+          await page.setViewportSize({ width: 1280, height: 720 });
+          const { dialog, state: detail } = await openLiveCardDetail(page);
+          observe('once live card detail', detail);
+          const taskFact = detail.facts.find((fact) => fact.label === '任务')?.value ?? '';
+          const fullDashboard = detail.links.find((link) => link.text === '打开完整任务看板');
+          const fullDashboardHref = fullDashboard ? new URL(fullDashboard.href, page.url()) : null;
+          const oracleToolNames = (traceSettlement?.toolSteps ?? [])
+            .map((step) => step.name)
+            .filter((name) => typeof name === 'string' && name.length > 0);
+          const drawerHasOracleToolStep = detail.steps.some((step) => oracleToolNames
+            .some((name) => step.summary.includes(`调用工具：${name}`)));
+          record('clicking the live card opens the detail layer', detail.text.length > 0, detail.text.slice(0, 200));
+          record('detail layer reports the real task identity', taskFact === taskId, { taskFact, taskId });
+          record(
+            'detail layer lists real execution steps',
+            detail.steps.length > 0
+              && detail.steps.every((step) => /^步骤 \d+$/.test(step.seq) && step.summary.length > 0),
+            detail.steps,
+          );
+          record(
+            'detail layer mirrors the oracle provider tool steps',
+            oracleToolNames.length > 0 && drawerHasOracleToolStep,
+            { oracleToolNames, steps: detail.steps.map((step) => step.summary).slice(-8) },
+          );
+          record(
+            'detail layer exposes the explicit full-dashboard link',
+            fullDashboardHref !== null
+              && fullDashboardHref.pathname.endsWith('/task-dashboard.html')
+              && fullDashboardHref.searchParams.get('task') === taskId,
+            fullDashboard,
+          );
+          await page.screenshot({ path: join(proofEvidenceDir, 'real-rcc-live-card-detail-1280x720.png') });
+          await dialog.locator('button.shell-layer-close').first().click();
+          await dialog.waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => {});
+          record(
+            'closing the detail layer returns to the entry page',
+            new URL(page.url()).pathname === '/index.html'
+              && await page.locator('dialog.shell-layer[open]').count() === 0,
+            page.url(),
+          );
+          record('once entry page has no page errors', pageErrors.length === 0, pageErrors);
+          run.ok = true;
+        },
       );
-      const historyBody = historyResponse.ok() ? await historyResponse.json() : null;
-      const reportedTurnIds = [...new Set(
-        (historyBody?.page?.items ?? [])
-          .map((entry) => entry.turnId)
-          .filter((value) => typeof value === 'string' && value.length > 0),
-      )];
-      const realLabels = turnLabels.filter((label) => label.unprojected === false && typeof label.turnId === 'string');
-      const unprojectedLabels = turnLabels.filter((label) => label.unprojected);
-      observe('once task id', taskId);
-      observe('once trace text', traceText);
-      observe('once runtime history status', historyResponse.status());
-      observe('once reported turn ids', reportedTurnIds);
-      observe('once drawer turn labels', turnLabels);
-      record('once submit lands on the real observation page', Boolean(taskId), page.url());
-      record('once observation renders the real pipeline', nodeCount >= 8, nodeCount);
-      record('once observation drawer shows the real tool trace', /file\.read|create_goal|update_goal/.test(traceText), traceText.slice(0, 400));
-      record(
-        'once drawer turn label equals the real provider turn id the runtime reported',
-        reportedTurnIds.length > 0
-          && realLabels.length > 0
-          && realLabels.every((label) => reportedTurnIds.includes(label.turnId)
-            && label.chipTurnId === label.turnId
-            && label.chip === `轮次 ${label.turnId}`),
-        { reportedTurnIds, realLabels },
-      );
-      record(
-        'once drawer never labels a real turn with the unprojected fallback',
-        realLabels.length > 0 && realLabels.every((label) => label.unprojected === false),
-        turnLabels,
-      );
-      record(
-        'once drawer uses the explicit no-turn state for events the provider did not stamp',
-        unprojectedLabels.length === 0 || unprojectedLabels.every((label) => label.turnKey === '__no-turn-identity__'),
-        unprojectedLabels,
-      );
-      record('once submit sends a once execution policy', confirmationBody?.executionPolicy?.executionMode === 'once' && Boolean(confirmationBody?.executionPolicy?.dueAt), confirmationBody);
-      record('once observation has no page errors', pageErrors.length === 0, pageErrors);
-      await page.screenshot({ path: join(artifactDir, 'rcc-once-observation.png') });
-      await context.close();
-      run.ok = true;
     }
 
     // Scheduled and recurring: real plans persisted as subscriptions. The two
@@ -1003,18 +1195,15 @@ async function sectionB(browser, artifactDir, root) {
       { mode: 'scheduled', label: 'scheduled', rawInput: 'Do not ask questions. Create exactly one task: report the current date.' },
       { mode: 'recurring', label: 'recurring', rawInput: 'Do not ask questions. Create exactly one task: report the current weekday name.' },
     ]) {
-      const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-      await pairContext(context, base, workspace, controlRoot);
-      const page = await context.newPage();
-      page.__base = base;
-      let confirmationBody;
-      page.on('request', (request) => {
-        if (request.url().endsWith('/confirmation') && request.method() === 'POST') confirmationBody = request.postDataJSON();
+      await withRccPage(base, workspace, controlRoot, { viewport: { width: 1440, height: 1000 } }, async (page) => {
+        let confirmationBody;
+        page.on('request', (request) => {
+          if (request.url().endsWith('/confirmation') && request.method() === 'POST') confirmationBody = request.postDataJSON();
+        });
+        await submitThroughEntry(page, { rawInput: plan.rawInput, mode: plan.mode });
+        await waitForPlanReceipt(page, plan.mode);
+        record(`${plan.label} submit sends its execution policy`, confirmationBody?.executionPolicy?.executionMode === plan.mode && Boolean(confirmationBody?.executionPolicy?.timezone) && Boolean(confirmationBody?.executionPolicy?.startAt), confirmationBody);
       });
-      await submitThroughEntry(page, { rawInput: plan.rawInput, mode: plan.mode });
-      await waitForPlanReceipt(page, plan.mode);
-      record(`${plan.label} submit sends its execution policy`, confirmationBody?.executionPolicy?.executionMode === plan.mode && Boolean(confirmationBody?.executionPolicy?.timezone) && Boolean(confirmationBody?.executionPolicy?.startAt), confirmationBody);
-      await context.close();
     }
     const subscriptionLines = (await readFile(subscriptionsPath, 'utf8')).trim().split('\n').filter(Boolean);
     const latest = JSON.parse(subscriptionLines.at(-1));
@@ -1034,6 +1223,10 @@ async function sectionB(browser, artifactDir, root) {
 
 const artifactDir = join(evidenceRoot, 'artifacts');
 await mkdir(artifactDir, { recursive: true });
+// The D20 real-RCC screenshots live with the product evidence, not in the
+// execution-owned artifact scratch root.
+const proofEvidenceDir = join(repoRoot, 'docs', 'evidence', 'd20-single-interface-20261101');
+await mkdir(proofEvidenceDir, { recursive: true });
 try {
   await sectionA(artifactDir);
 } catch (error) {
@@ -1042,18 +1235,13 @@ try {
 if (skipRcc) {
   observe('rcc', 'skipped via T22C_SKIP_RCC=1');
 } else {
-  const browser = await playwright.chromium.launch({ headless: true, args: browserArgs });
+  const root = await mkdtemp(join(tmpdir(), 't22c-entry-flow-'));
+  await mkdir(join(root, 'workspace'), { recursive: true });
+  await writeFile(join(root, 'workspace', 'marker.txt'), 'T22C_MARKER\n', 'utf8');
   try {
-    const root = await mkdtemp(join(tmpdir(), 't22c-entry-flow-'));
-    await mkdir(join(root, 'workspace'), { recursive: true });
-    await writeFile(join(root, 'workspace', 'marker.txt'), 'T22C_MARKER\n', 'utf8');
-    try {
-      await sectionB(browser, artifactDir, root);
-    } catch (error) {
-      record('real RCC section completed', false, error instanceof Error ? error.message : String(error));
-    }
-  } finally {
-    await browser.close().catch(() => {});
+    await sectionB(artifactDir, root);
+  } catch (error) {
+    record('real RCC section completed', false, error instanceof Error ? error.message : String(error));
   }
 }
 

@@ -885,12 +885,34 @@ function openSubmitProgressDetail(trigger) {
 async function startLiveTaskProgress({ taskId, scope }) {
   stopLiveTaskProgress()
   const taskIdValue = taskId && typeof taskId === 'object' ? taskId.value : taskId
-  const readDashboard = () => api.scopedTaskDashboard({
+  const readDashboardFor = (idValue) => api.scopedTaskDashboard({
     projectKey: scope.projectKey,
     mode: scope.mode,
-    taskId: { scope: 'task', value: taskIdValue },
+    taskId: { scope: 'task', value: idValue },
   })
-  const dashboard = await readDashboard()
+  // A committed new task is a queued parent whose real execution runs on its
+  // current execution child, the task that actually carries the operation. Read
+  // the parent's own dashboard first; when it has no operation yet, follow the
+  // child the runtime grouped under this row so the live card mirrors the real
+  // steps instead of waiting on an operation the parent never receives.
+  const resolveExecutingDashboard = async () => {
+    const own = await readDashboardFor(taskIdValue)
+    if (own?.operationId) return own
+    try {
+      const row = taskRows(await api.listTasks())
+        .find((candidate) => candidate.taskId?.value === taskIdValue)
+      const rawChild = row?.currentExecutionTaskId
+      const childId = rawChild && typeof rawChild === 'object' ? rawChild.value : rawChild
+      if (childId && childId !== taskIdValue) {
+        const child = await readDashboardFor(childId)
+        if (child?.operationId) return child
+      }
+    } catch {
+      // A task-list read failure must not hide the parent's own dashboard state.
+    }
+    return own
+  }
+  const dashboard = await resolveExecutingDashboard()
   if (pageLeaving) return
   const progress = {
     taskId: taskIdValue,
@@ -917,7 +939,7 @@ async function startLiveTaskProgress({ taskId, scope }) {
       observeTimer = null
       if (pageLeaving || liveTaskProgress !== progress) return
       try {
-        const next = await readDashboard()
+        const next = await resolveExecutingDashboard()
         if (pageLeaving || liveTaskProgress !== progress) return
         status.dataset.tone = 'success'
         connect(next)
