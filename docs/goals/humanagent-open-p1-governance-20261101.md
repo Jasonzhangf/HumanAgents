@@ -535,3 +535,33 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   status=`working`, owner=Emma. Alice's W2-A worktree still has no commit at
   `74fb7bb87` and now reports 13 dirty paths while she continues the contract
   adaptation and test run. No master-side takeover or merge was performed.
+
+- 2026-11-02 16:15 UTC: proof6 boundary review confirmed that `80/80` is not
+  end-to-end success; the task ended `blocked` after a retryable RCC
+  `SocketError`, and the existing issues `a9dc797` and `60d2e73` retain that
+  evidence. Separately, production `127.0.0.1:10086` is down because the
+  installed global `humanagent-cli` still contains the old whole-file
+  `readFileSync` path for `explicit-brain.jsonl`. Current `main` already
+  contains `3ae7c8d32` (`UiRuntimeJournal.findLastRecordMatching` and streaming
+  validation), and the current `dist` read the 615 MB production journal's
+  tail in 65 ms without an `ERR_STRING_TOO_LONG`. The remaining action is to
+  build/install a fresh release candidate and retry the formal restart. No
+  production journal was deleted or changed.
+
+- 2026-11-02 16:22 UTC: the `0.1.0043` release tarball was verified to contain
+  the streaming tail-read path (`scanJournalLinesBackwards` and
+  `readLatestExplicitBrainStateFromFile`) in
+  `packages/adapters/jsonl/src/explicit-brain-state-journal.js`. Package smoke
+  passed end to end: install, `doctor`, `run`, structured lifecycle error,
+  browser pairing, explicit input `201`, tasks API `200`, and arbitrary-cwd UI.
+  The extracted candidate package also read the real 644,887,039-byte
+  production `explicit-brain.jsonl` in 77 ms and recovered `stateSeq=157` with
+  25 deltas, so the fix is verified on both package smoke and live-sized data.
+
+- 2026-11-02 16:27 UTC: the `/Volumes/Intel` mount was independently checked
+  as connected APFS with 1.1 TiB free; the W2-B worktree is readable and shows
+  Alice's uncommitted progress plus the expected diff. Alice was asked to retry
+  the four remaining wiring files on the original path and return the raw
+  errno if the rejection recurs. The only release gate still waiting on the
+  human is explicit approval to install the verified global
+  `humanagent-cli` package and then perform the formal restart.
