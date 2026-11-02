@@ -633,7 +633,8 @@ function renderDraft(snapshot) {
   clearNode(section)
   if (snapshot.state === 'awaiting-clarification') {
     const panel = element('div', undefined, 'panel')
-    const question = snapshot.clarifications?.at(-1)?.question || snapshot.reply || '需要澄清'
+    const latestClarification = snapshot.clarifications?.at(-1)
+    const question = latestClarification?.question || snapshot.reply || '需要澄清'
     panel.append(element('h3', question))
     const form = element('form', undefined, 'form-grid')
     const label = element('label')
@@ -641,15 +642,17 @@ function renderDraft(snapshot) {
     const input = label.querySelector('input')
     input.name = 'answer'
     input.required = true
-    form.append(label)
     const actions = element('div', undefined, 'actions')
     const button = element('button', '回答并继续', 'button button--primary')
     button.type = 'submit'
     actions.append(button)
-    form.append(actions)
-    form.addEventListener('submit', (event) => {
-      event.preventDefault()
-      const answer = input.value.trim()
+    const optionButtons = []
+    const setClarificationControlsDisabled = (disabled) => {
+      button.disabled = disabled
+      for (const optionButton of optionButtons) optionButton.disabled = disabled
+    }
+    const submitClarificationAnswer = (rawAnswer, triggerButton) => {
+      const answer = String(rawAnswer ?? '').trim()
       if (!answer) {
         setEntryError(Object.assign(new Error('请先填写澄清内容。'), {
           code: 'request.invalid-field',
@@ -662,14 +665,42 @@ function renderDraft(snapshot) {
       const run = submissionGate.begin(() => executeSubmission(pendingSubmission, answer))
       if (!run.started) return
       submitting = true
-      button.disabled = true
+      setClarificationControlsDisabled(true)
       clearEntryError()
       void run.result
-        .catch((error) => handleSubmissionError(error, button))
+        .catch((error) => handleSubmissionError(error, triggerButton ?? button))
         .finally(() => {
           submitting = false
-          button.disabled = false
+          setClarificationControlsDisabled(false)
         })
+    }
+    const candidateOptions = Array.isArray(latestClarification?.options)
+      ? latestClarification.options
+        .filter((entry) => typeof entry === 'string' && entry.trim() !== '')
+        .map((entry) => entry.trim())
+      : []
+    if (candidateOptions.length > 0) {
+      const optionsGroup = element('div', undefined, 'actions clarification-options')
+      optionsGroup.setAttribute('role', 'group')
+      optionsGroup.setAttribute('aria-label', '候选澄清选项')
+      candidateOptions.forEach((optionText, index) => {
+        const optionButton = element('button', optionText, 'button clarification-option')
+        optionButton.type = 'button'
+        optionButton.dataset.clarificationOption = String(index)
+        optionButton.addEventListener('click', () => {
+          input.value = optionText
+          submitClarificationAnswer(optionText, optionButton)
+        })
+        optionButtons.push(optionButton)
+        optionsGroup.append(optionButton)
+      })
+      form.append(optionsGroup)
+    }
+    form.append(label)
+    form.append(actions)
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      submitClarificationAnswer(input.value, button)
     })
     panel.append(form)
     section.append(panel)

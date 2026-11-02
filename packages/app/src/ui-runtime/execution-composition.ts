@@ -4,7 +4,12 @@ import { canonicalJsonStringify, id, operationIdempotencyKey, operationSemanticF
   type ToolRegistration, type TurnCloseSummary } from '../../../contracts/src/index.js';
 import { JsonlTaskGrantJournal, readTaskBusinessRegistration } from '../../../adapters/jsonl/src/task-grants.js';
 import { createJsonlOperationControlJournal } from '../operation-control-journal.js';
-import type { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import { createJsonlToolEffectLedgerJournal, type JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import {
+  computeToolArgsDigest,
+  computeToolIdempotencyKey,
+  deriveToolEffectPolicy,
+} from '../../../runtime/src/checkpoints/effect-ledger-recovery.js';
 import type { RuntimeExecutionAllocation, RuntimeTaskJournalPort } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { taskStepPublisherForPool } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { OperationStopSettlementPort, OperationTaskBoundaryPort } from '../../../runtime/src/gateway/ports.js';
@@ -1016,11 +1021,14 @@ export function createDefaultExecutionComposition(input: {
         }
       }
       let childProducer: ProviderToolExecutionPort | undefined;
+      const effectLedger = createJsonlToolEffectLedgerJournal({
+        filePath: `${input.filePath}.effect-ledger.jsonl`,
+      });
       const providerToolExecution = {
             tools: [...(toolScope?.tools ?? input.providerOptions.tools ?? []), ADVERTISED_STANDARD_TURN_END_TOOL],
             executeTool: {
               canRunConcurrently: (call) => childProducer?.canRunConcurrently?.(call) === true,
-              execute: (request: Parameters<ProviderToolExecutionPort['execute']>[0]) => {
+              execute: async (request: Parameters<ProviderToolExecutionPort['execute']>[0]) => {
                 if (isStandardTurnEndCall(request.call.toolId)) return endExecutor.execute(request);
                 if (APP_CHILD_TOOLS.some((tool) => tool.toolId === request.call.toolId)) {
                   if (!childProducer) missing('the child tool has no bound child producer');
@@ -1028,7 +1036,111 @@ export function createDefaultExecutionComposition(input: {
                 }
                 const executor = providerToolExecutor?.executor ?? input.providerOptions.executeTool;
                 if (!executor) missing('the advertised tool has no admitted executor');
-                return executor.execute(request);
+                const argsDigest = computeToolArgsDigest(request.call.arguments);
+                const idempotencyKey = computeToolIdempotencyKey({
+                  turnId,
+                  toolCallId: request.call.callId,
+                  toolId: request.call.toolId,
+                  argsDigest,
+                });
+                const isReadonlyTool = ['file.read', 'file.list', 'file.search', 'get.goal', 'web.search'].includes(
+                  request.call.toolId,
+                );
+                const effectPolicy = deriveToolEffectPolicy(isReadonlyTool ? ['inspect'] : ['apply']);
+                const boundPlanStepId = 'step-1';
+                const existingRecords = await effectLedger.readToolEffectLedgerEntries({
+                  scope: allocation.scope,
+                  turnId,
+                });
+                const matching = existingRecords.find(
+                  (item) => item.entry.idempotencyKey === idempotencyKey || item.entry.callId === request.call.callId,
+                );
+                if (matching?.entry.state === 'effect-committed' && matching.cachedOutput) {
+                  return {
+                    callId: request.call.callId,
+                    toolId: request.call.toolId,
+                    status: matching.cachedOutput.status,
+                    output: matching.cachedOutput.output,
+                    outputRefs: matching.cachedOutput.outputRefs,
+                    evidenceRefs: matching.cachedOutput.evidenceRefs,
+                  };
+                }
+                if (matching?.entry.state === 'reconciled') {
+                  if (matching.cachedOutput) {
+                    return {
+                      callId: request.call.callId,
+                      toolId: request.call.toolId,
+                      status: matching.cachedOutput.status,
+                      output: matching.cachedOutput.output,
+                      outputRefs: matching.cachedOutput.outputRefs,
+                      evidenceRefs: matching.cachedOutput.evidenceRefs,
+                    };
+                  }
+                  return {
+                    callId: request.call.callId,
+                    toolId: request.call.toolId,
+                    status: 'succeeded',
+                    output: `Reconciled prior mutating tool effect (${request.call.toolId}); skipped duplicate execution.`,
+                    outputRefs: [],
+                    evidenceRefs: [],
+                  };
+                }
+                await effectLedger.appendToolEffectLedgerEntry({
+                  scope: allocation.scope,
+                  turnId,
+                  callId: request.call.callId,
+                  toolCallId: request.call.callId,
+                  boundPlanStepId,
+                  toolName: request.call.toolId,
+                  effectPolicy,
+                  idempotencyKey,
+                  argsDigest,
+                  state: 'dispatched-effect-unknown',
+                  outputArtifactRef: null,
+                });
+                const result = await executor.execute(request);
+                if (result.status === 'succeeded') {
+                  await effectLedger.appendToolEffectLedgerEntry({
+                    scope: allocation.scope,
+                    turnId,
+                    callId: request.call.callId,
+                    toolCallId: request.call.callId,
+                    boundPlanStepId,
+                    toolName: request.call.toolId,
+                    effectPolicy,
+                    idempotencyKey,
+                    argsDigest,
+                    state: 'effect-committed',
+                    outputArtifactRef: result.outputRefs[0] ?? `artifact:tool:${request.call.callId}`,
+                    cachedOutput: {
+                      output: typeof result.output === 'string' ? result.output : JSON.stringify(result.output ?? ''),
+                      outputRefs: result.outputRefs,
+                      evidenceRefs: result.evidenceRefs,
+                      status: 'succeeded',
+                    },
+                  });
+                } else {
+                  await effectLedger.appendToolEffectLedgerEntry({
+                    scope: allocation.scope,
+                    turnId,
+                    callId: request.call.callId,
+                    toolCallId: request.call.callId,
+                    boundPlanStepId,
+                    toolName: request.call.toolId,
+                    effectPolicy,
+                    idempotencyKey,
+                    argsDigest,
+                    state: 'effect-failed-clean',
+                    outputArtifactRef: null,
+                    cachedOutput: {
+                      output: typeof result.output === 'string' ? result.output : JSON.stringify(result.output ?? ''),
+                      outputRefs: result.outputRefs,
+                      evidenceRefs: result.evidenceRefs,
+                      status: 'failed',
+                    },
+                  });
+                }
+                return result;
               },
             } satisfies ProviderToolExecutionPort,
           };

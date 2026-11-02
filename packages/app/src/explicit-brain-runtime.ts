@@ -156,6 +156,7 @@ export interface ExplicitBrainInterpretationInput {
   readonly rawInput: string;
   readonly clarifications: readonly {
     readonly question: string;
+    readonly options?: readonly string[];
     readonly answer?: string;
   }[];
   readonly taskCandidates: readonly ExplicitBrainTaskCandidate[];
@@ -207,6 +208,7 @@ export type ExplicitBrainInterpretation =
       readonly normalizedInput: string;
       readonly knownFacts: readonly string[];
       readonly question: string;
+      readonly options?: readonly string[];
       readonly decisionRefs: readonly string[];
     };
 
@@ -261,7 +263,7 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     'dispatch_helper takes selection (roleId and optional configuredAgentId), assignmentFields, inputs, and evidenceRefs. Helpers must return JSON with agentId, producedArtifactRefs, status, summary, outputRefs, evidenceRefs, nextAction, and optional conditionRef/failureRef. Returned does not mean accepted.',
     'accept_helper takes helperCallId, refinedText, acceptanceRef, and evidenceRefs. Refine the actual returned conclusion before accepting it.',
     'The object is flat at the top level. kind must be requirement, status-query, clarification, or answer.',
-    'Every variant carries normalizedInput, knownFacts (string array), and decisionRefs (string array) at the top level, plus the fields for its own kind: proposal, taskFlowKind for a semantically clear requirement shape, and the optional matchedTaskId for requirement; answer for status-query and answer; and question for clarification.',
+    'Every variant carries normalizedInput, knownFacts (string array), and decisionRefs (string array) at the top level, plus the fields for its own kind: proposal, taskFlowKind for a semantically clear requirement shape, and the optional matchedTaskId for requirement; answer for status-query and answer; and question plus optional options (string array) for clarification.',
     'Never nest a decision wrapper, and never emit a selected-action, summary, user-input flag, tool-result flag, or tool-intents field.',
     'Never echo the input envelope back as output fields: interactionId, inputRevision, sourceRef, rawInput, clarifications, and taskCandidates are input only.',
     'The committed rawInput is the only request in this turn. taskCandidates and the prior turn checkpoints are reference history: read them only to match a status-query or an append/change target. A candidate status such as created, blocked, stopped, or waiting is never a user request, so never propose continuing, resuming, or finishing candidate tasks unless rawInput itself asks for that.',
@@ -274,9 +276,9 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     'Do not choose a task execution owner, worker, provider, or runtime in the intake decision.',
     'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
     'Use answer only for a general question you can answer directly from the current input and provided context, with no execution, exploration, external retrieval, or deliverable. Put the reply in answer; do not carry matchedTaskId, proposal, or intent. A request to perform work, explore, retrieve externally, or deliver a result is a requirement, never an answer.',
-    'For clarification, ask one concrete question and do not invent a task match.',
+    'For clarification, ask one concrete question, include options (an array of 2 to 4 concrete selectable option strings) when candidate choices exist, and do not invent a task match.',
     `Requirement proposal must be exactly this object shape: ${structuredProposalContract(input.inputRevision)}`,
-    'Requirement intent exists only at proposal.intent; do not add a top-level intent field. Do not select an owner. Status-query requires answer. Answer requires a non-empty answer. Clarification requires question.',
+    'Requirement intent exists only at proposal.intent; do not add a top-level intent field. Do not select an owner. Status-query requires answer. Answer requires a non-empty answer. Clarification requires question and optional options.',
   ].join('\n\n');
 }
 
@@ -651,7 +653,20 @@ function parseDecisionRecord(record: Record<string, unknown>, input: ExplicitBra
     if (typeof record.question !== 'string' || !record.question.trim()) {
       throw new ExplicitBrainOperationalToolError('unsupported-tool', 'clarification decision requires a question');
     }
-    return { kind, ...common, question: record.question };
+    if (record.options !== undefined
+      && (!Array.isArray(record.options) || record.options.some((entry) => typeof entry !== 'string' || !entry.trim()))) {
+      throw new ExplicitBrainOperationalToolError(
+        'unsupported-tool',
+        'clarification decision options must be an array of non-empty strings',
+      );
+    }
+    const options = record.options === undefined ? undefined : (record.options as string[]).map((entry) => entry.trim());
+    return {
+      kind,
+      ...common,
+      question: record.question,
+      ...(options !== undefined && options.length > 0 ? { options } : {}),
+    };
   }
   if (kind === 'answer') {
     if (record.matchedTaskId !== undefined) {

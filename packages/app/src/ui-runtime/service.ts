@@ -552,6 +552,8 @@ export interface UiRuntimeServiceOptions {
   readonly binding: ProviderBinding;
   readonly port: ExecutionRuntimePort;
   readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => PublicOutputCheckpointStore;
+  readonly effectLedgerFor?: RuntimeTaskCoordinatorOptions['effectLedgerFor'];
+  readonly autoResumeOnHydrate?: boolean;
   readonly attentionPort: AttentionPort;
   readonly providerState: string;
   readonly providerReadiness?: ProviderReadiness;
@@ -2407,6 +2409,8 @@ export class UiRuntimeService {
       organId: options.organId,
       checkpointStoreFor: options.checkpointStoreFor,
       publicOutputStoreFor: options.checkpointStoreFor,
+      ...(options.effectLedgerFor === undefined ? {} : { effectLedgerFor: options.effectLedgerFor }),
+      ...(options.autoResumeOnHydrate === undefined ? {} : { autoResumeOnHydrate: options.autoResumeOnHydrate }),
       attentionPort: options.attentionPort,
       journal: options.journal,
       hookRegistry: options.hookRegistry,
@@ -5884,6 +5888,18 @@ export class UiRuntimeService {
     }
   }
 
+  async recoverTask(
+    taskId: TaskId,
+    options?: { readonly operatorNote?: string },
+  ): Promise<RuntimeTaskSnapshotInput> {
+    try {
+      const recovered = await this.coordinator.recoverTask(taskId, options);
+      return toRuntimeTaskSnapshotInput(recovered);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
   eventsSince(operationId: OperationId, lastEventId?: string): readonly RuntimeSseEvent[] {
     try {
       return this.coordinator.eventsSince(operationId, lastEventId);
@@ -6174,7 +6190,11 @@ export class UiRuntimeService {
         }),
       });
       if (interpreted.kind === 'clarification') {
-        await this.explicitIntake.requestClarification(snapshot.interactionId, interpreted.question);
+        await this.explicitIntake.requestClarification(
+          snapshot.interactionId,
+          interpreted.question,
+          interpreted.options,
+        );
         this.persistExplicitBrainState();
         return await this.explicitIntake.inspect(snapshot.interactionId);
       }

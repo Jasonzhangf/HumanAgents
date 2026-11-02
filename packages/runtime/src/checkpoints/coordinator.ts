@@ -114,7 +114,10 @@ export function sameCheckpoint(left: Checkpoint, right: Checkpoint): boolean {
     && JSON.stringify(left.scope) === JSON.stringify(right.scope)
     && JSON.stringify(left.cycleId) === JSON.stringify(right.cycleId)
     && JSON.stringify(left.recoveryStateRef) === JSON.stringify(right.recoveryStateRef)
-    && JSON.stringify(left.evidenceRefs) === JSON.stringify(right.evidenceRefs);
+    && JSON.stringify(left.evidenceRefs) === JSON.stringify(right.evidenceRefs)
+    && left.checkpointKind === right.checkpointKind
+    && left.recoveryOutcome === right.recoveryOutcome
+    && JSON.stringify(left.recoveryFact ?? null) === JSON.stringify(right.recoveryFact ?? null);
 }
 
 export function checkpointCommitId(checkpoint: Pick<Checkpoint, 'id' | 'scope'>): string {

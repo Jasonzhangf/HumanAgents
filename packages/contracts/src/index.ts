@@ -92,6 +92,14 @@ export interface NextAction {
   readonly ref?: string;
 }
 
+import type { TurnSegmentRecoveryFact, TurnSegmentRecoveryOutcome } from './turn-segment-recovery.js';
+
+export type CheckpointBoundaryKind =
+  | 'tool-incremental'
+  | 'subagent-incremental'
+  | 'turn-closing'
+  | 'recovery';
+
 export interface Checkpoint {
   readonly id: CheckpointId;
   readonly scope: ScopeRef;
@@ -105,6 +113,9 @@ export interface Checkpoint {
   readonly recoveryStateRef: EvidenceRef;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly next: NextAction;
+  readonly checkpointKind?: CheckpointBoundaryKind;
+  readonly recoveryOutcome?: TurnSegmentRecoveryOutcome;
+  readonly recoveryFact?: TurnSegmentRecoveryFact;
 }
 
 export type RequirementIntent = 'append' | 'change' | 'create';
@@ -1908,6 +1919,7 @@ export * from './i2-history.js';
 export * from './agent-activity.js';
 export * from './interaction-provider-settlement.js';
 export * from './product-read.js';
+export * from './turn-segment-recovery.js';
 
 /**
  * Requirement pipeline node identity. Single source of truth for the thirteen nodes of

@@ -201,6 +201,7 @@ export interface ExplicitInteractionSnapshot {
 
 export interface ClarificationExchange {
   readonly question: string;
+  readonly options?: readonly string[];
   readonly answer?: string;
 }
 
@@ -637,14 +638,24 @@ export class ExplicitIntake {
     return assigned!;
   }
 
-  async requestClarification(input: InteractionId, question: string): Promise<void> {
+  async requestClarification(input: InteractionId, question: string, options?: readonly string[]): Promise<void> {
     const interaction = this.requireState(input, ['matching'], 'request clarification');
     if (!question || !question.trim()) {
       throw this.invalidState('request clarification', 'clarification question is required', 'provide-clarification-question');
     }
+    if (options !== undefined && (!Array.isArray(options) || options.some((entry) => typeof entry !== 'string' || !entry.trim()))) {
+      throw this.invalidState('request clarification', 'clarification options must be non-empty strings', 'provide-valid-clarification-options');
+    }
+    const normalizedOptions = options && options.length > 0 ? options.map((entry) => entry.trim()) : undefined;
     this.transition(interaction, 'awaiting-clarification', 'human', 'provide-clarification', 'clarification-required', (candidate) => {
       candidate.reply = question;
-      candidate.clarifications = [...(candidate.clarifications ?? []), { question }];
+      candidate.clarifications = [
+        ...(candidate.clarifications ?? []),
+        {
+          question,
+          ...(normalizedOptions === undefined ? {} : { options: normalizedOptions }),
+        },
+      ];
     });
   }
 
@@ -661,7 +672,11 @@ export class ExplicitIntake {
     this.transition(interaction, 'matching', 'explicit-intake', 'interpret-clarification', 'clarification-provided', (candidate) => {
       candidate.clarifications = [
         ...clarifications.slice(0, -1),
-        { question: current.question, answer },
+        {
+          question: current.question,
+          ...(current.options === undefined ? {} : { options: current.options }),
+          answer,
+        },
       ];
       candidate.reply = undefined;
     });

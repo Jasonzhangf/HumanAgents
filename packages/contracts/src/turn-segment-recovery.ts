@@ -1,7 +1,7 @@
 import { ContractError } from './errors.js';
 import { isCanonicalInstant } from './time.js';
 
-export type ProviderSettleState = 'not-sent' | 'stopped' | 'settled';
+export type ProviderSettleState = 'not-sent' | 'stopped' | 'settled' | 'unknown';
 export type ProviderSettleVerification =
   | 'lease-process-exit-reconcile'
   | 'provider-adapter-stop-ack'
@@ -22,12 +22,18 @@ export type ToolEffectState =
 
 export interface ToolEffectLedgerEntry {
   readonly callId: string;
+  readonly toolCallId?: string;
+  readonly turnId?: string;
   readonly boundPlanStepId: string;
   readonly toolName: string;
   readonly effectPolicy: 'readonly' | 'mutating';
+  readonly argsDigest?: string;
   readonly idempotencyKey: string;
   readonly state: ToolEffectState;
   readonly outputArtifactRef: string | null;
+  readonly dispatchedAt?: string;
+  readonly settledAt?: string | null;
+  readonly reconciliationNote?: string | null;
 }
 
 export type TurnSegmentRecoveryOutcome =
@@ -47,6 +53,10 @@ export interface TurnSegmentRecoveryFact {
   readonly providerSettleReceipt: ProviderSettleReceipt;
   readonly toolEffects: readonly ToolEffectLedgerEntry[];
   readonly recoveryOutcome: TurnSegmentRecoveryOutcome;
+  readonly outcome?: TurnSegmentRecoveryOutcome;
+  readonly recoveryCheckpointRef?: string;
+  readonly unknownMutatingCallIds?: readonly string[];
+  readonly recordedAt?: string;
 }
 
 function requireText(value: unknown, label: string): asserts value is string {
@@ -65,7 +75,7 @@ export function validateProviderSettleReceipt(receipt: ProviderSettleReceipt): v
   if (!receipt || typeof receipt !== 'object') {
     throw new ContractError('provider settle receipt must be an object');
   }
-  if (!['not-sent', 'stopped', 'settled'].includes(receipt.state)) {
+  if (!['not-sent', 'stopped', 'settled', 'unknown'].includes(receipt.state)) {
     throw new ContractError(`unsupported provider settle state: ${String(receipt.state)}`);
   }
   if (![
@@ -78,6 +88,10 @@ export function validateProviderSettleReceipt(receipt: ProviderSettleReceipt): v
   if (receipt.state === 'not-sent') {
     if (receipt.providerRequestId !== null) {
       throw new ContractError('not-sent provider settle receipt cannot carry a provider request id');
+    }
+  } else if (receipt.state === 'unknown') {
+    if (receipt.providerRequestId !== null) {
+      requireText(receipt.providerRequestId, 'provider settle request id');
     }
   } else {
     requireText(receipt.providerRequestId, 'provider settle request id');
@@ -107,12 +121,16 @@ export function validateToolEffectLedgerEntry(entry: ToolEffectLedgerEntry): voi
   if (entry.outputArtifactRef !== null) requireText(entry.outputArtifactRef, 'tool effect output artifact ref');
 }
 
-/** Deterministic recovery branch: only an unknown mutating effect requires hold. */
+/** Deterministic recovery branch: unknown provider settle or unknown mutating effect requires hold. */
 export function decideTurnSegmentRecovery(
   toolEffects: readonly ToolEffectLedgerEntry[],
+  providerSettleState: ProviderSettleState = 'settled',
 ): Exclude<TurnSegmentRecoveryOutcome, 'stopped'> {
   if (!Array.isArray(toolEffects)) throw new ContractError('turn segment tool effects must be an array');
   for (const entry of toolEffects) validateToolEffectLedgerEntry(entry);
+  if (providerSettleState === 'unknown') {
+    return 'recovery-hold-effect-unknown';
+  }
   return toolEffects.some((entry) => (
     entry.effectPolicy === 'mutating' && entry.state === 'dispatched-effect-unknown'
   ))
@@ -149,7 +167,10 @@ export function validateTurnSegmentRecoveryFact(fact: TurnSegmentRecoveryFact): 
   ].includes(fact.recoveryOutcome)) {
     throw new ContractError(`unsupported turn segment recovery outcome: ${String(fact.recoveryOutcome)}`);
   }
-  if (fact.recoveryOutcome !== 'stopped' && fact.recoveryOutcome !== decideTurnSegmentRecovery(fact.toolEffects)) {
+  if (
+    fact.recoveryOutcome !== 'stopped'
+    && fact.recoveryOutcome !== decideTurnSegmentRecovery(fact.toolEffects, fact.providerSettleReceipt.state)
+  ) {
     throw new ContractError('turn segment recovery outcome does not match effect safety state');
   }
 }

@@ -6,12 +6,12 @@
     "register_current_grant_business": "持锁读取当前 grant，并在同一 held 登记事务内登记本次 segment-open 的精确 business reservation，分别取得 grant commit 与 business registration commit",
     "append_segment_opened": "核验 reservation、本 segment 的 predecessor（captured/interrupted/initial-open）与 chain tail 后，向 Organ Journal 追加 segment-opened 并取得独立 segment commit；旧 epoch 迟到写被拒绝",
     "establish_epoch_window": "恢复本 epoch 的执行窗口与当前语义；新 physical parent control 的 executionEpoch 取实际 segment execution，admissionCommitRef 绑定该段已提交业务登记，但保留原父 operation 的不可变 intent、namespaceKey 与 fingerprintKey。释放新段 child/effect 前，以 segmentOpenedFromRecord 和 decodeActiveTurnRecords 做精确 typed join：已提交 segment-open → 其 businessRegistrationCommitRef/inputIdentity → businessTurnRef.bindingCommitRef 的原 binding-opened 与 businessTurnRef.execution → 原 execution namespace 中的祖先父 control envelope → 该 control admissionCommitRef 指向的原业务登记。initial-open 只发一次 initial input，合并历史段与当前段的未决义务并保留已完成 effect，旧 epoch 迟到写被拒绝",
-    "record_operation_effect_ledger": "记录每个工具或子代理动作的只读或变更策略、幂等身份、执行状态与输出资产引用",
+    "record_operation_effect_ledger": "在注册或打开新 segment 前读取并记录每个工具或子代理动作的只读/变更策略、幂等身份、执行状态与输出资产引用",
     "reconcile_in_flight_operations": "按租约退出、Provider 停止确认与响应结束事实收拢在途请求和副作用",
-    "persist_recovery_checkpoint": "持久保存恢复事实、副作用账本、Provider settle 回执与恢复责任",
-    "evaluate_effect_safety": "按是否存在未知变更副作用执行确定性安全分流",
-    "auto_resume_same_turn_segment": "无未知变更副作用时自动续跑同一轮并复用已提交输出",
-    "enter_recovery_hold": "存在未知变更副作用时进入持久恢复挂起，禁止自动重放",
+    "evaluate_effect_safety": "按是否存在未知变更副作用执行确定性安全分流（recovery-auto-resumed 或 recovery-hold-effect-unknown）",
+    "persist_recovery_checkpoint": "在新 segment 注册前持久保存恢复事实、副作用账本、Provider settle 回执与恢复责任",
+    "auto_resume_same_turn_segment": "无未知变更副作用时进入安全自动续跑分支并复用已提交输出，不重放已提交工具调用",
+    "enter_recovery_hold": "存在未知变更副作用时进入持久恢复挂起（allowedActions=['recover','stop']），不获取执行实例、不追加可运行 successor segment",
     "resolve_resume_outcome": "返回实际 receipts，或返回保留恢复责任且无新执行的 typed outcome；工具轮次预算拒绝已收到的调用时，先持久保存真实 failed/tool.round-limit/executed:false 结果，再抛原 typed error，恢复请求保留 call/output 配对，不执行被拒工具、不重放已接受 effect"
   },
   "arcs": {

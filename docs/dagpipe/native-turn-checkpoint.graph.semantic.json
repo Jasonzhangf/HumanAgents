@@ -2,10 +2,10 @@
   "graph": "humanagent-native-turn-checkpoint",
   "labels": {
     "validate_candidate": "校验语义描述、身份、来源和验收依据",
-    "record_operation_effect_ledger": "在每个工具或子代理动作前后记录只读或变更副作用及幂等身份",
+    "record_operation_effect_ledger": "在每个工具或子代理动作前后记录只读或变更副作用、幂等身份及输出资产引用",
     "reconcile_in_flight_operations": "按租约退出、适配器停止确认与响应结束事实收拢在途操作",
-    "persist_recovery_checkpoint": "持久保存副作用账本、Provider settle 回执、恢复责任与提交意图",
-    "commit_checkpoint_fact": "提交带可信时间的 checkpoint 事实",
+    "persist_recovery_checkpoint": "持久保存副作用账本、Provider settle 回执、恢复责任与提交意图（区分工具/子代理增量保存、Turn 收拢保存与恢复保存）",
+    "commit_checkpoint_fact": "提交带可信时间的增量、收拢或恢复 checkpoint 事实（正常增量或收拢保存不触发恢复重放）",
     "commit_closure_fact": "单独提交 turn closure 事实",
     "commit_context_view_fact": "单独提交语义 Context View 转换事实",
     "publish_qualified_history": "只从合格 durable 事实发布语义历史",

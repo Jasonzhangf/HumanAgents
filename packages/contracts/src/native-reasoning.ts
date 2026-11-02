@@ -552,7 +552,7 @@ export function validateDurableCheckpointReceipt(value: unknown, expectedIdentit
 
 function validateCheckpointStructure(value: unknown): asserts value is Checkpoint {
   const checkpoint = record(value, 'relationship checkpoint');
-  exactKeys(checkpoint, ['id', 'scope', 'cycleId', 'seq', 'previousCheckpointId', 'directiveRevision', 'executionEpoch', 'outcome', 'summary', 'recoveryStateRef', 'evidenceRefs', 'next'], [], 'relationship checkpoint');
+  exactKeys(checkpoint, ['id', 'scope', 'cycleId', 'seq', 'previousCheckpointId', 'directiveRevision', 'executionEpoch', 'outcome', 'summary', 'recoveryStateRef', 'evidenceRefs', 'next'], ['checkpointKind', 'recoveryOutcome', 'recoveryFact'], 'relationship checkpoint');
   scopedId(checkpoint.id, 'checkpoint', 'relationship checkpoint id');
   validateScope(checkpoint.scope, 'relationship checkpoint scope');
   scopedId(checkpoint.cycleId, 'cycle', 'relationship checkpoint cycleId');
