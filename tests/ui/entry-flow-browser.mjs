@@ -341,6 +341,31 @@ async function handleScriptedApi(url, method, body) {
   if (url.pathname === '/api/tasks' && method === 'GET') {
     return { status: 200, body: { draft: [], waiting: [...scripted.tasks], running: [], completed: [], stopped: [], failed: [] } };
   }
+  // A confirmed task resolves its exact project/mode scope before the entry
+  // page refreshes its committed row and starts the in-place progress card.
+  if (url.pathname === '/api/dashboard' && url.searchParams.get('scope') === 'system') {
+    return {
+      status: 200,
+      body: {
+        surface: 'runtime-project',
+        projects: scripted.tasks.length === 0
+          ? []
+          : [{
+              projectKey: 'humanagent',
+              mode: 'rcc',
+              tasks: scripted.tasks.map((task) => ({
+                scope: {
+                  kind: 'task',
+                  projectKey: 'humanagent',
+                  mode: 'rcc',
+                  taskId: task.taskId,
+                },
+                task: { taskId: task.taskId },
+              })),
+            }],
+      },
+    };
+  }
   const observationMatch = /^\/api\/tasks\/([^/]+)\/observation$/.exec(url.pathname);
   if (observationMatch && method === 'GET') {
     const taskId = decodeURIComponent(observationMatch[1]);

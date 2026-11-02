@@ -2205,6 +2205,7 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     'const cardStates = [];',
     'const draftedStates = [];',
     'const status = { dataset: {}, textContent: "" };',
+    'const submitBanner = { text() {}, clear() {} };',
     'const window = { location: { assign() {} } };',
     // Record the exact arguments the page hands to the card event, including the
     // detail object, and mirror the real appendCardEvent's interactionId

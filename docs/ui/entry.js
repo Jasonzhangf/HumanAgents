@@ -6,6 +6,7 @@ import {
   formatTime,
   loadRuntimeStatus,
   mountPageTemplate,
+  openTechnicalDetail,
   renderPageError,
   renderRuntimeStatus,
   renderTaskExecutions,
@@ -197,9 +198,11 @@ export function taskLandingHref(taskId, scope, interactionId) {
 /**
  * The confirmed new-task submission lands on the live execution dashboard. The
  * entry form submit is the single human confirmation, so the page must show the
- * real execution steps immediately; it never sends the human to the static
- * task.html confirm page. `task.html?interaction=...` stays the
- * existing-task-change entry for a genuine confirm/clarify/abandon decision.
+ * real execution steps in place; it never auto-navigates to the static
+ * task.html confirm page or the task dashboard. This href remains the explicit
+ * "open the full task board" link inside the in-place detail layer.
+ * `task.html?interaction=...` stays the existing-task-change entry for a
+ * genuine confirm/clarify/abandon decision.
  */
 export function submittedTaskLandingHref(taskId, scope) {
   return taskDashboardHref(taskId, scope)
@@ -247,7 +250,7 @@ export async function readEntryQueue(api) {
  * Nothing touches the document until the returned methods are called, so the
  * seam stays import-safe in Node.
  */
-export function createSubmitStatusBanner(target) {
+export function createSubmitStatusBanner(target, { onOpenDetail } = {}) {
   let block = null
   let phase = null
   let detail = null
@@ -256,6 +259,9 @@ export function createSubmitStatusBanner(target) {
   let tick = null
   let startedAt = 0
   let stepStartedAt = 0
+  // Every real runtime step the page observed, in arrival order. The detail
+  // layer reads this list; the page never re-derives a step from a timer.
+  const steps = []
 
   // A monotonic clock keeps the elapsed labels stable across clock changes.
   const elapsedNow = () => (
@@ -286,6 +292,7 @@ export function createSubmitStatusBanner(target) {
     tick = null
   }
   const mount = () => {
+    steps.length = 0
     if (!block) {
       block = element('div', undefined, 'progress progress--live')
       block.dataset.tone = 'active'
@@ -302,6 +309,23 @@ export function createSubmitStatusBanner(target) {
       stepTimer = element('span', undefined, 'progress-timer')
       stepTimer.setAttribute('aria-hidden', 'true')
       block.append(stepTimer)
+      // The card opens the detail layer only on an explicit click. The whole
+      // block is the affordance, so a human can inspect the real step history
+      // and then close back to this same input surface.
+      if (typeof onOpenDetail === 'function') {
+        block.dataset.interactive = 'true'
+        block.setAttribute('role', 'button')
+        block.setAttribute('tabindex', '0')
+        block.setAttribute('aria-label', '查看任务执行进度详情')
+        const open = () => onOpenDetail(block)
+        block.addEventListener('click', open)
+        block.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          open()
+        })
+        block.append(element('span', '详情', 'progress-detail-hint'))
+      }
     }
     clearNode(target)
     target.append(block)
@@ -331,6 +355,14 @@ export function createSubmitStatusBanner(target) {
     const summary = typeof event?.summary === 'string' ? event.summary.trim() : ''
     if (Number.isFinite(seq)) phase.textContent = `步骤 ${seq}`
     if (summary !== '' && detail) detail.textContent = summary
+    if (event && (Number.isFinite(seq) || summary !== '')) {
+      steps.push({
+        seq: Number.isFinite(seq) ? seq : null,
+        summary,
+        kind: typeof event.kind === 'string' ? event.kind : undefined,
+        occurredAt: typeof event.occurredAt === 'string' ? event.occurredAt : undefined,
+      })
+    }
     stepStartedAt = elapsedNow()
     paintTimers()
   }
@@ -347,7 +379,8 @@ export function createSubmitStatusBanner(target) {
     else if (target && typeof target.removeChild === 'function') target.removeChild(stale)
   }
   const isLive = () => block !== null
-  return { mount, text, step, clear, isLive }
+  const history = () => steps.slice()
+  return { mount, text, step, clear, isLive, history }
 }
 
 // The page seams above are pure and import-safe in Node. Everything below owns
@@ -367,10 +400,14 @@ const template = mountPageTemplate(pageRoot, {
   lede: '接受用户任务、展示只读整理反馈，并在提交后显示任务进展与执行入口。',
 })
 const { status } = template.hosts
-const submitBanner = createSubmitStatusBanner(status)
+const submitBanner = createSubmitStatusBanner(status, { onOpenDetail: openSubmitProgressDetail })
 let interactionCard = null
 let pageLeaving = false
 const submissionGate = createSubmissionGate()
+// A confirmed once task hands its live execution progress to the single entry
+// interface. While this handle exists the submit banner stays on the page and
+// mirrors the runtime's real execution steps; otherwise it settles normally.
+let liveTaskProgress = null
 
 /**
  * Keep this attempt's user input in a page-owning history state so browser
@@ -729,12 +766,162 @@ async function refreshQueue() {
   }
 }
 
+// The runtime's real execution event kinds. The entry page mirrors these to the
+// submit banner's live step and never invents a step of its own.
+const EXECUTION_STEP_EVENTS = [
+  'execution.started',
+  'provider.model',
+  'provider.output',
+  'provider.tool',
+  'provider.tool-result',
+  'provider.error',
+  'execution.settling',
+  'execution.retry',
+  'checkpoint.committed',
+  'execution.terminal',
+  'attention.opened',
+  'attention.resolved',
+]
+
+/**
+ * Subscribe to the runtime's real execution event stream for a confirmed task's
+ * operation. Each event carries the runtime's own `seq` and `summary`; the page
+ * only mirrors them. The stream closes itself on the final terminal event so a
+ * finished task does not reconnect.
+ */
+function subscribeExecutionStepStream(operationId, onEvent) {
+  if (!operationId || typeof EventSource === 'undefined') return () => {}
+  let stream
+  try {
+    stream = new EventSource(api.eventsUrl(operationId))
+  } catch {
+    return () => {}
+  }
+  let closed = false
+  const stop = () => {
+    if (closed) return
+    closed = true
+    try { stream.close() } catch {}
+  }
+  for (const kind of EXECUTION_STEP_EVENTS) {
+    stream.addEventListener(kind, (message) => {
+      if (closed) return
+      let payload
+      try {
+        payload = JSON.parse(message.data || '{}')
+      } catch {
+        payload = {}
+      }
+      const event = {
+        ...payload,
+        kind: typeof payload.kind === 'string' ? payload.kind : kind,
+        seq: Number.isSafeInteger(payload.seq) ? payload.seq : undefined,
+      }
+      onEvent(event)
+      if (kind === 'execution.terminal' && payload.terminalPhase === 'final') stop()
+    })
+  }
+  return stop
+}
+
+function stopLiveTaskProgress() {
+  if (!liveTaskProgress) return
+  try { liveTaskProgress.stop() } catch {}
+  liveTaskProgress = null
+}
+
+// The progress card's next layer. It reports only the task identity, the
+// runtime state the dashboard read returned, and the real steps the page
+// mirrored from the execution stream. Closing it returns to this same entry.
+function openSubmitProgressDetail(trigger) {
+  const progress = liveTaskProgress
+  const content = element('div', undefined, 'stack progress-detail-body')
+  if (!progress) {
+    content.append(element('p', '任务尚未进入执行进度。', 'empty'))
+  } else {
+    const facts = element('dl', undefined, 'draft-receipt')
+    const addFact = (label, value) => {
+      const row = element('div')
+      row.append(element('dt', label), element('dd', value || '未提供'))
+      facts.append(row)
+    }
+    addFact('任务', progress.taskId)
+    addFact('状态', progress.dashboard?.stateLabel || progress.dashboard?.state)
+    addFact('执行来源', progress.operationId)
+    content.append(facts)
+    const steps = submitBanner.history()
+    if (steps.length === 0) {
+      content.append(element('p', '等待运行时返回执行步骤…', 'empty'))
+    } else {
+      const list = element('ol', undefined, 'progress-step-list')
+      for (const step of steps) {
+        const item = element('li', undefined, 'progress-step')
+        item.append(
+          element('span', Number.isFinite(step.seq) ? `步骤 ${step.seq}` : '步骤', 'progress-step-seq'),
+          element('span', step.summary || step.kind || '执行事件', 'progress-step-summary'),
+        )
+        if (step.occurredAt) item.append(element('time', formatTime(step.occurredAt), 'progress-step-time'))
+        list.append(item)
+      }
+      content.append(list)
+    }
+    const link = element('a', '打开完整任务看板', 'button button--sm')
+    link.href = submittedTaskLandingHref(progress.taskId, progress.scope)
+    content.append(link)
+  }
+  openTechnicalDetail({ title: '任务执行进度', eyebrow: '实时进度', content, trigger })
+}
+
+/**
+ * Keep a confirmed new-task submission on the single entry interface. Refresh
+ * the committed task row in place, read the task's real dashboard to discover
+ * its executing operation, then mirror the operation's real execution event
+ * stream into the live submit banner. No navigation, no second confirmation,
+ * and no fabricated step: a missing dashboard read stays an explicit failure.
+ */
+async function startLiveTaskProgress({ taskId, scope }) {
+  stopLiveTaskProgress()
+  const taskIdValue = taskId && typeof taskId === 'object' ? taskId.value : taskId
+  const dashboard = await api.scopedTaskDashboard({
+    projectKey: scope.projectKey,
+    mode: scope.mode,
+    taskId: { scope: 'task', value: taskIdValue },
+  })
+  if (pageLeaving) return
+  const progress = {
+    taskId: taskIdValue,
+    scope,
+    operationId: dashboard?.operationId,
+    dashboard,
+    stop: () => {},
+  }
+  liveTaskProgress = progress
+  // A clarification loop re-enters submission without the original mount, so
+  // the live card must be (re)mounted here before its step history is used.
+  if (!submitBanner.isLive()) submitBanner.mount()
+  submitBanner.text('任务已提交，正在执行…')
+  progress.stop = subscribeExecutionStepStream(progress.operationId, (event) => {
+    if (pageLeaving || liveTaskProgress !== progress) return
+    submitBanner.step({
+      seq: event.seq,
+      summary: event.summary,
+      kind: event.kind,
+      occurredAt: event.occurredAt,
+    })
+    if (event.kind === 'execution.terminal') {
+      status.dataset.tone = ['failed', 'blocked', 'cancelled'].includes(event.status)
+        ? 'danger'
+        : 'success'
+    }
+  })
+}
+
 /**
  * Move a confirmed new-task submission into the live execution main line. It
- * resolves the exact task scope and lands on the live task dashboard so the
- * human sees the real execution steps. A read that cannot find the scope stays
- * an explicit landing failure; it never falls back to an unscoped task read or
- * a second create.
+ * resolves the exact task scope and leaves the human on the single entry
+ * interface so the live progress card shows the real execution steps. A read
+ * that cannot find the scope stays an explicit landing failure; it never falls
+ * back to an unscoped task read or a second create.
  */
 async function landOnSubmittedTask(identity) {
   let taskIdValue
@@ -762,10 +949,11 @@ async function landOnSubmittedTask(identity) {
       interactionId,
     })
     if (pageLeaving) return
-    // A confirmed new-task submission lands on the live execution dashboard:
-    // the form submit is the only confirmation, so the human must see the real
-    // steps, not the static task.html confirm page.
-    window.location.assign(submittedTaskLandingHref(taskIdValue, landing.scope))
+    // Refresh the committed task row in place so the entry list reflects the
+    // new task before the live progress card carries its real steps.
+    await refreshQueue()
+    if (pageLeaving) return
+    await startLiveTaskProgress({ taskId: taskIdValue, scope: landing.scope })
   } catch (error) {
     if (lookupError) throw lookupError
     throw error
@@ -1135,9 +1323,8 @@ async function executeSubmission(submission, clarificationAnswer) {
     // demand instead of downgrading to an unfinished input.
     confirmation = snapshot.confirmation || confirmation || snapshot
     status.dataset.tone = 'success'
-    status.textContent = '需求已接收，正在刷新任务进展…'
+    submitBanner.text('需求已接收，正在刷新任务进展…')
     await landOnSubmittedTask(identityFromConfirmedSnapshot(snapshot))
-    status.textContent = '需求已接收；任务进展已刷新。'
     return snapshot
   }
   if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
@@ -1172,9 +1359,8 @@ async function executeSubmission(submission, clarificationAnswer) {
     await refreshQueue()
     return snapshot
   }
-  status.textContent = '需求已提交，正在刷新任务进展…'
+  submitBanner.text('需求已提交，正在刷新任务进展…')
   await landOnSubmittedTask(identityFromReceipt(receipt.requirement))
-  status.textContent = '需求已提交；任务进展已刷新。'
   return snapshot
 }
 
@@ -1386,7 +1572,9 @@ function renderForm() {
     void run.result.catch((error) => handleSubmissionError(error, submitButton)).finally(() => {
       submitting = false
       submitButton.disabled = false
-      submitBanner.clear()
+      // A confirmed once task keeps the live progress card after this settle;
+      // every other result (error, answer, saved plan) removes it normally.
+      if (!liveTaskProgress) submitBanner.clear()
       if (interactionId) {
         freezeCreationInputs()
       } else {

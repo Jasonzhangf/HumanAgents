@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * G1.4 real-browser proof: a confirmed new-task submission lands on the live
- * task dashboard with the execution state rendered, never on the static
- * task.html?interaction=... confirm page.
+ * D20 real-browser proof: a confirmed new-task submission stays on the single
+ * entry interface with the live execution progress card. It never navigates to
+ * task-dashboard.html and never shows the static task.html?interaction=...
+ * confirm page.
  *
  * Serves the built UI (`dist/app/ui`) through Playwright route interception
  * against a synthetic origin. No listening socket; runs wherever headless
@@ -14,15 +15,17 @@
  *   2. /interpret → awaiting-confirmation + draft, while the explicit.step SSE
  *      stream at /api/explicit/interactions/:id/events delivers real steps.
  *   3. Confirm → /api/explicit/interactions/:id/confirmation → confirmed task.
- *   4. entry.js landOnSubmittedTask resolves scope via /api/dashboard?scope=system
- *      and navigates to task-dashboard.html?task=...&projectKey=...&mode=...
- *   5. The dashboard page renders the live execution projection (执行中).
+ *   4. entry.js landOnSubmittedTask resolves scope via /api/dashboard?scope=system,
+ *      refreshes the committed task row, and reads the exact task dashboard.
+ *   5. The entry page subscribes to the execution stream and renders the real
+ *      step, total timer, per-step timer, and clickable detail layer in place.
  *
  * Assertions:
- *   - submission navigates to task-dashboard.html carrying task/projectKey/mode
- *     and NO interaction parameter;
+ *   - submission stays on index.html with no interaction parameter;
+ *   - the live card shows a real execution step and both timers;
+ *   - the card opens and closes the detail layer without leaving the entry;
  *   - the submission drives the explicit.step stream (stream attached);
- *   - the dashboard page renders the live execution state;
+ *   - the exact scoped dashboard and execution streams are read;
  *   - no uncaught pageerror;
  *   - screenshots captured at 1280x720 and 390x844.
  */
@@ -146,8 +149,9 @@ function handleScriptedApi(state, url, method, body) {
       status: 200,
       sse: true,
       messages: [
-        `event: execution.started\ndata: ${JSON.stringify({ operationId: 'operation-new-task-1', step: 1, summary: '执行开始', occurredAt: OCCURRED_AT })}\n\n`,
-        `event: execution.step\ndata: ${JSON.stringify({ step: 1, seq: 1, summary: '执行步骤：runtime.queue', occurredAt: OCCURRED_AT })}\n\n`,
+        `event: execution.started\ndata: ${JSON.stringify({ operationId: 'operation-new-task-1', seq: 1, summary: '执行开始', occurredAt: OCCURRED_AT })}\n\n`,
+        `event: provider.tool\ndata: ${JSON.stringify({ seq: 2, summary: '调用工具：file.read', occurredAt: OCCURRED_AT })}\n\n`,
+        `event: execution.terminal\ndata: ${JSON.stringify({ seq: 3, summary: '执行完成', status: 'succeeded', terminalPhase: 'final', occurredAt: OCCURRED_AT })}\n\n`,
       ],
     };
   }
@@ -301,43 +305,62 @@ async function capture(viewport) {
   await page.fill('#entry-form textarea[name="rawInput"]', 'submission');
   await page.click('#entry-form button[type="submit"]');
 
-  const landed = await waitForCondition(() =>
-    page.evaluate(() => /task-dashboard\.html/.test(window.location.href)).catch(() => false),
+  const live = await waitForCondition(() =>
+    page.evaluate(() => {
+      const block = document.querySelector('.status-banner .progress.progress--live');
+      const phase = block?.querySelector('.progress-phase')?.textContent ?? '';
+      return block !== null && /^步骤 \d+$/.test(phase);
+    }).catch(() => false),
   );
-  if (!landed) {
-    await page.screenshot({ path: join(evidenceRoot, `landing-failure-${viewport.width}x${viewport.height}.png`), fullPage: true });
-    record(`${viewport.width}x${viewport.height} submission lands on task-dashboard.html`, false, { url: page.url(), errors: pageErrors.slice(0, 5) });
+  if (!live) {
+    await page.screenshot({ path: join(evidenceRoot, `entry-live-failure-${viewport.width}x${viewport.height}.png`), fullPage: true });
+    record(`${viewport.width}x${viewport.height} submission shows the entry live progress card`, false, { url: page.url(), errors: pageErrors.slice(0, 5) });
     await browser.close();
     return;
   }
 
-  // Let the dashboard refresh render the live execution projection.
-  await page.waitForFunction(
-    () => /任务投影已同步|执行中/.test(document.body.innerText),
-    undefined,
-    { timeout: 20000 },
-  ).catch(() => {});
-  await page.waitForTimeout(600);
-  await page.screenshot({ path: join(evidenceRoot, `landing-${viewport.width}x${viewport.height}.png`), fullPage: true });
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: join(evidenceRoot, `entry-live-${viewport.width}x${viewport.height}.png`), fullPage: true });
 
   const url = new URL(page.url());
+  const card = await page.evaluate(() => {
+    const block = document.querySelector('.status-banner .progress.progress--live');
+    const timers = [...block.querySelectorAll('.progress-timer')].map((node) => node.textContent);
+    const rect = block.getBoundingClientRect();
+    return {
+      phase: block.querySelector('.progress-phase')?.textContent ?? null,
+      summary: block.querySelector('.progress-detail')?.textContent ?? null,
+      timers,
+      interactive: block.dataset.interactive === 'true',
+      intersectsViewport: rect.bottom > 0 && rect.top < window.innerHeight,
+      overflowX: block.scrollWidth > block.clientWidth + 1,
+    };
+  });
   const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
-  record(`${viewport.width}x${viewport.height} submission lands on task-dashboard.html`, url.pathname.endsWith('/task-dashboard.html'), { url: page.url(), errors: pageErrors.slice(0, 5) });
-  record(`${viewport.width}x${viewport.height} landing carries task=${state.taskId}`, url.searchParams.get('task') === state.taskId, url.search);
-  record(`${viewport.width}x${viewport.height} landing carries projectKey=${state.projectKey}`, url.searchParams.get('projectKey') === state.projectKey, url.search);
-  record(`${viewport.width}x${viewport.height} landing carries mode=${state.mode}`, url.searchParams.get('mode') === state.mode, url.search);
-  record(`${viewport.width}x${viewport.height} landing carries NO interaction param`, url.searchParams.get('interaction') === null, url.search);
+  record(`${viewport.width}x${viewport.height} submission stays on the entry index`, url.pathname.endsWith('/index.html'), { url: page.url(), errors: pageErrors.slice(0, 5) });
+  record(`${viewport.width}x${viewport.height} entry URL carries NO interaction param`, url.searchParams.get('interaction') === null, url.search);
+  record(`${viewport.width}x${viewport.height} live card shows a real execution step`, /^步骤 \d+$/.test(card.phase ?? ''), card.phase);
+  record(`${viewport.width}x${viewport.height} live card shows the runtime summary`, card.summary === '执行完成' || card.summary === '调用工具：file.read', card.summary);
+  record(`${viewport.width}x${viewport.height} live card shows total and per-step timers`, card.timers.length === 2 && card.timers.every((timer) => /总耗时|本步/.test(timer)), card.timers);
+  record(`${viewport.width}x${viewport.height} live card is interactive`, card.interactive === true, card.interactive);
+  record(`${viewport.width}x${viewport.height} live card is visible in the viewport`, card.intersectsViewport === true, card);
+  record(`${viewport.width}x${viewport.height} live card has no horizontal overflow`, card.overflowX === false, card.overflowX);
   record(`${viewport.width}x${viewport.height} submission drives the explicit.step stream`, state.stepStreamRequests.length > 0, { stepStreamRequests: state.stepStreamRequests });
-  record(`${viewport.width}x${viewport.height} dashboard renders the live execution state`, /任务投影已同步|执行中/.test(bodyText), bodyText.slice(0, 400));
+  record(`${viewport.width}x${viewport.height} submission reads the exact task dashboard`, state.executionStreamRequests.length > 0, { executionStreamRequests: state.executionStreamRequests });
+  record(`${viewport.width}x${viewport.height} entry shows no second confirmation control`, !/确认提交|二次确认|审批/.test(bodyText), bodyText.slice(0, 400));
   record(`${viewport.width}x${viewport.height} no uncaught pageerror`, pageErrors.length === 0, pageErrors);
 
-  // The landed dashboard must subscribe to the real execution event stream,
-  // and at least one execution event must update the displayed state.
-  await waitForCondition(() => state.executionStreamRequests.length > 0, 15000);
-  await page.waitForTimeout(500);
-  const bodyTextAfterStream = await page.evaluate(() => document.body.innerText).catch(() => '');
-  record(`${viewport.width}x${viewport.height} dashboard subscribes to execution event stream`, state.executionStreamRequests.length > 0, { executionStreamRequests: state.executionStreamRequests });
-  record(`${viewport.width}x${viewport.height} execution event updates displayed step/progress`, /执行步骤：runtime.queue|已收到执行事件/.test(bodyTextAfterStream), bodyTextAfterStream.slice(0, 400));
+  await page.locator('.status-banner .progress.progress--live').click();
+  const dialog = page.locator('dialog.shell-layer[open]');
+  await dialog.waitFor({ state: 'visible', timeout: 5_000 });
+  const drawerText = ((await dialog.innerText()) || '').replace(/\s+/g, ' ').trim();
+  record(`${viewport.width}x${viewport.height} live card opens the detail layer`, drawerText.includes('任务执行进度'), drawerText.slice(0, 300));
+  record(`${viewport.width}x${viewport.height} detail layer carries the real task identity`, drawerText.includes(state.taskId), drawerText.slice(0, 300));
+  record(`${viewport.width}x${viewport.height} detail layer carries real execution steps`, drawerText.includes('调用工具：file.read') && drawerText.includes('执行完成'), drawerText.slice(0, 500));
+  await page.screenshot({ path: join(evidenceRoot, `entry-detail-${viewport.width}x${viewport.height}.png`), fullPage: true });
+  await dialog.locator('button.shell-layer-close').first().click();
+  await dialog.waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => {});
+  record(`${viewport.width}x${viewport.height} detail layer closes back to the entry`, await page.locator('dialog.shell-layer[open]').count() === 0 && new URL(page.url()).pathname.endsWith('/index.html'), page.url());
   observe(`${viewport.width}x${viewport.height} final URL`, page.url());
 
   await browser.close();

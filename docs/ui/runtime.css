@@ -1030,6 +1030,55 @@ pre {
   flex-shrink: 0;
   font-family: ui-monospace, SFMono-Regular, monospace;
 }
+/* The submit progress card doubles as the detail trigger once a confirmed task
+   is executing. The whole block is the affordance; the hint names the action. */
+.progress[data-interactive="true"] {
+  cursor: pointer;
+}
+.progress[data-interactive="true"]:focus-visible {
+  outline: 2px solid var(--accent, #4f8cff);
+  outline-offset: 2px;
+}
+.progress-detail-hint {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--accent-deep, #2563eb);
+  white-space: nowrap;
+}
+.progress-detail-body {
+  gap: 12px;
+}
+.progress-step-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.progress-step {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--surface) 70%, var(--background));
+  font-size: 13px;
+}
+.progress-step-seq {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.progress-step-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.progress-step-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .quick-create-policy {
   display: flex;
   align-items: center;

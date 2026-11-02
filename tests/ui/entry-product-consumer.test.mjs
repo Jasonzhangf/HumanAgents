@@ -129,10 +129,10 @@ test('a confirmed task lands on the interaction task page with exact scope', () 
   assert.equal(url.searchParams.get('interaction'), 'interaction-1')
 })
 
-test('a confirmed new-task submission lands on the live dashboard, not the static confirm page', () => {
-  // The entry form submit is the single human confirmation. A new task must
-  // land on the live execution dashboard so the human sees real steps, never on
-  // task.html?interaction=... where task.js renders a static confirm dead page.
+test('the in-place detail link opens the live dashboard, not the static confirm page', () => {
+  // The entry form submit is the single human confirmation and stays on entry.
+  // This href is the explicit detail-layer action that opens the full board; it
+  // must never point at task.html?interaction=... or act as an auto-navigation.
   const href = submittedTaskLandingHref(taskId, taskScope)
   const url = new URL(href, 'https://product.invalid/')
 
