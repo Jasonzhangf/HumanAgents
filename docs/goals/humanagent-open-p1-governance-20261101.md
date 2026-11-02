@@ -354,3 +354,17 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   closed, independent review PASS (findings=[]) and real RCC 4444
   `execution.retry` seq=4 receipt. Marked that goal `Status: COMPLETE` and did
   not rearm it; only the active `ad967f01...` goal remains subscribed.
+
+- 2026-11-02 11:37 UTC: consumed goal deadline
+  `m1793619119214-836` (goal:sha256:ad967f01..., state=read). The next one-shot
+  deadline `sub-m1793619166996-839` is already armed for about 11:52 UTC, so no
+  duplicate subscription was created. `collab board show` reports the single
+  open task `mvp-w2a-implicit-orchestration-20261102` at revision 5,
+  status=working, owner=Alice. Alice's worktree is still based on `74fb7bb87`
+  with 11 modified files and the new `tests/app/w2a-implicit-orchestration.test.ts`;
+  the latest status adds `tests/app/task-grant-http-public-consumer.test.ts` to
+  the dirty set. Her live snapshot shows she is editing the turn-end contract
+  and running W2-A tests, regression tests, typecheck, and build:app. No W2-A
+  commit or acceptance receipt exists yet. This patrol made no code or task
+  ownership change; the four P0 blockers and the unclosed frontend-input to
+  orchestration path remain the delivery gap.
