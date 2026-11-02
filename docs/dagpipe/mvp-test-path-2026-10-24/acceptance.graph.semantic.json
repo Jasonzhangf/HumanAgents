@@ -1,0 +1,17 @@
+{
+  "graph":"humanagent-mvp-acceptance-path",
+  "labels":{
+    "baseline":"校准需求、业务图与测试入口",
+    "foundation":"验证契约、配置、持久事实与资产",
+    "provider":"独立验证双协议与请求收拢",
+    "brain":"独立验证显式分流与需求准入",
+    "runtime":"独立验证动态编排、收口与恢复",
+    "services":"独立验证工具、记忆、事件与计划",
+    "projection":"独立验证阅读、结果与动作语义",
+    "compose":"验证确定性应用组合与持久交付",
+    "live":"验证真实双协议运行与副作用",
+    "interaction":"验证简单回答与单任务浏览器交互",
+    "long_horizon":"验证长程编排、停止恢复与计划增量",
+    "closeout":"汇总整体验收、审查与资源责任"
+  }
+}

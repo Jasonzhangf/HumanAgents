@@ -573,3 +573,86 @@ main a474cf109 上 `pnpm build:runtime` 的 ui-runtime tsc 步骤出现类型回
   - 原始运行 receipt `receipt.before-review.json` 保留 state=UNVERIFIED；review 后 `receipt.json` state=SUCCESS/businessReview=PASS。两者行为步骤完全一致，未伪造运行。
 - master `collab task review --accept` 成功（disposition no_merge_required），`collab task close` 成功。issue `21b1c11`、`e3b8584` 已 `appsdk bug close`。
 - 资源收口：Carol typed-preview worktree 已 remove/prune/absent，分支 `codex/typed-new-task-preview-20261031` 已删；现 6 个 worktree（main + Alice D6 + 4 locked provider PROTECTED_HOLD）。
+
+## 2026-11-02 01:43 UTC（master 巡检与并行派发）
+
+- 消费 master-idle 通知 `m1793583287178-209`（receive `receive-69890-1793583789405332000-0`）。
+- D17 `execution-retry-native-rcc-lane-20261101`：GCM PID 85863 自 15:14 起约 2h28m，日志 17:43 仍更新；worktree `execution-retry-visual-proof-20261101` 中 `agent-driver.ts`/`service.ts`/`coordinator.ts` 3 文件 modified 未 commit，属活动推进，不打断。
+- D18 `d6ac049-runner-contract-cancel-20261101`：GCM PID 22744 自 17:30 起约 12m，日志 17:43 更新；独立 worktree `d6ac049-runner-contract-cancel-20261101` 尚无改动（复现/定位阶段），不重复派。
+- worktree 实测 7 个（main + D17 + D18 + 4 locked provider `PROTECTED_HOLD`），未超 10，无自有 stale 资源。
+- board `tasks=[]`；Alice/Bob/Carol/David presence present、agent_state unknown、无 active_task，空闲原因=无 ready 长程目标可派，合理，不空邀请。
+- `collab ceo status` CEO=Alice（`is_current=false`），本 master 非 CEO，不能写 `ceo_report_state`；本轮无 `on_completion` 请求，不虚构回报。
+- main=origin/main=`2d0146981`；goal 一次性 deadline rearm；project patrol armed `900000`ms、目标 `1500000`ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除，不声称已对齐。
+
+## 2026-11-02 01:50 UTC（D19 派发与 board idle）
+
+- 消费 board-idle 通知 `m1793584166994-225`（`receive-97389-1793584202993259000-0`）。
+- D19 发布 `minimality-ablation-audit-increment2-20261101`（priority p3，executor Emma，reviewer Jenny），`collab board invite --to Emma --expected-revision 1` 成功，`invited_peer=codex-session-30316131393936642d663536382d373236302d626562322d356635326136333865376230`，durable msg `board-invite-minimality-ablation-audit-increment2-20261101-2`。任务为只读审计增量：不删代码、不改 `.appsdk`、不动生产、不重启 daemon/tmux。
+- D17 GCM PID 85863 仍运行（约 2h35m），日志 17:47 更新；worktree 剩余 `service.ts`/`coordinator.ts` 两文件 modified。
+- D18 GCM PID 22744 仍运行（约 19m），当前测试进程正在 cancel identity 路径附近，日志显示 `execution identity: operation.started not resolved` 相关输出，worker 选择保持长等待，不重启红态。
+- 生产 10086 `/` 与 `/api/liveness` 均 200，`/api/runtime/status` mode=rcc、state=ready、connected=true。
+
+## 2026-11-02 01:55 UTC（D19 review 接受与关闭）
+
+- 消费 review-required 通知 `m1793584274964-227`；`collab recv` 返回 `count=0`（当前无 pending durable 正文）。
+- D19 `minimality-ablation-audit-increment2-20261101` 交付已核验并接受：`docs/architecture/minimality-ablation-audit-2026-11-01.md`（untracked，docs-only）9 个候选均列出入口、消费者、失败模式、源码证据与 keep/remove/unknown 结论。核对每个候选恰好出现一次；`git status --short -- packages tests scripts .appsdk` 为空，无产品代码修改、无删除。`b4f9f4f` keep，其余 8 项 unknown。
+- master 执行 `collab task review --accept`（disposition `no_merge_required`）；`collab task close --force`（cleanup `manual`，reason 记录只读文档增量无 worktree/无产品改动，receipt `cleanup-manual-minimality-ablation-audit-increment2-20261101-1793584552460`）。D19 在清单记 `closed`。
+- 重要边界：本报告是静态证据，不代表运行时验收，unknown 项不授予删除许可。
+- D17 GCM PID 85863 自 15:14 起约 2h42m，worktree 剩 `packages/app/src/ui-runtime/service.ts`、`packages/runtime/src/ui-runtime/coordinator.ts` 两文件 modified 未 commit；日志 `.worker-runs/d17-native-retry/gcm-exec.log` 17:56 仍更新（worker 正在收口 spurious `execution.retry blocked`），不打断。
+- D18 GCM PID 22744 自 17:30 起约 26m，worktree 仍 clean（定位/红态阶段），日志 17:56 更新，不重启红态。
+- 核对项目 `AGENTS.md` 已含用户要求的 `## 符号探索` 段（第 50-56 行，nn-code 用法与 capability-gap 反馈），无需重复添加。
+
+## 2026-11-02 02:12 UTC（D18 r1 INCOMPLETE，D18/D20 r3 重派）
+
+- D18 r1（PID 22744）返回 INCOMPLETE，写 `result-d18.md`：红态稳定复现 `ambiguous must not issue a stop POST`、`1 !== 0`。根因 `tests/app/dashboard-e2e/lib/journal.mjs` 的 `executionIdentityFromRecords`：提交 `32956ce7e` 把 ambiguous fail-closed 改成「同 task 一律取最新」，`verifyStopIdentity` 接受并列身份后发 1 次 stop POST。该路径超出 r1 允许范围，worker 未做 test-only weakening，worktree 保持 clean。合同已扩 `tests/app/dashboard-e2e/lib/**`，语义：最新 epoch/startedAt 唯一时仍取最新，最新位置并列不同 operation/cycle 且无 operationId 时 fail-closed；保留 `journal.test.mjs` latest-epoch 覆盖。
+- D20 r1（PID 83535）与 r2 均在 `nohup ... &` 启动后退出，无 result；日志有 `UserPromptSubmit` 但进程不存活。改用 D17/D18-r1 同款前台 `codex exec | tee` 模式，D18 r3（session 66437）与 D20 r3（session 42903）已进入模型执行（`UserPromptSubmit` 出现，正在读测试/入口代码）。
+- D17 PID 85863 仍运行约 3h，日志 18:14 更新；继续等其收口 spurious `execution.retry blocked` 与提交。
+- worktree 8 个（main + D17 + D18 + D20 + 4 locked provider PROTECTED_HOLD），未超 10。
+
+## 2026-11-02 02:35 UTC（Collab context 协议错误与 r3 进度）
+
+- 消费 Emma 通知 `m1793586818959-281` 与 master-idle `m1793586891023-284`。`collab context` 稳定失败：`bad request: invalid project context envelope: unknown field invocation_cwd`（CLI 0.2.0411），与 Emma 登记的 git-bug `d442481` 一致。`appsdk goal status` 因此 `GOAL_OWNER_CONTEXT_FAILED:exit=1`；goal 一次性 deadline 已在 02:08 消费，当前无法重订。登记清单 D21（P2，Collab context 协议错误）。
+- 未重启/升级用户管理 daemon、未换通道绕过。`collab board show` / `collab who` / `collab ceo status` 仍可用：board `tasks=[]`，CEO=Alice（is_current=false）。
+- D18 r3 已改 `tests/app/dashboard-e2e/lib/journal.mjs` + `journal.test.mjs`，正在跑完整 `runner-contract.test.mjs` 65/65（输出重定向 `/tmp/d18-runner-contract.log`）。
+- D20 r3 正在写 stay-on-entry 浏览器测试，worktree 尚无落盘改动。
+- D17 真实 `retry-visual-proof.mjs` 首次 flaky INCOMPLETE（task snapshot total=0），已重跑；worktree `service.ts` + `coordinator.ts` + proof 脚本 3 文件 modified，未 commit。
+
+## 2026-11-02 02:56 UTC（D18/D19 收口与 D22 四路审计）
+
+- D18 `d6ac049` 已收口：r3 候选 `ada11bec5` 已 ff 合入 main 并 push；master 独立复跑 `journal.test.mjs` 6/6、完整 `runner-contract.test.mjs` 65/65，停止 POST 保持 0；D18 worktree/branch 已移除并确认路径不存在。
+- D19 `minimality-ablation-audit-increment2-20261101` 已 review-accept + close；报告 `docs/architecture/minimality-ablation-audit-2026-11-01.md` 保留为静态证据，9 个候选中 `b4f9f4f` keep、其余 unknown。unknown 只表示证据不足，不构成删除授权。
+- D17 `3c8c433` 仍在执行：PID 85863 活跃约 3h44m，当前工作树只改 `packages/runtime/src/ui-runtime/coordinator.ts` 与 `tests/app/dashboard-e2e/retry-visual-proof.mjs`，无 commit/result。D20 `8a4ab78` 仍在执行：session 42903 活跃约 46m，当前改 `docs/ui/entry.js`、`docs/ui/runtime.css` 并新增 `tests/ui/entry-submit-stays-browser.mjs`，无 commit/result。
+- Alice 已按用户直接指令启动 D22 四路只读审计：worktree `/Volumes/Intel/playground/humanagent/mvp-audit-20261101`（detached HEAD `ada11bec5`，clean），PID 21933/21939/21941/21942 分别审计 A 显式 UI、B 显式→隐式→执行→结果链、C checkpoint 恢复、D agent debug 工具链；合同和 lane 在 `.worker-runs/mvp-audit-alice-20261101/`，当前尚无 report，属正常活动。
+- Collab `context` 仍失败 `invalid project context envelope: unknown field invocation_cwd`，`appsdk goal status` 仍 `GOAL_OWNER_CONTEXT_FAILED:exit=1`；不重启或升级用户管理 daemon，不伪造 goal active。当前 worktree 8 个（main + D17 + D20 + D22 audit + 4 locked provider `PROTECTED_HOLD`），未超 10，生产 10086 未写。
+
+## 2026-11-02 04:56 UTC（D17 r2 红测阶段，D20 r4 推进中）
+
+- 消费 Emma 通知 `m1793594010686-369`（D17 交付待验收，正文已确认 consumed_by_recv=true）。`collab recv` 无正文返回，已终止等待；`collab msg` 只读确认原正文属实。
+- D17 独立 review 两轮均 fail/blocking_findings，三处 P1 已锁定：F1 `coordinator.ts:1661` 分类过宽、F2 `coordinator.ts:5369` 耗尽无 blocked 终态、F3 `coordinator.ts:5256` 无 native-lane 门禁。
+- r2 GCM session 49348（PID 88444）正在同一 worktree 执行：已进入 `tests/app/execution-corrective-retry.test.ts` 红测，新增 native 非 5xx 拒绝、native 耗尽 blocked、非 native 不重试三组；当前预修复红测 `3 pass / 4 fail`（native 成功、非 5xx、耗尽、非 native 均红，非 native 现为 `failed` 而非期望 `blocked`），worker 仍在继续，不中断、不重派。`result-d17-r2.md` 尚未出现，worktree 保持 clean HEAD `af153dcf6`。
+- D20 r4 PID 15580 运行约 48m，仅 `tests/ui/entry-flow-browser.mjs` modified，尚无 `result-d20-r4.md`；不中断、不重复派工。
+- worktree 7（main + D17 + D20 + 4 locked provider PROTECTED_HOLD），未超 10；生产 10086 未动。board `tasks=[]`；CEO=Alice（is_current=false），本 master 非 CEO，不虚构回报。
+- project patrol armed 900000ms、目标 1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除，不声称对齐。
+
+## 2026-11-02 05:45 UTC（D17 r2 交付、master 复验 PASS、独立 review 派发；D20 r4 仍在真实 RCC 迭代）
+
+- 消费本轮 `m1793597527226-396`（master-idle:project-patrol）。`origin/main` 仍为 `ada11bec5`，D17 r2 候选 `ede3189ba`（parent `af153dcf6`）已组合到最新 main。
+- D17 r2 已写回 `result-d17-r2.md`：F1/F2/F3 各有红→绿证据；master 独立复跑 `pnpm typecheck` exit 0、`pnpm build:app` exit 0、`retry-injection-contract.test.mjs` 3/3、`execution-corrective-retry.test.js` 7/7；真实 RCC 4444 一次性 503 receipt 落盘且 `Result: SUCCESS`（terminal succeeded、checkpoint 1、execution.retry seq=4）。
+- 已写 r2 review 合同 `.worker-runs/d17-native-retry/review-contract-r2.md`，按同 route 派独立 OAuth review `d17-native-rcc-retry-review-20261103`（`codex-auto-review`，base=`origin/main`），当前 working。
+- D20 r4 PID 15580 仍运行（约 1h33m），尚无 `result-d20-r4.md`；`entry-flow-browser-r4.log` 上一轮 64/65，真实 RCC Section B 在 +41s 进入 `blocked/tools=3` 且无 terminal tool trace。worker 正在把固定 20s draft 等待改为完整 90s 内同时观察 draft/回执/错误/状态并重跑真实 RCC，属真实修复活动，不中断、不重派。
+- 资源：worktree 7（main + D17 + D20 + 4 locked provider PROTECTED_HOLD），未超 10；生产 10086 未写。
+
+## 2026-11-02 06:36 UTC（W1-B 推进、W1-A 停止待 W0、W0 分派）
+
+- 独立专家审查 v4 设计层 PASS（`expert-review-v4-report.md`）：P0-1 要求物理退役顶层 `deliveryText`，`summary.result.text` 是唯一公开文本真源；v3 因同时保留双来源被 FAIL。当前 `packages/contracts/src/standard-turn-end.ts` 仍是 v1/v2 时代双字段，未退役。
+- W1-A 旧合同使用「top-level `deliveryText` 优先 + `summary.result.text` 兜底」，已被 v4 判定为要消融的双来源，因此终止 W1-A r2（session 60985，未改代码，工作树干净），待 W0 契约/DAG 门禁合入后再按 v4 唯一真源规则重新分派。`gcm-exec-r2.log` 保留原协商过程。
+- W0 已落合同并分派独立 GCM worker（session 1794，worktree `/Volumes/Intel/playground/humanagent/mvp-w0-contract-and-dag-20261102`，branch `codex/mvp-w0-contract-and-dag-20261102`，base `f3b63887f`）：只允许 `packages/contracts/src`、`tests/contracts`、`docs/dagpipe/*.graph*.json`；退役 `deliveryText`、补 PlanRevision/恢复/Agent Debug typed contracts，更新 5 张受影响 DAG 并跑 `node scripts/dagpipe-validate-graphs.mjs`。
+- W1-B（session 53997/PID 45278）仍在独立 worktree `/Volumes/Intel/playground/humanagent/mvp-w1b-explicit-ui-clarity-20261101` 运行；contract 要求保留四角按钮、真实 RCC 4444 双视口、不回归 stay-on-entry，当前无代码落盘可审，worktree clean。resource` 等待其 red 测试与证据，不中断、不重派。
+- `collab context` 本轮成功（daemon verify current pane），identity=Jenny role=master，CEO=Alice is_current=false，project patrol 仍以 900000ms armed、目标 1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除。board `tasks=[]`；worktree 8（main + W0 + W1-B + 4 locked provider PROTECTED_HOLD），未超 10；生产 10086 未动。
+
+## 2026-11-02 10:40 UTC（外置卷权限阻塞 W2-A，主检出树 docs 收口）
+
+- 消费最新 deadline/master-idle 通知，`collab recv` 无正文返回后停止等待。`collab context` 成功：identity=Jenny role=master，注册且 endpoint live；`collab board show` 唯一可推进任务为 `mvp-w2a-implicit-orchestration-20261102`（P0，status working，owner Alice，缺 review），next_step 是“等待宿主外置卷权限恢复后在同一 worktree 继续 W2-A”。Emma、Bob、Carol、David 均在线空闲、无已分派任务。
+- 外置卷权限仍未恢复：`/Volumes/Intel` 挂载（APFS `nodev,nosuid,noowners`，属主 fanzhang:staff），`stat`/`ls -d` 可取元组，但读取目录内容、进 worktree、读 `.worker-runs` receipts 全部 `Operation not permitted`。因此 W2-A worktree 与全部证据/截图当前不可访问，无法推进实现或补图；不绕路径、不换 worktree、不重启用户 daemon。
+- 主检出树 `/Volumes/extension/code/humanagent` 可读，HEAD `751580a17` == origin/main；`node scripts/dagpipe-validate-graphs.mjs` 输出 `validated 31 DAGpipe graph(s)`，全部有效。`appsdk 0.1.0015 (rust)`、`collab 0.2.0389`；AGENTS.md `## 符号探索`（50-58 行）已含 nn-code 使用与反馈要求。主检出树 docs 修改（checklist/goal/note + 16 个 docs 证据）已暂存，待提交。
+- 交付清单 `docs/goals/master-delivery-checklist-2026-10-31.md`：D1-D22 已关闭，D23-D43 为开放 P0/P1 缺陷（D23 原生 lane 绕过隐式编排、D24 公共结果为空、D31 Planner 非 JSON、D42 首页提交停 received 等），MVP 未达交付标准。用户三项前端验收：输入可执行未稳定（D42）、动画有但无当前 step/计时（D20 rework）、执行后派发编排未成立（D23），截图证据在不可读卷上，权限恢复后补图。

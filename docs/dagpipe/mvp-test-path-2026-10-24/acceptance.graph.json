@@ -1,0 +1,65 @@
+{
+  "id": "humanagent-mvp-acceptance-path",
+  "version": "1",
+  "meta": {
+    "status": "AUDIT-PLAN / NOT-RUNTIME-IMPLEMENTATION",
+    "title": "从部分独立测试到整体交互的最小验收路径",
+    "scope": "一次验收批次；不是产品业务运行图，不注册或执行新的 Runtime Operator",
+    "resultContract": "每个节点产出 passed/failed/unverified 与证据；前置失败时下游返回未执行及原因，继续保存责任和资源结果；只有必需证据充分才放行，不把图可达当验收通过",
+    "owners": {
+      "baseline": "集成 owner：docs/dagpipe、scripts、需求映射",
+      "foundation": "contracts/core/config/jsonl/filesystem 各自 owner",
+      "provider": "adapters/provider",
+      "brain": "runtime/explicit-brain/intake/admission；app 组装",
+      "runtime": "runtime/orchestration/agent-loop/context/checkpoints/control；app supervisor 接线",
+      "services": "runtime/hand/gateway/memory/events/subscriptions；adapters/operations",
+      "projection": "packages/ui 与 docs/ui；app HTTP 组装",
+      "compose": "packages/app 集成 owner",
+      "live": "Provider 验收 owner",
+      "interaction": "UI 验收 owner",
+      "long_horizon": "runtime 组合验收 owner",
+      "closeout": "集成 owner 与独立 milestone Reviewer"
+    },
+    "gapRefs": {
+      "baseline": ["G01", "G02", "G03", "G14"],
+      "provider": ["G05", "G07"],
+      "brain": ["G04", "G08"],
+      "runtime": ["G06", "G09", "G10"],
+      "services": ["G11", "G12"],
+      "projection": ["G13"]
+    }
+  },
+  "inputs": [{"id": "audit_scope", "schema": "Object"}],
+  "nodes": [
+    {"id":"baseline","operator":"humanagent-audit-baseline","operator_version":"1","inputs":["audit_scope"],"output":{"id":"mapped_scope","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"foundation","operator":"humanagent-audit-foundation","operator_version":"1","inputs":["mapped_scope"],"output":{"id":"foundation_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"provider","operator":"humanagent-audit-provider","operator_version":"1","inputs":["foundation_result"],"output":{"id":"provider_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"brain","operator":"humanagent-audit-brain","operator_version":"1","inputs":["foundation_result"],"output":{"id":"brain_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"runtime","operator":"humanagent-audit-runtime","operator_version":"1","inputs":["foundation_result"],"output":{"id":"runtime_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"services","operator":"humanagent-audit-services","operator_version":"1","inputs":["foundation_result"],"output":{"id":"services_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"projection","operator":"humanagent-audit-projection","operator_version":"1","inputs":["foundation_result"],"output":{"id":"projection_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"compose","operator":"humanagent-audit-composition","operator_version":"1","inputs":["provider_result","brain_result","runtime_result","services_result","projection_result"],"output":{"id":"composition_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"live","operator":"humanagent-audit-live-provider","operator_version":"1","inputs":["composition_result"],"output":{"id":"live_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"interaction","operator":"humanagent-audit-interaction","operator_version":"1","inputs":["live_result"],"output":{"id":"interaction_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"long_horizon","operator":"humanagent-audit-long-horizon","operator_version":"1","inputs":["interaction_result"],"output":{"id":"long_horizon_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"closeout","operator":"humanagent-audit-closeout","operator_version":"1","inputs":["long_horizon_result"],"output":{"id":"acceptance_receipt","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges": [
+    {"from":"baseline","to":"foundation","arc_id":"mapped_scope"},
+    {"from":"foundation","to":"provider","arc_id":"foundation_result"},
+    {"from":"foundation","to":"brain","arc_id":"foundation_result"},
+    {"from":"foundation","to":"runtime","arc_id":"foundation_result"},
+    {"from":"foundation","to":"services","arc_id":"foundation_result"},
+    {"from":"foundation","to":"projection","arc_id":"foundation_result"},
+    {"from":"provider","to":"compose","arc_id":"provider_result"},
+    {"from":"brain","to":"compose","arc_id":"brain_result"},
+    {"from":"runtime","to":"compose","arc_id":"runtime_result"},
+    {"from":"services","to":"compose","arc_id":"services_result"},
+    {"from":"projection","to":"compose","arc_id":"projection_result"},
+    {"from":"compose","to":"live","arc_id":"composition_result"},
+    {"from":"live","to":"interaction","arc_id":"live_result"},
+    {"from":"interaction","to":"long_horizon","arc_id":"interaction_result"},
+    {"from":"long_horizon","to":"closeout","arc_id":"long_horizon_result"}
+  ],
+  "outputs": ["acceptance_receipt"]
+}

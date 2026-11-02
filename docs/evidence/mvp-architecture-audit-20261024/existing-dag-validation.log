@@ -1,0 +1,61 @@
+valid DAG: humanagent-acp-runtime-wiring@1 (10 nodes, 11 edges, 8 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-checkpoint-path-reentry@1 (4 nodes, 3 edges, 4 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-ci-checkpoint@1 (3 nodes, 2 edges, 3 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-context-events@2 (5 nodes, 4 edges, 5 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-daemon-restart@2 (9 nodes, 8 edges, 9 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-dashboard-e2e-local-file-search@1 (16 nodes, 15 edges, 16 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-dashboard-e2e-web-search@1 (11 nodes, 10 edges, 11 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-default-product-adoption@1 (4 nodes, 3 edges, 4 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-explicit-requirement@5 (12 nodes, 12 edges, 10 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-explicit-semantic-turn@2 (5 nodes, 4 edges, 5 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-hand-search-websearch@1 (14 nodes, 13 edges, 14 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-headless-session@1 (7 nodes, 6 edges, 7 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-human-readable-ux-reading@3 (5 nodes, 4 edges, 5 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-auth-session@3 (6 nodes, 5 edges, 6 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-implicit-turn-closure@1 (7 nodes, 6 edges, 7 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-memory-curation@2 (6 nodes, 5 edges, 6 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-native-admitted-turn@1 (8 nodes, 8 edges, 7 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-native-turn-checkpoint@1 (10 nodes, 10 edges, 9 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-native-turn-segment-recovery@1 (5 nodes, 4 edges, 5 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-observation-read@7 (8 nodes, 8 edges, 8 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-pair-issuance@2 (5 nodes, 4 edges, 5 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-scheduled-occurrence@2 (9 nodes, 8 edges, 9 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-serve-launch@1 (4 nodes, 3 edges, 4 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-serve-task@3 (14 nodes, 13 edges, 14 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-subagent-call-checkpoint@1 (5 nodes, 4 edges, 5 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-subscription-control@1 (5 nodes, 4 edges, 5 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-task-grant-control-entry@2 (4 nodes, 3 edges, 4 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-task-liveness-display@3 (7 nodes, 6 edges, 7 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-turn-continuation-request@1 (6 nodes, 5 edges, 6 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+valid DAG: humanagent-workspace-selection@2 (4 nodes, 3 edges, 4 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate
+validated 30 DAGpipe graph(s)
