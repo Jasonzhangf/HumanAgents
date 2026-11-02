@@ -185,6 +185,29 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ## Update Log
 
+- 2026-11-02 12:14 UTC: W2-A `mvp-w2a-implicit-orchestration-20261102` was
+  delivered at commit `7b51b8076`, then reviewed by Jenny and returned to
+  `rework` (board revision 10). Two blocking findings: (1) the production path
+  does not implement dynamic orchestrator action selection. In
+  `packages/runtime/src/ui-runtime/coordinator.ts`, `commitAndBindOrchestratedPlanSteps`
+  defaults to one fixed `execute` step with `objective=operation.input` and
+  returns `isolatedPrompt=operation.input`; `dynamicStepSequence` is only set
+  in `tests/app/w2a-implicit-orchestration.test.ts`, no production producer.
+  There is no orchestrator model call to choose explore/plan/execute/review, no
+  per-step isolated context, and no post-result re-decision loop. This fails
+  `planner-w2/plan.md` section 5.2. (2) `w2a-result.md` overclaims the graph
+  and symbols: it says graph v5 / 15 nodes / 18 edges with a new
+  `orchestrator_plan_step_gate`, and mentions `initialTaskPlanner` and
+  `prepareInitialExecutionPlanStep`, but the actual
+  `docs/dagpipe/implicit-turn-closure.graph.json` is version 2 / 10 nodes / 13
+  edges with no such node, and grep finds neither symbol; the actual graph diff
+  only adds meta contract strings and updates the binding `ownerPath`/design
+  note. The genuine live local-file-search and retry receipts are retained.
+  Rework scope was sent to Alice (`m1793621784281-899`). Goal deadline
+  `m1793621761721-898` was consumed and re-armed with `appsdk goal subscribe
+  --interval 20m` (one-shot armed). MVP acceptance remains NOT achieved; the
+  four P0s are still open.
+
 - 2026-11-02 11:32 UTC: goal deadline `m1793619119214-836`（LAST_REMINDER）已用 `collab recv` 消费，并用 `appsdk goal subscribe --interval 20m` 显式重订阅（one-shot armed）。W2-A 实现正在落盘：`git status` 显示 11 文件改动（graph 三文件、jsonl adapter、ui-runtime 服务/索引/执行组合、runtime orchestration/协调器、测试契约），新增 `tests/app/w2a-implicit-orchestration.test.ts`；HEAD 仍 `74fb7bb87`，未提交、未合入 main。Alice 正在运行 typecheck/build:app/测试集，部分命令失败并在迭代。board rev 5 反映“执行 W2-A...”。goal 保持 active，4 项 P0 仍未关闭，MVP 交付结论仍为未达成。
 
 - 2026-11-02 11:11 UTC: goal deadline `m1793617873883-811`（LAST_REMINDER）已用 `collab recv` 消费（receive `receive-77755-1793617883244503000-0`），并用 `appsdk goal subscribe --interval 20m` 显式重订阅（one-shot armed，下次触发 1793619118878）。W2-A 实现落盘中：`git status` 显示 4 文件改动（graph 三文件 + task-plan-revisions.ts，+112/-10），新增 `tests/app/w2a-implicit-orchestration.test.ts`，未提交；board rev 5 已反映“执行 W2-A...”。Alice 工作树权限恢复后按 `planner-w2/plan.md` W2-A 节继续，未换树、未自行 merge。goal 保持 active，4 项 P0 仍未关闭，MVP 交付结论仍为未达成。
