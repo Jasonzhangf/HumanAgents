@@ -87,6 +87,7 @@ function freshScripted() {
     inspected: 0,
     stepStreamRequests: [],
     executionStreamRequests: [],
+    taskDashboardReads: 0,
     confirmationCount: 0,
   };
 }
@@ -184,21 +185,24 @@ function handleScriptedApi(state, url, method, body) {
   const taskDashMatch = /^\/api\/tasks\/([^/]+)\/dashboard/.exec(url.pathname);
   if (taskDashMatch && method === 'GET') {
     const taskIdValue = decodeURIComponent(taskDashMatch[1]);
-    const streamed = state.executionStreamRequests.length > 0;
+    state.taskDashboardReads += 1;
+    // The first committed read is admitted but has no operation yet. The entry
+    // page must observe again, then connect the real stream once it appears.
+    const operationReady = state.taskDashboardReads >= 2;
     return {
       status: 200,
       body: {
         taskId: { scope: 'task', value: taskIdValue },
         title: 'submission',
-        state: 'running',
-        stateLabel: '执行中',
+        state: operationReady ? 'running' : 'created',
+        stateLabel: operationReady ? '执行中' : '等待调度',
         currentNode: 'runtime.queue',
         input: 'submission',
         output: '',
-        nextStep: streamed ? '执行步骤：runtime.queue（已收到执行事件）' : '等待执行',
+        nextStep: operationReady ? '执行步骤：runtime.queue（已收到执行事件）' : '等待执行',
         updatedAt: new Date().toISOString(),
-        operationId: 'operation-new-task-1',
-        statusSections: { business: '执行中', waiting: streamed ? '执行步骤·已收到执行事件' : '执行步骤' },
+        ...(operationReady ? { operationId: 'operation-new-task-1' } : {}),
+        statusSections: { business: operationReady ? '执行中' : '等待调度', waiting: operationReady ? '执行步骤·已收到执行事件' : '等待执行' },
         allowedActions: ['stop'],
         recentEvents: [],
         publicOutput: { state: 'absent', commits: [] },
@@ -347,6 +351,7 @@ async function capture(viewport) {
   record(`${viewport.width}x${viewport.height} live card has no horizontal overflow`, card.overflowX === false, card.overflowX);
   record(`${viewport.width}x${viewport.height} submission drives the explicit.step stream`, state.stepStreamRequests.length > 0, { stepStreamRequests: state.stepStreamRequests });
   record(`${viewport.width}x${viewport.height} submission reads the exact task dashboard`, state.executionStreamRequests.length > 0, { executionStreamRequests: state.executionStreamRequests });
+  record(`${viewport.width}x${viewport.height} entry observes until the execution operation appears`, state.taskDashboardReads >= 2, { taskDashboardReads: state.taskDashboardReads });
   record(`${viewport.width}x${viewport.height} entry shows no second confirmation control`, !/确认提交|二次确认|审批/.test(bodyText), bodyText.slice(0, 400));
   record(`${viewport.width}x${viewport.height} no uncaught pageerror`, pageErrors.length === 0, pageErrors);
 

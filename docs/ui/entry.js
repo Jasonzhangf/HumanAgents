@@ -782,6 +782,9 @@ const EXECUTION_STEP_EVENTS = [
   'attention.opened',
   'attention.resolved',
 ]
+// Match the task dashboard's observation cadence while a confirmed task is
+// admitted but has not yet published its executing operation.
+const LIVE_PROGRESS_OBSERVE_MS = 750
 
 /**
  * Subscribe to the runtime's real execution event stream for a confirmed task's
@@ -882,11 +885,12 @@ function openSubmitProgressDetail(trigger) {
 async function startLiveTaskProgress({ taskId, scope }) {
   stopLiveTaskProgress()
   const taskIdValue = taskId && typeof taskId === 'object' ? taskId.value : taskId
-  const dashboard = await api.scopedTaskDashboard({
+  const readDashboard = () => api.scopedTaskDashboard({
     projectKey: scope.projectKey,
     mode: scope.mode,
     taskId: { scope: 'task', value: taskIdValue },
   })
+  const dashboard = await readDashboard()
   if (pageLeaving) return
   const progress = {
     taskId: taskIdValue,
@@ -900,20 +904,61 @@ async function startLiveTaskProgress({ taskId, scope }) {
   // the live card must be (re)mounted here before its step history is used.
   if (!submitBanner.isLive()) submitBanner.mount()
   submitBanner.text('任务已提交，正在执行…')
-  progress.stop = subscribeExecutionStepStream(progress.operationId, (event) => {
+  let streamStop = () => {}
+  let observeTimer = null
+  progress.stop = () => {
+    if (observeTimer !== null) clearTimeout(observeTimer)
+    observeTimer = null
+    streamStop()
+  }
+  function observeDashboard() {
+    if (observeTimer !== null) return
+    observeTimer = setTimeout(async () => {
+      observeTimer = null
+      if (pageLeaving || liveTaskProgress !== progress) return
+      try {
+        const next = await readDashboard()
+        if (pageLeaving || liveTaskProgress !== progress) return
+        status.dataset.tone = 'success'
+        connect(next)
+      } catch {
+        if (pageLeaving || liveTaskProgress !== progress) return
+        status.dataset.tone = 'danger'
+        submitBanner.text('任务进度暂时不可读，正在重试…')
+        observeDashboard()
+      }
+    }, LIVE_PROGRESS_OBSERVE_MS)
+  }
+  function connect(nextDashboard) {
     if (pageLeaving || liveTaskProgress !== progress) return
-    submitBanner.step({
-      seq: event.seq,
-      summary: event.summary,
-      kind: event.kind,
-      occurredAt: event.occurredAt,
-    })
-    if (event.kind === 'execution.terminal') {
-      status.dataset.tone = ['failed', 'blocked', 'cancelled'].includes(event.status)
-        ? 'danger'
-        : 'success'
+    progress.dashboard = nextDashboard
+    progress.operationId = nextDashboard?.operationId
+    if (progress.operationId) {
+      submitBanner.text('任务已提交，正在执行…')
+      streamStop = subscribeExecutionStepStream(progress.operationId, (event) => {
+        if (pageLeaving || liveTaskProgress !== progress) return
+        submitBanner.step({
+          seq: event.seq,
+          summary: event.summary,
+          kind: event.kind,
+          occurredAt: event.occurredAt,
+        })
+        if (event.kind === 'execution.terminal') {
+          status.dataset.tone = ['failed', 'blocked', 'cancelled'].includes(event.status)
+            ? 'danger'
+            : 'success'
+        }
+      })
+      return
     }
-  })
+    if (!['created', 'admitted', 'running', 'settling'].includes(nextDashboard?.state)) {
+      submitBanner.text(nextDashboard?.stateLabel || nextDashboard?.state || '任务状态已更新')
+      return
+    }
+    submitBanner.text('任务已提交，等待调度…')
+    observeDashboard()
+  }
+  connect(dashboard)
 }
 
 /**
