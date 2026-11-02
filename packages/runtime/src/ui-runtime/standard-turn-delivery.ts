@@ -15,6 +15,7 @@ import {
   type ScopeRef,
   type StandardTurnEndCommand,
   isStandardTurnEndToolId,
+  standardTurnEndPublicText,
   type WorkAssignment,
   assertProviderToolExecutionFactBinding,
   ContractError,
@@ -252,8 +253,8 @@ function requireStringField(value: unknown, field: string): string {
   return fieldValue;
 }
 
-/** Reads the model-persisted `deliveryText` from the accepted end call arguments. */
-function persistedDeliveryText(argumentsJson: string): string {
+/** Reads the model-persisted `summary.result.text` from the accepted end call arguments. */
+function persistedPublicText(argumentsJson: string): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(argumentsJson);
@@ -261,7 +262,9 @@ function persistedDeliveryText(argumentsJson: string): string {
     throw new StandardTurnDeliveryError('standard-turn-delivery.text-arguments-invalid',
       'the persisted standard-turn end arguments are not valid JSON', OWNER, { cause });
   }
-  return requireStringField(parsed, 'deliveryText');
+  const summary = typeof parsed === 'object' && parsed !== null ? (parsed as { summary?: unknown }).summary : undefined;
+  const result = typeof summary === 'object' && summary !== null ? (summary as { result?: unknown }).result : undefined;
+  return requireStringField(result, 'text');
 }
 
 /**
@@ -439,7 +442,7 @@ export async function readStandardTurnDelivery(
   }
   const facts = collectAcceptedToolResults(input);
   const materials: StandardTurnDeliveryMaterial[] = [];
-  for (const delivery of acceptedEnd.resolvedEvidenceRefs) {
+  for (const delivery of acceptedEnd.resolvedEvidenceRefs ?? []) {
     const matches = facts.filter((fact) => carriesEvidence(fact, delivery)
       && !isStandardTurnEndToolId(fact.envelope.fact.result.toolId));
     if (matches.length > 1) {
@@ -561,19 +564,20 @@ export async function readStandardTurnDelivery(
       sourceEvidence: [...fact.envelope.fact.result.evidenceRefs],
     });
   }
-  if (acceptedEnd.deliveryText !== undefined) {
+  const publicText = standardTurnEndPublicText(acceptedEnd);
+  if (publicText !== undefined) {
     const endCall = resolveAcceptedEndCall(input, acceptedEnd);
     const rawArguments = endCall.envelope.fact.rawArguments;
     // The Provider codec persists the wire `arguments` string under the
     // `arguments` view, so the reader already returns the model arguments JSON.
-    // The exact text body is the `deliveryText` field of that object.
+    // The exact public text is the `summary.result.text` field of that object.
     const argumentsJson = decodeUtf8(
       await readAssetBytes(reader, endCall.envelope.scope, rawArguments),
       'standard-turn end arguments',
     );
-    if (persistedDeliveryText(argumentsJson) !== acceptedEnd.deliveryText) {
+    if (persistedPublicText(argumentsJson) !== publicText) {
       throw new StandardTurnDeliveryError('standard-turn-delivery.text-mismatch',
-        'the persisted raw end arguments do not carry the accepted delivery text');
+        'the persisted raw end arguments do not carry the accepted result text');
     }
     if (input.deliveryTextBody === undefined) {
       throw new StandardTurnDeliveryError('standard-turn-delivery.text-source-missing',
@@ -586,9 +590,9 @@ export async function readStandardTurnDelivery(
       throw new StandardTurnDeliveryError('standard-turn-delivery.artifact-conflict',
         'the immutable delivery text body reference digest does not match its read bytes');
     }
-    if (decodeUtf8(bytes, 'bound delivery text') !== acceptedEnd.deliveryText) {
+    if (decodeUtf8(bytes, 'bound delivery text') !== publicText) {
       throw new StandardTurnDeliveryError('standard-turn-delivery.text-mismatch',
-        'the immutable delivery text body does not equal the accepted delivery text');
+        'the immutable delivery text body does not equal the accepted result text');
     }
     const deliveryEvidence = endCall.envelope.fact.rawArguments.ref;
     materials.push({

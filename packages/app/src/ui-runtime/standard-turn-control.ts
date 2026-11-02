@@ -4,13 +4,12 @@ import { canonicalJsonStringify, type AcceptedRawFact, type BusinessPayload,
 import type { AdmittedTurnIdentity } from '../../../contracts/src/native-reasoning.js';
 import { validateNativeSegmentSaveSourceV2, type NativeSegmentSaveSourceV2 } from '../../../contracts/src/active-turn-segments.js';
 import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
-import type { TurnCloseSummary } from '../../../contracts/src/turn-closure.js';
 import { ContractError } from '../../../contracts/src/errors.js';
 import {
   STANDARD_TURN_END_TOOL_ID,
   isStandardTurnEndToolId,
   validateStandardTurnEndCommand,
-  validateStandardTurnEndInput,
+  validateStandardTurnEndPayload,
   type StandardTurnEndCommand,
   type StandardTurnEndInput,
 } from '../../../contracts/src/standard-turn-end.js';
@@ -21,14 +20,28 @@ import type {
 
 const OWNER = 'humanagent.app.standard-turn-control';
 
-/** One summary section as the model produces it: semantic text plus evidence refs. */
-const SUMMARY_SECTION_SCHEMA: BusinessPayload = {
+/**
+ * The canonical four-part summary as the model produces it. `result.text` is
+ * the only public result text; `outcome` and `result.status` are separate
+ * model decisions and are never derived from one another.
+ */
+export const STANDARD_TURN_END_SUMMARY_SCHEMA: BusinessPayload = {
   type: 'object',
   properties: {
-    text: { type: 'string' },
-    evidenceRefs: { type: 'array', items: { type: 'object' } },
+    goal: { type: 'string', minLength: 1, description: 'What this turn set out to achieve.' },
+    actions: { type: 'array', items: { type: 'string', minLength: 1 }, description: 'What was actually done in this turn, one entry per action.' },
+    result: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['completed', 'partial', 'blocked'] },
+        text: { type: 'string', description: 'The user-facing result of this turn. When status is completed this text is published to the user as the answer.' },
+      },
+      required: ['status', 'text'],
+      additionalProperties: false,
+    },
+    nextStep: { type: 'string', minLength: 1, description: 'The expected next step after this turn.' },
   },
-  required: ['text', 'evidenceRefs'],
+  required: ['goal', 'actions', 'result', 'nextStep'],
   additionalProperties: false,
 };
 
@@ -65,26 +78,21 @@ export const INSPECTION_OUTCOME_SCHEMA: BusinessPayload = {
  */
 export const STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
   toolId: STANDARD_TURN_END_TOOL_ID,
-  description: 'humanagent.turn.end: End the current task turn when this phase has sufficient results and evidence. Provide the four-part goal/actions/result/expectedNextStep summary and scoped delivery references. The Task can remain unfinished; the independent Planner decides continue, complete, or failed after closure.',
+  description: 'humanagent.turn.end: End the current task turn when this phase has sufficient results and evidence. Provide outcome (completed when the task is done, continue when more turns are needed, blocked when it cannot proceed) and the four-part summary goal/actions/result/nextStep; result.text is the user-facing answer. deliveryRefs only cite committed file writes or inspection results. The independent Planner decides continue, complete, or failed after closure.',
   inputSchema: {
     type: 'object',
     properties: {
+      outcome: { type: 'string', enum: ['completed', 'continue', 'blocked'] },
       summary: {
-        type: 'object',
+        ...STANDARD_TURN_END_SUMMARY_SCHEMA,
         properties: {
-          goal: SUMMARY_SECTION_SCHEMA,
-          actions: SUMMARY_SECTION_SCHEMA,
-          result: SUMMARY_SECTION_SCHEMA,
-          expectedNextStep: SUMMARY_SECTION_SCHEMA,
+          ...(STANDARD_TURN_END_SUMMARY_SCHEMA.properties as Record<string, BusinessPayload>),
           inspectionOutcome: INSPECTION_OUTCOME_SCHEMA,
         },
-        required: ['goal', 'actions', 'result', 'expectedNextStep'],
-        additionalProperties: false,
       },
-      deliveryText: { type: 'string', description: 'Human-readable delivery material for this turn. For a text-only delivery put the material here and leave deliveryRefs empty.' },
       deliveryRefs: { type: 'array', items: { type: 'string' }, description: 'Scoped references to delivery artifacts that can actually be committed to the turn: a file.write output or an inspection result. Never cite goal/todo/bash/edit results here; they carry no delivery material. A text-only delivery leaves this array empty.' },
     },
-    required: ['summary', 'deliveryRefs'],
+    required: ['outcome', 'summary', 'deliveryRefs'],
     additionalProperties: false,
   },
 };
@@ -210,19 +218,16 @@ export interface StandardTurnEndControlInput {
 function parseStandardTurnEndArguments(call: ProviderToolCall): StandardTurnEndInput {
   const args = call.arguments;
   const summary = args.summary;
-  const deliveryText = args.deliveryText;
   const deliveryRefs = args.deliveryRefs;
   if (typeof summary !== 'object' || summary === null || Array.isArray(summary)) {
     throw new StandardTurnEndError('standard-turn-end.arguments', 'standard turn end requires a summary object');
   }
-  if (deliveryText !== undefined && typeof deliveryText !== 'string') {
-    throw new StandardTurnEndError('standard-turn-end.arguments', 'standard turn end deliveryText must be a string when present');
-  }
   if (!Array.isArray(deliveryRefs) || !deliveryRefs.every((reference) => typeof reference === 'string')) {
     throw new StandardTurnEndError('standard-turn-end.arguments', 'standard turn end requires a delivery reference string array');
   }
-  return { summary: summary as unknown as TurnCloseSummary,
-    ...(deliveryText === undefined ? {} : { deliveryText }), deliveryRefs };
+  // The canonical validator rejects the retired top-level text field by own
+  // property, so the raw arguments are forwarded unchanged.
+  return args as unknown as StandardTurnEndInput;
 }
 
 function assertBoundExecution(identity: AdmittedTurnIdentity, execution: ProviderExecutionIdentityRef): void {
@@ -302,7 +307,7 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
       let parsed: StandardTurnEndInput;
       try {
         parsed = parseStandardTurnEndArguments(call);
-        validateStandardTurnEndInput(parsed, identity.scopeRef);
+        validateStandardTurnEndPayload(parsed);
       } catch (error) {
         const refusal = error instanceof ContractError
           ? { code: 'standard-turn-end.arguments', message: error.message }
@@ -310,10 +315,11 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
         if (refusal) return createRefusedStandardTurnEndResult(identity, refusal);
         throw error;
       }
+      const deliveryRefs = parsed.deliveryRefs ?? [];
       let resolvedEvidenceRefs: readonly EvidenceRef[];
       try {
-        resolvedEvidenceRefs = parsed.deliveryRefs.length === 0 ? []
-          : await input.owner.resolveDelivery({ identity, deliveryRefs: parsed.deliveryRefs, requireDeliveryMaterial: true });
+        resolvedEvidenceRefs = deliveryRefs.length === 0 ? []
+          : await input.owner.resolveDelivery({ identity, deliveryRefs, requireDeliveryMaterial: true });
       } catch (error) {
         const refusal = standardTurnEndModelInputRefusal(error);
         if (refusal) return createRefusedStandardTurnEndResult(identity, refusal);
@@ -322,8 +328,8 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
       const command: StandardTurnEndCommand = {
         kind: 'standard-turn-end',
         identity,
+        outcome: parsed.outcome,
         summary: parsed.summary,
-        ...(parsed.deliveryText === undefined ? {} : { deliveryText: parsed.deliveryText }),
         ...(requestId === undefined ? {} : {
           acceptedEndCall: {
             requestId,
@@ -332,7 +338,7 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
             scope,
           },
         }),
-        deliveryRefs: parsed.deliveryRefs,
+        deliveryRefs,
         resolvedEvidenceRefs,
       };
       validateStandardTurnEndCommand(command);
@@ -340,7 +346,7 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
       return {
         output: canonicalJsonStringify({ owner: OWNER, kind: command.kind, turnId: identity.turnId, accepted: true }),
         outputRefs: [],
-        evidenceRefs: [...command.resolvedEvidenceRefs],
+        evidenceRefs: [...resolvedEvidenceRefs],
         status: 'succeeded',
         executorRoute: STANDARD_TURN_END_TOOL_ID,
       };

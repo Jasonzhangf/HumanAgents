@@ -879,8 +879,9 @@ test('task events stream stays open across an advancing final and the next opera
                     acceptedEnd: {
                       kind: 'standard-turn-end',
                       identity,
-                      summary,
-                      deliveryText: 'task complete',
+                      outcome: 'completed',
+                      summary: { goal: 'finish task', actions: ['execute turn'],
+                        result: { status: 'completed', text: 'task complete' }, nextStep: 'complete task' },
                       deliveryRefs: [],
                       resolvedEvidenceRefs: [],
                     },

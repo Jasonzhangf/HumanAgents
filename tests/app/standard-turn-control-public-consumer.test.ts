@@ -10,7 +10,8 @@ import {
   type ProviderExecutionIdentityRef,
   type ProviderToolCall,
   type ScopeRef,
-  type TurnCloseSummary,
+  type StandardTurnEndCommand,
+  type StandardTurnEndSummary,
 } from '../../packages/contracts/src/index.js';
 import { ContractError } from '../../packages/contracts/src/errors.js';
 import {
@@ -61,11 +62,11 @@ const deliveryEvidence: EvidenceRef = {
   scope,
 };
 
-const summary: TurnCloseSummary = {
-  goal: { text: 'goal text', evidenceRefs: [deliveryEvidence] },
-  actions: { text: 'actions text', evidenceRefs: [deliveryEvidence] },
-  result: { text: 'result text', evidenceRefs: [deliveryEvidence] },
-  expectedNextStep: { text: 'next step text', evidenceRefs: [deliveryEvidence] },
+const summary: StandardTurnEndSummary = {
+  goal: 'goal text',
+  actions: ['actions text'],
+  result: { status: 'completed', text: 'result text' },
+  nextStep: 'next step text',
 };
 
 const KNOWN_REF = 'native-file-write';
@@ -102,7 +103,7 @@ function call(arguments_: Record<string, unknown>): ProviderToolCall {
 test('typed executor returns a failed tool result when a delivery reference is unresolved', async () => {
   let routed = 0;
   const executor = createStandardTurnEndExecutor({ owner: fakeOwner(), route: () => { routed += 1; } });
-  const actualCall = call({ summary, deliveryRefs: [UNRESOLVED_REF] });
+  const actualCall = call({ outcome: 'completed', summary, deliveryRefs: [UNRESOLVED_REF] });
   const result = await executor.execute({
     execution, scope, call: actualCall, signal,
   });
@@ -134,7 +135,7 @@ test('typed executor propagates owner delivery ContractError unchanged', async (
     route: () => {},
   });
   await assert.rejects(
-    async () => executor.execute({ execution, scope, call: call({ summary, deliveryRefs: [KNOWN_REF] }), signal }),
+    async () => executor.execute({ execution, scope, call: call({ outcome: 'completed', summary, deliveryRefs: [KNOWN_REF] }), signal }),
     (error: unknown) => error === failure,
   );
 });
@@ -143,7 +144,7 @@ test('typed executor routes the accepted command when delivery references resolv
   let routed: unknown;
   const executor = createStandardTurnEndExecutor({ owner: fakeOwner(), route: (command) => { routed = command; } });
   const result = await executor.execute({
-    execution, scope, call: call({ summary, deliveryRefs: [KNOWN_REF] }), signal,
+    execution, scope, call: call({ outcome: 'completed', summary, deliveryRefs: [KNOWN_REF] }), signal,
   });
   assert.equal(result.status, 'succeeded');
   const output = JSON.parse(result.output) as Record<string, unknown>;
@@ -159,7 +160,7 @@ test('typed executor still throws when no admitted turn is bound', async () => {
     route: () => {},
   });
   await assert.rejects(
-    async () => executor.execute({ execution, scope, call: call({ summary, deliveryRefs: [KNOWN_REF] }), signal }),
+    async () => executor.execute({ execution, scope, call: call({ outcome: 'completed', summary, deliveryRefs: [KNOWN_REF] }), signal }),
     (error: unknown) => error instanceof StandardTurnEndError && error.code === 'standard-turn-end.unbound',
   );
 });
@@ -170,7 +171,7 @@ test('typed executor still throws when the resolved turn does not match the prov
     async () => executor.execute({
       execution: { ...execution, operationId: id('operation', 'ui-operation-9') },
       scope,
-      call: call({ summary, deliveryRefs: [KNOWN_REF] }),
+      call: call({ outcome: 'completed', summary, deliveryRefs: [KNOWN_REF] }),
       signal,
     }),
     (error: unknown) => error instanceof StandardTurnEndError && error.code === 'standard-turn-end.binding',
@@ -183,60 +184,12 @@ test('typed executor does not swallow route errors', async () => {
     route: () => { throw new Error('request drain failed'); },
   });
   await assert.rejects(
-    async () => executor.execute({ execution, scope, call: call({ summary, deliveryRefs: [KNOWN_REF] }), signal }),
+    async () => executor.execute({ execution, scope, call: call({ outcome: 'completed', summary, deliveryRefs: [KNOWN_REF] }), signal }),
     /request drain failed/,
   );
 });
 
-test('wire executor returns a failed tool result when a summary reference is unresolved', async () => {
-  const wire = createStandardTurnEndWireExecutor(fakeOwner(), {
-    async execute() { throw new Error('control must not run for a refused end'); },
-  });
-  const result = await wire.execute({
-    execution,
-    scope,
-    call: call({
-      summary: {
-        goal: { text: 'goal text', evidenceRefs: [UNRESOLVED_REF] },
-        actions: { text: 'actions text', evidenceRefs: [KNOWN_REF] },
-        result: { text: 'result text', evidenceRefs: [KNOWN_REF] },
-        expectedNextStep: { text: 'next step text', evidenceRefs: [KNOWN_REF] },
-      },
-      deliveryRefs: [KNOWN_REF],
-    }),
-    signal,
-  });
-  assert.equal(result.status, 'failed');
-  assert.equal(result.error?.code, 'standard-turn-end.delivery-unresolved');
-  assert.equal((JSON.parse(result.output) as Record<string, unknown>).turnId, 'turn-1');
-});
-
-test('wire executor propagates owner delivery ContractError unchanged', async () => {
-  const failure = new ContractError('journal write failed');
-  const wire = createStandardTurnEndWireExecutor(
-    fakeOwner({ async resolveDelivery() { throw failure; } }),
-    { async execute() { throw new Error('control must not run for an owner failure'); } },
-  );
-  await assert.rejects(
-    async () => wire.execute({
-      execution,
-      scope,
-      call: call({
-        summary: {
-          goal: { text: 'goal text', evidenceRefs: [KNOWN_REF] },
-          actions: { text: 'actions text', evidenceRefs: [KNOWN_REF] },
-          result: { text: 'result text', evidenceRefs: [KNOWN_REF] },
-          expectedNextStep: { text: 'next step text', evidenceRefs: [KNOWN_REF] },
-        },
-        deliveryRefs: [KNOWN_REF],
-      }),
-      signal,
-    }),
-    (error: unknown) => error === failure,
-  );
-});
-
-test('wire executor routes through control when summary and delivery references resolve', async () => {
+test('wire executor forwards the canonical payload unchanged to the single control executor', async () => {
   let forwarded: ProviderToolCall | undefined;
   const control: ProviderToolExecutionPort = {
     async execute(request) {
@@ -245,74 +198,48 @@ test('wire executor routes through control when summary and delivery references 
     },
   };
   const wire = createStandardTurnEndWireExecutor(fakeOwner(), control);
-  const result = await wire.execute({
+  const args = { outcome: 'completed', summary, deliveryRefs: [KNOWN_REF] } as unknown as Record<string, unknown>;
+  const result = await wire.execute({ execution, scope, call: call(args), signal });
+  assert.equal(result.status, 'succeeded');
+  assert.deepEqual(forwarded?.arguments, args);
+});
+
+test('wire executor still throws when no admitted turn is bound', async () => {
+  const wire = createStandardTurnEndWireExecutor(
+    fakeOwner({ async resolveBoundTurn() { return null; } }),
+    { async execute() { throw new Error('control must not run for an unbound end'); } },
+  );
+  await assert.rejects(
+    async () => wire.execute({ execution, scope, call: call({ outcome: 'completed', summary, deliveryRefs: [] }), signal }),
+    (error: unknown) => error instanceof StandardTurnEndError && error.code === 'standard-turn-end.unbound',
+  );
+});
+
+test('control preserves an explicit inspection outcome in the accepted summary', async () => {
+  let accepted: StandardTurnEndCommand | undefined;
+  const executor = createStandardTurnEndExecutor({ owner: fakeOwner(), route: (command) => { accepted = command; } });
+  const result = await executor.execute({
     execution,
     scope,
     call: call({
-      summary: {
-        goal: { text: 'goal text', evidenceRefs: [KNOWN_REF] },
-        actions: { text: 'actions text', evidenceRefs: [KNOWN_REF] },
-        result: { text: 'result text', evidenceRefs: [KNOWN_REF] },
-        expectedNextStep: { text: 'next step text', evidenceRefs: [KNOWN_REF] },
-      },
+      outcome: 'completed',
+      summary: { ...summary, inspectionOutcome: { status: 'completed', judgment: 'scope observed' } },
       deliveryRefs: [KNOWN_REF],
     }),
     signal,
   });
   assert.equal(result.status, 'succeeded');
-  assert.ok(forwarded);
-  const forwardedSummary = (forwarded!.arguments as unknown as { summary: TurnCloseSummary }).summary;
-  assert.equal(forwardedSummary.goal.evidenceRefs[0].evidenceId.value, 'native-file-write');
+  assert.deepEqual(accepted?.summary.inspectionOutcome, { status: 'completed', judgment: 'scope observed' });
 });
 
-test('wire executor preserves an explicit inspection outcome in the accepted summary', async () => {
-  let acceptedSummary: TurnCloseSummary | undefined;
-  const owner = fakeOwner();
-  const control = createStandardTurnEndExecutor({
-    owner,
-    route: (command) => { acceptedSummary = command.summary; },
-  });
-  const wire = createStandardTurnEndWireExecutor(owner, control);
-  const result = await wire.execute({
-    execution,
-    scope,
-    call: call({
-      summary: {
-        goal: { text: 'goal text', evidenceRefs: [KNOWN_REF] },
-        actions: { text: 'actions text', evidenceRefs: [KNOWN_REF] },
-        result: { text: 'result text', evidenceRefs: [KNOWN_REF] },
-        expectedNextStep: { text: 'next step text', evidenceRefs: [KNOWN_REF] },
-        inspectionOutcome: { status: 'completed', judgment: 'scope observed' },
-      },
-      deliveryRefs: [KNOWN_REF],
-    }),
-    signal,
-  });
-  assert.equal(result.status, 'succeeded');
-  assert.deepEqual(acceptedSummary?.inspectionOutcome, { status: 'completed', judgment: 'scope observed' });
-});
-
-test('wire executor rejects malformed inspection outcomes through the shared control validator', async () => {
-  const owner = fakeOwner();
+test('control rejects malformed inspection outcomes as model argument refusals', async () => {
   let routed = 0;
-  const wire = createStandardTurnEndWireExecutor(owner, createStandardTurnEndExecutor({
-    owner,
-    route: () => { routed += 1; },
-  }));
+  const executor = createStandardTurnEndExecutor({ owner: fakeOwner(), route: () => { routed += 1; } });
   for (const inspectionOutcome of [{ status: 'completed' }, { status: 'unknown' }]) {
-    const result = await wire.execute({
+    const result = await executor.execute({
       execution,
       scope,
-      call: call({
-        summary: {
-          goal: { text: 'goal text', evidenceRefs: [KNOWN_REF] },
-          actions: { text: 'actions text', evidenceRefs: [KNOWN_REF] },
-          result: { text: 'result text', evidenceRefs: [KNOWN_REF] },
-          expectedNextStep: { text: 'next step text', evidenceRefs: [KNOWN_REF] },
-          inspectionOutcome,
-        },
-        deliveryRefs: [KNOWN_REF],
-      }),
+      call: call({ outcome: 'completed', summary: { ...summary, inspectionOutcome }, deliveryRefs: [KNOWN_REF] }),
       signal,
     });
     assert.equal(result.status, 'failed');
@@ -321,55 +248,62 @@ test('wire executor rejects malformed inspection outcomes through the shared con
   assert.equal(routed, 0);
 });
 
-test('top-level delivery refs are resolved as delivery material, summary citations are not', async () => {
+test('control refuses the retired top-level deliveryText and a missing outcome', async () => {
+  let routed = 0;
+  const executor = createStandardTurnEndExecutor({ owner: fakeOwner(), route: () => { routed += 1; } });
+  for (const args of [
+    { outcome: 'completed', summary, deliveryText: 'legacy text', deliveryRefs: [] },
+    { summary, deliveryRefs: [] },
+  ]) {
+    const result = await executor.execute({ execution, scope, call: call(args), signal });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'standard-turn-end.arguments');
+  }
+  assert.equal(routed, 0);
+});
+
+test('control refuses a completed end with neither result text nor delivery asset', async () => {
+  let routed = 0;
+  const executor = createStandardTurnEndExecutor({ owner: fakeOwner(), route: () => { routed += 1; } });
+  const result = await executor.execute({
+    execution,
+    scope,
+    call: call({ outcome: 'completed', summary: { ...summary, result: { status: 'completed', text: '   ' } }, deliveryRefs: [] }),
+    signal,
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'standard-turn-end.arguments');
+  assert.match(result.error?.message ?? '', /missing-public-deliverable/);
+  assert.equal(routed, 0);
+});
+
+test('only top-level delivery refs are resolved, as delivery material', async () => {
   const resolutionKinds: Array<boolean | undefined> = [];
   const owner = fakeOwner({
     async resolveDelivery({ deliveryRefs, requireDeliveryMaterial }) {
       resolutionKinds.push(requireDeliveryMaterial);
-      return deliveryRefs.map((reference) => {
-        if (reference !== KNOWN_REF) {
-          throw new StandardTurnEndError('standard-turn-end.delivery-unresolved', `unresolved ${reference}`);
-        }
-        return deliveryEvidence;
-      });
+      return deliveryRefs.map(() => deliveryEvidence);
     },
   });
   let routed = 0;
-  const wire = createStandardTurnEndWireExecutor(owner, createStandardTurnEndExecutor({
-    owner,
-    route: () => { routed += 1; },
-  }));
-  const result = await wire.execute({
-    execution,
-    scope,
-    call: call({
-      summary: {
-        goal: { text: 'goal text', evidenceRefs: [KNOWN_REF] },
-        actions: { text: 'actions text', evidenceRefs: [KNOWN_REF] },
-        result: { text: 'result text', evidenceRefs: [KNOWN_REF] },
-        expectedNextStep: { text: 'next step text', evidenceRefs: [KNOWN_REF] },
-      },
-      deliveryRefs: [KNOWN_REF],
-    }),
-    signal,
-  });
+  const wire = createStandardTurnEndWireExecutor(owner, createStandardTurnEndExecutor({ owner, route: () => { routed += 1; } }));
+  const result = await wire.execute({ execution, scope, call: call({ outcome: 'completed', summary, deliveryRefs: [KNOWN_REF] }), signal });
   assert.equal(result.status, 'succeeded');
   assert.equal(routed, 1);
-  assert.equal(resolutionKinds.length, 5);
-  assert.deepEqual(resolutionKinds.slice(0, 4), [undefined, undefined, undefined, undefined]);
-  assert.equal(resolutionKinds[4], true);
+  assert.deepEqual(resolutionKinds, [true]);
 });
 
-test('the advertised tools describe delivery refs as committed file writes or inspection results only', () => {
-  const schema: { properties?: Record<string, unknown> } = STANDARD_TURN_END_TOOL.inputSchema;
-  const advertisedSchema: { properties?: Record<string, unknown> } = ADVERTISED_STANDARD_TURN_END_TOOL.inputSchema;
+test('the advertised tools require outcome and the canonical summary, without deliveryText', () => {
+  const schema: { properties?: Record<string, unknown>; required?: readonly string[] } = STANDARD_TURN_END_TOOL.inputSchema;
+  const advertisedSchema: { properties?: Record<string, unknown>; required?: readonly string[] } = ADVERTISED_STANDARD_TURN_END_TOOL.inputSchema;
   for (const candidate of [schema, advertisedSchema]) {
     const deliveryRefs = candidate.properties?.deliveryRefs as { description: string } | undefined;
     if (deliveryRefs === undefined) throw new Error('the tool schema must declare deliveryRefs');
     assert.match(deliveryRefs.description, /never cite goal/i);
-    const deliveryText = candidate.properties?.deliveryText as { description: string } | undefined;
-    if (deliveryText === undefined) throw new Error('the tool schema must declare deliveryText');
-    assert.match(deliveryText.description, /deliveryRefs empty/i);
+    assert.equal(candidate.properties?.deliveryText, undefined);
+    assert.deepEqual(candidate.required, ['outcome', 'summary', 'deliveryRefs']);
+    const summarySchema = candidate.properties?.summary as { required?: readonly string[] } | undefined;
+    assert.deepEqual(summarySchema?.required, ['goal', 'actions', 'result', 'nextStep']);
   }
 });
 

@@ -6,6 +6,7 @@ import {
   type ScopeRef,
 } from './index.js';
 import { validateAdmittedTurnIdentity, type AdmittedTurnIdentity } from './native-reasoning.js';
+import { validateInspectionExecutionOutcome, type InspectionExecutionOutcome } from './i2-history.js';
 import { ContractError } from './errors.js';
 
 /**
@@ -66,6 +67,8 @@ export interface StandardTurnEndSummary {
     readonly text: string;
   };
   readonly nextStep: string;
+  /** Measured inspection judgment; present only when an inspection execution ran. */
+  readonly inspectionOutcome?: InspectionExecutionOutcome;
 }
 
 /**
@@ -157,6 +160,7 @@ export function validateStandardTurnEndPayload(input: StandardTurnEndPayload): v
   if (typeof summary.result.text !== 'string') {
     throw new ContractError('standard-turn-end.summary.result.text');
   }
+  if (summary.inspectionOutcome !== undefined) validateInspectionExecutionOutcome(summary.inspectionOutcome);
   const deliveryRefs = input.deliveryRefs;
   if (deliveryRefs !== undefined) requireStringArray(deliveryRefs, 'standard-turn-end.delivery-refs');
   const hasText = summary.result.text.trim().length > 0;
@@ -180,6 +184,20 @@ export function assertStandardTurnEndPublicationEligible(input: StandardTurnEndP
   if (!isStandardTurnEndPublicationEligible(input)) {
     throw new ContractError('standard-turn-end.non-completed-publication');
   }
+}
+
+/**
+ * The one public result text of a standard-turn end: `summary.result.text`,
+ * only when the model declared both `outcome` and `result.status` completed
+ * and the text is non-empty. Anything else publishes no text.
+ */
+export function standardTurnEndPublicText(input: StandardTurnEndPayload): string | undefined {
+  validateStandardTurnEndPayload(input);
+  return input.outcome === 'completed'
+    && input.summary.result.status === 'completed'
+    && input.summary.result.text.trim().length > 0
+    ? input.summary.result.text
+    : undefined;
 }
 
 /**

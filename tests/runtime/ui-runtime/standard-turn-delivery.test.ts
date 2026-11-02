@@ -95,7 +95,8 @@ test('inspect delivery binds the raw report when an inspect result has no primar
     requiredCapabilities: [],
     mergeGate: 'not-required',
   };
-  const section = { text: 'inspect completed', evidenceRefs: [evidence] };
+  const summary = { goal: 'inspect completed', actions: ['inspect completed'],
+    result: { status: 'completed' as const, text: '' }, nextStep: 'inspect completed' };
   const acceptedEnd: StandardTurnEndCommand = {
     kind: 'standard-turn-end',
     identity: {
@@ -110,7 +111,8 @@ test('inspect delivery binds the raw report when an inspect result has no primar
       runtimeBindingRef: 'inspect-report-binding',
       permissionRevision: 'inspect-report-permission',
     },
-    summary: { goal: section, actions: section, result: section, expectedNextStep: section },
+    outcome: 'completed',
+    summary,
     deliveryRefs: [evidence.locator],
     resolvedEvidenceRefs: [evidence],
   };
@@ -283,7 +285,8 @@ test('inspect delivery accepts a verified execution fact and rejects a mismatche
     requiredCapabilities: [],
     mergeGate: 'not-required',
   };
-  const section = { text: 'inspect completed', evidenceRefs: [evidence] };
+  const summary = { goal: 'inspect completed', actions: ['inspect completed'],
+    result: { status: 'completed' as const, text: '' }, nextStep: 'inspect completed' };
   const acceptedEnd: StandardTurnEndCommand = {
     kind: 'standard-turn-end',
     identity: {
@@ -298,7 +301,8 @@ test('inspect delivery accepts a verified execution fact and rejects a mismatche
       runtimeBindingRef: 'inspect-fact-binding',
       permissionRevision: 'inspect-fact-permission',
     },
-    summary: { goal: section, actions: section, result: section, expectedNextStep: section },
+    outcome: 'completed',
+    summary,
     deliveryRefs: [evidence.locator],
     resolvedEvidenceRefs: [evidence],
   };

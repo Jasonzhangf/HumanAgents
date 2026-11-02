@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   id,
+  standardTurnEndPublicText,
   type AgentDriver,
   type AgentRoleDisplay,
   type AgentEvent,
@@ -3194,13 +3195,13 @@ export class RuntimeTaskCoordinator {
         'assemble the runtime delivery reader before accepting a terminal complete turn');
     }
     const readback = await standardTurn.readDelivery();
-    // A refs-only accepted end declares no `deliveryText`. Bind its real
+    // The only public text is `summary.result.text` of a completed end. An
+    // accepted end without that text is an asset-only delivery: bind its real
     // material bundle to the retained assignment through the existing
-    // assignment-level binder (non-empty materials, business-turn identity,
-    // artifact refs/digests/bodies and evidence) against the original readback
-    // assignment; that binding is the whole gate and generates no public text.
-    // The assignment is never rebuilt from the current physical epoch.
-    if (readback.acceptedEnd.deliveryText === undefined) {
+    // assignment-level binder; that binding is the whole gate and generates no
+    // public text. The assignment is never rebuilt from the current epoch.
+    const publicText = standardTurnEndPublicText(readback.acceptedEnd);
+    if (publicText === undefined) {
       bindAssignmentDelivery({ assignment: readback.assignment, readback });
       return;
     }
@@ -3226,9 +3227,9 @@ export class RuntimeTaskCoordinator {
         'resolve the delivery bound to this exact operation and epoch');
     }
     const exactText = new TextDecoder('utf-8', { fatal: true }).decode(material.bytes);
-    if (exactText !== readback.acceptedEnd.deliveryText) {
+    if (exactText !== publicText) {
       throw new RuntimeTaskControlError('standard-turn-delivery.text-mismatch', RUNTIME_OWNER,
-        'the immutable delivery body does not equal the accepted delivery text',
+        'the immutable delivery body does not equal the accepted result text',
         'resolve the immutable body bound to the accepted delivery text');
     }
     const storeFor = this.options.publicOutputStoreFor;

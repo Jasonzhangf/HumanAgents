@@ -1100,11 +1100,11 @@ async function resolveRunOutcome(input: {
   if (command === undefined) return blocked('the child turn has no accepted standard end action');
   const delivery = input.state.delivery;
   if (delivery === undefined) return blocked('the child turn produced no delivery');
-  const cited = new Set(command.deliveryRefs);
+  const cited = new Set(command.deliveryRefs ?? []);
   if (!cited.has(delivery.asset.ref.locator) && !cited.has(delivery.asset.ref.evidenceId.value)) {
     return blocked('the accepted standard end does not cite this child delivery');
   }
-  if (!command.resolvedEvidenceRefs.some((ref) => ref.evidenceId.value === delivery.asset.ref.evidenceId.value)) {
+  if (!(command.resolvedEvidenceRefs ?? []).some((ref) => ref.evidenceId.value === delivery.asset.ref.evidenceId.value)) {
     return blocked('the accepted standard end did not resolve this child delivery asset');
   }
   if (input.settlement === undefined) return blocked('the child exposed no Provider settlement');

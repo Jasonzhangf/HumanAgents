@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { canonicalJsonStringify, id, operationIdempotencyKey, operationSemanticFingerprint,
-  operationSemanticFingerprintKey, type ToolRegistration } from '../../../contracts/src/index.js';
+  operationSemanticFingerprintKey, standardTurnEndPublicText, type StandardTurnEndSummary,
+  type ToolRegistration, type TurnCloseSummary } from '../../../contracts/src/index.js';
 import { JsonlTaskGrantJournal, readTaskBusinessRegistration } from '../../../adapters/jsonl/src/task-grants.js';
 import { createJsonlOperationControlJournal } from '../operation-control-journal.js';
 import type { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
@@ -86,6 +87,21 @@ export type ServiceContextCorrectionRequest =
   Omit<ExecuteConfirmedTaskContextCorrectionInput, 'filePath' | 'journal' | 'principalOwner'>;
 export type ServiceCheckpointReentryRequest =
   Omit<ExecuteConfirmedTaskCheckpointReentryInput, 'filePath' | 'journal' | 'principalOwner'>;
+
+/**
+ * Project the canonical standard-end summary into the internal checkpoint
+ * summary. Per-section evidence stays empty under the canonical model; the
+ * turn-level resolved evidence travels on the accepted command.
+ */
+export function projectTurnCloseSummary(summary: StandardTurnEndSummary): TurnCloseSummary {
+  return {
+    goal: { text: summary.goal, evidenceRefs: [] },
+    actions: { text: summary.actions.join('\n'), evidenceRefs: [] },
+    result: { text: summary.result.text, evidenceRefs: [] },
+    expectedNextStep: { text: summary.nextStep, evidenceRefs: [] },
+    ...(summary.inspectionOutcome === undefined ? {} : { inspectionOutcome: summary.inspectionOutcome }),
+  };
+}
 
 function initialBindingOf(initial: ActiveTurnInitialSegmentSource) {
   return initial.kind === 'captured' ? initial.body.binding : initial.binding;
@@ -995,7 +1011,7 @@ export function createDefaultExecutionComposition(input: {
           scope: envelope.scope, requestId: envelope.request.requestId, call: envelope.fact.call,
           signal: new AbortController().signal });
         if (resolved.status !== 'succeeded' || !acceptedEnd
-          || canonicalJsonStringify(acceptedEnd.summary) !== canonicalJsonStringify(loop.retainedTurnClose()!.inputs.summary)) {
+          || canonicalJsonStringify(projectTurnCloseSummary(acceptedEnd.summary)) !== canonicalJsonStringify(loop.retainedTurnClose()!.inputs.summary)) {
           missing('retained accepted standard-end conflicts with the exact frozen close');
         }
       }
@@ -1170,8 +1186,8 @@ export function createDefaultExecutionComposition(input: {
           contextView: { key: semanticKey, accepted: { version: 1, admittedTurn, checkpoint: relationship,
             acceptance: { ownerId: allocation.ownerId, acceptanceRef: relationship.receipt.commitIdentity,
               sourceEvidenceRefs: checkpoint.evidenceRefs },
-            semantics: { goal: acceptedEnd.summary.goal.text, actions: acceptedEnd.summary.actions.text,
-              result: acceptedEnd.summary.result.text, nextStep: acceptedEnd.summary.expectedNextStep.text },
+            semantics: { goal: acceptedEnd.summary.goal, actions: acceptedEnd.summary.actions.join('\n'),
+              result: acceptedEnd.summary.result.text, nextStep: acceptedEnd.summary.nextStep },
             adoptedChildren, recovery: { recoveryStateRef: admittedTurn.recoveryStateRef,
               recoveryResponsibilityRef: facts.recoveryResponsibilityRef, unresolvedOperationRefs: facts.unresolvedOperationRefs,
               laterErrorRefs: facts.laterErrorRefs } } },
@@ -1488,7 +1504,8 @@ export function createDefaultExecutionComposition(input: {
             if (!acceptedEnd) missing('delivery readback requires the bound standard-turn end');
             const entries = await currentEntries();
             let deliveryTextBody: RawAsset | undefined;
-            if (acceptedEnd.deliveryText !== undefined) {
+            const publicText = standardTurnEndPublicText(acceptedEnd);
+            if (publicText !== undefined) {
               const reference = acceptedEnd.acceptedEndCall;
               if (reference === undefined) missing('the accepted text end has no trusted end-call reference');
               const ref = await rawEvidence.write({
@@ -1496,7 +1513,7 @@ export function createDefaultExecutionComposition(input: {
                 kind: 'tool',
                 type: 'standard-turn-delivery-text',
                 locator: `standard-turn-delivery/text/${reference.callId}`,
-                content: acceptedEnd.deliveryText,
+                content: publicText,
               });
               deliveryTextBody = { ref, view: { kind: 'utf8-text' } };
             }
@@ -1579,7 +1596,7 @@ export function createDefaultExecutionComposition(input: {
             operationId: allocation.operationId, status: 'succeeded' as const,
             outputRef: currentTurnRef,
             outputDigest: `sha256:${createHash('sha256').update(canonicalJsonStringify(acceptedEnd)).digest('hex')}`,
-            evidenceRefs: [...settled.evidenceRefs, ...acceptedEnd!.resolvedEvidenceRefs],
+            evidenceRefs: [...settled.evidenceRefs, ...(acceptedEnd!.resolvedEvidenceRefs ?? [])],
             verifier: { name: 'humanagent.standard-turn-controller', version: '1', decision: 'bound end accepted and actual producer drain completed' },
             completedAt: input.now().toISOString(),
           } : undefined;
@@ -1600,7 +1617,7 @@ export function createDefaultExecutionComposition(input: {
           const current = await input.currentState.read({ organId: allocation.scope.organId, taskId: allocation.taskId });
           if (current.state !== 'known') missing('canonical turn closure has no authoritative current Task');
           const firstErrorRef = current.value.processing.firstErrorRef;
-          closingInput ??= { summary: structuredClone(acceptedEnd.summary), reviewCommitRefs: acceptedReviewRefs,
+          closingInput ??= { summary: projectTurnCloseSummary(acceptedEnd.summary), reviewCommitRefs: acceptedReviewRefs,
             prepareCheckpointClosure: async (checkpoint) => {
               if (closingCheckpoint && canonicalJsonStringify(closingCheckpoint) !== canonicalJsonStringify(checkpoint)) {
                 missing('native preparation changed the frozen closing candidate');
