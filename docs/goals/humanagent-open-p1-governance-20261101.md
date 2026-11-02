@@ -760,3 +760,15 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   with `appsdk goal subscribe --interval 20m`; project patrol armed
   (`sub-m1793413132850-18`). No merge, install, worktree delete or process
   kill was performed.
+
+- 2026-11-02 18:56 UTC: project-patrol. Alice 的真实 tmux 快照可见：
+  已接受 P0 `mvp-real-lane-entry-task-row-20261102`，正在真实 `--mode rcc`
+  入口跑提交诊断，刚结束 11m43s 推理并继续读取源码，不是 idle/等待。
+  板面为 W2-A `merged`/缺 close（Alice 负责关闭并回收工作树），W2-B
+  `delivered`/缺 review/integration/close，P0 proof8 `working`。W2-B
+  独立验收边界保持：真实 `local-file-search` 账本与 6 条 ledger 证据已
+  可核，但 `w2b-recovery-receipt.json` 的 mutating 中断恢复仍是构造
+  候选，不是真实中断/真实写副作用；真实 mutating/recovery 仍标
+  `UNVERIFIED`，不按 complete 放行。已向 Alice 发 durable 指示
+  `m1793645962786-1339`：继续 P0 且交付必须附可打开的前端截图/录屏
+  路径，P0 完成后关闭 W2-A 任务并回收自有工作树，不合并 main。
