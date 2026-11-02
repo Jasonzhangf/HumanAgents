@@ -96,9 +96,10 @@ function digestArguments(args: Readonly<Record<string, unknown>>): string {
 }
 
 /**
- * A terminal batch holds more than one complete intake decision object. The
- * intake contract requires exactly one, so the batch is rejected as a whole.
- * The private identity lets the interpreter recognize this exact ambiguous
+ * A terminal batch holds more than one candidate decision object and none of
+ * them satisfies the intake contract. A single valid candidate is selected by
+ * priority before this error is raised, so this private identity marks only the
+ * genuinely undecidable batch: it lets the interpreter recognize that exact
  * shape for its one re-answer allowance without matching error text, and it
  * keeps every other parse failure on its existing non-retryable lane.
  */
@@ -560,7 +561,8 @@ function topLevelJsonObjectSpans(text: string): readonly { readonly start: numbe
   return spans;
 }
 
-function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretationInput): ExplicitBrainInterpretation {
+/** Exported for focused contract tests of the explicit-intake reply parser. */
+export function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretationInput): ExplicitBrainInterpretation {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(output)?.[1];
   const scoped = fenced ?? output;
   const spans = topLevelJsonObjectSpans(scoped);
@@ -577,26 +579,7 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
     if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
     objects.push(value as Record<string, unknown>);
   }
-  let record: Record<string, unknown> | undefined;
-  if (objects.length === 1) {
-    // One top-level object is the decision candidate: whether it satisfies the
-    // intake contract is the contract check below, not a span count.
-    record = objects[0];
-  } else if (objects.length > 1) {
-    // A model may echo the request envelope it was handed (`interactionId`,
-    // `rawInput`, `taskCandidates`, ...) in front of its decision. That echo
-    // states no decision kind, so only the objects that state one are
-    // decisions, and two decision objects stay ambiguous.
-    const decisions = objects.filter((entry) => typeof entry.kind === 'string');
-    record = decisions.length === 1 ? decisions[0] : undefined;
-    if (record === undefined) {
-      if (decisions.length > 1) throw new MultipleIntakeDecisionsError(decisions.length);
-      throw new ExplicitBrainOperationalToolError(
-        'unsupported-tool',
-        `interaction agent returned invalid JSON: the terminal output holds ${objects.length} top-level JSON objects and none of them is a decision object`,
-      );
-    }
-  } else {
+  if (objects.length === 0) {
     throw new ExplicitBrainOperationalToolError(
       'unsupported-tool',
       spans.length === 0
@@ -604,6 +587,51 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
         : `interaction agent returned invalid JSON: ${parseError ?? 'the terminal output holds no JSON decision object'}`,
     );
   }
+  if (objects.length === 1) {
+    // One top-level object is the decision candidate: whether it satisfies the
+    // intake contract is the contract check, not a span count.
+    return parseDecisionRecord(objects[0]!, input);
+  }
+  // A model may echo the request envelope it was handed (`interactionId`,
+  // `rawInput`, `taskCandidates`, ...) in front of its decision. That echo
+  // states no decision kind, so only the objects that state one are decisions.
+  const decisions = objects.filter((entry) => typeof entry.kind === 'string');
+  if (decisions.length === 0) {
+    throw new ExplicitBrainOperationalToolError(
+      'unsupported-tool',
+      `interaction agent returned invalid JSON: the terminal output holds ${objects.length} top-level JSON objects and none of them is a decision object`,
+    );
+  }
+  // Validate every candidate first, then select by priority. An invalid
+  // candidate is simply not selected; a single format wobble must not turn a
+  // completed tool execution into a blocked intake. Only when no candidate is
+  // valid does the bounded re-answer path run, exactly once.
+  const valid: ExplicitBrainInterpretation[] = [];
+  for (const candidate of decisions) {
+    try {
+      valid.push(parseDecisionRecord(candidate, input));
+    } catch {
+      // Not a valid decision; a later candidate may still be valid.
+    }
+  }
+  if (valid.length === 0) {
+    throw new MultipleIntakeDecisionsError(decisions.length);
+  }
+  valid.sort((left, right) => intakeDecisionPriority(left.kind) - intakeDecisionPriority(right.kind));
+  return valid[0]!;
+}
+
+/** Intake decision priority: a real task decision outranks a clarification or a report. */
+function intakeDecisionPriority(kind: ExplicitBrainInterpretation['kind']): number {
+  switch (kind) {
+    case 'requirement': return 0;
+    case 'clarification': return 1;
+    case 'status-query': return 2;
+    case 'answer': return 3;
+  }
+}
+
+function parseDecisionRecord(record: Record<string, unknown>, input: ExplicitBrainInterpretationInput): ExplicitBrainInterpretation {
   const kind = record.kind;
   const normalizedInput = record.normalizedInput;
   const knownFacts = record.knownFacts;
@@ -857,7 +885,7 @@ export function createProviderExplicitBrainInterpreter(input: {
       }
       throw error;
     }
-    request.onStep?.({ kind: 'turn.completed', summary: 'Explicit turn completed', turnId: live.owner.turn.turnId });
+    request.onStep?.({ kind: 'turn.completed', summary: '显式整理回合已完成', turnId: live.owner.turn.turnId });
     retained = undefined;
     return interpretation;
   };
@@ -1142,7 +1170,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             }
             await requireColdAnswerSettlement(finalParentOutput, interpretation);
             await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
-            effectiveRequest.onStep?.({ kind: 'turn.completed', summary: 'Explicit turn completed', turnId: pending.fact.turn.turnId });
+            effectiveRequest.onStep?.({ kind: 'turn.completed', summary: '显式整理回合已完成', turnId: pending.fact.turn.turnId });
             return interpretation;
           }
           const durableHelpers = await input.turnHelperJournal.readTurnHelpers(pending.fact.turn);
@@ -1178,7 +1206,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             }
             await requireColdAnswerSettlement(finalParentOutput, interpretation);
             await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
-            effectiveRequest.onStep?.({ kind: 'turn.completed', summary: 'Explicit turn completed', turnId: pending.fact.turn.turnId });
+            effectiveRequest.onStep?.({ kind: 'turn.completed', summary: '显式整理回合已完成', turnId: pending.fact.turn.turnId });
             return interpretation;
           }
           if (input.prepareAgentProvider === undefined) {
@@ -1309,21 +1337,21 @@ export function createProviderExplicitBrainInterpreter(input: {
             if (event.phase === 'dispatching') {
               request.onStep?.({
                 kind: 'request.dispatching',
-                summary: 'Dispatching request to the model',
+                summary: '正在请求模型整理任务',
                 turnId: event.turnId,
                 requestId: event.requestId,
               });
             } else if (event.phase === 'dispatched') {
               request.onStep?.({
                 kind: 'request.dispatched',
-                summary: 'Model request dispatched',
+                summary: '模型请求已发出',
                 turnId: event.turnId,
                 requestId: event.requestId,
               });
             } else if (event.phase === 'settled') {
               request.onStep?.({
                 kind: 'request.settled',
-                summary: 'Model request settled',
+                summary: '模型请求已完成',
                 turnId: event.turnId,
                 requestId: event.requestId,
               });

@@ -139,11 +139,45 @@ function outputText(events: readonly AgentEvent[]): string {
     .join('');
 }
 
-function parseModelResponse(text: string): PlannerModelResponse {
-  const trimmed = text.trim();
-  const start = trimmed.indexOf('{');
-  const end = trimmed.lastIndexOf('}');
-  if (start < 0 || end <= start) {
+/** The content of the first ```json fenced block, or the text unchanged. */
+function stripMarkdownFence(text: string): string {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  return fenced === null ? text : fenced[1]!;
+}
+
+/**
+ * The first balanced top-level JSON object substring, or undefined. A Planner
+ * reply may arrive with a prose preface or a trailing note; only the first
+ * complete object is the structured publication. String literals and escapes
+ * are tracked so braces inside strings never affect the balance.
+ */
+function firstBalancedJsonObject(text: string): string | undefined {
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char === '{') { if (depth === 0) start = index; depth += 1; continue; }
+    if (char !== '}' || depth === 0) continue;
+    depth -= 1;
+    if (depth === 0 && start >= 0) return text.slice(start, index + 1);
+  }
+  return undefined;
+}
+
+/** Exported for focused contract tests of the Planner reply parser. */
+export function parseModelResponse(text: string): PlannerModelResponse {
+  const scoped = stripMarkdownFence(text.trim());
+  const objectText = firstBalancedJsonObject(scoped);
+  if (objectText === undefined) {
     throw new IndependentTurnPlannerError(
       'planner.response.missing',
       'the independent Planner model returned no structured publication',
@@ -152,7 +186,7 @@ function parseModelResponse(text: string): PlannerModelResponse {
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(trimmed.slice(start, end + 1));
+    parsed = JSON.parse(objectText);
   } catch (cause) {
     throw new IndependentTurnPlannerError(
       'planner.response.invalid',
@@ -189,6 +223,19 @@ function parseModelResponse(text: string): PlannerModelResponse {
     snapshot: record.snapshot as TaskPlanSnapshot,
     ...(typeof record.reasonText === 'string' && record.reasonText.trim().length > 0 ? { reasonText: record.reasonText } : {}),
   };
+}
+
+/**
+ * The Planner response defects a single corrective re-ask can plausibly fix: a
+ * missing, unparsable, or schema-incomplete structured publication. A Provider
+ * settlement, binding or ownership failure is never correctable this way.
+ */
+function isCorrectablePlannerResponse(error: unknown): boolean {
+  return error instanceof IndependentTurnPlannerError
+    && (error.code === 'planner.response.missing'
+      || error.code === 'planner.response.invalid'
+      || error.code === 'planner.response.decision-missing'
+      || error.code === 'planner.response.publication-missing');
 }
 
 /**
@@ -524,8 +571,8 @@ export function createIndependentTurnPlanner(deps: IndependentTurnPlannerDeps): 
       ...(input.preparedCall.configuredAgentId === undefined ? {} : { configuredAgentId: input.preparedCall.configuredAgentId }),
     });
     let result: R;
-    try {
-      const { text, settlement } = await invokePlannerModel(input, composition);
+    const runOnce = async (modelInput: Parameters<typeof invokePlannerModel>[0]): Promise<R> => {
+      const { text, settlement } = await invokePlannerModel(modelInput, composition);
       if (settlement.state !== 'succeeded') {
         throw new IndependentTurnPlannerError(
           'planner.settlement.failed',
@@ -533,7 +580,35 @@ export function createIndependentTurnPlanner(deps: IndependentTurnPlannerDeps): 
           'resume planning with its recovery owner; a non-succeeded settlement must not fabricate success',
         );
       }
-      result = accept(text);
+      return accept(text);
+    };
+    try {
+      try {
+        result = await runOnce(input);
+      } catch (first) {
+        // One bounded corrective re-ask: only a missing/unparsable/incomplete
+        // structured publication is retried, and only once. A settlement,
+        // binding or ownership failure keeps its own error and is never retried.
+        if (!isCorrectablePlannerResponse(first)) throw first;
+        const instruction = String((input.payload as Record<string, unknown>).instruction ?? '');
+        const correctiveInput: Parameters<typeof invokePlannerModel>[0] = {
+          ...input,
+          payload: {
+            ...(input.payload as Record<string, unknown>),
+            instruction: `${instruction}\n\n<corrective>Your previous reply was rejected: ${first instanceof Error ? first.message : String(first)}. Re-answer the same committed input. Reply with exactly one JSON object that carries the decision and the whole-task snapshot, with no preface, closing note, surrogate wrapper or Markdown fence.</corrective>`,
+          } as unknown as BusinessPayload,
+        };
+        try {
+          result = await runOnce(correctiveInput);
+        } catch (second) {
+          throw new IndependentTurnPlannerError(
+            'planner.response.invalid',
+            `the independent Planner reply stayed invalid after one corrective re-ask: ${second instanceof Error ? second.message : String(second)}`,
+            'resume the alignment stage with a valid structured publication; the bounded corrective re-ask did not converge',
+            new AggregateError([second, first], 'independent Planner reply was invalid on the first attempt and stayed invalid after one corrective re-ask'),
+          );
+        }
+      }
     } catch (primary) {
       try {
         await closeAgentProvider(composition);
