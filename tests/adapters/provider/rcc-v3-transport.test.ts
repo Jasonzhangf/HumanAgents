@@ -718,7 +718,7 @@ function adapter(
   provider = binding,
   codec: ProviderCodec = new ResponsesProviderCodec(),
   source: ProviderTransportSource = 'rcc',
-  extra: { readonly credential?: string } = {},
+  extra: { readonly credential?: string; readonly noProgressBudgetMs?: number; readonly postMessageCompletionGraceMs?: number } = {},
   adapterEvidence: ProviderEvidenceSink = sink(),
 ) {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
@@ -2322,4 +2322,189 @@ test('RCC v3 Responses keeps exact late item-less duplicate tails out of content
   assert.match(observed.at(-2)?.eventId ?? '', /response\.output_text\.delta/);
   assert.match(observed.at(-1)?.eventId ?? '', /response\.completed/);
   assert.equal(observed.at(-1)?.terminalState, 'succeeded');
+});
+
+// Failure probability basis: observed in 6 of 8 real RCC 4444 T22c runs
+// (proof1, proof3, proof5, proof6, proof7, proof8). Impact: P0/P1, because RCC
+// intercepts Round 1 completion on single-round message requests (intake
+// decision, implicit planner, and post-turn-end summary drain without
+// `humanagent_turn_end`) to run an unrequested `continue_execution` Round 2,
+// either holding the SSE stream silent for 25-120s (exceeding the 30s entry
+// task-row budget or failing with stream.no-progress / UND_ERR_SOCKET) or
+// emitting a second assistant message item that corrupts Round 1. Cost: one
+// local fake-stream test covering both silence and second-message shapes.
+test('RCC v3 completes single-round message requests after round-one message done without waiting for unrequested continue_execution rounds', async () => {
+  const roundOneDecision = '{"kind":"requirement","normalizedInput":"Read marker.txt and report contents","knownFacts":[],"decisionRefs":[],"proposal":{"revision":1,"intent":"create","title":"Read marker.txt","objective":"Read marker.txt","deliverable":"marker contents","deliveryConditions":[],"evidenceRefs":[],"blockingGaps":[]}}';
+  const unrequestedRoundTwoDecision = '{"kind":"requirement","normalizedInput":"继续执行尚未完成的任务；需要工具时直接调用工具；如果任务已完成，请给出完成总结。","knownFacts":[],"decisionRefs":[]}';
+
+  // Shape 1: RCC finishes Round 1's message item and then holds the SSE stream
+  // silent while waiting on an upstream `continue_execution` round.
+  let silentAborted = false;
+  const silentTailBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      const encoder = new TextEncoder();
+      yield encoder.encode(frame('response.created', { response: { id: 'resp-rcc-round1-silent' } }));
+      yield encoder.encode(frame('response.output_item.done', {
+        output_index: 0,
+        item: {
+          type: 'message',
+          id: 'item-round1-decision',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: roundOneDecision }],
+        },
+      }));
+      await new Promise<void>(() => { /* RCC waits on upstream Round 2 */ });
+    },
+  };
+  const silentBuilt = adapter(async (_url, init) => {
+    init.signal?.addEventListener('abort', () => { silentAborted = true; }, { once: true });
+    return response(silentTailBody);
+  }, binding, new ResponsesProviderCodec(), 'rcc', { noProgressBudgetMs: 1_500 });
+  await silentBuilt.adapter.start({
+    ...startInput(),
+    tools: [{ toolId: 'dispatch_helper', description: 'dispatch helper', inputSchema: { type: 'object' } }],
+  });
+  const startedAt = Date.now();
+  const silentObserved = [];
+  const silentFacts: Array<{ readonly kind: string }> = [];
+  for await (const event of silentBuilt.adapter.observe({
+    ...execution,
+    onRawFacts: async (facts) => {
+      for (const fact of facts) silentFacts.push({ kind: fact.kind });
+    },
+  })) {
+    silentObserved.push(event);
+  }
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(elapsedMs < 2_000, true, `expected single-round message to complete promptly, took ${String(elapsedMs)}ms`);
+  assert.equal(silentObserved.at(-1)?.terminalState, 'succeeded');
+  assert.equal(silentAborted, true, 'transport aborts the unneeded upstream Round 2 stream');
+  assert.equal(silentFacts.filter((fact) => fact.kind === 'content').length, 1);
+  assert.equal((await silentBuilt.adapter.settle(execution)).state, 'succeeded');
+
+  // Shape 2: RCC buffers a second assistant message item (`output_index: 1`)
+  // from `continue_execution` without a second `response.created`. The second
+  // message item must not enter Round 1's decoded content facts.
+  const bufferedSecondMessageBuilt = adapter(async () => response(chunks([
+    frame('response.created', { response: { id: 'resp-rcc-buffered-round2' } }),
+    frame('response.output_item.done', {
+      output_index: 0,
+      item: {
+        type: 'message',
+        id: 'rcc-output-0',
+        role: 'assistant',
+        status: 'completed',
+        content: [{ type: 'output_text', text: roundOneDecision }],
+      },
+    }),
+    frame('response.output_item.done', {
+      output_index: 1,
+      item: {
+        type: 'message',
+        id: 'rcc-output-1',
+        role: 'assistant',
+        status: 'completed',
+        content: [{ type: 'output_text', text: unrequestedRoundTwoDecision }],
+      },
+    }),
+    frame('response.completed', { response: { id: 'resp-rcc-buffered-round2' } }),
+  ])), binding, new ResponsesProviderCodec(), 'rcc');
+  await bufferedSecondMessageBuilt.adapter.start({
+    ...startInput(),
+    tools: [{ toolId: 'dispatch_helper', description: 'dispatch helper', inputSchema: { type: 'object' } }],
+  });
+  const bufferedFacts: Array<{ readonly kind: string; readonly contentUnitId?: string }> = [];
+  const bufferedObserved = [];
+  for await (const event of bufferedSecondMessageBuilt.adapter.observe({
+    ...execution,
+    onRawFacts: async (facts) => {
+      for (const fact of facts) {
+        bufferedFacts.push({ kind: fact.kind, ...(fact.kind === 'content' ? { contentUnitId: fact.contentUnitId } : {}) });
+      }
+    },
+  })) {
+    bufferedObserved.push(event);
+  }
+  assert.deepEqual(
+    bufferedFacts.filter((fact) => fact.kind === 'content').map((fact) => fact.contentUnitId),
+    ['responses:assistant-text:rcc-output-0'],
+  );
+  assert.equal(bufferedObserved.at(-1)?.terminalState, 'succeeded');
+  assert.equal((await bufferedSecondMessageBuilt.adapter.settle(execution)).state, 'succeeded');
+
+  // Negative 1: A pending tool call in Round 1 must NOT be truncated by the
+  // single-round post-message grace even if `humanagent_turn_end` is absent.
+  const toolRoundBuilt = adapter(async () => response(chunks([
+    frame('response.created', { response: { id: 'resp-rcc-tool-round' } }),
+    frame('response.output_item.done', {
+      output_index: 0,
+      item: {
+        type: 'function_call',
+        id: 'item-tool-call-1',
+        call_id: 'call-helper-1',
+        name: 'dispatch_helper',
+        arguments: '{"selection":{"roleId":"observer"}}',
+      },
+    }),
+    frame('response.completed', { response: { id: 'resp-rcc-tool-round' } }),
+  ])), binding, new ResponsesProviderCodec(), 'rcc', { postMessageCompletionGraceMs: 50 });
+  await toolRoundBuilt.adapter.start({
+    ...startInput(),
+    tools: [{ toolId: 'dispatch_helper', description: 'dispatch helper', inputSchema: { type: 'object' } }],
+  });
+  const toolRoundObserved = [];
+  for await (const event of toolRoundBuilt.adapter.observe(execution)) {
+    toolRoundObserved.push(event);
+  }
+  assert.equal(toolRoundObserved.some((event) => event.kind === 'tool'), true);
+  assert.equal(toolRoundObserved.at(-1)?.terminalState, 'waiting');
+
+  // Negative 2: A request carrying `humanagent_turn_end` is a multi-step agent
+  // loop and must NOT enter single-round post-message completion after a plain
+  // assistant message item.
+  let turnEndAbortedEarly = false;
+  const turnEndBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      const encoder = new TextEncoder();
+      yield encoder.encode(frame('response.created', { response: { id: 'resp-rcc-turn-end' } }));
+      yield encoder.encode(frame('response.output_item.done', {
+        output_index: 0,
+        item: {
+          type: 'message',
+          id: 'item-prelude-msg',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'Let me call the tool next.' }],
+        },
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      yield encoder.encode(frame('response.output_item.done', {
+        output_index: 1,
+        item: {
+          type: 'function_call',
+          id: 'item-turn-end-call',
+          call_id: 'call-turn-end-1',
+          name: 'humanagent_turn_end',
+          arguments: '{"status":"succeeded","summary":"done"}',
+        },
+      }));
+      yield encoder.encode(frame('response.completed', { response: { id: 'resp-rcc-turn-end' } }));
+    },
+  };
+  const turnEndBuilt = adapter(async (_url, init) => {
+    init.signal?.addEventListener('abort', () => { turnEndAbortedEarly = true; }, { once: true });
+    return response(turnEndBody);
+  }, binding, new ResponsesProviderCodec(), 'rcc', { postMessageCompletionGraceMs: 30, noProgressBudgetMs: 1_500 });
+  await turnEndBuilt.adapter.start({
+    ...startInput(),
+    tools: [{ toolId: 'humanagent_turn_end', description: 'end turn', inputSchema: { type: 'object' } }],
+  });
+  const turnEndObserved = [];
+  for await (const event of turnEndBuilt.adapter.observe(execution)) {
+    turnEndObserved.push(event);
+  }
+  assert.equal(turnEndAbortedEarly, false, 'multi-step request with humanagent_turn_end must not be truncated by post-message grace');
+  assert.equal(turnEndObserved.some((event) => event.kind === 'tool'), true);
+  assert.equal(turnEndObserved.at(-1)?.terminalState, 'waiting');
 });
