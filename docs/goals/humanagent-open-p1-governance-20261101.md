@@ -158,9 +158,9 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 |---|---|---|---|---|---|
 | M1 | 常驻 longhorizon 目标与 open bug 真源维护 | `active`：goal `ad967f01…` 每 20m 显式重 arm；`appsdk bug list` 当前 33 项 open，其中 P0 4、P1 12、P2 6，另有 11 项未分级审计/UX/通信项 | `appsdk goal status` 返回 active/observed=subscribed；`appsdk bug list --json` 已核对 `45f92c8`、`a9dc797`、`4c21e74`、`47b26dd` 四项 P0；旧清单只覆盖其中的 22 项 | 每轮刷新；未分级项补 owner；Alice 修复后同步 bug 状态 | 目标持续 active；所有 open 项有 owner、证据路径、下一动作；不能把 22 项旧队列冒称全部 |
 | M2 | 项目巡检（四项） | `armed`：project-patrol `sub-m1793413132850-18`，interval 900000ms，目标 1500000ms；`collab notify status` 仍为 `PATROL_CADENCE_RUNTIME_GAP`；goal deadline 已在 10:50 UTC 消费并用 `appsdk goal subscribe --interval 20m` 显式重订阅（`fired_count=0`、status=armed） | `collab notify status`；`appsdk goal status --json`；worktree 6（main + W2-A + 4 locked provider `PROTECTED_HOLD`），未超 10；10:50 UTC 复核 `/Volumes/Intel` 已恢复 | 每轮核对 worker、未关闭 board、资源和权限真源；不声称节奏已对齐；已通知 Alice 继续 W2-A | 四项均核对并有回执；gap 未解除时如实报告 |
-| M3 | W1-A/W1-B 结果转交 Alice，不再续派或合并 | `已合并进 Alice 集成树`：W1-A `3c0b49f89`/`626969fb3` 与 W1-B `37c38dd56` 已进入 `codex/mvp-repair-integration-20261102`；Alice 尚未合入 main | Alice 通知 `m1793608738345-612`；Jenny 已回 `m1793608837878-614`；W1 工作树已由 Alice 收走 | 等待 Alice W2/W3 与 milestone review 后合入 main；Jenny 不续派/不合并 | W1 证据路径已转交；Alice 负责后续验收/集成；Jenny 不重复合并 |
-| M4 | W2/W3 证据接收与核对 | `进行中`：board `mvp-w2a-implicit-orchestration-20261102` revision 5，status=`working`，`next_step=执行 W2-A：补图校验、红测、隐式编排与计划步骤强绑定实现及真实 RCC 验收`；W2-A 集成树 `mvp-w2a-orch-20261102` 已落 W2-A 实现（HEAD 仍 `74fb7bb87`，未提交、未合入 main）：graph 三文件、`packages/adapters/jsonl/src/index.ts`、`packages/adapters/jsonl/src/task-plan-revisions.ts`、`packages/app/src/ui-runtime/execution-composition.ts`、`packages/app/src/ui-runtime/index.ts`、`packages/app/src/ui-runtime/service.ts`、`packages/runtime/src/orchestration/task-plan-revisions.ts`、`packages/runtime/src/ui-runtime/coordinator.ts`、`tests/app/execution-corrective-retry.test.ts`，新增 `tests/app/w2a-implicit-orchestration.test.ts`；正运行 typecheck + build:app + 测试集，部分命令失败且 Alice 在迭代 | `collab board show`；`collab worker snapshot`（Alice 正在编辑 coordinator.ts、同步测试契约、运行测试） | 等待 Alice 命令执行通过并提交 W2-A，交 milestone 证据后由 Jenny 集成验收；Jenny 不代集成、不自行 merge | 只读核对，不代 Alice 集成；W2-A/W2-B/W3 各自结果与真实 RCC 回执齐全后才可标完成 |
-| M5 | 自有 worktree 与资源收口 | `open`：仅 W2-A 活动；W1-A/W1-B 树已收走；4 个 locked provider 树 `PROTECTED_HOLD` | `git worktree list` 实测 6 个，未超 10 | 每轮核对；W2-A 合入后立即移除自有树 | 每个候选合入后 remove+prune；不触他人树 |
+| M3 | W1-A/W1-B 结果转交 Alice，不再续派或合并 | `已进入 origin/main`：W1-A `3c0b49f89`/`626969fb3` 与 W1-B `37c38dd56` 均为 `origin/main` 祖先 | `git merge-base --is-ancestor` 实测三个提交均 `yes`；Alice 工作树已由她收走 | 保持不续派；后续 W1 相关 P0 由 Alice 按 W1-W3 计划验收 | W1 提交已入 main；剩余 P0 状态以 `appsdk bug list` 为准，不重复合并 |
+| M4 | W2/W3 证据接收与核对 | W2-A 实现已入 main（`7b51b8076` 与返工 `0e9696a9e` 均为 `origin/main` 祖先，集成 commit `351a17ca0` 也在 main）；board 任务 `mvp-w2a-implicit-orchestration-20261102` rev16 `merged`，但独立审查记录了两项后续：w2a-result.md 图描述回边需更正、Planner 决策端口未在 `packages/app` 接线；W2-B `879332f5a` 不是 main 祖先，board rev8 `rework` | `collab board show`；`git merge-base --is-ancestor`；`collab worker snapshot` | W2-B 完成真实中断/效果恢复证据后由 Alice 交回；W2-A 两项后续和 W2-B 都不得因“已入集成分支”标完成 | W2-A 可交付面已入 main，但两项后续未闭环；W2-B 未并入 main，真实 mutating/recovery 证据缺失时标 `UNVERIFIED` |
+| M5 | 自有 worktree 与资源收口 | `open`：main、`mvp-real-path-dispatch-20261102`、`mvp-w2a-orch-20261102` 与 4 个 locked provider 树 `PROTECTED_HOLD`，共 7/10 | `git worktree list` 实测 7 个，未超 10 | 每轮核对；W2-B 收口后移除 `mvp-w2a-orch`；`mvp-real-path-dispatch` 由 Alice 完成后关闭 | 每个候选合入后 remove+prune；不触他人树 |
 | M6 | 用户最近问题的清单映射 | `已映射且有截图`：动画 step/计时截图实际位于 `/Volumes/Intel/playground/humanagent/.worker-runs/entry-progress-step-timers-20261101/worker-1/evidence/step-progress-1280x720.png` 与 `.../step-progress-390x844.png`，已目视确认显示步骤、总耗时、本步耗时；无二次确认（D20 `f3b63887f` 已入 main，真实 RCC 80/80）、容错循环（D17 `ede3189ba` 已入 main，真实 RCC 4444 once-503 receipt SUCCESS、`execution.retry` seq=4）、nn-code（AGENTS.md `## 符号探索` 第 50 行已存在；类方法解析缺口报告已 durable enqueue 到 `NNAnything.Bob`，msg_id `m1793575205675-2`）、Carol 无 snapshot（`22a689b` 已按「直接问 Carol」关闭） | 均已映射；后续发现新问题即 `appsdk bug intake` 登记 | 每项有 bug id 或证据路径；不把未验证结果当完成；截图阶段不等于 W2/W3 全链路验收 |
 
 ### P 列：当前未关闭问题（按优先级，全部在 `appsdk bug list` 为 open）
@@ -177,7 +177,7 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ### 同事 / worker 推进方式（每轮核对 busy/idle 与原因）
 
-- **Alice**（CEO + 修复 owner）：Jason 授权直接完成 W1-W3。W1 结果由她验收/集成/合入 main；W2-A/W2-B/W3-A/W3-B 及 milestone Review 由她规划、派发、验收、集成。board `mvp-w2a-implicit-orchestration-20261102` 已 accepted / working；10:01 UTC snapshot 显示她当前停在 `/Volumes/Intel/playground/humanagent/mvp-w2a-orch-20261102` 的 `Operation not permitted`，master 已复现并通知保留任务、停止重复重试，待宿主外置卷权限恢复后按 `planner-w2/plan.md` 的 W2-A 节继续，不代 Jenny 合并。台账 `mvp-repair-alice-20261102/ledger.md`。
+- **Alice**（CEO + 修复 owner）：Jason 授权直接完成 W1-W3。W1 与 W2-A 实现已入 main；当前她先执行 `mvp-real-lane-entry-task-row-20261102` 真实 RCC P0（tmux 快照显示 thought 35m04s、329+ 动作、正在读取文件/运行命令，不是 idle），随后串行处理 `mvp-clarification-selectable-options-20261102`（board `invited`，她已收到指标通知）并收口 W2-A。W2-B 被退回 `rework`，等她补真实 typed settle/absence 与进程中断效果证据。台账 `mvp-repair-alice-20261102/ledger.md`。
 - **W1-A GCM worker**（PID 45538，session 60985）：已完成并退出；提交 `3c0b49f89`（B1 canonical StandardTurnEndPayload + 单公开输出源）与 `626969fb3`（B3/A4 intake+planner JSON resilience + 中文 step 文案）已由 Alice 合并进 `codex/mvp-repair-integration-20261102`。工作树已收走，Jenny 不再续派。
 - **W1-B GCM worker**（PID 58804，session 53997）：已完成并退出；提交 `37c38dd56`（A1/A3/A4/A5 直接回答卡、corner safe-area、title cleanup、coverage aggregation）已由 Alice 合并进同一集成分支。工作树已收走，Jenny 不再续派。
 - **Emma**（项目经理 + 质检消融架构师）：负责 MVP 用户路径质检与项目推进；每半小时巡检，发现影响交付问题发给 Jenny 跟踪；验收修复走真实入口，保留双视口证据。目标 `emma-mvp-quality-acceptance-2026-11-01.md`。
@@ -853,3 +853,16 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `is_current=false`，无法经 `ceo reply` 投递，继续本地 master 推进。
   `project_board_patrol` 无取消项。goal deadline 订阅
   `sub-m1793647962135-1357` 与 project patrol `sub-m1793413132850-18` 均在位。
+
+- 2026-11-02 19:56 UTC: goal deadline `m1793649162627-1377` consumed
+  (`collab msg` 回执 `consumed_by_recv=true`, state=`read`)；project-patrol
+  四项重新核对。open bug 仍 33：按标题核准为 P0 4、P1 12、P2 6、未分级 11
+  （修正 19:42/19:47 日志中的 P1 10、未分级 13）。board 4 个 open 任务仍归
+  Alice：real-lane entry-task-row rev3 `working`、W2-A rev16 `merged`
+  （main 已含 `7b51b8076`/`0e9696a9e`，待 owner close）、W2-B rev8
+  `rework`、clarification options rev3 `invited`。Alice 的 tmux 快照显示
+  thought 35m04s、329+ 动作、当前 `Reading file`，并已看到
+  clarification 指标通知，不是 idle；Emma/Bob/Carol/David 无 open task，不做
+  盲目唤醒。`mvp-real-path-dispatch` 分支 ahead 1/behind 18，未并入
+  main；W2-B `879332f5a` 仍不是 main 祖先。worktree 7/10；RCC 4444 监听，
+  生产 `127.0.0.1:10086` 仍无监听；本轮未合并、未安装、未删 worktree、未杀进程。
