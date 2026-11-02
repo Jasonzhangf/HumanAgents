@@ -51,6 +51,14 @@ const DEFAULT_PROBE_TTL_MS = 5 * 60 * 1000;
 // no new bytes arrive for this long. At ~2.4s/frame, 120s is roughly fifty
 // frames of silence, far beyond any live stream's inter-frame gap.
 const DEFAULT_NO_PROGRESS_BUDGET_MS = 120_000;
+// Once an RCC single-round message request (an intake decision, implicit
+// planner call, or post-turn-end summary drain without `humanagent_turn_end`)
+// completes its first-round assistant message item with no tool call pending,
+// a normal RCC completion (`response.completed`, optionally preceded by late
+// duplicate tail deltas) arrives within ~30ms. A longer silence means RCC
+// intercepted round-one completion to open an unrequested `continue_execution`
+// second round.
+const DEFAULT_POST_MESSAGE_COMPLETION_GRACE_MS = 300;
 // A pure runaway guard, not a progress criterion: it only stops a provider
 // that floods one unit with an absurd number of delta frames. It sits far
 // above any real stream (the largest production sample was 535 frames) and
@@ -133,6 +141,7 @@ export interface RccV3ProviderTransportOptions<
    * criterion and must stay far above any real stream.
    */
   readonly deltaRunawayCap?: number;
+  readonly postMessageCompletionGraceMs?: number;
 }
 
 interface ActiveExecution {
@@ -149,6 +158,7 @@ interface ActiveExecution {
   streamDone: boolean;
   resourceReleased: boolean;
   responsesToolCallsPending: boolean;
+  singleRoundMessageTerminal?: boolean;
   terminalState?: 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'stopped' | 'unknown';
   terminalError?: ProviderError;
   // Resolved by observe() once the SSE loop has stopped consuming the body,
@@ -503,16 +513,30 @@ class StreamSilenceError extends Error {
   }
 }
 
+function isSingleRoundMessageRequest(
+  protocol: 'responses' | 'anthropic' | 'openai',
+  request: ProviderWireRequest,
+  source: ProviderTransportSource,
+): boolean {
+  if (source !== 'rcc' || protocol !== 'responses' || request.protocol !== 'responses') return false;
+  return !(request.tools ?? []).some((tool) => tool.name === 'humanagent_turn_end');
+}
+
 async function* withSilenceWatchdog(
   body: AsyncIterable<Uint8Array>,
-  silenceBudgetMs: number,
+  silenceBudgetMs: number | (() => number),
+  onSilence?: () => void,
 ): AsyncIterable<Uint8Array> {
   const iterator = body[Symbol.asyncIterator]();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     while (true) {
+      const budgetMs = typeof silenceBudgetMs === 'function' ? silenceBudgetMs() : silenceBudgetMs;
       const silence = new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new StreamSilenceError(silenceBudgetMs)), silenceBudgetMs);
+        timer = setTimeout(() => {
+          onSilence?.();
+          reject(new StreamSilenceError(budgetMs));
+        }, budgetMs);
         // The watchdog timer must fire even when the dead socket is the only
         // pending work in the process, so it cannot be unref'd.
       });
@@ -632,10 +656,11 @@ async function* parseSse(
   body: AsyncIterable<Uint8Array>,
   maxEventBytes: number,
   maxBufferBytes: number,
-  silenceBudgetMs: number,
+  silenceBudgetMs: number | (() => number),
+  onSilence?: () => void,
 ): AsyncIterable<SseFrame> {
   const decoder = new TextDecoder();
-  const iterator = withSilenceWatchdog(body, silenceBudgetMs)[Symbol.asyncIterator]();
+  const iterator = withSilenceWatchdog(body, silenceBudgetMs, onSilence)[Symbol.asyncIterator]();
   let buffer = '';
   let event: string | undefined;
   let data: string[] = [];
@@ -800,6 +825,7 @@ export class RccV3ProviderTransport<
   private readonly stopReasons = new Map<AnyProviderExecutionIdentityRef, string>();
   private readonly options: Omit<RccV3ProviderTransportOptions<TIdentity>, 'credential'>;
   private readonly noProgressBudgetMs: number;
+  private readonly postMessageCompletionGraceMs: number;
   private readonly deltaRunawayCap: number;
   private credential: string | undefined;
 
@@ -838,6 +864,7 @@ export class RccV3ProviderTransport<
     this.fetcher = options.fetch ?? defaultFetch;
     this.maxEventBytes = options.maxEventBytes ?? DEFAULT_MAX_EVENT_BYTES;
     this.noProgressBudgetMs = options.noProgressBudgetMs ?? DEFAULT_NO_PROGRESS_BUDGET_MS;
+    this.postMessageCompletionGraceMs = options.postMessageCompletionGraceMs ?? DEFAULT_POST_MESSAGE_COMPLETION_GRACE_MS;
     this.deltaRunawayCap = options.deltaRunawayCap ?? DEFAULT_DELTA_RUNAWAY_CAP;
     this.maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
     this.probeTtlMs = options.probeTtlMs ?? DEFAULT_PROBE_TTL_MS;
@@ -921,6 +948,7 @@ export class RccV3ProviderTransport<
       streamDone: false,
       resourceReleased: false,
       responsesToolCallsPending: false,
+      singleRoundMessageTerminal: isSingleRoundMessageRequest(protocol, request, this.source),
     };
     let ref: EvidenceRef;
     try {
@@ -989,6 +1017,7 @@ export class RccV3ProviderTransport<
     active.terminalError = undefined;
     active.streamCompletion = undefined;
     active.responsesToolCallsPending = false;
+    active.singleRoundMessageTerminal = isSingleRoundMessageRequest(protocol, request, this.source);
     let sent: RccV3SendResult;
     try {
       sent = await this.send(protocol, request, controller);
@@ -1051,17 +1080,39 @@ export class RccV3ProviderTransport<
     // codec's request-local duplicate check, not a new content unit.
     let activeReasoningItemId: string | undefined;
     let reasoningSummaryStarted = false;
+    let activeResponseId = `rcc-response-${String(active.identity.executionEpoch)}`;
+    let responsesRoundCount = 0;
+    let roundOneMessageCompleted = false;
     // Open content-unit delta streams of this observation. A unit leaves the
     // map when its own done event arrives, and every unit is dropped once the
     // stream reports a terminal event.
     const openUnits = new Map<string, { readonly kind: ContentDeltaUnit['kind']; deltas: number }>();
+    const awaitingPostMessageCompletion = (): boolean =>
+      Boolean(active.singleRoundMessageTerminal)
+      && roundOneMessageCompleted
+      && !active.responsesToolCallsPending
+      && openUnits.size === 0
+      && !observedTerminal
+      && !active.stopRequested;
     // The moment the stream last made real progress: a delta carrying new
     // bytes, a unit opening, or any non-delta event. Silence is measured from
     // here, never from the stream start, so a slow but advancing stream never
     // trips the no-progress budget.
     let lastProgressAtMs = this.now().getTime();
     try {
-      for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes, this.noProgressBudgetMs)) {
+      for await (const frame of parseSse(
+        active.body,
+        this.maxEventBytes,
+        this.maxBufferBytes,
+        () => (awaitingPostMessageCompletion() ? this.postMessageCompletionGraceMs : this.noProgressBudgetMs),
+        () => {
+          if (awaitingPostMessageCompletion() && !active.controller.signal.aborted) {
+            active.controller.abort(
+              new DOMException('RCC v3 single-round message completed after post-message grace', 'AbortError'),
+            );
+          }
+        },
+      )) {
         if (active.stopRequested) throw active.stopCause;
         if (!frame.data) continue;
         if (frame.data === '[DONE]') {
@@ -1093,9 +1144,58 @@ export class RccV3ProviderTransport<
         const normalized = active.protocol === 'responses' && type === 'response.output_item.done'
           ? (this.source === 'http' ? record : normalizeServertoolCall(record))
           : record;
+        if (active.protocol === 'responses' && (type === 'response.created' || type === 'response.in_progress')) {
+          const responseRecord = optionalRecord(record.response);
+          if (responseRecord && typeof responseRecord.id === 'string' && responseRecord.id.trim() !== '') {
+            activeResponseId = responseRecord.id;
+          }
+        }
         if (active.protocol === 'responses' && type === 'response.created') {
+          responsesRoundCount += 1;
           activeReasoningItemId = undefined;
           reasoningSummaryStarted = false;
+          if (responsesRoundCount > 1 && awaitingPostMessageCompletion()) {
+            observedTerminal = true;
+            openUnits.clear();
+            active.terminalState = terminalStateFor(active.protocol, 'response.completed', undefined, active.stopRequested);
+            if (!active.controller.signal.aborted) {
+              active.controller.abort(
+                new DOMException('RCC v3 single-round message completed before unrequested second round', 'AbortError'),
+              );
+            }
+            yield {
+              protocol: 'responses',
+              type: 'response.completed',
+              response: { id: activeResponseId },
+            } as unknown as ProviderWireEvent;
+            break;
+          }
+        }
+        if (active.protocol === 'responses' && (type === 'response.output_item.added' || type === 'response.output_item.done')) {
+          const item = readRecord(normalized.item);
+          if (item.type === 'function_call') {
+            active.responsesToolCallsPending = true;
+            roundOneMessageCompleted = false;
+          } else if (item.type === 'message' && awaitingPostMessageCompletion()) {
+            // RCC buffered a second assistant message item (`rcc-output-1`)
+            // from its unrequested `continue_execution` round without emitting
+            // a second `response.created`. Settle Round 1 before that item can
+            // enter the codec's content facts.
+            observedTerminal = true;
+            openUnits.clear();
+            active.terminalState = terminalStateFor(active.protocol, 'response.completed', undefined, active.stopRequested);
+            if (!active.controller.signal.aborted) {
+              active.controller.abort(
+                new DOMException('RCC v3 single-round message completed before buffered second message item', 'AbortError'),
+              );
+            }
+            yield {
+              protocol: 'responses',
+              type: 'response.completed',
+              response: { id: activeResponseId },
+            } as unknown as ProviderWireEvent;
+            break;
+          }
         }
         if (active.protocol === 'responses' && type === 'response.output_item.added') {
           const item = readRecord(record.item);
@@ -1200,6 +1300,9 @@ export class RccV3ProviderTransport<
             activeReasoningItemId = undefined;
             reasoningSummaryStarted = false;
           }
+          if (item.type === 'message' && !active.responsesToolCallsPending) {
+            roundOneMessageCompleted = true;
+          }
         }
         if (active.protocol === 'responses' && (type === 'response.function_call_arguments.done' || type === 'response.output_text.done'
           || type === 'response.reasoning_text.done' || type === 'response.reasoning_summary_text.done')) {
@@ -1275,6 +1378,16 @@ export class RccV3ProviderTransport<
         yield raw;
         if (active.stopRequested) throw active.stopCause;
       }
+      if (!active.terminalState && awaitingPostMessageCompletion()) {
+        observedTerminal = true;
+        openUnits.clear();
+        active.terminalState = terminalStateFor(active.protocol, 'response.completed', undefined, active.stopRequested);
+        yield {
+          protocol: 'responses',
+          type: 'response.completed',
+          response: { id: activeResponseId },
+        } as unknown as ProviderWireEvent;
+      }
       if (active.protocol === 'openai' && active.stopRequested && active.terminalState === 'succeeded' && !active.terminalError) {
         active.terminalState = 'stopped';
       }
@@ -1298,6 +1411,23 @@ export class RccV3ProviderTransport<
       // after that point only releases the stream: it must not overwrite the
       // observed outcome or surface a fabricated failure to the consumer.
       if (observedTerminal && !active.terminalError) return;
+      if (awaitingPostMessageCompletion() && (cause instanceof StreamSilenceError || !(cause instanceof ProviderAdapterError))) {
+        observedTerminal = true;
+        openUnits.clear();
+        active.terminalState = terminalStateFor(active.protocol, 'response.completed', undefined, active.stopRequested);
+        if (!active.controller.signal.aborted) {
+          active.controller.abort(
+            new DOMException('RCC v3 single-round message completed after post-message grace', 'AbortError'),
+          );
+        }
+        yield {
+          protocol: 'responses',
+          type: 'response.completed',
+          response: { id: activeResponseId },
+        } as unknown as ProviderWireEvent;
+        completed = true;
+        return;
+      }
       let thrown = cause;
       if (cause instanceof StreamSilenceError && !active.terminalError) {
         // The provider stopped writing bytes. This is the pure no-progress
