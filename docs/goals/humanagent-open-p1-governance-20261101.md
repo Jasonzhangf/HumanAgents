@@ -614,3 +614,23 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   Production `127.0.0.1:10086` remains down pending explicit install approval
   for the verified `humanagent-cli-0.1.0043.tgz`. No agent-side merge, install
   or worktree deletion was performed this wake.
+
+- 2026-11-02 17:25 UTC: goal deadline `m1793640234645-1261` consumed (receive
+  `receive-61721-1793640240560173000-0`) and explicitly rearmed via
+  `appsdk goal subscribe --interval 20m` (one-shot armed; project patrol
+  `sub-m1793413132850-18` still armed at 900000 ms). W2-B progress check found
+  a real stall: no HumanAgent GCM worker process is running; Alice's pane
+  snapshot ends at Google `UNAUTHENTICATED (code 401)` error id
+  `ab9af658-008a-41b7-98c0-07d52e49e70b-2191` with an idle prompt; last W2-B
+  worktree write is `cold-execution-resume.ts` at 08:34 PT (about 50 minutes
+  before this check); `coordinator.ts`/`service.ts`/`server.ts`/
+  `execution-composition.ts` wiring is still incomplete per Alice's own note.
+  Board: W2-A revision 16 `merged` at `351a17ca0` (Alice owns close); W2-B
+  revision 4 `working`, `completion_missing=["review"]`. Durable message
+  `m1793640333243-1265` sent to Alice: do not switch models; re-dispatch a
+  fresh `codex exec --profile gcm` worker if the 401 is transient, or report
+  the exact auth gate and original error; do not merge/push; return delivery
+  evidence and commit only when W2-B is complete. Production
+  `127.0.0.1:10086` still down pending explicit install approval for the
+  verified `humanagent-cli-0.1.0043.tgz`. No merge, install, worktree delete
+  or process kill was performed.
