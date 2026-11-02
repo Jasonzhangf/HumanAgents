@@ -185,6 +185,16 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ## Update Log
 
+- 2026-11-02 12:39 UTC: goal deadline `m1793623110942-915` consumed via
+  `collab recv` and re-armed with `appsdk goal subscribe --interval 20m`.
+  Board still has one task, `mvp-w2a-implicit-orchestration-20261102`,
+  status `rework` revision 10, owner Alice. `collab worker snapshot` shows Alice
+  actively implementing the rework: she added `decideAndCommitPostStepContinuation`
+  and `commitTerminalOrchestratedPlanRevision`, fixed
+  `tests/app/w2a-implicit-orchestration.test.ts` type declarations, and is
+  running `pnpm typecheck`, build, and the W2-A focused suite before real RCC
+  E2E. No main merge or integration happened in this tick.
+
 - 2026-11-02 12:14 UTC: W2-A `mvp-w2a-implicit-orchestration-20261102` was
   delivered at commit `7b51b8076`, then reviewed by Jenny and returned to
   `rework` (board revision 10). Two blocking findings: (1) the production path
