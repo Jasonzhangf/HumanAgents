@@ -592,3 +592,25 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   remains explicit human approval to install the verified
   `dist/release/humanagent-cli-0.1.0043.tgz` globally, after which the user
   performs the formal restart; no agent-side install or restart was run.
+
+- 2026-11-02 17:04 UTC: project patrol `m1793638953773-1234` consumed
+  (receive `receive-17166-1793638976813276000-0`) and goal deadline
+  `m1793639000873-1238` consumed (receive `receive-28103-1793639008108459000-0`);
+  goal explicitly rearmed via `appsdk goal subscribe --interval 20m` (one-shot
+  armed, project patrol `sub-m1793413132850-18` still armed at 900000 ms).
+  Four-item audit: (1) 33 open bugs (4 P0 `45f92c8`/`a9dc797`/`4c21e74`/`47b26dd`,
+  14 P1, 6 P2, 9 unclassified ablation); (2) W2-A revision 16 `merged` at
+  `351a17ca0` (Alice owns worktree/branch close), W2-B revision 4 `working`
+  (Alice, no delivery evidence yet); (3) worktrees 7/10 (main +
+  `mvp-real-path-dispatch-20261102` + `mvp-w2a-orch-20261102` + 4 locked
+  provider `PROTECTED_HOLD`), under the 10 limit; `mvp-real-path-dispatch` is
+  clean, behind `origin/main` by 5, and carries one unmerged commit
+  `35b9c043e` (goal-file deletion + PNG swaps) whose content is superseded by
+  already-merged `e746255c3`/`f5f13f05d`; left in place pending owner
+  confirmation, not deleted; (4) Emma/Bob/Carol/David idle with no open tasks
+  (reasonable, no ready work to dispatch), Alice active on W2-B. CEO=Alice,
+  `is_current=false`; `collab ceo reply` recorded=true, reported=false (CEO
+  worker not reachable for delivery in this project scope, known limitation).
+  Production `127.0.0.1:10086` remains down pending explicit install approval
+  for the verified `humanagent-cli-0.1.0043.tgz`. No agent-side merge, install
+  or worktree deletion was performed this wake.
