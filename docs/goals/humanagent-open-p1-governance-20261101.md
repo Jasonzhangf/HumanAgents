@@ -161,7 +161,7 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 | M3 | W1-A/W1-B 结果转交 Alice，不再续派或合并 | `已合并进 Alice 集成树`：W1-A `3c0b49f89`/`626969fb3` 与 W1-B `37c38dd56` 已进入 `codex/mvp-repair-integration-20261102`；Alice 尚未合入 main | Alice 通知 `m1793608738345-612`；Jenny 已回 `m1793608837878-614`；W1 工作树已由 Alice 收走 | 等待 Alice W2/W3 与 milestone review 后合入 main；Jenny 不续派/不合并 | W1 证据路径已转交；Alice 负责后续验收/集成；Jenny 不重复合并 |
 | M4 | W2/W3 证据接收与核对 | `进行中`：board `mvp-w2a-implicit-orchestration-20261102` revision 5，status=`working`，`next_step=执行 W2-A：补图校验、红测、隐式编排与计划步骤强绑定实现及真实 RCC 验收`；W2-A 集成树 `mvp-w2a-orch-20261102` 已落 W2-A 实现（HEAD 仍 `74fb7bb87`，未提交、未合入 main）：graph 三文件、`packages/adapters/jsonl/src/index.ts`、`packages/adapters/jsonl/src/task-plan-revisions.ts`、`packages/app/src/ui-runtime/execution-composition.ts`、`packages/app/src/ui-runtime/index.ts`、`packages/app/src/ui-runtime/service.ts`、`packages/runtime/src/orchestration/task-plan-revisions.ts`、`packages/runtime/src/ui-runtime/coordinator.ts`、`tests/app/execution-corrective-retry.test.ts`，新增 `tests/app/w2a-implicit-orchestration.test.ts`；正运行 typecheck + build:app + 测试集，部分命令失败且 Alice 在迭代 | `collab board show`；`collab worker snapshot`（Alice 正在编辑 coordinator.ts、同步测试契约、运行测试） | 等待 Alice 命令执行通过并提交 W2-A，交 milestone 证据后由 Jenny 集成验收；Jenny 不代集成、不自行 merge | 只读核对，不代 Alice 集成；W2-A/W2-B/W3 各自结果与真实 RCC 回执齐全后才可标完成 |
 | M5 | 自有 worktree 与资源收口 | `open`：仅 W2-A 活动；W1-A/W1-B 树已收走；4 个 locked provider 树 `PROTECTED_HOLD` | `git worktree list` 实测 6 个，未超 10 | 每轮核对；W2-A 合入后立即移除自有树 | 每个候选合入后 remove+prune；不触他人树 |
-| M6 | 用户最近问题的清单映射 | `已映射且有截图`：动画 step/计时截图实际位于 `/Volumes/Intel/playground/humanagent/.worker-runs/entry-progress-step-timers-20261101/worker-1/evidence/step-progress-1280x720.png` 与 `.../step-progress-390x844.png`，已目视确认显示步骤、总耗时、本步耗时；无二次确认（D20 `f3b63887f` 已入 main，真实 RCC 80/80）、容错循环（D17 `ede3189ba` 已入 main，真实 RCC 4444 once-503 receipt SUCCESS、`execution.retry` seq=4）、nn-code（AGENTS.md `## 符号探索` 第 50 行已存在；类方法解析缺口报告已 durable enqueue 到 `NNAnything.Bob`，msg_id `m1793575205675-2`）、Carol 无 snapshot（`22a689b` 已按「直接问 Carol」关闭）、monid 非根因（D15 改用 local-file-search/RCC 4444） | 均已映射；后续发现新问题即 `appsdk bug intake` 登记 | 每项有 bug id 或证据路径；不把未验证结果当完成；截图阶段不等于 W2/W3 全链路验收 |
+| M6 | 用户最近问题的清单映射 | `已映射且有截图`：动画 step/计时截图实际位于 `/Volumes/Intel/playground/humanagent/.worker-runs/entry-progress-step-timers-20261101/worker-1/evidence/step-progress-1280x720.png` 与 `.../step-progress-390x844.png`，已目视确认显示步骤、总耗时、本步耗时；无二次确认（D20 `f3b63887f` 已入 main，真实 RCC 80/80）、容错循环（D17 `ede3189ba` 已入 main，真实 RCC 4444 once-503 receipt SUCCESS、`execution.retry` seq=4）、nn-code（AGENTS.md `## 符号探索` 第 50 行已存在；类方法解析缺口报告已 durable enqueue 到 `NNAnything.Bob`，msg_id `m1793575205675-2`）、Carol 无 snapshot（`22a689b` 已按「直接问 Carol」关闭） | 均已映射；后续发现新问题即 `appsdk bug intake` 登记 | 每项有 bug id 或证据路径；不把未验证结果当完成；截图阶段不等于 W2/W3 全链路验收 |
 
 ### P 列：当前未关闭问题（按优先级，全部在 `appsdk bug list` 为 open）
 
@@ -184,6 +184,20 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - **Bob / Carol / David**：可用 peer。Carol 无 tmux snapshot 能力时按「直接问 Carol」方式发 durable message（上次 `m1793534323235-241`），不把 snapshot 缺失当阻塞；无 ready 长程目标时不空邀请。
 
 ## Update Log
+
+- 2026-11-02 18:02 UTC: 用户纠正「这和 monid 有毛关系？」。确认
+  monid 与 HumanAgent MVP 验收路径无关；它只是历史 D15 web.search 后端
+  备注。真实重试/效果证据统一走 `local-file-search` + 真实 RCC 4444。
+  已从 M6 活动清单移除 monid 条目，避免噪声。本轮 project-patrol 四项
+  实测：board 仅两项——`mvp-w2a-implicit-orchestration-20261102`
+  status=`merged`/缺 `close`，`mvp-w2b-effect-ledger-checkpoint-recovery-20261102`
+  status=`working`/缺 `review`（owner Alice，rev 4，无 `delivery_evidence`）；
+  open bug：P0 4（`45f92c8`、`a9dc797`、`4c21e74`、`47b26dd`）、P1 12、
+  P2 6、未分级 10（含 `db7f3ba6` 澄清仅自由文本缺确认项）；worktree 7
+  （main + `mvp-real-path-dispatch` + `mvp-w2a-orch` + 4 locked provider），
+  未超 10。W1-A/W1-B 树已收走。CEO=Alice（`is_current=false`）。真实 RCC
+  路径仍未交付（proof6 `blocked`、proof7 `56/57`），W2-B 是当前 Alice 的
+  在写实现；Jenny 不代集成、不重复派单。
 
 - 2026-11-02 15:40 UTC: CORRECTION — the real RCC path is NOT delivered. Emma's
   boundary review of proof6 is correct: `80/80` only proves the assertions
