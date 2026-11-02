@@ -173,6 +173,8 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - P2 `ee0a4e0`、`f2cda64`、`e7f8815`、`69d70a0`、`8000805`、`db32833`。
 - 未分级 open：`69f2101`、`a807545`、`f5cf73b`、`28469ed`、`353b2f1`、`b4f9f4f`、`0016675`、`5dcc763`、`5be453f`、`8a4ab78`、`d442481`；不得因未带 P 标签从巡检中漏掉。
 
+- 未分级项归属（2026-11-02 11:49 UTC）：`69f2101`、`a807545`、`f5cf73b`、`28469ed`、`353b2f1`、`b4f9f4f`、`0016675`、`5dcc763`、`5be453f` 交给 Emma 做只读消费者/可达性核查，board 任务 `minimality-ablation-owner-triage-20261102`；`8a4ab78` 归入 Alice 的 MVP 唯一界面验收范围，当前 `docs/ui/entry.js` 仍存在 `location.assign`，不得按已修处理；`d442481` 属 AppSDK/Collab 协议外部边界，当前 `collab context` 已成功但原错误仍保留，等兼容性 owner 核验，不在 HumanAgent 实现层伪造修复。
+
 ### 同事 / worker 推进方式（每轮核对 busy/idle 与原因）
 
 - **Alice**（CEO + 修复 owner）：Jason 授权直接完成 W1-W3。W1 结果由她验收/集成/合入 main；W2-A/W2-B/W3-A/W3-B 及 milestone Review 由她规划、派发、验收、集成。board `mvp-w2a-implicit-orchestration-20261102` 已 accepted / working；10:01 UTC snapshot 显示她当前停在 `/Volumes/Intel/playground/humanagent/mvp-w2a-orch-20261102` 的 `Operation not permitted`，master 已复现并通知保留任务、停止重复重试，待宿主外置卷权限恢复后按 `planner-w2/plan.md` 的 W2-A 节继续，不代 Jenny 合并。台账 `mvp-repair-alice-20261102/ledger.md`。
@@ -368,3 +370,16 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   commit or acceptance receipt exists yet. This patrol made no code or task
   ownership change; the four P0 blockers and the unclosed frontend-input to
   orchestration path remain the delivery gap.
+
+- 2026-11-02 11:49 UTC: refreshed live bug truth: 33 open, 70 closed. The 33
+  open split remains P0=4, P1=12, P2=6, and 11 items without a P label. The nine
+  ablation/architecture candidates plus the MVP unique-interface bug were
+  published as board task `minimality-ablation-owner-triage-20261102`
+  (priority p2, executor Emma, revision 2, status invited) for read-only
+  consumer/reachability triage. The delivery is a single result file under
+  `.worker-runs/minimality-ablation-triage-20261102/`; no product code, config,
+  test asset, RCC configuration, production root, or bug status may be changed.
+  `8a4ab78` remains an Alice MVP acceptance item because the current source
+  still calls `location.assign`. `d442481` remains an external Collab protocol
+  compatibility issue; current `collab context` succeeds, but the original
+  error is preserved and is not a HumanAgent code fix.
