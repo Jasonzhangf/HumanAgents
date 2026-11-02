@@ -565,3 +565,30 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   errno if the rejection recurs. The only release gate still waiting on the
   human is explicit approval to install the verified global
   `humanagent-cli` package and then perform the formal restart.
+
+- 2026-11-02 16:44 UTC: goal deadline `m1793637764698-1208` consumed with
+  `collab recv --timeout 3` (count 0, no pending mail) and explicitly rearmed
+  via `appsdk goal subscribe --interval 20m` (`fired_count` reset, one-shot
+  armed; project patrol `sub-m1793413132850-18` still armed at 900000 ms).
+  User requested `appsdk升级到最新版`; verified `~/.cargo/bin/appsdk` already
+  reports `appsdk 0.1.0015 (rust)`, the canonical repo `rust/release-version`
+  is `0.1.0015`, `origin/main:rust/release-version` is `0.1.0015`, and the
+  newest remote tag is `v0.1.0015`. The installed binary is already the latest
+  released version, so no global install was performed and no runtime was
+  written. `collab worker snapshot` for Alice shows live W2-B progress: she
+  edited `cold-execution-resume.ts` and is exploring `coordinator.ts`; one of
+  her dispatched GCM workers returned a Google `UNAUTHENTICATED (code 401)`
+  transport error (error id `ab9af658-...-2191`), preserved as an auth fact,
+  not a W2-B code failure. Board state now: W2-A
+  `mvp-w2a-implicit-orchestration-20261102` revision 16 status=`merged`
+  (integration commit `351a17ca0`), next_step `owner cleans the worktree and
+  closes the task` (Alice owns cleanup/close; Jenny must not merge or close);
+  W2-B `mvp-w2b-effect-ledger-checkpoint-recovery-20261102` revision 4
+  status=`working`, `completion_missing=["review"]`, no delivery evidence yet.
+  Four P0 remain open (`45f92c8` native lane bypasses implicit Brain,
+  `a9dc797` empty public output, `4c21e74` observation lacks per-agent facts,
+  `47b26dd` direct answer collapses main column); MVP end-to-end path still
+  `未达成`. Production `127.0.0.1:10086` is still down. The single release gate
+  remains explicit human approval to install the verified
+  `dist/release/humanagent-cli-0.1.0043.tgz` globally, after which the user
+  performs the formal restart; no agent-side install or restart was run.
