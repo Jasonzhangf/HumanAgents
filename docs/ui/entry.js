@@ -235,6 +235,43 @@ export async function readEntryQueue(api) {
   return { runtimeStatus, tasks }
 }
 
+// The runtime publishes its real execution step summaries as internal English
+// phase names. The page keeps them reachable but shows a readable label so a
+// Chinese surface never leaks `request to the model`-style internal copy.
+const INTERNAL_STEP_LABELS = new Map([
+  ['Dispatching request to the model', '正在派发模型请求'],
+  ['Model request dispatched', '模型请求已派发'],
+  ['Model request settled', '模型请求已收拢'],
+  ['provider requested model work', '已向模型请求工作'],
+  ['provider request settled', '模型请求已收束'],
+  ['provider requested model work settled', '模型工作已收束'],
+  ['execution started', '执行已开始'],
+  ['execution succeeded', '执行成功'],
+  ['execution failed', '执行失败'],
+  ['execution cancelled', '执行已取消'],
+  ['execution settling', '执行正在收拢'],
+  ['execution retry', '执行重试'],
+  ['execution terminal', '执行已结束'],
+  ['checkpoint committed', '检查点已提交'],
+  ['stopped checkpoint committed', '停止检查点已提交'],
+  ['provider tool', '调用工具'],
+  ['provider tool-result', '工具返回'],
+  ['attention opened', '需要关注'],
+  ['attention resolved', '关注已处理'],
+])
+
+export function localizedStepSummary(summary) {
+  const text = typeof summary === 'string' ? summary.trim() : ''
+  if (text === '') return ''
+  const exact = INTERNAL_STEP_LABELS.get(text)
+  if (exact !== undefined) return exact
+  for (const [prefix, label] of INTERNAL_STEP_LABELS) {
+    if (text.startsWith(`${prefix}:`)) return `${label}${text.slice(prefix.length)}`
+    if (text.startsWith(`${prefix} `)) return `${label} ${text.slice(prefix.length + 1)}`
+  }
+  return text
+}
+
 /**
  * The live submit progress banner.
  *
@@ -353,12 +390,13 @@ export function createSubmitStatusBanner(target, { onOpenDetail } = {}) {
     if (!block || !phase) return
     const seq = event?.seq
     const summary = typeof event?.summary === 'string' ? event.summary.trim() : ''
-    if (Number.isFinite(seq)) phase.textContent = `步骤 ${seq}`
-    if (summary !== '' && detail) detail.textContent = summary
+    const humanSummary = localizedStepSummary(summary)
+    if (Number.isFinite(seq)) phase.textContent = `步骤 ${seq}/${steps.length + 1}`
+    if (humanSummary !== '' && detail) detail.textContent = humanSummary
     if (event && (Number.isFinite(seq) || summary !== '')) {
       steps.push({
         seq: Number.isFinite(seq) ? seq : null,
-        summary,
+        summary: humanSummary,
         kind: typeof event.kind === 'string' ? event.kind : undefined,
         occurredAt: typeof event.occurredAt === 'string' ? event.occurredAt : undefined,
       })
@@ -395,9 +433,7 @@ if (!(interactionCardHost instanceof HTMLElement)) throw new Error('index page r
 const template = mountPageTemplate(pageRoot, {
   layout: 'work',
   active: '新建 Task',
-  eyebrow: 'Explicit Input',
   title: '任务输入',
-  lede: '接受用户任务、展示只读整理反馈，并在提交后显示任务进展与执行入口。',
 })
 const { status } = template.hosts
 const submitBanner = createSubmitStatusBanner(status, { onOpenDetail: openSubmitProgressDetail })
@@ -502,9 +538,43 @@ function liveArea() {
   const section = element('section', undefined, 'section')
   section.id = 'entry-live'
   const head = element('header', undefined, 'section-head')
-  head.append(element('h2', '队列与任务状态'), element('span', 'Runtime', 'section-meta'))
+  head.append(element('h2', '队列与任务状态'))
   section.append(head, element('p', '尚未提交任务。', 'empty'))
   return section
+}
+
+// A simple direct answer or status receipt is the interaction's business
+// result. It is rendered as a full-width result card in the main column; the
+// top status banner keeps only a short status word, so a long answer can never
+// squeeze the page heading into a one-character column.
+function ensureDirectAnswerRegion() {
+  let host = template.hosts.primary.querySelector('#entry-direct-answer')
+  if (host) return host
+  host = element('section', undefined, 'section entry-direct-answer')
+  host.id = 'entry-direct-answer'
+  const live = template.hosts.primary.querySelector('#entry-live')
+  if (live && live.parentNode) live.parentNode.insertBefore(host, live)
+  else template.hosts.primary.append(host)
+  return host
+}
+
+function renderDirectAnswer(result) {
+  const host = ensureDirectAnswerRegion()
+  clearNode(host)
+  const head = element('header', undefined, 'section-head')
+  head.append(element('h2', '直接回答'), element('span', '本次请求已直接回答', 'section-meta'))
+  host.append(head)
+  const card = element('article', undefined, 'panel')
+  card.dataset.directAnswer = 'true'
+  card.append(element('p', result.text, 'business-output-text'))
+  host.append(card)
+  const live = template.hosts.primary.querySelector('#entry-live')
+  if (live) {
+    clearNode(live)
+    const liveHead = element('header', undefined, 'section-head')
+    liveHead.append(element('h2', '队列与任务状态'), element('span', '0 项', 'section-meta'))
+    live.append(liveHead, element('p', '本次请求已直接回答，未创建任务。', 'empty'))
+  }
 }
 
 function renderField(section, label, value) {
@@ -644,8 +714,8 @@ function renderDraft(snapshot) {
   }
 
   // A direct answer or a status receipt has no draft to inspect; the answer is
-  // the result and it is shown in the status region. The raw interaction enum
-  // stays internal instead of being printed as page text.
+  // the result and it is shown in the main column result card. The raw
+  // interaction enum stays internal instead of being printed as page text.
   if (snapshot.state !== 'answered' && snapshot.state !== 'status-only') {
     section.append(element('p', `状态：${snapshot.state} · ${snapshot.nextAction}`, 'empty'))
   }
@@ -1377,11 +1447,12 @@ async function executeSubmission(submission, clarificationAnswer) {
   if (snapshot.state === 'awaiting-clarification') return snapshot
   // A simple answer and a status receipt are both the interaction's business
   // result. They end this submission: the reply is shown in the main status
-  // region with success tone, and no draft, requirement or task is created.
+  // result card, and no draft, requirement or task is created.
   const directResult = answeredSubmissionPresentation(snapshot)
   if (directResult) {
     status.dataset.tone = directResult.tone
-    status.textContent = directResult.text
+    status.textContent = '本次请求已直接回答'
+    renderDirectAnswer(directResult)
     return snapshot
   }
   if (snapshot.state === 'confirmed') {
@@ -1658,7 +1729,12 @@ function renderForm() {
 async function load() {
   const { status: runtimeStatus, error } = await loadRuntimeStatus()
   if (pageLeaving) return
-  renderRuntimeStatus(status, runtimeStatus, error)
+  renderRuntimeStatus(status, runtimeStatus, error, {
+    extraEntries: [
+      ['界面', 'Explicit Input'],
+      ['区块', 'Runtime'],
+    ],
+  })
   template.hosts.primary.append(interactionCardHost, liveArea())
   template.hosts.composer.append(renderForm())
   await refreshQueue()

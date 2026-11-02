@@ -112,7 +112,10 @@ a {
 .page {
   width: min(1180px, calc(100% - 40px));
   margin: 0 auto;
-  padding: 36px 0 64px;
+  /* The four corner controls stay fixed on the viewport. A horizontal safe
+     inset keeps every content card out of their columns, so a card never
+     shares a bounding box with a control at any scroll position. */
+  padding: 36px 72px 72px;
 }
 
 .page[data-page-layout] {
@@ -152,6 +155,7 @@ a {
 .page-heading {
   grid-column: 1 / -1;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
   gap: 28px;
@@ -424,6 +428,17 @@ textarea {
   background: var(--surface);
   color: var(--muted);
   line-height: 1.5;
+  /* The banner only carries a short status word. A bounded width plus
+     break-anywhere keeps a long answer from widening it and squeezing the
+     heading copy into a one-character column. */
+  max-width: min(100%, 44ch);
+  overflow-wrap: anywhere;
+}
+
+/* The direct answer / clarification body renders in the main column as a
+   full-width result card, never inside the top status banner. */
+.entry-direct-answer {
+  overflow-wrap: anywhere;
 }
 
 .status-banner[data-tone="danger"] {
@@ -649,7 +664,7 @@ pre {
     align-items: flex-start;
     flex-direction: column;
     gap: 10px;
-    padding: 16px 20px;
+    padding: 64px 20px 16px;
   }
 
   .topnav {
@@ -693,6 +708,12 @@ pre {
   .event {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  /* On a phone the corner controls are 44px tall. A larger vertical inset
+     keeps the top and bottom content clear of both rows. */
+  .page {
+    padding: 24px 76px 84px;
   }
 }
 
@@ -1110,7 +1131,7 @@ pre {
    never covers the page, and every control here only reads or changes how the layer looks. */
 .topbar {
   /* Reserve the top band so the top corner buttons never overlap the brand or navigation. */
-  padding-top: 54px;
+  padding-top: 72px;
 }
 
 .shell-controls {
