@@ -183,6 +183,18 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ## Update Log
 
+- 2026-11-02 22:45 UTC: 消费 goal deadline `m1793659542681-1533` 后，显式
+  `appsdk goal subscribe` 重新武装一次性 deadline（20m，100 次，TTL 604800s）；
+  `appsdk goal status --json` 返回 active/armed。project-patrol
+  `sub-m1793413132850-18` 仍 armed，900000ms（目标 1500000ms，gap 未解除）。
+  board 仍 `mvp-remaining-p0-followups-20261102`（Alice working rev3）。Alice
+  snapshot 显示已进入编辑（`index.ts`，累计 102 动作/1 edit），不是只读分析；
+  worktree `mvp-remaining-p0-followups` 仍基于 `9e57a0a5d`。worktree 共 7
+  （main + real-path-dispatch + remaining-p0-followups + 4 locked provider
+  PROTECTED_HOLD），未超 10，未触碰其他 owner 资源。Carol 进度请求
+  `m1793659062726-1525` 尚未回执，不据此判定阻塞。下一动作：等 Alice 交付
+  W3-B/W2-A 后独立 review + integration，不抢其 writer。
+
 - 2026-11-02 22:34 UTC: project-patrol `m1793658767157-1511`。RCC
   `127.0.0.1:4444/health` 现返回 200（此前 22:16 记录未监听），真实入口可继续
   验收。`appsdk bug list` 的 git-bug 锁已由遗留 pid 30117 释放，现可读取；open
