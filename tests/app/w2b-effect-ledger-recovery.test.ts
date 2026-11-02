@@ -446,6 +446,37 @@ test('W2-B Scenario 4, 5, 6, 7 & 8: recovery-auto-resumed, recovery-hold-effect-
       verifiedAt: '2026-11-02T05:00:02.000Z',
     });
 
+    // Scenario 4c (Negative): Safe tool effects with unconfirmed/unknown provider settle receipt must hold and never auto-resume
+    const scopeUnknownSettleOnly = makeScope('task-w2b-unknown-settle', 'cycle-unknown-settle', 'op-unknown-settle');
+    const refUnknownSettleOnly = makeEvidenceRef(scopeUnknownSettleOnly, 'recovery:unknown-settle');
+    await ledger.appendToolEffectLedgerEntry({
+      scope: scopeUnknownSettleOnly,
+      turnId: 'turn-unknown-settle',
+      toolCallId: 'call-read-only-1',
+      toolName: 'file.read',
+      effectPolicy: 'readonly',
+      idempotencyKey: 'idem:turn-unknown-settle:call-read-only-1',
+      argsDigest: 'sha256:4444',
+      state: 'dispatched-effect-unknown',
+    });
+    const unknownSettleDecision = await evaluateAndPersistTurnRecovery({
+      ledger,
+      checkpointStore,
+      scope: scopeUnknownSettleOnly,
+      turnId: 'turn-unknown-settle',
+      directiveRevision: 1,
+      executionEpoch: 1,
+      recoveryStateRef: refUnknownSettleOnly,
+    });
+    assert.equal(
+      unknownSettleDecision.outcome,
+      'recovery-hold-effect-unknown',
+      'unconfirmed provider settle (state=unknown) must hold and never auto-resume even when tool effects are readonly',
+    );
+    assert.deepEqual(unknownSettleDecision.allowedActions, ['recover', 'stop']);
+    assert.equal(unknownSettleDecision.checkpoint?.checkpoint.outcome, 'blocked');
+    assert.equal(unknownSettleDecision.fact?.providerSettleReceipt.state, 'unknown');
+
     // Scenario 5: Unknown mutating effect (mutating + dispatched-effect-unknown) with empty providerSettlements -> recovery-hold-effect-unknown + settle state 'unknown' (never fabricates 'not-sent')
     const scopeHold = makeScope('task-w2b-hold', 'cycle-hold', 'op-hold');
     const refHold = makeEvidenceRef(scopeHold, 'recovery:hold');
@@ -481,8 +512,8 @@ test('W2-B Scenario 4, 5, 6, 7 & 8: recovery-auto-resumed, recovery-hold-effect-
     );
     assert.equal(holdDecision.fact?.providerSettleReceipt.providerRequestId, null);
 
-    // Scenario 6: Explicit recover transitions held entry to reconciled, commits recovery-auto-resumed, and is idempotent on duplicate calls
-    const recoveredFirst = await reconcileHeldTurnEffectsForRecover({
+    // Scenario 6a (Negative): Reconciling tool effects without a settled/stopped/not-sent ProviderSettleReceipt keeps the turn held on unknown settle
+    const heldBecauseSettleStillUnknown = await reconcileHeldTurnEffectsForRecover({
       ledger,
       checkpointStore,
       scope: scopeHold,
@@ -492,12 +523,38 @@ test('W2-B Scenario 4, 5, 6, 7 & 8: recovery-auto-resumed, recovery-hold-effect-
       recoveryStateRef: refHold,
       operatorNote: 'Verified external bash side effect is clean',
     });
+    assert.equal(
+      heldBecauseSettleStillUnknown.outcome,
+      'recovery-hold-effect-unknown',
+      'reconcileHeldTurnEffectsForRecover must remain held when providerSettleReceipt.state is still unknown',
+    );
+    assert.deepEqual(heldBecauseSettleStillUnknown.allowedActions, ['recover', 'stop']);
+    assert.equal(heldBecauseSettleStillUnknown.fact?.providerSettleReceipt.state, 'unknown');
+    const holdEntriesAfterEffectReconcile = await ledger.readToolEffectLedgerEntries({ scope: scopeHold, turnId: 'turn-hold' });
+    assert.equal(holdEntriesAfterEffectReconcile.length, 1);
+    assert.equal(holdEntriesAfterEffectReconcile[0]?.entry.state, 'reconciled');
+
+    // Scenario 6b (Positive): Explicit recover with confirmed ProviderSettleReceipt (stopped/settled/not-sent) commits recovery-auto-resumed and is idempotent on duplicate calls
+    const confirmedHoldSettlement = {
+      providerRequestId: 'req-hold-stopped-1',
+      state: 'stopped' as const,
+      verifiedBy: 'provider-adapter-stop-ack' as const,
+      verifiedAt: '2026-11-02T05:00:05.000Z',
+    };
+    const recoveredFirst = await reconcileHeldTurnEffectsForRecover({
+      ledger,
+      checkpointStore,
+      scope: scopeHold,
+      turnId: 'turn-hold',
+      directiveRevision: 1,
+      executionEpoch: 1,
+      recoveryStateRef: refHold,
+      providerSettlements: [confirmedHoldSettlement],
+      operatorNote: 'Verified external bash side effect is clean and provider request stopped',
+    });
     assert.equal(recoveredFirst.outcome, 'recovery-auto-resumed');
     assert.equal(recoveredFirst.checkpoint?.checkpoint.recoveryOutcome, 'recovery-auto-resumed');
-    assert.equal(recoveredFirst.fact?.providerSettleReceipt.state, 'unknown');
-    const holdEntriesAfterRecover = await ledger.readToolEffectLedgerEntries({ scope: scopeHold, turnId: 'turn-hold' });
-    assert.equal(holdEntriesAfterRecover.length, 1);
-    assert.equal(holdEntriesAfterRecover[0]?.entry.state, 'reconciled');
+    assert.deepEqual(recoveredFirst.fact?.providerSettleReceipt, confirmedHoldSettlement);
 
     const journalBeforeDuplicateRecover = await readFile(journalPath, 'utf8');
     const recoveredDuplicate = await reconcileHeldTurnEffectsForRecover({
@@ -508,7 +565,7 @@ test('W2-B Scenario 4, 5, 6, 7 & 8: recovery-auto-resumed, recovery-hold-effect-
       directiveRevision: 1,
       executionEpoch: 1,
       recoveryStateRef: refHold,
-      operatorNote: 'Verified external bash side effect is clean',
+      operatorNote: 'Verified external bash side effect is clean and provider request stopped',
     });
     const journalAfterDuplicateRecover = await readFile(journalPath, 'utf8');
     assert.equal(recoveredDuplicate.outcome, 'recovery-auto-resumed');
@@ -691,10 +748,27 @@ test('W2-B Coordinator hydrate & recoverTask E2E: recovery-hold sets allowedActi
     assert.equal(snapAfterHydrate.checkpoint?.recoveryOutcome, 'recovery-hold-effect-unknown');
     assert.equal(resumedRuns, 0, 'recovery-hold must not auto-resume before operator recover');
 
-    // Operator invokes recoverTask (and duplicate recoverTask call is idempotent)
+    // Negative: recoverTask without confirmed providerSettlements keeps task held in blocked state while provider settle is unknown
+    const snapWithoutSettle = await coordinator2.recoverTask(task.taskId, {
+      operatorNote: 'effect checked but provider settle not yet provided',
+    });
+    assert.equal(snapWithoutSettle.state, 'blocked');
+    assert.deepEqual(snapWithoutSettle.allowedActions, ['recover', 'stop']);
+    assert.equal(snapWithoutSettle.checkpoint?.recoveryOutcome, 'recovery-hold-effect-unknown');
+    assert.equal(resumedRuns, 0, 'recoverTask must not resume while providerSettleReceipt.state is unknown');
+
+    // Positive: Operator invokes recoverTask with confirmed providerSettlements (and duplicate recoverTask call is idempotent)
+    const confirmedCoordSettle = [
+      {
+        providerRequestId: 'req-coord-stopped-1',
+        state: 'stopped' as const,
+        verifiedBy: 'lease-process-exit-reconcile' as const,
+        verifiedAt: '2026-11-02T05:15:05.000Z',
+      },
+    ];
     const [recoveredSnap1, recoveredSnap2] = await Promise.all([
-      coordinator2.recoverTask(task.taskId),
-      coordinator2.recoverTask(task.taskId),
+      coordinator2.recoverTask(task.taskId, { providerSettlements: confirmedCoordSettle }),
+      coordinator2.recoverTask(task.taskId, { providerSettlements: confirmedCoordSettle }),
     ]);
     assert.equal(recoveredSnap1.taskId.value, task.taskId.value);
     assert.equal(recoveredSnap2.taskId.value, task.taskId.value);
@@ -1036,8 +1110,24 @@ test('W2-B real child-process SIGKILL interrupt during mutating tool execution -
     assert.equal(snapAfterHydrate.checkpoint?.recoveryFact?.toolEffects[0]?.toolName, 'file.write');
     assert.equal(parentResumedTurnRuns, 0);
 
+    // Calling recoverTask without a confirmed ProviderSettleReceipt must remain held while settle state is unknown
+    const snapHeldWithoutSettle = await coordinator2.recoverTask(taskId, {
+      operatorNote: `verified ${targetFilePath} written by child pid ${inFlightInfo.pid} before SIGKILL (settle still unknown)`,
+    });
+    assert.equal(snapHeldWithoutSettle.state, 'blocked');
+    assert.equal(snapHeldWithoutSettle.checkpoint?.recoveryOutcome, 'recovery-hold-effect-unknown');
+    assert.equal(parentResumedTurnRuns, 0);
+
+    // Calling recoverTask with a confirmed ProviderSettleReceipt (stopped after child process exit verification) releases hold and resumes same Turn
+    const confirmedChildExitSettle = {
+      providerRequestId: `req:${inFlightInfo.operationId}:epoch-1`,
+      state: 'stopped' as const,
+      verifiedBy: 'lease-process-exit-reconcile' as const,
+      verifiedAt: new Date().toISOString(),
+    };
     await coordinator2.recoverTask(taskId, {
-      operatorNote: `verified ${targetFilePath} written by child pid ${inFlightInfo.pid} before SIGKILL`,
+      operatorNote: `verified ${targetFilePath} written by child pid ${inFlightInfo.pid} before SIGKILL and confirmed process exit settle`,
+      providerSettlements: [confirmedChildExitSettle],
     });
 
     const deadline = Date.now() + 5000;
@@ -1058,7 +1148,7 @@ test('W2-B real child-process SIGKILL interrupt during mutating tool execution -
 
     const latestRecoveryFact = await ledger.readLatestTurnSegmentRecoveryFact({ scope, turnId: inFlightInfo.turnId });
     assert.equal(latestRecoveryFact?.recoveryOutcome, 'recovery-auto-resumed');
-    assert.equal(latestRecoveryFact?.providerSettleReceipt.state, 'unknown');
+    assert.deepEqual(latestRecoveryFact?.providerSettleReceipt, confirmedChildExitSettle);
     assert.equal(latestRecoveryFact?.toolEffects[0]?.state, 'reconciled');
 
     if (process.env.W2B_RECEIPT_PATH) {
@@ -1068,6 +1158,9 @@ test('W2-B real child-process SIGKILL interrupt during mutating tool execution -
         JSON.stringify(
           {
             generatedAt: new Date().toISOString(),
+            realRccMidTurnInterruptRecoveryStatus: 'UNVERIFIED',
+            realRccMidTurnInterruptRecoveryNote:
+              'liveRccE2EScenario proves real RCC 4444 normal multi-round tool effect ledger persistence; realProcessInterruptRecoveryProof proves child-process SIGKILL mid-mutating-tool interrupt, unknown-settle hold, and same-turn recovery after confirmed stopped ProviderSettleReceipt; live RCC mid-stream interrupt recovery remains UNVERIFIED.',
             liveRccE2EScenario: {
               scenario: 'local-file-search',
               attemptId: 'local-file-search-20261102-102408-p410sa',
@@ -1087,6 +1180,11 @@ test('W2-B real child-process SIGKILL interrupt during mutating tool execution -
               turnId: inFlightInfo.turnId,
               mutatedTargetFile: targetFilePath,
               diskSideEffectVerifiedBeforeRecover: true,
+              heldWhenSettleUnknownBeforeSettleConfirmation: {
+                state: snapHeldWithoutSettle.state,
+                recoveryOutcome: snapHeldWithoutSettle.checkpoint?.recoveryOutcome,
+                parentResumedTurnRuns: 0,
+              },
               beforeOperatorRecover: {
                 state: snapAfterHydrate.state,
                 allowedActions: snapAfterHydrate.allowedActions,

@@ -121,12 +121,16 @@ export function validateToolEffectLedgerEntry(entry: ToolEffectLedgerEntry): voi
   if (entry.outputArtifactRef !== null) requireText(entry.outputArtifactRef, 'tool effect output artifact ref');
 }
 
-/** Deterministic recovery branch: only an unknown mutating effect requires hold. */
+/** Deterministic recovery branch: unknown provider settle or unknown mutating effect requires hold. */
 export function decideTurnSegmentRecovery(
   toolEffects: readonly ToolEffectLedgerEntry[],
+  providerSettleState: ProviderSettleState = 'settled',
 ): Exclude<TurnSegmentRecoveryOutcome, 'stopped'> {
   if (!Array.isArray(toolEffects)) throw new ContractError('turn segment tool effects must be an array');
   for (const entry of toolEffects) validateToolEffectLedgerEntry(entry);
+  if (providerSettleState === 'unknown') {
+    return 'recovery-hold-effect-unknown';
+  }
   return toolEffects.some((entry) => (
     entry.effectPolicy === 'mutating' && entry.state === 'dispatched-effect-unknown'
   ))
@@ -163,7 +167,10 @@ export function validateTurnSegmentRecoveryFact(fact: TurnSegmentRecoveryFact): 
   ].includes(fact.recoveryOutcome)) {
     throw new ContractError(`unsupported turn segment recovery outcome: ${String(fact.recoveryOutcome)}`);
   }
-  if (fact.recoveryOutcome !== 'stopped' && fact.recoveryOutcome !== decideTurnSegmentRecovery(fact.toolEffects)) {
+  if (
+    fact.recoveryOutcome !== 'stopped'
+    && fact.recoveryOutcome !== decideTurnSegmentRecovery(fact.toolEffects, fact.providerSettleReceipt.state)
+  ) {
     throw new ContractError('turn segment recovery outcome does not match effect safety state');
   }
 }

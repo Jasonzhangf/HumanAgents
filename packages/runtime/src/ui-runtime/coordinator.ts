@@ -38,6 +38,7 @@ import {
   type ToolExecutionFact,
   type TurnSegmentRecoveryFact,
   type TurnSegmentRecoveryOutcome,
+  type ProviderSettleReceipt,
   type ScopeRef,
   type Task,
   type TaskId,
@@ -2995,7 +2996,10 @@ export class RuntimeTaskCoordinator {
    */
   async recoverTask(
     taskId: TaskId,
-    options?: { readonly operatorNote?: string },
+    options?: {
+      readonly operatorNote?: string;
+      readonly providerSettlements?: readonly ProviderSettleReceipt[];
+    },
   ): Promise<RuntimeTaskSnapshot> {
     const record = this.requireTask(taskId);
     if (record.recoveryPromise) {
@@ -3066,6 +3070,7 @@ export class RuntimeTaskCoordinator {
           directiveRevision: record.directiveRevision,
           executionEpoch: record.executionEpoch ?? operation.executionEpoch,
           recoveryStateRef,
+          providerSettlements: options?.providerSettlements,
           operatorNote: options?.operatorNote,
         });
         if (decision.checkpoint) {
@@ -3081,6 +3086,13 @@ export class RuntimeTaskCoordinator {
           record.currentState = '已对账安全副作用，自动恢复中';
           record.nextStep = '在同一业务 Turn 继续执行';
           this.resumeInterruptedTaskTurn(record, operation, scope);
+        } else if (decision.outcome === 'recovery-hold-effect-unknown') {
+          record.state = 'blocked';
+          record.running = false;
+          record.stopping = false;
+          record.currentState = '变更副作用或 Provider 结算状态待确认';
+          record.nextStep = '确认外部变更与 Provider 请求收拢结果后执行恢复或停止任务';
+          record.allowedActions = ['recover', 'stop'];
         }
         return this.snapshot(record);
       } finally {

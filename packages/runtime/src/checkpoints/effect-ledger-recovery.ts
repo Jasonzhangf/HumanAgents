@@ -538,7 +538,7 @@ export async function evaluateAndPersistTurnRecovery(
           verifiedBy: 'lease-process-exit-reconcile',
           verifiedAt: new Date().toISOString(),
         };
-    const recoveryOutcome = decideTurnSegmentRecovery(entries);
+    const recoveryOutcome = decideTurnSegmentRecovery(entries, resolvedSettleReceipt.state);
 
     const digestToken = sha256Hex(
       canonicalJsonStringify({
