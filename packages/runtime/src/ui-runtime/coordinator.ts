@@ -1656,6 +1656,17 @@ function errorFromUnknown(error: unknown): RuntimeTaskError {
   };
 }
 
+function retryableNativeStartFailure(error: unknown): RuntimeTaskError {
+  const failure = errorFromUnknown(error);
+  if (failure.retryable || error === null || typeof error !== 'object' || !('providerError' in error)) {
+    return failure;
+  }
+  const providerError = (error as { readonly providerError?: ProviderError }).providerError;
+  return providerError?.phase === 'start' && /^http\.5\d\d$/.test(providerError.code)
+    ? { ...failure, retryable: true }
+    : failure;
+}
+
 function recoveryProjection(recovery: StopSettlementRecovery): RuntimeTaskError {
   return {
     code: recovery.code,
@@ -5243,6 +5254,12 @@ export class RuntimeTaskCoordinator {
           break;
         }
       } else {
+        // Non-orchestrated lane (no child/orchestration review ports). The real
+        // `--mode rcc` serve enters here because `defaultOrchestrate()` returns
+        // `{}` when a native driver is bound. The native lane owns its real
+        // provider turn through this delivery tail; the bounded corrective
+        // retry is a provider-model transport concern and stays here instead of
+        // moving into the orchestrated dispatch.
         if (this.options.providerRetry) {
           throw new RuntimeTaskControlError(
             'execution.retry.wiring.invalid',
@@ -5267,56 +5284,99 @@ export class RuntimeTaskCoordinator {
           });
           this.bindChildCallManager(driver, record.taskAssembly);
         }
+        // The Runtime/composition is started exactly once. A clean retryable
+        // provider transport failure (the first real request never reached a
+        // tool) escapes `submit()` before any observation, so the same admitted
+        // execution can be re-submitted once with a corrective prompt. Reusing
+        // the admitted driver/composition is required: a fresh native driver
+        // would re-prepare an operation whose control coverage already belongs
+        // to this runtime and be rejected.
         await composition!.start();
-        await composition!.submit(prompt);
-        completeExecutionReady(true);
-        if (record.stopping || record.postCommitRecoveryPending) return;
-        const observations = new BudgetedProviderObservations(
-          composition!.observe()[Symbol.asyncIterator](),
-          { ...DEFAULT_UI_EXECUTION_EVENT_BUDGET, ...this.options.executionBudget },
-          () => this.now().getTime(),
-        );
-        record.budgetObservation = observations;
-        try {
-          while (true) {
-            const exhausted = observations.exhausted();
-            if (exhausted !== undefined) {
-              if (this.budgetStopOwnedByAttempt(record, operation)) {
-                await this.beginRequestBudgetStop(record, operation, exhausted);
-              }
-              break;
-            }
-            const step = await observations.next();
-            if (step.kind === 'deadline') continue;
-            if (step.step.done) break;
-            const observation = step.step.value;
-            if (record.postCommitRecoveryPending) return;
-            if (!observation.accepted) {
-              this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
-              continue;
-            }
-            const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
-            if (!event.providerEvent) continue;
-            observations.note(event.providerEvent);
-            await this.recordProviderEvent(record, operation, event.providerEvent);
+        let submission = prompt;
+        let nativeAttemptObserved = false;
+        const nativeAttempt = async () => {
+          await composition!.submit(submission);
+          completeExecutionReady(true);
+          if (record.stopping || record.postCommitRecoveryPending) {
+            return { closure: undefined as AgentRuntimeClosure | undefined, status: 'cancelled' as const };
           }
-        } finally {
-          if (record.budgetObservation === observations) record.budgetObservation = undefined;
-          await observations.close();
+          nativeAttemptObserved = true;
+          const observations = new BudgetedProviderObservations(
+            composition!.observe()[Symbol.asyncIterator](),
+            { ...DEFAULT_UI_EXECUTION_EVENT_BUDGET, ...this.options.executionBudget },
+            () => this.now().getTime(),
+          );
+          record.budgetObservation = observations;
+          try {
+            while (true) {
+              const exhausted = observations.exhausted();
+              if (exhausted !== undefined) {
+                if (this.budgetStopOwnedByAttempt(record, operation)) {
+                  await this.beginRequestBudgetStop(record, operation, exhausted);
+                }
+                break;
+              }
+              const step = await observations.next();
+              if (step.kind === 'deadline') continue;
+              if (step.step.done) break;
+              const observation = step.step.value;
+              if (record.postCommitRecoveryPending) return { closure: undefined, status: 'blocked' as const };
+              if (!observation.accepted) {
+                this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
+                continue;
+              }
+              const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
+              if (!event.providerEvent) continue;
+              observations.note(event.providerEvent);
+              await this.recordProviderEvent(record, operation, event.providerEvent);
+            }
+          } finally {
+            if (record.budgetObservation === observations) record.budgetObservation = undefined;
+            await observations.close();
+          }
+          if (record.postCommitRecoveryPending) return { closure: undefined, status: 'blocked' as const };
+          if (runtime!.snapshot().state === 'stopped') {
+            this.finalize(record, 'stopped');
+            return { closure: undefined, status: 'cancelled' as const };
+          }
+          if (record.stopping) return { closure: undefined, status: 'cancelled' as const };
+          this.pushEvent(record, operation, 'execution.settling', 'settling', 'execution settling', []);
+          record.state = 'settling';
+          record.running = false;
+          record.currentState = '收拢中';
+          record.nextStep = '等待 checkpoint';
+          record.allowedActions = [];
+          const settled = await composition!.settle();
+          return { closure: settled, status: settled.state === 'succeeded' ? 'succeeded' as const : 'failed' as const };
+        };
+        const nativeMaxAttempts = 2;
+        let nativeAttemptNumber = 1;
+        while (true) {
+          let outcome: { readonly closure: AgentRuntimeClosure | undefined; readonly status: 'succeeded' | 'failed' | 'blocked' | 'cancelled' };
+          try {
+            outcome = await nativeAttempt();
+          } catch (error) {
+            const failure = retryableNativeStartFailure(error);
+            const committedSideEffects = record.checkpointReceipt !== undefined
+              || operation.events.some((entry) => entry.kind === 'provider.tool' || entry.kind === 'provider.tool-result');
+            if (
+              !failure.retryable
+              || nativeAttemptObserved
+              || committedSideEffects
+              || record.stopping
+              || record.postCommitRecoveryPending
+              || nativeAttemptNumber >= nativeMaxAttempts
+            ) throw error;
+            submission = `${prompt}\n\n纠正说明：第 ${nativeAttemptNumber} 次尝试执行失败，原因：${failure.message}。请根据上一轮失败原因修正后再次执行。`;
+            this.pushEvent(record, operation, 'execution.retry', 'retrying',
+              `第 ${nativeAttemptNumber + 1} 次尝试（重试原因：${failure.message}）`, [],
+              STEP_OWNER, true, `recover:execution.retry.${record.taskId.value}`);
+            nativeAttemptNumber += 1;
+            continue;
+          }
+          closure = outcome.closure;
+          break;
         }
-        if (record.postCommitRecoveryPending) return;
-        if (runtime!.snapshot().state === 'stopped') {
-          this.finalize(record, 'stopped');
-          return;
-        }
-        if (record.stopping) return;
-        this.pushEvent(record, operation, 'execution.settling', 'settling', 'execution settling', []);
-        record.state = 'settling';
-        record.running = false;
-        record.currentState = '收拢中';
-        record.nextStep = '等待 checkpoint';
-        record.allowedActions = [];
-        closure = await composition!.settle();
       }
       if (record.postCommitRecoveryPending || !closure) return;
       const settledClosure = closure;

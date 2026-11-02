@@ -1,0 +1,49 @@
+{
+  "result": "SUCCESS",
+  "scenario": "local-file-search",
+  "entry": "homepage",
+  "serviceMode": "candidate",
+  "requestedOutcome": "success",
+  "attemptId": "local-file-search-20261101-195432-157ks9",
+  "candidate": {
+    "repoPath": "/Volumes/Intel/playground/humanagent/execution-retry-visual-proof-20261101",
+    "releaseVersion": "0.1.0043"
+  },
+  "runtime": {
+    "mode": "rcc",
+    "protocol": "responses",
+    "requestedModel": "gpt-5.5",
+    "resolvedModel": "MiniMax-M3",
+    "upstream": "http://127.0.0.1:4444",
+    "controlRoot": "isolated tmp control root (not production ~/.humanagent)"
+  },
+  "task": {
+    "executionTaskId": "scheduled-task-665227213af5adf02045",
+    "terminalState": "succeeded"
+  },
+  "checkpointCommitted": 1,
+  "toolRounds": 3,
+  "requestStartTurns": 5,
+  "retryEvent": {
+    "seq": 4,
+    "kind": "execution.retry",
+    "state": "retrying",
+    "summary": "第 2 次尝试（重试原因：RCC v3 returned HTTP 503: {\"error\":{\"type\":\"harness_injected_retryable_failure\",\"message\":\"deterministic attempt-1 failure injected by retry-injection.mjs at the transport boundary\"}}）"
+  },
+  "retryScreenshots": [
+    "docs/evidence/execution-retry-native-rcc-lane-20261101/retry-step-1280x720.png",
+    "docs/evidence/execution-retry-native-rcc-lane-20261101/retry-step-390x844.png"
+  ],
+  "missingEvidence": [],
+  "deviation": null,
+  "cleanup": {
+    "branch": "settled",
+    "cleaned": true
+  },
+  "injection": {
+    "injectedCount": 1,
+    "injectedPaths": ["/v1/responses"],
+    "forwardedCount": 19,
+    "errors": []
+  }
+}

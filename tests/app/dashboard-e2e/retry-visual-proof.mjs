@@ -29,6 +29,7 @@
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -41,6 +42,9 @@ import { runLocalFileSearchScenario } from './scenarios/local-file-search.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_PATH = join(__dirname, '..', '..', '..');
 const UPSTREAM = (process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444').replace(/\/$/, '');
+// Isolated control root for this attempt. Persistent state stays outside the
+// production `~/.humanagent` and outside the runner's ephemeral attempt root.
+const ISOLATED_CONTROL_ROOT = join(tmpdir(), `humanagent-d17-retry-control-${Date.now()}`);
 
 function fail(message) {
   console.error(JSON.stringify({ status: 'FAIL', error: message }, null, 2));
@@ -72,24 +76,34 @@ async function runRetryProofScenario(binding) {
     const rowSeen = (rows) => rows.some((row) => String(row.kind ?? '').startsWith('execution.retry'));
     await pageBackDashboardHistory(binding);
     const { page } = binding.browser;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    // The corrective retry step is emitted before the first real tool round, so
+    // it lives on the oldest history page. Page back through the whole bounded
+    // window until that row is visible or the pager reaches the first page.
+    let retryRowVisible = false;
+    for (let attempt = 0; attempt < 64; attempt += 1) {
       const dom = await readTaskDashboardDom(binding, { navigate: false });
-      if (rowSeen(dom.eventRows ?? [])) break;
+      if (rowSeen(dom.eventRows ?? [])) {
+        retryRowVisible = true;
+        break;
+      }
       const older = page.locator('.history-pager button', { hasText: '更早' }).first();
       if (await older.count() === 0 || await older.isDisabled()) break;
       await older.click();
-      await page.waitForTimeout(200);
+      await page.waitForTimeout(120);
     }
     const retryRow = page.locator('li.event', { has: page.locator('.event-kind', { hasText: 'execution.retry' }) }).first();
-    if (await retryRow.count() === 0) {
+    if (!retryRowVisible || await retryRow.count() === 0) {
       throw new Error('execution.retry row was not found in the dashboard execution trace');
     }
-    await retryRow.scrollIntoViewIfNeeded();
     for (const viewport of [
       { width: 1280, height: 720, name: 'retry-step-1280x720' },
       { width: 390, height: 844, name: 'retry-step-390x844' },
     ]) {
       await page.setViewportSize(viewport);
+      await page.waitForTimeout(150);
+      // Re-center the row after every resize: the trace drawer rewraps, so a
+      // bottom-aligned scroll would clip the retry summary on the wider view.
+      await retryRow.evaluate((element) => element.scrollIntoView({ block: 'center' }));
       await page.waitForTimeout(150);
       const path = join(binding.screenshotsDir, `${viewport.name}.png`);
       await page.screenshot({ path });
@@ -117,12 +131,17 @@ async function runRetryProofScenario(binding) {
     missing.push(`retry-step screenshots captured=${retryScreenshots.length} (expected 2: 1280x720 and 390x844)`);
   }
 
-  evidence.retryProof = {
+  const retryProof = {
     upstream: UPSTREAM,
     retryEvent,
     terminalRecord,
     retryScreenshots,
     journalEventCount: events.length,
+  };
+  evidence.retryProof = retryProof;
+  evidence.scenarioEvidence = {
+    ...(evidence.scenarioEvidence ?? {}),
+    retryProof,
   };
   evidence.screenshots = [...(evidence.screenshots ?? []), ...retryScreenshots];
   if (missing.length) evidence.missingEvidence = missing;
@@ -141,6 +160,7 @@ async function main() {
     serviceMode: 'candidate',
     entry: 'homepage',
     outcome: 'success',
+    controlRoot: ISOLATED_CONTROL_ROOT,
     hooks: {
       runScenario: runRetryProofScenario,
     },

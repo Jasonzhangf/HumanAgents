@@ -20,6 +20,10 @@ import {
   type AttentionPort,
 } from '../../packages/runtime/src/index.js';
 import {
+  ProviderAdapterError,
+  ProviderAgentDriver,
+} from '../../packages/adapters/provider/src/index.js';
+import {
   AgentRuntimePoolManager,
   OrchestrationManager,
   type ExecutionAgentPort,
@@ -192,6 +196,26 @@ class ScriptedCorrectivePort extends FakeReplayExecutionRuntimePort {
   }
 }
 
+class NativeStartFailurePort extends FakeReplayExecutionRuntimePort {
+  readonly startPayloads: unknown[] = [];
+  startCount = 0;
+
+  override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    this.startPayloads.push(structuredClone(input.payload ?? null));
+    this.startCount += 1;
+    if (this.startCount === 1) {
+      throw new ProviderAdapterError({
+        code: 'http.503',
+        category: 'provider',
+        phase: 'start',
+        message: 'RCC v3 returned HTTP 503: injected retryable failure',
+        scope: input,
+      });
+    }
+    return super.start(input);
+  }
+}
+
 // 与现有 ui-runtime 测试一致的真实编排装配：编排层使用 forwarded maxAttempts。
 function orchestratedServiceFor(root: string, port: ExecutionRuntimePort): UiRuntimeService {
   const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
@@ -285,6 +309,40 @@ function orchestratedServiceFor(root: string, port: ExecutionRuntimePort): UiRun
         });
         return { orchestration, runtimePool };
       },
+    },
+  });
+}
+
+function nativeServiceFor(root: string, port: ExecutionRuntimePort): UiRuntimeService {
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  return new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    journal,
+    closurePort: journal,
+    memory: testMemory('project-corrective-retry'),
+    runtimeComposition: {
+      createExecutionPorts: () => ({
+        admitExecution: async () => {},
+        createDriver: async (allocation) => new ProviderAgentDriver({
+          port,
+          binding,
+          runtimeId: allocation.runtimeId,
+          taskId: allocation.taskId,
+          operationId: allocation.operationId,
+          executionEpoch: allocation.executionEpoch,
+          assignmentId: allocation.assignmentId,
+          scope: allocation.scope,
+          inputRefs: allocation.inputRefs,
+          ownerId: allocation.ownerId,
+        }),
+      }),
     },
   });
 }
@@ -411,6 +469,33 @@ test('有界纠正重试：已提交副作用后失败则不重新派发', async
       false,
       'blocked summary for a single-attempt side-effect failure must not claim the attempt cap was reached',
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('有界纠正重试：native lane 的 HTTP 5xx start 失败后使用纠正 prompt 重派发一次', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-corrective-retry-native-'));
+  try {
+    const port = new NativeStartFailurePort({ binding });
+    const service = nativeServiceFor(root, port);
+    const task = service.createTask({ title: 'native corrective retry' });
+    await service.startExecution(task.taskId, { prompt: 'retry the native provider request' });
+    await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+    assert.equal(port.startCount, 2, 'the native lane must dispatch exactly one corrective retry');
+    const firstPrompt = JSON.stringify(port.startPayloads[0]);
+    const secondPrompt = JSON.stringify(port.startPayloads[1]);
+    assert.ok(firstPrompt.includes('retry the native provider request'));
+    assert.ok(secondPrompt.includes('纠正说明'));
+    assert.ok(secondPrompt.includes('第 1 次尝试执行失败'));
+    assert.ok(secondPrompt.includes('HTTP 503'));
+
+    const events = service.taskDashboard(task.taskId).history.events;
+    const retryEvent = events.find((event) => (event.kind as string) === 'execution.retry' && event.state === 'retrying');
+    assert.ok(retryEvent, 'the native lane must project execution.retry/retrying');
+    assert.ok((retryEvent!.summary ?? '').includes('第 2 次尝试'));
+    assert.ok((retryEvent!.summary ?? '').includes('重试原因'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
