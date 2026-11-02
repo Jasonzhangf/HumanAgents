@@ -28,16 +28,20 @@ for new work.
      queue and must not be re-dispatched as W1-B.
 
 3. MVP end-to-end user path (the user's primary acceptance)
-   - Status: `未达成`. Four P0 remain open: `45f92c8` native lane bypasses
+   - Status: `未完全达成`. Four P0 remain open: `45f92c8` native lane bypasses
      implicit Brain orchestration, `a9dc797` completed native task public
      output empty, `4c21e74` observation lacks per-agent facts, `47b26dd`
      direct answer collapses main column.
-   - P0 `mvp-real-lane-entry-task-row-20261102`: Alice confirmed from
-     proof1-proof8 millisecond SSE evidence that RCC starts an unrequested
-     `continue_execution` Round 2 after a single-round request receives the
-     Round 1 message item. The red test is in
-     `/Volumes/Intel/playground/humanagent/mvp-w2a-orch-20261102/tests/adapters/provider/rcc-v3-transport.test.ts`
-     and failed with `stream.no-progress` as expected. The fix is incomplete.
+   - P0 `mvp-real-lane-entry-task-row-20261102`: `已进入 origin/main`.
+     The accepted fix is based on Alice candidate `53632c748`; main content
+     commit `8ad88aacf` carries the provider/test changes and provenance merge
+     `ef8b19534` keeps the exact candidate reachable without applying the
+     rejected W2-B parent content. Combined gates passed: provider focused
+     suite 53/53, `pnpm typecheck`, and `pnpm build:app`. The real RCC 4444
+     entry-flow receipt is 80/80 with the committed task row before the 30s
+     budget, live step plus total/per-step timers, succeeded pipeline at
+     +20s with two real provider tools, and non-empty output. Bug `60d2e73`
+     is closed; the board task is merged and awaits Alice's owner close.
    - Acceptance: arbitrary task input through the single interface reaches
      completion and dispatches to orchestration, with visible current turn
      step + timer and no second confirmation.
@@ -149,8 +153,8 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 | M | 交付物 | 状态 | 证据 / 缺口 | 下一动作 | 验收与停止条件 |
 |---|---|---|---|---|---|
-| M1 | 常驻 longhorizon 目标与 open bug 真源维护 | `active`：goal `ad967f01…` 每 20m 显式重 arm；`appsdk bug list` 当前 33 项 open，其中 P0 4、P1 12、P2 6，另有 11 项未分级审计/UX/通信项 | `appsdk goal status` 返回 active/observed=subscribed；`appsdk bug list --json` 已核对 `45f92c8`、`a9dc797`、`4c21e74`、`47b26dd` 四项 P0；旧清单只覆盖其中的 22 项 | 每轮刷新；未分级项补 owner；Alice 修复后同步 bug 状态 | 目标持续 active；所有 open 项有 owner、证据路径、下一动作；不能把 22 项旧队列冒称全部 |
-| M2 | 项目巡检（四项） | `armed`：project-patrol `sub-m1793413132850-18`，interval 900000ms，目标 1500000ms；`collab notify status` 仍为 `PATROL_CADENCE_RUNTIME_GAP`；goal deadline 已于 20:18 UTC 消费，并在 20:19 UTC 用 `appsdk goal subscribe --interval 20m` 显式重订阅 | `collab notify status`；`appsdk goal status --json`；worktree 7（main + W2-A 集成树 + real-path-dispatch + 4 locked provider `PROTECTED_HOLD`）；20:20 UTC 重试 `/Volumes/Intel` worktree 仍 EPERM | 每轮核对 worker、未关闭 board、资源和权限真源；不声称节奏已对齐；已向 Alice 发出当前进度与解除条件询问 | 四项均核对并有回执；gap 未解除时如实报告 |
+| M1 | 常驻 longhorizon 目标与 open bug 真源维护 | `active`：goal `ad967f01…` 每 20m 显式重 arm；`appsdk bug list` 当前 32 项 open，其中 P0 4、P1 9、P2 6，另有 13 项未分级审计/UX/通信项 | `appsdk goal status` 返回 armed/subscribed；`appsdk bug list --json` 已核对四项 P0；`60d2e73` 已在真实 RCC 入口和截图证据后关闭 | 每轮刷新；未分级项补 owner；Alice 修复后同步 bug 状态 | 目标持续 active；所有 open 项有 owner、证据路径、下一动作；不能把旧队列冒称全部 |
+| M2 | 项目巡检（四项） | `armed`：project-patrol `sub-m1793413132850-18`，interval 900000ms，目标 1500000ms；`collab notify status` 仍为 `PATROL_CADENCE_RUNTIME_GAP`；goal deadline `m1793651994627-1409` 已消费并按 20m 重新武装为 `sub-m1793652337880-1413` | `collab notify status`；`appsdk goal status --json`；worktree 7（main + W2-A 集成树 + real-path-dispatch + 4 locked provider `PROTECTED_HOLD`）；本轮已成功读取 `/Volumes/Intel` worktree、运行测试并核对证据 | 每轮核对 worker、未关闭 board、资源和权限真源；不声称节奏已对齐；继续推进 Alice 的 clarification 与 W2-B rework | 四项均核对并有回执；gap 未解除时如实报告 |
 | M3 | W1-A/W1-B 结果转交 Alice，不再续派或合并 | `已进入 origin/main`：W1-A `3c0b49f89`/`626969fb3` 与 W1-B `37c38dd56` 均为 `origin/main` 祖先 | `git merge-base --is-ancestor` 实测三个提交均 `yes`；Alice 工作树已由她收走 | 保持不续派；后续 W1 相关 P0 由 Alice 按 W1-W3 计划验收 | W1 提交已入 main；剩余 P0 状态以 `appsdk bug list` 为准，不重复合并 |
 | M4 | W2/W3 证据接收与核对 | W2-A 实现已入 main（`7b51b8076` 与返工 `0e9696a9e` 均为 `origin/main` 祖先，集成 commit `351a17ca0` 也在 main）；board 任务 `mvp-w2a-implicit-orchestration-20261102` rev16 `merged`，但独立审查记录了两项后续：w2a-result.md 图描述回边需更正、Planner 决策端口未在 `packages/app` 接线；W2-B `879332f5a` 不是 main 祖先，board rev8 `rework` | `collab board show`；`git merge-base --is-ancestor`；`collab worker snapshot` | W2-B 完成真实中断/效果恢复证据后由 Alice 交回；W2-A 两项后续和 W2-B 都不得因“已入集成分支”标完成 | W2-A 可交付面已入 main，但两项后续未闭环；W2-B 未并入 main，真实 mutating/recovery 证据缺失时标 `UNVERIFIED` |
 | M5 | 自有 worktree 与资源收口 | `open`：main、`mvp-real-path-dispatch-20261102`、`mvp-w2a-orch-20261102` 与 4 个 locked provider 树 `PROTECTED_HOLD`，共 7/10 | `git worktree list` 实测 7 个，未超 10 | 每轮核对；W2-B 收口后移除 `mvp-w2a-orch`；`mvp-real-path-dispatch` 由 Alice 完成后关闭 | 每个候选合入后 remove+prune；不触他人树 |
@@ -162,7 +166,7 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - P0 `a9dc797` 完成态公开输出为空（Alice W1-A 范围）。
 - P0 `4c21e74` observation 缺 per-agent turn/context/tool/model（Alice W3-B 范围）。
 - P0 `47b26dd` 直接回答后主区域塌陷（Alice W1-B 范围）。
-- P1 `6a11c8d`、`5f80361`、`28d01ec`、`acca591`、`1da2e49`、`82af5dc`、`180f971`、`111efcc`、`a7f56b9`、`486ddd4`、`28c9738`、`60d2e73`。
+- P1 `6a11c8d`、`5f80361`、`28d01ec`、`1da2e49`、`180f971`、`111efcc`、`a7f56b9`、`486ddd4`、`28c9738`。
 - P2 `ee0a4e0`、`f2cda64`、`e7f8815`、`69d70a0`、`8000805`、`db32833`。
 - 未分级 open：`69f2101`、`a807545`、`f5cf73b`、`28469ed`、`353b2f1`、`b4f9f4f`、`0016675`、`5dcc763`、`5be453f`、`8a4ab78`、`d442481`；不得因未带 P 标签从巡检中漏掉。
 
@@ -170,13 +174,27 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ### 同事 / worker 推进方式（每轮核对 busy/idle 与原因）
 
-- **Alice**（CEO + 修复 owner）：Jason 授权直接完成 W1-W3。W1 与 W2-A 实现已入 main；当前她先执行 `mvp-real-lane-entry-task-row-20261102` 真实 RCC P0（tmux 快照显示 thought 35m04s、329+ 动作、正在读取文件/运行命令，不是 idle），随后串行处理 `mvp-clarification-selectable-options-20261102`（board `invited`，她已收到指标通知）并收口 W2-A。W2-B 被退回 `rework`，等她补真实 typed settle/absence 与进程中断效果证据。台账 `mvp-repair-alice-20261102/ledger.md`。
+- **Alice**（CEO + 修复 owner）：Jason 授权直接完成 W1-W3。W1 与 W2-A 实现已入 main；`mvp-real-lane-entry-task-row-20261102` 已 review PASS、集成并推送，板任务为 `merged`，等待她作为 owner close。收到通知 `m1793652350328-1414` 后，她应继续 `mvp-clarification-selectable-options-20261102` 与 W2-B `rework`。W2-B 必须保留实际 typed settle/absence 语义，并补真实进程中断下的 mutating effect recovery 或显式 hold；W2-A 收口仍需处理 result-doc 回边描述和 Planner 决策端口接线。台账 `mvp-repair-alice-20261102/ledger.md`。
 - **W1-A GCM worker**（PID 45538，session 60985）：已完成并退出；提交 `3c0b49f89`（B1 canonical StandardTurnEndPayload + 单公开输出源）与 `626969fb3`（B3/A4 intake+planner JSON resilience + 中文 step 文案）已由 Alice 合并进 `codex/mvp-repair-integration-20261102`。工作树已收走，Jenny 不再续派。
 - **W1-B GCM worker**（PID 58804，session 53997）：已完成并退出；提交 `37c38dd56`（A1/A3/A4/A5 直接回答卡、corner safe-area、title cleanup、coverage aggregation）已由 Alice 合并进同一集成分支。工作树已收走，Jenny 不再续派。
 - **Emma**（项目经理 + 质检消融架构师）：负责 MVP 用户路径质检与项目推进；每半小时巡检，发现影响交付问题发给 Jenny 跟踪；验收修复走真实入口，保留双视口证据。目标 `emma-mvp-quality-acceptance-2026-11-01.md`。
 - **Bob / Carol / David**：可用 peer。Carol 无 tmux snapshot 能力时按「直接问 Carol」方式发 durable message（上次 `m1793534323235-241`），不把 snapshot 缺失当阻塞；无 ready 长程目标时不空邀请。
 
 ## Update Log
+
+- 2026-11-02 20:45 UTC: consumed `m1793651911372-1408` and deadline
+  `m1793651994627-1409`. Reviewed Alice's delivered
+  `mvp-real-lane-entry-task-row-20261102`: independently reran provider
+  53/53, `pnpm typecheck`, and `pnpm build:app`; checked the 80/80 real RCC
+  receipt and desktop/mobile screenshots. Cherry-picked only the reviewed P0
+  changes onto latest main, removed the trailing blank line, committed
+  `8ad88aacf`, pushed it, then recorded candidate `53632c748` provenance with
+  merge `ef8b19534`; rejected W2-B content was not applied. Recorded
+  `collab task integrated` and closed bug `60d2e73`. Re-armed goal
+  `sub-m1793652337880-1413` at 20m. Project patrol remains
+  `PATROL_CADENCE_RUNTIME_GAP` at runtime `900000ms` versus target
+  `1500000ms`. Worktree count 7/10; W2-A remains `merged`, W2-B `rework`,
+  clarification options `working`, all owned by Alice.
 
 - 2026-11-02 20:20 UTC: goal deadline `m1793650721655-1396` 已消费并显式
   续期为 20m；project patrol `sub-m1793413132850-18` 仍 armed，但运行
