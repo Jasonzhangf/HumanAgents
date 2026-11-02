@@ -971,3 +971,37 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   澄清选项单测通过。`explicit-brain-runtime` 56/62，6 个失败与
   `7e5de34af`（main 前身）逐项一致，属既有基线非合并引入。本轮已合并、
   已推送、未安装、未删除 worktree、未杀进程。
+
+- 2026-11-02 22:16 UTC: 消费 `m1793657282300-1484` 后的项目巡检（四项）。
+  `collab board show` 为空：W2-B `mvp-w2b-effect-ledger-checkpoint-recovery-20261102`
+  与 `mvp-clarification-selectable-options-20261102` 已由 owner close，加上
+  real-lane P0 与 W2-A 共 4 个 merged 任务全部关闭；Alice snapshot 确认共享树
+  `mvp-w2a-orch-20261102` 已 `git worktree remove`，候选分支
+  `codex/mvp-repair-integration-20261102` 已删除，证据保留于 w2a/w2b/result.md。
+  1) 未关闭 P0/P1：`appsdk bug list` 仍 4 项 P0 open（`45f92c8`、`a9dc797`、
+  `4c21e74`、`47b26dd`），另有 P1/P2 与未分级项 open；`45f92c8`（W2-A）仍有两项
+  后续（result-doc 回边描述、Planner 决策端口未在 `packages/app` 接线），
+  `4c21e74`（W3-B observation 缺 per-agent facts）尚未实现，`a9dc797`/`47b26dd`
+  修复已在 main（W1-A `3c0b49f89`/`626969fb3`、W1-B `37c38dd56`）但 bug 未按
+  真实入口验收后关闭。2) 未完成任务或 ready 工作：board 为空，无 ready 候选；
+  剩余 P0 归 Alice 的 W1-W3 范围。3) 自有 worktree 与资源：`git worktree list`
+  实测 6 个（main、`mvp-real-path-dispatch-20261102`、4 个 locked provider
+  `PROTECTED_HOLD`），未超 10；`mvp-real-path-dispatch` 仍为独立候选分支待确认
+  是否需保留。4) peer/worker busy/idle：Alice 已完成清理、tmux 缓冲在空提示符，
+  无 open task；Emma/Bob/Carol/David 无 open task。生产 `127.0.0.1:10086` 与
+  RCC `127.0.0.1:4444` 当前均未监听，真实入口黑盒验收暂不可行；`collab notify
+  status` 仍报告 `PATROL_CADENCE_RUNTIME_GAP`（运行 900000ms、目标 1500000ms），
+  且因进度未记录为 `PROJECT_PATROL_PROGRESS_NOT_RECORDED`，未声称节奏已对齐。
+  本轮未合并、未安装、未删 worktree、未杀进程。
+
+- 2026-11-02 22:27 UTC: goal deadline `m1793658297642-1496` 已 `collab recv`
+  消费（receive `receive-72449-1793658304316808000-0`）并显式重订阅 20m
+  (`appsdk goal subscribe --goal docs/goals/humanagent-open-p1-governance-20261101.md --interval 20m`，
+  one-shot armed；project patrol `sub-m1793413132850-18` 仍 armed)。针对仍未实现的
+  P0 缺口，已发布 board 任务 `mvp-remaining-p0-followups-20261102`
+  (priority p0, executor Alice, rev3 `working`)，范围=W3-B `4c21e74`
+  observation 五类 Agent 只读五维投影 + W2-A `45f92c8` 后续（result-doc 回边、
+  Planner 决策端口接入 `packages/app`）；含 allowed/forbidden paths、真实 RCC 4444
+  五类 Agent 矩阵、Playwright 双视口 observation.html 断言和清理条件。Alice 已接受
+  invite 并进入 working；`a9dc797`/`47b26dd` 修复已在 main，待 app/RCC 恢复后同入口
+  验收再关闭 bug。本轮未合并、未安装、未删 worktree、未杀进程。
