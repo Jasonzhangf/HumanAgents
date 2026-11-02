@@ -6190,7 +6190,11 @@ export class UiRuntimeService {
         }),
       });
       if (interpreted.kind === 'clarification') {
-        await this.explicitIntake.requestClarification(snapshot.interactionId, interpreted.question);
+        await this.explicitIntake.requestClarification(
+          snapshot.interactionId,
+          interpreted.question,
+          interpreted.options,
+        );
         this.persistExplicitBrainState();
         return await this.explicitIntake.inspect(snapshot.interactionId);
       }

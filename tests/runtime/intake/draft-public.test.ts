@@ -2540,3 +2540,53 @@ test('failed prepareConfirmation save is atomic and cannot leak confirmation thr
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('requestClarification and answerClarification preserve optional structured candidate options and reject malformed options', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-clarification-options-'));
+  try {
+    const journal = new FileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+
+    const withOptionsId = await receivePreview(intake);
+    await intake.beginMatching(withOptionsId);
+    await intake.requestClarification(withOptionsId, '请选择验收范围', ['仅检查 README 前 10 行', '检查整个 docs 目录']);
+
+    const waitingWithOptions = await intake.inspect(withOptionsId);
+    assert.equal(waitingWithOptions.state, 'awaiting-clarification');
+    assert.deepEqual(waitingWithOptions.clarifications, [
+      {
+        question: '请选择验收范围',
+        options: ['仅检查 README 前 10 行', '检查整个 docs 目录'],
+      },
+    ]);
+
+    await intake.answerClarification(withOptionsId, '仅检查 README 前 10 行');
+    const answeredWithOptions = await intake.inspect(withOptionsId);
+    assert.equal(answeredWithOptions.state, 'matching');
+    assert.deepEqual(answeredWithOptions.clarifications, [
+      {
+        question: '请选择验收范围',
+        options: ['仅检查 README 前 10 行', '检查整个 docs 目录'],
+        answer: '仅检查 README 前 10 行',
+      },
+    ]);
+
+    const withoutOptionsId = await receivePreview(intake);
+    await intake.beginMatching(withoutOptionsId);
+    await intake.requestClarification(withoutOptionsId, '请补充验收范围');
+    const waitingWithoutOptions = await intake.inspect(withoutOptionsId);
+    assert.deepEqual(waitingWithoutOptions.clarifications, [
+      { question: '请补充验收范围' },
+    ]);
+    assert.equal('options' in (waitingWithoutOptions.clarifications?.[0] ?? {}), false);
+
+    const invalidOptionsId = await receivePreview(intake);
+    await intake.beginMatching(invalidOptionsId);
+    await assert.rejects(
+      () => intake.requestClarification(invalidOptionsId, '请选择验收范围', ['']),
+      (error: unknown) => error instanceof ExplicitIntakeError && error.code === 'invalid-state',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

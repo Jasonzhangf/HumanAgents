@@ -256,7 +256,13 @@ async function handleScriptedApi(url, method, body) {
   const interpretMatch = /^\/api\/explicit\/interactions\/([^/]+)\/interpret$/.exec(url.pathname);
   if (interpretMatch && method === 'POST') {
     const interaction = scripted.interactions.get(decodeURIComponent(interpretMatch[1]));
-    if (/CLARIFY/.test(interaction.rawInput) && !interaction.answered) {
+    if (/CLARIFY_OPTIONS/.test(interaction.rawInput) && !interaction.answered) {
+      interaction.state = 'awaiting-clarification';
+      interaction.clarifications = [{
+        question: '请选择验收范围。',
+        options: ['仅检查 README 前 10 行', '检查整个 docs 目录'],
+      }];
+    } else if (/CLARIFY/.test(interaction.rawInput) && !interaction.answered) {
       interaction.state = 'awaiting-clarification';
       interaction.clarifications = [{ question: '请补充验收范围。' }];
     } else {
@@ -289,9 +295,14 @@ async function handleScriptedApi(url, method, body) {
   if (clarificationMatch && method === 'POST') {
     scripted.clarificationCount += 1;
     const interaction = scripted.interactions.get(decodeURIComponent(clarificationMatch[1]));
+    const prior = interaction.clarifications?.at(-1);
     interaction.answered = true;
     interaction.state = 'matching';
-    interaction.clarifications = [{ question: '请补充验收范围。', answer: String(body?.answer ?? '') }];
+    interaction.clarifications = [{
+      question: prior?.question ?? '请补充验收范围。',
+      ...(Array.isArray(prior?.options) ? { options: prior.options } : {}),
+      answer: String(body?.answer ?? ''),
+    }];
     return { status: 200, body: snapshotFor(interaction) };
   }
   const confirmationMatch = /^\/api\/explicit\/interactions\/([^/]+)\/confirmation$/.exec(url.pathname);
@@ -552,6 +563,8 @@ async function sectionA(artifactDir) {
     await page.click('#entry-form button[type="submit"]');
     await page.waitForSelector('#entry-draft input[name="answer"]', { timeout: 10_000 });
     const question = (await page.textContent('#entry-draft')) ?? '';
+    const optionCountWithoutOptions = await page.locator('#entry-draft [data-clarification-option]').count();
+    record('clarification without options does not fabricate option buttons', optionCountWithoutOptions === 0, optionCountWithoutOptions);
     await page.fill('#entry-draft input[name="answer"]', '验收范围就是 README 的前 10 行');
     await page.click('#entry-draft button[type="submit"]');
     const row = await waitForSubmittedTaskRow(page, expectedTaskId);
@@ -567,6 +580,41 @@ async function sectionA(artifactDir) {
       { row, url: page.url() },
     );
   }, { viewport: runs[0].viewport });
+
+  // Clarification with candidate options renders clickable option buttons across
+  // desktop and mobile viewports and submits immediately when an option is clicked.
+  for (const run of runs) {
+    await withScriptedPage(async (page) => {
+      const rawInput = `CLARIFY_OPTIONS 处理这份需求 (${run.label})`;
+      const expectedTaskId = `ui-task-${scripted.taskSeq + 1}`;
+      const clarifyBefore = scripted.clarificationCount;
+      await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
+      await page.fill('#entry-form textarea[name="rawInput"]', rawInput);
+      await page.click('#entry-form button[type="submit"]');
+      await page.waitForSelector('#entry-draft [data-clarification-option="0"]', { timeout: 10_000 });
+      const optionTexts = await page.locator('#entry-draft [data-clarification-option]').allTextContents();
+      record(
+        `${run.label} clarification renders candidate option buttons`,
+        optionTexts.length === 2
+        && optionTexts[0]?.trim() === '仅检查 README 前 10 行'
+        && optionTexts[1]?.trim() === '检查整个 docs 目录',
+        optionTexts,
+      );
+      await page.click('#entry-draft [data-clarification-option="0"]');
+      const row = await waitForSubmittedTaskRow(page, expectedTaskId);
+      const href = new URL(row.href, page.url());
+      record(
+        `${run.label} clicking a clarification option submits immediately and renders the committed task row`,
+        scripted.clarificationCount - clarifyBefore === 1
+        && row.taskId === expectedTaskId
+        && new URL(page.url()).pathname === '/index.html'
+        && href.pathname.endsWith('/task-dashboard.html')
+        && href.searchParams.get('task') === expectedTaskId
+        && row.heading === semanticTitleFor(rawInput),
+        { row, clarificationDelta: scripted.clarificationCount - clarifyBefore, url: page.url() },
+      );
+    }, { viewport: run.viewport, reducedMotion: run.reducedMotion });
+  }
 
   // A failed submission keeps the goal text, reports the real reason in the
   // shell status region and leaves a usable retry. The retry must reuse the

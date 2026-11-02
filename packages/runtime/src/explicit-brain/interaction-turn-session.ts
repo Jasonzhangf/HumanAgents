@@ -206,6 +206,7 @@ export type ExplicitTurnInterpretedOutcome =
       readonly normalizedInput: string;
       readonly knownFacts: readonly string[];
       readonly question: string;
+      readonly options?: readonly string[];
       readonly decisionRefs: readonly string[];
     }
   | {

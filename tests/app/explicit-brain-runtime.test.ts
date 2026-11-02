@@ -7073,3 +7073,112 @@ test('provider explicit brain keeps the different-input boundary when the busine
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('provider explicit brain interpreter preserves clarification options when present, omits them when absent, and rejects malformed options', async () => {
+  const root = join(parentFixtureRoot, `clarification-options-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-clarify-options', providerId: 'provider-clarify-options', protocol: 'responses',
+    endpointRef: 'recorded://clarify-options', modelRef: 'model-clarify-options',
+    configDigest: 'sha256:clarify-options-config', capabilityDigest: 'sha256:clarify-options-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  try {
+    let nextOutput: Record<string, unknown> = {
+      kind: 'clarification',
+      normalizedInput: '请帮我整理这份项目文档',
+      knownFacts: [],
+      question: '请选择整理范围。',
+      options: ['仅检查 README 前 10 行', '检查整个 docs 目录'],
+      decisionRefs: ['clarify-options-1'],
+    };
+    const port = new RecordedParentPort({
+      binding,
+      evidence,
+      stepDelayMs: 0,
+      replay: [],
+      respond: async () => [{
+        type: 'response.output_text.done',
+        item_id: 'final',
+        text: JSON.stringify(nextOutput),
+      }],
+    });
+    const makeInterpreter = (scopeSuffix: string) => createProviderExplicitBrainInterpreter({
+      organId: id('organ', 'explicit-test'),
+      interactionScopeId: `runtime:clarify-options-${scopeSuffix}`,
+      parentJournal,
+      checkpointJournal: helperJournal,
+      helperJournal,
+      turnHelperJournal: helperJournal,
+      rawEvidence: evidence,
+      rawContent,
+      clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding,
+      templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      port,
+    });
+
+    const withOptions = await makeInterpreter('with-options').interpret({
+      interactionId: 'interaction-clarify-1',
+      inputRevision: 1,
+      sourceRef: 'ui:clarify-1',
+      rawInput: '请帮我整理这份项目文档',
+      clarifications: [],
+      taskCandidates: [],
+    });
+    assert.equal(withOptions.kind, 'clarification');
+    if (withOptions.kind !== 'clarification') throw new Error('expected clarification decision');
+    assert.equal(withOptions.question, '请选择整理范围。');
+    assert.deepEqual(withOptions.options, [
+      '仅检查 README 前 10 行',
+      '检查整个 docs 目录',
+    ]);
+
+    nextOutput = {
+      kind: 'clarification',
+      normalizedInput: '请帮我整理这份项目文档',
+      knownFacts: [],
+      question: '请补充验收范围。',
+      decisionRefs: ['clarify-options-2'],
+    };
+    const withoutOptions = await makeInterpreter('without-options').interpret({
+      interactionId: 'interaction-clarify-2',
+      inputRevision: 1,
+      sourceRef: 'ui:clarify-2',
+      rawInput: '请帮我整理这份项目文档',
+      clarifications: [],
+      taskCandidates: [],
+    });
+    assert.equal(withoutOptions.kind, 'clarification');
+    if (withoutOptions.kind !== 'clarification') throw new Error('expected clarification decision');
+    assert.equal(withoutOptions.question, '请补充验收范围。');
+    assert.equal('options' in withoutOptions, false);
+
+    nextOutput = {
+      kind: 'clarification',
+      normalizedInput: '请帮我整理这份项目文档',
+      knownFacts: [],
+      question: '请补充验收范围。',
+      options: [''],
+      decisionRefs: ['clarify-options-3'],
+    };
+    await assert.rejects(
+      () => makeInterpreter('malformed-options').interpret({
+        interactionId: 'interaction-clarify-3',
+        inputRevision: 1,
+        sourceRef: 'ui:clarify-3',
+        rawInput: '请帮我整理这份项目文档',
+        clarifications: [],
+        taskCandidates: [],
+      }),
+      /clarification decision options must be an array of non-empty strings/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
