@@ -707,6 +707,7 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly roleModelBindings?: Partial<
     Readonly<Record<'orchestration' | 'execution' | 'review', AgentModelBinding>>
   >;
+  readonly orchestratorDecisionPort?: OrchestratorDecisionPort;
   readonly createTaskAssembly?: (input: {
     readonly task: Task;
     readonly scope: ScopeRef;
@@ -715,6 +716,110 @@ export interface RuntimeTaskCoordinatorOptions {
     readonly maxAttempts?: number;
     readonly childCallPort?: ChildCallPort;
   }) => RuntimeTaskAssembly;
+}
+
+export interface OrchestratorStepCandidate {
+  readonly kind: 'explore' | 'plan' | 'execute' | 'review';
+  readonly targetAgentRole: 'orchestration' | 'execution' | 'review';
+  readonly effectPolicy: 'readonly' | 'mutating';
+  readonly objective: string;
+}
+
+export interface OrchestratorCompletedStepOutcome {
+  readonly planRevisionId: string;
+  readonly step: PlanRevisionStep;
+  readonly status: 'succeeded' | 'failed' | 'blocked' | 'cancelled';
+  readonly summary: string;
+  readonly outputText?: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface OrchestratorDecisionInput {
+  readonly phase: 'initial' | 'post-step';
+  readonly taskId: string;
+  readonly operationId: string;
+  readonly executionEpoch: number;
+  readonly title: string;
+  readonly directive: string;
+  readonly input: string;
+  readonly predecessorCheckpointId: string | null;
+  readonly priorRevisions: readonly PlanRevisionRecord[];
+  readonly completedSteps: readonly OrchestratorCompletedStepOutcome[];
+  readonly dynamicStepSequence?: readonly OrchestratorStepCandidate[];
+}
+
+export type OrchestratorDecisionOutput =
+  | {
+      readonly decision: 'continue' | 'replan';
+      readonly step: OrchestratorStepCandidate;
+    }
+  | {
+      readonly decision: 'complete' | 'blocked';
+      readonly step?: undefined;
+    };
+
+export interface OrchestratorDecisionPort {
+  decide(input: OrchestratorDecisionInput): Promise<OrchestratorDecisionOutput> | OrchestratorDecisionOutput;
+}
+
+export function selectProductionOrchestratorStep(
+  input: Pick<OrchestratorDecisionInput, 'title' | 'directive' | 'input'>,
+): OrchestratorStepCandidate {
+  const combined = `${input.title}\n${input.directive}\n${input.input}`;
+  const hasReviewIntent =
+    /\b(code\s+review|review\s+only|audit\s+only|quality\s+review|security\s+audit|verify\s+compliance)\b/i.test(combined)
+    || /(?:代码审查|专项审计|质量审查|仅审查|执行审查)/.test(combined);
+  if (hasReviewIntent) {
+    return {
+      kind: 'review',
+      targetAgentRole: 'review',
+      effectPolicy: 'readonly',
+      objective: input.input,
+    };
+  }
+  const hasPlanOnlyIntent =
+    /\b(draft\s+a?\s*plan|design\s+plan\s+only|produce\s+a?\s*plan|plan\s+only|architecture\s+plan)\b/i.test(combined)
+    || /(?:仅制定计划|只输出规划|架构规划方案|生成执行计划)/.test(combined);
+  if (hasPlanOnlyIntent) {
+    return {
+      kind: 'plan',
+      targetAgentRole: 'orchestration',
+      effectPolicy: 'readonly',
+      objective: input.input,
+    };
+  }
+  const hasExplicitReadOnlyMarker =
+    /\b(read-only|readonly|do\s+not\s+modify|without\s+modifying)\b/i.test(combined)
+    || /(?:只读|不修改任何文件|不要修改|严禁修改)/.test(combined);
+  const hasMutatingVerb =
+    !hasExplicitReadOnlyMarker
+    && (
+      /\b(file\.write|file\.edit|write\s+file|create\s+file|delete\s+file|modify\s+file|patch\s+file|apply\s+fix|implement|execute\s+the\s+change|execute\s+the\s+planned)\b/i.test(combined)
+      || /(?:写入文件|创建文件|修改文件|删除文件|应用补丁)/.test(combined)
+    );
+  const hasExploreIntent =
+    hasExplicitReadOnlyMarker
+    || (
+      !hasMutatingVerb
+      && (
+        /\b(file\.search|file\.read|search|find|locate|inspect|explore|summarize|read|list\s+files)\b/i.test(combined)
+        || /(?:搜索|查找|检索|读取|查看|定位|探索|汇总)/.test(combined)
+      )
+    );
+  if (hasExploreIntent) {
+    return {
+      kind: 'explore',
+      targetAgentRole: 'execution',
+      effectPolicy: 'readonly',
+      objective: input.input,
+    };
+  }
+  return {
+    kind: 'execute',
+    targetAgentRole: 'execution',
+    effectPolicy: 'mutating',
+    objective: input.input,
+  };
 }
 
 /**
@@ -4739,94 +4844,188 @@ export class RuntimeTaskCoordinator {
     driver.bindChildCallManager?.(assembly.orchestration);
   }
 
-  private async commitAndBindOrchestratedPlanSteps(
+  private async decideOrchestratorAction(
+    record: TaskRecord,
+    operation: OperationRecord,
+    phaseInput: {
+      readonly phase: 'initial' | 'post-step';
+      readonly priorRevisions: readonly PlanRevisionRecord[];
+      readonly completedSteps: readonly OrchestratorCompletedStepOutcome[];
+    },
+  ): Promise<OrchestratorDecisionOutput> {
+    const decisionInput: OrchestratorDecisionInput = {
+      phase: phaseInput.phase,
+      taskId: record.taskId.value,
+      operationId: operation.operationId.value,
+      executionEpoch: operation.executionEpoch,
+      title: record.title,
+      directive: record.directive,
+      input: operation.input,
+      predecessorCheckpointId: record.checkpoint?.id.value ?? null,
+      priorRevisions: phaseInput.priorRevisions,
+      completedSteps: phaseInput.completedSteps,
+      dynamicStepSequence: operation.dynamicStepSequence,
+    };
+    if (this.options.orchestratorDecisionPort) {
+      return await this.options.orchestratorDecisionPort.decide(decisionInput);
+    }
+    if (operation.dynamicStepSequence && operation.dynamicStepSequence.length > 0) {
+      const latestCompleted = phaseInput.completedSteps.at(-1);
+      if (latestCompleted && latestCompleted.status !== 'succeeded') {
+        return { decision: 'blocked' };
+      }
+      const nextIndex = phaseInput.completedSteps.length;
+      if (nextIndex < operation.dynamicStepSequence.length) {
+        return {
+          decision: 'continue',
+          step: operation.dynamicStepSequence[nextIndex]!,
+        };
+      }
+      return { decision: 'complete' };
+    }
+    if (phaseInput.phase === 'initial') {
+      return {
+        decision: 'continue',
+        step: selectProductionOrchestratorStep(decisionInput),
+      };
+    }
+    const latestCompleted = phaseInput.completedSteps.at(-1);
+    if (!latestCompleted || latestCompleted.status !== 'succeeded') {
+      return { decision: 'blocked' };
+    }
+    return { decision: 'complete' };
+  }
+
+  private buildIsolatedSubagentStepPrompt(
+    record: TaskRecord,
+    boundRevision: PlanRevisionRecord,
+    boundStep: PlanRevisionStep,
+  ): string {
+    const ownCheckpointSummary = record.checkpoint?.summary ?? 'none';
+    const declaredEvidenceLocators = boundStep.inputEvidenceRefs.map((ref) => ref.locator).join(', ') || 'none';
+    return [
+      `[Subagent Isolated Context — ${boundStep.contextIsolation.contextRootId}]`,
+      `Plan Revision: ${boundRevision.planRevisionId}`,
+      `Bound Step: ${boundStep.stepId} (kind=${boundStep.kind}, role=${boundStep.targetAgentRole}, effectPolicy=${boundStep.effectPolicy})`,
+      `Explicit Dispatch Template (${record.title}):`,
+      boundStep.objective,
+      `Subagent Own Checkpoint: ${ownCheckpointSummary}`,
+      `Declared Evidence Refs: ${declaredEvidenceLocators}`,
+    ].join('\n');
+  }
+
+  private async commitSingleOrchestratedPlanRevision(
     record: TaskRecord,
     operation: OperationRecord,
     scope: ScopeRef,
-  ): Promise<{ readonly boundStep: PlanRevisionStep; readonly isolatedPrompt: string }> {
-    const stepsToCommit = operation.dynamicStepSequence && operation.dynamicStepSequence.length > 0
-      ? operation.dynamicStepSequence
-      : [{
-          kind: 'execute' as const,
-          targetAgentRole: 'execution' as const,
-          effectPolicy: 'mutating' as const,
-          objective: operation.input,
-        }];
-    const committedRevisions: PlanRevisionRecord[] = [];
-    for (const [seqIdx, spec] of stepsToCommit.entries()) {
-      const planRevisionId = `plan-rev:${record.taskId.value}:${operation.operationId.value}:${operation.executionEpoch}:${seqIdx + 1}`;
-      const stepId = `step:${planRevisionId}:0`;
-      const modelBinding: AgentModelBinding = this.options.roleModelBindings?.[spec.targetAgentRole] ?? {
-        provider: 'configured-provider',
-        requestedModel: operation.allocation?.configuredAgentId ?? spec.targetAgentRole,
-        actualModel: null,
-      };
-      const contextRootId = `ctx:${record.taskId.value}:${operation.operationId.value}:${operation.executionEpoch}:${seqIdx + 1}:0`;
-      const step: PlanRevisionStep = {
-        stepId,
-        kind: spec.kind,
-        targetAgentRole: spec.targetAgentRole,
-        objective: spec.objective,
-        state: 'pending',
-        effectPolicy: spec.effectPolicy,
-        modelBinding,
-        contextIsolation: {
-          contextRootId,
-          parentContextId: null,
-          inheritsOrchestratorContext: false,
-          allowedInputSources: [
-            'explicit-dispatch-template',
-            'subagent-own-checkpoints',
-            'declared-evidence-refs',
-          ],
-        },
-        inputEvidenceRefs: [this.operationScopeEvidence(scope, `plan-step/${stepId}/input`)],
-        outputEvidenceRefs: [],
-      };
-      const predecessorCheckpointId = record.checkpoint?.id.value ?? null;
-      const committed = this.options.executionPlanRevisionPort
-        ? await this.options.executionPlanRevisionPort.publishExecutionPlanRevision({
-            scope: { organId: this.options.organId, taskId: record.taskId },
-            record: {
-              planRevisionId,
-              taskId: record.taskId.value,
-              operationId: operation.operationId.value,
-              executionEpoch: operation.executionEpoch,
-              predecessorCheckpointId,
-              decision: 'continue',
-              steps: [step],
-            },
-          })
-        : {
+    input: {
+      readonly seqNumber: number;
+      readonly decision: PlanRevisionRecord['decision'];
+      readonly spec: OrchestratorStepCandidate;
+      readonly state: PlanRevisionStep['state'];
+      readonly outputEvidenceRefs?: readonly EvidenceRef[];
+    },
+  ): Promise<PlanRevisionRecord> {
+    const planRevisionId = `plan-rev:${record.taskId.value}:${operation.operationId.value}:${operation.executionEpoch}:${input.seqNumber}`;
+    const stepId = `step:${planRevisionId}:0`;
+    const modelBinding: AgentModelBinding = this.options.roleModelBindings?.[input.spec.targetAgentRole] ?? {
+      provider: 'configured-provider',
+      requestedModel: operation.allocation?.configuredAgentId ?? input.spec.targetAgentRole,
+      actualModel: null,
+    };
+    const contextRootId = `ctx:${record.taskId.value}:${operation.operationId.value}:${operation.executionEpoch}:${input.seqNumber}:0`;
+    const step: PlanRevisionStep = {
+      stepId,
+      kind: input.spec.kind,
+      targetAgentRole: input.spec.targetAgentRole,
+      objective: input.spec.objective,
+      state: input.state,
+      effectPolicy: input.spec.effectPolicy,
+      modelBinding,
+      contextIsolation: {
+        contextRootId,
+        parentContextId: null,
+        inheritsOrchestratorContext: false,
+        allowedInputSources: [
+          'explicit-dispatch-template',
+          'subagent-own-checkpoints',
+          'declared-evidence-refs',
+        ],
+      },
+      inputEvidenceRefs: [this.operationScopeEvidence(scope, `plan-step/${stepId}/input`)],
+      outputEvidenceRefs: input.outputEvidenceRefs ? [...input.outputEvidenceRefs] : [],
+    };
+    const predecessorCheckpointId = record.checkpoint?.id.value ?? null;
+    const committed = this.options.executionPlanRevisionPort
+      ? await this.options.executionPlanRevisionPort.publishExecutionPlanRevision({
+          scope: { organId: this.options.organId, taskId: record.taskId },
+          record: {
             planRevisionId,
             taskId: record.taskId.value,
             operationId: operation.operationId.value,
             executionEpoch: operation.executionEpoch,
             predecessorCheckpointId,
-            decision: 'continue' as const,
+            decision: input.decision,
             steps: [step],
-            committedRef: {
-              eventKind: 'task-plan-revision.published' as const,
-              commitId: `plan-commit:v1:${planRevisionId}`,
-              journalSeq: seqIdx + 1,
-              state: 'committed' as const,
-            },
-          };
-      validatePlanRevisionRecord(committed, {
-        taskId: record.taskId.value,
-        operationId: operation.operationId.value,
-        executionEpoch: operation.executionEpoch,
-      });
-      committedRevisions.push(committed);
+          },
+        })
+      : {
+          planRevisionId,
+          taskId: record.taskId.value,
+          operationId: operation.operationId.value,
+          executionEpoch: operation.executionEpoch,
+          predecessorCheckpointId,
+          decision: input.decision,
+          steps: [step],
+          committedRef: {
+            eventKind: 'task-plan-revision.published' as const,
+            commitId: `plan-commit:v1:${planRevisionId}`,
+            journalSeq: input.seqNumber,
+            state: 'committed' as const,
+          },
+        };
+    validatePlanRevisionRecord(committed, {
+      taskId: record.taskId.value,
+      operationId: operation.operationId.value,
+      executionEpoch: operation.executionEpoch,
+    });
+    return committed;
+  }
+
+  private async commitAndBindOrchestratedPlanSteps(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+  ): Promise<{ readonly boundStep: PlanRevisionStep; readonly isolatedPrompt: string }> {
+    const initialDecision = await this.decideOrchestratorAction(record, operation, {
+      phase: 'initial',
+      priorRevisions: [],
+      completedSteps: [],
+    });
+    if (
+      (initialDecision.decision !== 'continue' && initialDecision.decision !== 'replan')
+      || initialDecision.step === undefined
+    ) {
+      throw new RuntimeTaskControlError(
+        'orchestration.unbound-plan-step',
+        RUNTIME_OWNER,
+        `initial orchestrator decision ${initialDecision.decision} did not produce a runnable plan step`,
+        'produce an explore, plan, execute, or review step before dispatching execution',
+      );
     }
-    const latestRevision = committedRevisions.at(-1)!;
+    const committed = await this.commitSingleOrchestratedPlanRevision(record, operation, scope, {
+      seqNumber: 1,
+      decision: initialDecision.decision,
+      spec: initialDecision.step,
+      state: 'pending',
+    });
     const binding: PlanStepDispatchBinding = operation.planStepBinding ?? {
-      boundPlanRevisionId: latestRevision.planRevisionId,
-      boundPlanStepId: latestRevision.steps[0]!.stepId,
+      boundPlanRevisionId: committed.planRevisionId,
+      boundPlanStepId: committed.steps[0]!.stepId,
     };
     let boundStep: PlanRevisionStep;
     try {
-      boundStep = assertPlanStepDispatchBinding(latestRevision, binding);
+      boundStep = assertPlanStepDispatchBinding(committed, binding);
     } catch {
       throw new RuntimeTaskControlError(
         'orchestration.unbound-plan-step',
@@ -4835,18 +5034,125 @@ export class RuntimeTaskCoordinator {
         'bind a valid planRevisionId and stepId before dispatching execution',
       );
     }
+    const committedRevisions = [committed];
     operation.planRevisions = committedRevisions;
-    operation.planRevision = latestRevision;
+    operation.planRevision = committed;
     operation.boundPlanRevisionId = binding.boundPlanRevisionId;
     operation.boundPlanStepId = binding.boundPlanStepId;
     record.planRevisions = committedRevisions;
-    record.planRevision = latestRevision;
+    record.planRevision = committed;
     record.boundPlanRevisionId = binding.boundPlanRevisionId;
     record.boundPlanStepId = binding.boundPlanStepId;
     return {
       boundStep,
-      isolatedPrompt: operation.input,
+      isolatedPrompt: this.buildIsolatedSubagentStepPrompt(record, committed, boundStep),
     };
+  }
+
+  private async decideAndCommitPostStepContinuation(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    completedSteps: OrchestratorCompletedStepOutcome[],
+  ): Promise<
+    | { readonly kind: 'continue'; readonly boundStep: PlanRevisionStep; readonly isolatedPrompt: string }
+    | { readonly kind: 'complete' }
+    | { readonly kind: 'blocked' }
+  > {
+    const currentRevision = operation.planRevision;
+    const currentStep = currentRevision?.steps[0];
+    if (!currentRevision || !currentStep) {
+      return { kind: 'complete' };
+    }
+    completedSteps.push({
+      planRevisionId: currentRevision.planRevisionId,
+      step: currentStep,
+      status: 'succeeded',
+      summary: `step ${currentStep.stepId} (${currentStep.kind}) completed`,
+      outputText: record.output || undefined,
+      evidenceRefs: [this.operationScopeEvidence(scope, `plan-step/${currentStep.stepId}/output`)],
+    });
+    const priorRevisions = operation.planRevisions ?? [currentRevision];
+    const postDecision = await this.decideOrchestratorAction(record, operation, {
+      phase: 'post-step',
+      priorRevisions,
+      completedSteps,
+    });
+    if (
+      (postDecision.decision === 'continue' || postDecision.decision === 'replan')
+      && postDecision.step !== undefined
+    ) {
+      const seqNumber = priorRevisions.length + 1;
+      const nextCommitted = await this.commitSingleOrchestratedPlanRevision(record, operation, scope, {
+        seqNumber,
+        decision: postDecision.decision,
+        spec: postDecision.step,
+        state: 'pending',
+      });
+      const nextStep = assertPlanStepDispatchBinding(nextCommitted, {
+        boundPlanRevisionId: nextCommitted.planRevisionId,
+        boundPlanStepId: nextCommitted.steps[0]!.stepId,
+      });
+      const updatedRevisions = [...priorRevisions, nextCommitted];
+      operation.planRevisions = updatedRevisions;
+      operation.planRevision = nextCommitted;
+      operation.boundPlanRevisionId = nextCommitted.planRevisionId;
+      operation.boundPlanStepId = nextStep.stepId;
+      record.planRevisions = updatedRevisions;
+      record.planRevision = nextCommitted;
+      record.boundPlanRevisionId = nextCommitted.planRevisionId;
+      record.boundPlanStepId = nextStep.stepId;
+      return {
+        kind: 'continue',
+        boundStep: nextStep,
+        isolatedPrompt: this.buildIsolatedSubagentStepPrompt(record, nextCommitted, nextStep),
+      };
+    }
+    if (postDecision.decision === 'blocked') {
+      return { kind: 'blocked' };
+    }
+    return { kind: 'complete' };
+  }
+
+  private async commitTerminalOrchestratedPlanRevision(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    decision: 'complete' | 'blocked',
+    evidenceRefs: readonly EvidenceRef[],
+  ): Promise<void> {
+    const currentRevision = operation.planRevision;
+    const currentStep = currentRevision?.steps[0];
+    if (!currentRevision || !currentStep) return;
+    const priorRevisions = operation.planRevisions ?? [currentRevision];
+    const seqNumber = priorRevisions.length + 1;
+    const planRevisionId = `plan-rev:${record.taskId.value}:${operation.operationId.value}:${operation.executionEpoch}:${seqNumber}`;
+    const stepId = `step:${planRevisionId}:0`;
+    const outputEvidenceRefs: EvidenceRef[] = [
+      this.operationScopeEvidence(scope, `plan-step/${stepId}/output`),
+      ...evidenceRefs,
+    ];
+    const committed = await this.commitSingleOrchestratedPlanRevision(record, operation, scope, {
+      seqNumber,
+      decision,
+      spec: {
+        kind: currentStep.kind,
+        targetAgentRole: currentStep.targetAgentRole,
+        effectPolicy: currentStep.effectPolicy,
+        objective: currentStep.objective,
+      },
+      state: decision === 'complete' ? 'completed' : 'failed',
+      outputEvidenceRefs,
+    });
+    const updatedRevisions = [...priorRevisions, committed];
+    operation.planRevisions = updatedRevisions;
+    operation.planRevision = committed;
+    operation.boundPlanRevisionId = committed.planRevisionId;
+    operation.boundPlanStepId = committed.steps[0]!.stepId;
+    record.planRevisions = updatedRevisions;
+    record.planRevision = committed;
+    record.boundPlanRevisionId = committed.planRevisionId;
+    record.boundPlanStepId = committed.steps[0]!.stepId;
   }
 
   private async runExecution(
@@ -5375,7 +5681,7 @@ export class RuntimeTaskCoordinator {
               firstFailureEvidence = problem?.evidenceRefs ?? [];
             }
             const retryReason = problem?.reason ?? `第 ${attemptNumber} 次尝试执行失败`;
-            executionPrompt = `${prompt}
+            executionPrompt = `${orchestratedStepPrompt}
 
 纠正说明：第 ${attemptNumber} 次尝试执行失败，原因：${retryReason}。请根据上一轮失败原因修正后再次执行。`;
             currentAssignment = remediation;
@@ -5441,6 +5747,15 @@ export class RuntimeTaskCoordinator {
           );
           break;
         }
+        if (closure) {
+          await this.commitTerminalOrchestratedPlanRevision(
+            record,
+            operation,
+            scope,
+            closure.state === 'succeeded' ? 'complete' : 'blocked',
+            closure.evidenceRefs,
+          );
+        }
       } else {
         // Non-orchestrated lane (no child/orchestration review ports). The real
         // `--mode rcc` serve enters here because `defaultOrchestrate()` returns
@@ -5488,52 +5803,78 @@ export class RuntimeTaskCoordinator {
         await composition!.start();
         let submission = orchestratedStepPrompt;
         let nativeAttemptObserved = false;
+        const completedOrchestratedSteps: OrchestratorCompletedStepOutcome[] = [];
         const nativeAttempt = async () => {
-          await composition!.submit(submission);
-          completeExecutionReady(true);
-          if (record.stopping || record.postCommitRecoveryPending) {
-            return { closure: undefined as AgentRuntimeClosure | undefined, status: 'cancelled' as const };
-          }
-          nativeAttemptObserved = true;
-          const observations = new BudgetedProviderObservations(
-            composition!.observe()[Symbol.asyncIterator](),
-            { ...DEFAULT_UI_EXECUTION_EVENT_BUDGET, ...this.options.executionBudget },
-            () => this.now().getTime(),
-          );
-          record.budgetObservation = observations;
-          try {
-            while (true) {
-              const exhausted = observations.exhausted();
-              if (exhausted !== undefined) {
-                if (this.budgetStopOwnedByAttempt(record, operation)) {
-                  await this.beginRequestBudgetStop(record, operation, exhausted);
+          while (true) {
+            await composition!.submit(submission);
+            completeExecutionReady(true);
+            if (record.stopping || record.postCommitRecoveryPending) {
+              return { closure: undefined as AgentRuntimeClosure | undefined, status: 'cancelled' as const };
+            }
+            nativeAttemptObserved = true;
+            const observations = new BudgetedProviderObservations(
+              composition!.observe()[Symbol.asyncIterator](),
+              { ...DEFAULT_UI_EXECUTION_EVENT_BUDGET, ...this.options.executionBudget },
+              () => this.now().getTime(),
+            );
+            record.budgetObservation = observations;
+            try {
+              while (true) {
+                const exhausted = observations.exhausted();
+                if (exhausted !== undefined) {
+                  if (this.budgetStopOwnedByAttempt(record, operation)) {
+                    await this.beginRequestBudgetStop(record, operation, exhausted);
+                  }
+                  break;
                 }
-                break;
+                const step = await observations.next();
+                if (step.kind === 'deadline') continue;
+                if (step.step.done) break;
+                const observation = step.step.value;
+                if (record.postCommitRecoveryPending) return { closure: undefined, status: 'blocked' as const };
+                if (!observation.accepted) {
+                  this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
+                  continue;
+                }
+                const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
+                if (!event.providerEvent) continue;
+                observations.note(event.providerEvent);
+                await this.recordProviderEvent(record, operation, event.providerEvent);
               }
-              const step = await observations.next();
-              if (step.kind === 'deadline') continue;
-              if (step.step.done) break;
-              const observation = step.step.value;
-              if (record.postCommitRecoveryPending) return { closure: undefined, status: 'blocked' as const };
-              if (!observation.accepted) {
-                this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
+            } finally {
+              if (record.budgetObservation === observations) record.budgetObservation = undefined;
+              await observations.close();
+            }
+            if (record.postCommitRecoveryPending) return { closure: undefined, status: 'blocked' as const };
+            if (runtime!.snapshot().state === 'stopped') {
+              this.finalize(record, 'stopped');
+              return { closure: undefined, status: 'cancelled' as const };
+            }
+            if (record.stopping) return { closure: undefined, status: 'cancelled' as const };
+            if (record.orchestrated) {
+              const stepFollowup = await this.decideAndCommitPostStepContinuation(
+                record,
+                operation,
+                scope,
+                completedOrchestratedSteps,
+              );
+              if (stepFollowup.kind === 'continue') {
+                submission = stepFollowup.isolatedPrompt;
+                orchestratedStepPrompt = stepFollowup.isolatedPrompt;
                 continue;
               }
-              const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
-              if (!event.providerEvent) continue;
-              observations.note(event.providerEvent);
-              await this.recordProviderEvent(record, operation, event.providerEvent);
+              if (stepFollowup.kind === 'blocked') {
+                await this.commitTerminalOrchestratedPlanRevision(record, operation, scope, 'blocked', []);
+                throw new RuntimeTaskControlError(
+                  'orchestration.post-step.blocked',
+                  RUNTIME_OWNER,
+                  'post-step orchestrator decision blocked further execution',
+                  'inspect committed PlanRevisionRecord and step evidence',
+                );
+              }
             }
-          } finally {
-            if (record.budgetObservation === observations) record.budgetObservation = undefined;
-            await observations.close();
+            break;
           }
-          if (record.postCommitRecoveryPending) return { closure: undefined, status: 'blocked' as const };
-          if (runtime!.snapshot().state === 'stopped') {
-            this.finalize(record, 'stopped');
-            return { closure: undefined, status: 'cancelled' as const };
-          }
-          if (record.stopping) return { closure: undefined, status: 'cancelled' as const };
           this.pushEvent(record, operation, 'execution.settling', 'settling', 'execution settling', []);
           record.state = 'settling';
           record.running = false;
@@ -5541,6 +5882,15 @@ export class RuntimeTaskCoordinator {
           record.nextStep = '等待 checkpoint';
           record.allowedActions = [];
           const settled = await composition!.settle();
+          if (record.orchestrated) {
+            await this.commitTerminalOrchestratedPlanRevision(
+              record,
+              operation,
+              scope,
+              settled.state === 'succeeded' ? 'complete' : 'blocked',
+              settled.evidenceRefs,
+            );
+          }
           return { closure: settled, status: settled.state === 'succeeded' ? 'succeeded' as const : 'failed' as const };
         };
         const nativeMaxAttempts = 2;
@@ -5575,7 +5925,7 @@ export class RuntimeTaskCoordinator {
               throw error;
             }
             nativeFirstFailure ??= failure;
-            submission = `${prompt}\n\n纠正说明：第 ${nativeAttemptNumber} 次尝试执行失败，原因：${failure.message}。请根据上一轮失败原因修正后再次执行。`;
+            submission = `${orchestratedStepPrompt}\n\n纠正说明：第 ${nativeAttemptNumber} 次尝试执行失败，原因：${failure.message}。请根据上一轮失败原因修正后再次执行。`;
             this.pushEvent(record, operation, 'execution.retry', 'retrying',
               `第 ${nativeAttemptNumber + 1} 次尝试（重试原因：${failure.message}）`, failure.evidenceRefs ?? [],
               STEP_OWNER, true, `recover:execution.retry.${record.taskId.value}`);

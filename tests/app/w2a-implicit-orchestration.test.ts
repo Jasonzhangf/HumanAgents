@@ -350,7 +350,7 @@ const knownCurrentStateFacts = {
   },
 };
 
-test('W2-A (1): native default path sets orchestrated=true and commits PlanRevisionRecord before execution', async () => {
+test('W2-A (1): native default path sets orchestrated=true, selects non-execute explore action on read-only search, isolates step prompt from operation.input, and commits post-step PlanRevisionRecord in the same Turn', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'w2a-native-default-'));
   try {
     const controlPath = join(dir, 'control.jsonl');
@@ -358,6 +358,7 @@ test('W2-A (1): native default path sets orchestrated=true and commits PlanRevis
     const planConsumer = new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(organJournal));
     const store = new ServiceExecutionCheckpointStore(controlPath, organJournal, () => new Date('2026-11-02T10:00:00.000Z'));
     const currentStatePort = createJsonlRuntimeTaskCurrentStateJournal({ journal: organJournal });
+    const submittedPrompts: string[] = [];
 
     const testBinding = {
       bindingId: 'binding-w2a',
@@ -412,7 +413,9 @@ test('W2-A (1): native default path sets orchestrated=true and commits PlanRevis
         admitExecution: async () => {},
         createExecutionPorts: () => ({
           admitExecution: async () => {},
-          createDriver: async (driverInput: RuntimeExecutionDriverInput) => createNativeStandardTurnDriver(driverInput, store),
+          createDriver: async (driverInput: RuntimeExecutionDriverInput) => createNativeStandardTurnDriver(driverInput, store, {
+            onSubmit: (prompt) => submittedPrompts.push(prompt),
+          }),
           currentStatePort,
           currentStateFacts: knownCurrentStateFacts,
           executionPlanRevisionPort: planConsumer,
@@ -443,7 +446,7 @@ test('W2-A (1): native default path sets orchestrated=true and commits PlanRevis
     const taskId = dispatched.taskId;
     const deadline = Date.now() + 5000;
     while (
-      (!service.taskDashboard(taskId).events.some((ev) => ev.kind === 'execution.terminal')
+      (!service.taskDashboard(taskId).history.events.some((ev) => ev.kind === 'execution.terminal')
         || service.taskDashboard(taskId).state !== 'succeeded')
       && Date.now() < deadline
     ) {
@@ -454,17 +457,47 @@ test('W2-A (1): native default path sets orchestrated=true and commits PlanRevis
     const dash = service.taskDashboard(taskId) as ReturnType<UiRuntimeService['taskDashboard']> & {
       readonly orchestrated?: boolean;
       readonly planRevision?: PlanRevisionRecord;
+      readonly planRevisions?: readonly PlanRevisionRecord[];
     };
     assert.equal(dash.orchestrated, true, 'native RCC task with createTaskAssembly must default to orchestrated=true');
     assert.ok(dash.planRevision, 'committed PlanRevisionRecord must be present on task dashboard');
-    validatePlanRevisionRecord(dash.planRevision!, {
-      taskId: taskId.value,
-      operationId: dash.operationId!,
-      executionEpoch: dash.executionEpoch!,
-    });
-    assert.equal(dash.planRevision!.steps[0]?.contextIsolation.inheritsOrchestratorContext, false);
+    assert.ok(dash.planRevisions, 'planRevisions history must be present on task dashboard');
+    assert.equal(
+      dash.planRevisions!.length,
+      2,
+      'production Turn must commit pre-step initial PlanRevisionRecord (continue) and post-step second-decision PlanRevisionRecord (complete)',
+    );
+    const initialRev = dash.planRevisions![0]!;
+    const postStepRev = dash.planRevisions![1]!;
+    assert.equal(initialRev.decision, 'continue');
+    assert.equal(initialRev.steps[0]?.kind, 'explore', 'production path must dynamically select explore for read-only search rather than fixed execute');
+    assert.equal(initialRev.steps[0]?.effectPolicy, 'readonly');
+    assert.equal(initialRev.steps[0]?.state, 'pending');
+    assert.equal(postStepRev.decision, 'complete', 'post-step second decision in the same Turn must commit decision=complete');
+    assert.equal(postStepRev.steps[0]?.kind, 'explore');
+    assert.equal(postStepRev.steps[0]?.state, 'completed');
+    assert.ok((postStepRev.steps[0]?.outputEvidenceRefs.length ?? 0) > 0, 'completed post-step revision must carry outputEvidenceRefs');
+    for (const rev of dash.planRevisions!) {
+      validatePlanRevisionRecord(rev, {
+        taskId: taskId.value,
+        operationId: dash.operationId!,
+        executionEpoch: dash.executionEpoch!,
+      });
+      assert.equal(rev.steps[0]?.contextIsolation.inheritsOrchestratorContext, false);
+    }
+    assert.equal(submittedPrompts.length, 1);
+    assert.equal(
+      submittedPrompts[0] !== dash.input,
+      true,
+      'step isolated prompt must be constructed from isolated subagent context rather than raw operation.input',
+    );
+    assert.match(submittedPrompts[0]!, /\[Subagent Isolated Context — ctx:/);
+    assert.match(submittedPrompts[0]!, /kind=explore, role=execution, effectPolicy=readonly/);
+    const replayedFromJournal = await planConsumer.replayExecutionPlanRevisions({ organId, taskId });
+    assert.equal(replayedFromJournal.length, 2, 'both pre-step and post-step PlanRevisionRecords must be durably persisted in control.jsonl');
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await new Promise((r) => setTimeout(r, 25));
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -507,11 +540,12 @@ test('W2-A (2): unbound or mismatched planStepBinding throws orchestration.unbou
     );
     assert.equal(driverCalls, 0, 'Provider driver must not be created when planStepBinding is invalid');
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await new Promise((r) => setTimeout(r, 25));
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('W2-A (3 & 4): dynamic orchestrator selects explore -> plan -> execute without forced review and isolates subagent context window', async () => {
+test('W2-A (3 & 4): dynamic orchestrator selects explore -> plan -> execute -> complete across post-step decisions without forced review and isolates subagent context window', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'w2a-dynamic-select-'));
   try {
     const controlPath = join(dir, 'control.jsonl');
@@ -567,14 +601,23 @@ test('W2-A (3 & 4): dynamic orchestrator selects explore -> plan -> execute with
     };
     assert.equal(snap.state, 'succeeded');
     assert.ok(snap.planRevisions, 'planRevisions history must be exposed on snapshot');
-    assert.equal(snap.planRevisions!.length, 3, 'must commit 3 dynamic plan revisions (explore -> plan -> execute)');
+    assert.equal(
+      snap.planRevisions!.length,
+      4,
+      'must commit 3 step dispatches (explore -> plan -> execute) plus 1 post-step terminal complete revision',
+    );
     assert.deepEqual(
-      snap.planRevisions!.map((rev) => rev.steps[0]!.kind),
-      ['explore', 'plan', 'execute'],
+      snap.planRevisions!.map((rev) => ({ decision: rev.decision, kind: rev.steps[0]!.kind, state: rev.steps[0]!.state })),
+      [
+        { decision: 'continue', kind: 'explore', state: 'pending' },
+        { decision: 'continue', kind: 'plan', state: 'pending' },
+        { decision: 'continue', kind: 'execute', state: 'pending' },
+        { decision: 'complete', kind: 'execute', state: 'completed' },
+      ],
     );
     assert.deepEqual(
       snap.planRevisions!.map((rev) => rev.steps[0]!.modelBinding.requestedModel),
-      ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.4-mini'],
+      ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-mini'],
     );
     for (const rev of snap.planRevisions!) {
       validatePlanRevisionRecord(rev, {
@@ -584,8 +627,9 @@ test('W2-A (3 & 4): dynamic orchestrator selects explore -> plan -> execute with
       });
       assert.equal(rev.steps[0]!.contextIsolation.inheritsOrchestratorContext, false);
     }
-    assert.ok(submittedPrompts.length >= 1);
+    assert.equal(submittedPrompts.length, 3, 'each step in explore -> plan -> execute must receive its own isolated dispatch');
     for (const p of submittedPrompts) {
+      assert.equal(p !== snap.input, true, 'step prompt must be isolated from raw operation.input');
       assert.equal(
         p.includes('ORCHESTRATOR_SECRET_RAW_HISTORY_99182'),
         false,
@@ -593,7 +637,8 @@ test('W2-A (3 & 4): dynamic orchestrator selects explore -> plan -> execute with
       );
     }
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await new Promise((r) => setTimeout(r, 25));
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -669,6 +714,7 @@ test('W2-A (5 & 6): orchestrated native standardTurn has single admission/retry 
     assert.equal(snap2.state === 'succeeded', false, 'empty public deliverable must never be accepted as succeeded');
     assert.equal(snap2.error?.code, 'standard-turn-end.missing-public-deliverable');
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await new Promise((r) => setTimeout(r, 25));
+    await rm(dir, { recursive: true, force: true });
   }
 });
