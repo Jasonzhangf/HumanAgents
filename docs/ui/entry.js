@@ -948,7 +948,11 @@ function openSubmitProgressDetail(trigger) {
       content.append(list)
     }
     const link = element('a', '打开完整任务看板', 'button button--sm')
-    link.href = submittedTaskLandingHref(progress.executingTaskId || progress.taskId, progress.scope)
+    // The full-dashboard link exposes the committed business task (the queued
+    // parent work item), not the internal executing child that merely carries
+    // the operation. Internal child tasks stay readable via detail/Observation
+    // and never replace the task row's dashboard identity.
+    link.href = submittedTaskLandingHref(progress.taskId, progress.scope)
     content.append(link)
   }
   openTechnicalDetail({ title: '任务执行进度', eyebrow: '实时进度', content, trigger })
