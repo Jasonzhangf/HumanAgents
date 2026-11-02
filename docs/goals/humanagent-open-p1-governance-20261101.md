@@ -841,3 +841,15 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   （待 owner close）、W2-B rework/rev8（待真实中断恢复证据）、clarification
   selectable invited/rev2。worktree 7/10 未变。本轮未合并、未安装、未删
   worktree、未杀进程。
+
+- 2026-11-02 19:47 UTC: project-patrol（`m1793648860859-1371` 已消费）。四项
+  实测：open bug 33（P0 4 `45f92c8`/`a9dc797`/`4c21e74`/`47b26dd`、P1 10、
+  P2 6、未分级 13），无变化；board 4 个 open 任务（Alice 的 real-lane
+  working、W2-A merged、W2-B rework，加 clarification invited）；worktree
+  7/10 未增未删。Alice 的 tmux 快照显示她仍在活动（running command，
+  thought 35m，已收到 `board-invite-mvp-clarification`），不是 idle；Emma
+  idle 无任务，Bob/Carol/David present 无任务，未做盲目唤醒（daemon
+  dispatcher 负责 eligible peer wake）。`collab ceo status`：CEO=Alice
+  `is_current=false`，无法经 `ceo reply` 投递，继续本地 master 推进。
+  `project_board_patrol` 无取消项。goal deadline 订阅
+  `sub-m1793647962135-1357` 与 project patrol `sub-m1793413132850-18` 均在位。
