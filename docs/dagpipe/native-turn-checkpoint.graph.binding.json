@@ -11,12 +11,17 @@
       "ownerRel": "packages/core/src/checkpoint.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
-    "reconcile_operations": {
+    "record_operation_effect_ledger": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
       "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
-    "persist_recovery_state": {
+    "reconcile_in_flight_operations": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "persist_recovery_checkpoint": {
       "ownerPath": "packages/adapters/filesystem/src/index.ts",
       "ownerRel": "packages/adapters/filesystem/src/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"
@@ -43,12 +48,12 @@
       "ownerRel": "packages/runtime/src/context/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
-    "project_durable_success": {
+    "auto_resume_same_turn_segment": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
       "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
-    "recovery_hold": {
+    "enter_recovery_hold": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
       "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"

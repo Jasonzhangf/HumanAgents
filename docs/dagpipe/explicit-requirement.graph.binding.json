@@ -22,45 +22,16 @@
       "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
       "ownerSymbol": "ExplicitIntake"
     },
-    "create_reviewable_draft": {
-      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerSymbol": "ExplicitIntake.createDraft"
-    },
-    "revise_draft_to_approval": {
-      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerSymbol": "ExplicitIntake.refineDraft"
-    },
-    "confirm_exact_revision": {
-      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerSymbol": "ExplicitIntake.confirmDraftRevision",
-      "productionWiringStatus": "wired",
-      "productionOwnerPath": "packages/app/src/ui-runtime/service.ts",
-      "productionOwnerRel": "packages/app/src/ui-runtime/service.ts",
-      "productionOwnerSymbol": "UiRuntimeService.confirmExplicitRequirement"
-    },
-    "validate_draft_revision": {
-      "ownerPath": "packages/core/src/draft-revision.ts",
-      "ownerRel": "packages/core/src/draft-revision.ts",
-      "ownerSymbol": "assertDraftRevisionCurrent",
-      "publicExportOwnerPath": "packages/core/src/index.ts",
-      "publicExportOwnerRel": "packages/core/src/index.ts"
-    },
-    "submit_single_authorization": {
+    "normalize_and_commit_requirement_envelope": {
       "ownerPath": "packages/runtime/src/explicit-brain/router.ts",
       "ownerRel": "packages/runtime/src/explicit-brain/router.ts",
       "ownerSymbol": "RequirementSubmissionOwner.submitFinal",
       "templateSerializationOwnerPath": "packages/app/src/ui-runtime/service.ts",
       "templateSerializationOwnerRel": "packages/app/src/ui-runtime/service.ts",
       "templateSerializationOwnerSymbol": "normalizedInputForDraftFields",
-      "confirmedPayloadContract": "同一 canonical goal/scope/constraints/deliverables JSON 从 confirmed typed revision 进入 RequirementEnvelope.normalizedInput；禁止在此节点重序列化、裁剪或替换为单句 goal",
+      "confirmedPayloadContract": "同一 canonical goal/scope/constraints/deliverables JSON 从 typed revision 进入 RequirementEnvelope.normalizedInput；禁止在此节点重序列化、裁剪或替换为单句 goal",
       "semanticTitleContract": "structuredProposal.title 由显式 Brain 产生，并作为独立任务名称穿过 typed revision、RequirementEnvelope 与 Task.title。标题不替换 normalizedInput、directive 或执行模板。",
       "taskFlowContract": "taskFlow 来自显式 Brain 的可选 TaskFlowBinding；确认表单、executionPolicy 与固定触发模式不得覆盖或补造分类。缺省值沿 legacy absent 读取，不生成默认值。",
-      "confirmationOwnerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "confirmationOwnerRel": "packages/runtime/src/intake/explicit-intake.ts",
-      "confirmationOwnerSymbol": "ExplicitIntake.confirmDraftRevision",
       "queueOwnerPath": "packages/runtime/src/intake/requirement-inbox.ts",
       "queueOwnerRel": "packages/runtime/src/intake/requirement-inbox.ts",
       "queueOwnerSymbol": "RequirementInbox.append",
@@ -77,6 +48,16 @@
       "productionOwnerRel": "packages/app/src/ui-runtime/service.ts",
       "productionOwnerSymbol": "UiRuntimeService.confirmTypedExplicitRequirement",
       "productionEvidence": "confirmTypedExplicitRequirement 调用 RequirementSubmissionOwner.submitFinal，并在 executionPolicy 存在时经 persistAuthorizedExecutionPlan→SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2819-2831, 2949-2972）"
+    },
+    "enqueue_fifo_requirement": {
+      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
+      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts",
+      "ownerSymbol": "RequirementInbox.append"
+    },
+    "stay_on_single_entry_surface": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService"
     },
     "establish_task_identity": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",

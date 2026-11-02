@@ -62,6 +62,23 @@ import {
   validateInspectionOccurrenceOpenedRecord,
   type InspectionOccurrenceOpenedRecord,
 } from '@humanagent/contracts';
+import {
+  assertPlanStepDispatchBinding,
+  assertStandardTurnEndPublicationEligible,
+  decideTurnSegmentRecovery,
+  isStandardTurnEndPublicationEligible,
+  validateAgentDebugInspection,
+  validateAgentInvocationIdentity,
+  validatePlanRevisionRecord,
+  validateStandardTurnEndPayload,
+  validateTokenUsageInspection,
+  validateTurnSegmentRecoveryFact,
+  type AgentDebugInspection,
+  type AgentInvocationIdentity,
+  type PlanRevisionRecord,
+  type StandardTurnEndPayload,
+  type TurnSegmentRecoveryFact,
+} from '@humanagent/contracts';
 
 const memoryActor = (overrides: Partial<MemoryActorContext> = {}): MemoryActorContext => ({
   actorId: 'actor-a',
@@ -89,6 +106,166 @@ const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const scope: ScopeRef = { organId: organ, taskId: task };
 const operation = id('operation', 'operation-a');
+
+function captureContractError(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('expected contract call to throw');
+}
+
+function validStandardTurnEndPayload(overrides: Partial<StandardTurnEndPayload> = {}): StandardTurnEndPayload {
+  return {
+    outcome: 'completed',
+    summary: {
+      goal: '完成用户目标',
+      actions: ['执行了必要步骤'],
+      result: { status: 'completed', text: '这是唯一公开交付文本' },
+      nextStep: '结束当前任务',
+    },
+    ...overrides,
+  };
+}
+
+function validPlanRevisionRecord(overrides: Partial<PlanRevisionRecord> = {}): PlanRevisionRecord {
+  return {
+    planRevisionId: 'plan-rev:task-a:operation-a:1',
+    taskId: 'task-a',
+    operationId: 'operation-a',
+    executionEpoch: 1,
+    predecessorCheckpointId: null,
+    decision: 'continue',
+    steps: [{
+      stepId: 'step:plan-rev:task-a:operation-a:1:0',
+      kind: 'execute',
+      targetAgentRole: 'execution',
+      objective: '执行当前步骤',
+      state: 'completed',
+      effectPolicy: 'readonly',
+      modelBinding: { provider: 'rcc', requestedModel: 'gcm', actualModel: 'gcm' },
+      contextIsolation: {
+        contextRootId: 'ctx:task-a:operation-a:step-0:1',
+        parentContextId: null,
+        inheritsOrchestratorContext: false,
+        allowedInputSources: ['explicit-dispatch-template', 'subagent-own-checkpoints', 'declared-evidence-refs'],
+      },
+      inputEvidenceRefs: [],
+      outputEvidenceRefs: [],
+    }],
+    committedRef: {
+      eventKind: 'task-plan-revision.published',
+      commitId: 'plan-commit:v1:plan-rev:task-a:operation-a:1',
+      journalSeq: 1,
+      state: 'committed',
+    },
+    ...overrides,
+  };
+}
+
+function validRecoveryFact(overrides: Partial<TurnSegmentRecoveryFact> = {}): TurnSegmentRecoveryFact {
+  return {
+    taskId: 'task-a',
+    operationId: 'operation-a',
+    turnId: 'turn-1',
+    executionEpoch: 1,
+    segmentSeq: 1,
+    predecessorCheckpointId: null,
+    planRevisionId: 'plan-rev:task-a:operation-a:1',
+    recoveryResponsibilityOwner: 'humanagent.runtime',
+    providerSettleReceipt: {
+      providerRequestId: 'request-1',
+      state: 'settled',
+      verifiedBy: 'response-stream-eof',
+      verifiedAt: '2026-11-01T00:00:00.000Z',
+    },
+    toolEffects: [],
+    recoveryOutcome: 'recovery-auto-resumed',
+    ...overrides,
+  };
+}
+
+function validInvocationIdentity(overrides: Partial<AgentInvocationIdentity> = {}): AgentInvocationIdentity {
+  return {
+    invocationId: 'inv:execution:task-a:operation-a:turn-1:1',
+    agentRole: 'execution',
+    sourceNodeId: 'execute-step-1',
+    taskId: 'task-a',
+    operationId: 'operation-a',
+    turnId: 'turn-1',
+    executionEpoch: 1,
+    boundPlanRevisionId: 'plan-rev:task-a:operation-a:1',
+    boundPlanStepId: 'step:plan-rev:task-a:operation-a:1:0',
+    parentInvocationId: null,
+    contextIsolation: {
+      contextRootId: 'ctx:task-a:operation-a:step-0:1',
+      parentContextId: null,
+      inheritsOrchestratorContext: false,
+    },
+    ...overrides,
+  };
+}
+
+function validDebugInspection(overrides: Partial<AgentDebugInspection> = {}): AgentDebugInspection {
+  return {
+    agentRole: 'execution',
+    invocationStatus: 'completed',
+    latestInvocation: validInvocationIdentity(),
+    invocationHistoryCount: 1,
+    turn: {
+      state: 'collected',
+      turnId: 'turn-1',
+      round: 1,
+      lifecycleState: 'completed',
+      startedAt: '2026-11-01T00:00:00.000Z',
+      completedAt: '2026-11-01T00:01:00.000Z',
+      durationMs: 60000,
+    },
+    context: {
+      state: 'collected',
+      contextRootId: 'ctx:task-a:operation-a:step-0:1',
+      inheritsOrchestratorContext: false,
+      messageCount: 3,
+      charCount: 200,
+      injectedRefs: [],
+      compacted: false,
+      omissionReason: null,
+    },
+    model: {
+      state: 'collected',
+      provider: 'rcc',
+      requestedModel: 'gcm',
+      actualModel: 'gcm',
+      retryCount: 0,
+      tokenUsage: { state: 'collected', inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    },
+    tools: {
+      availableToolsState: 'collected',
+      availableTools: ['humanagent_turn_end'],
+      callsState: 'collected',
+      calls: [{
+        callId: 'call-1',
+        toolName: 'humanagent_turn_end',
+        state: 'succeeded',
+        durationMs: 10,
+        redactedInputSummary: '调用标准收口动作',
+        outputRef: null,
+        errorMessage: null,
+      }],
+    },
+    error: {
+      state: 'none',
+      code: null,
+      message: null,
+      owner: null,
+      retryable: null,
+      readonlyNextActionHint: null,
+    },
+    ...overrides,
+  };
+}
+
 const proceduralCandidate = (overrides: Partial<ProceduralMemoryCandidate> = {}): ProceduralMemoryCandidate => ({
   candidateId: 'procedural-a',
   namespace: 'project',
@@ -2081,4 +2258,159 @@ test('agent activity selection query rejects mixed and half-formed selectors', (
     assignmentId: 'asg-1',
   };
   assert.equal(validateTaskAgentActivitySelectionQuery(selected).assignmentId, 'asg-1');
+});
+
+test('canonical standard turn end uses summary.result.text and rejects the retired deliveryText alias', () => {
+  const payload = validStandardTurnEndPayload();
+  assert.doesNotThrow(() => validateStandardTurnEndPayload(payload));
+  assert.equal(isStandardTurnEndPublicationEligible(payload), true);
+  assert.doesNotThrow(() => assertStandardTurnEndPublicationEligible(payload));
+
+  assert.match(
+    (captureContractError(
+      () => validateStandardTurnEndPayload({ ...payload, deliveryText: 'retired alias' } as unknown as StandardTurnEndPayload),
+    ) as Error).message,
+    /standard-turn-end\.retired-delivery-text/,
+  );
+  assert.match(
+    (captureContractError(() => validateStandardTurnEndPayload({
+      ...payload,
+      summary: { ...payload.summary, result: { status: 'completed', text: '   ' } },
+    })) as Error).message,
+    /standard-turn-end\.missing-public-deliverable/,
+  );
+  assert.match(
+    (captureContractError(() => validateStandardTurnEndPayload({
+      ...payload,
+      summary: { ...payload.summary, result: { status: 'unknown', text: 'bad' } },
+    } as unknown as StandardTurnEndPayload)) as Error).message,
+    /standard-turn-end\.result-status/,
+  );
+  assert.match(
+    (captureContractError(
+      () => validateStandardTurnEndPayload({ ...payload, deliveryRefs: ['asset://ok', 'asset://ok'] }),
+    ) as Error).message,
+    /standard-turn-end\.delivery-refs/,
+  );
+
+  const continuation = validStandardTurnEndPayload({
+    outcome: 'continue',
+    summary: { ...payload.summary, result: { status: 'partial', text: '仍需继续' } },
+  });
+  assert.equal(isStandardTurnEndPublicationEligible(continuation), false);
+  assert.match(
+    (captureContractError(
+      () => assertStandardTurnEndPublicationEligible(continuation),
+    ) as Error).message,
+    /standard-turn-end\.non-completed-publication/,
+  );
+
+  const assetOnly = validStandardTurnEndPayload({
+    summary: { ...payload.summary, result: { status: 'completed', text: '' } },
+    deliveryRefs: ['asset://delivery/report.pdf'],
+  });
+  assert.doesNotThrow(() => validateStandardTurnEndPayload(assetOnly));
+});
+
+test('plan revision contract binds immutable committed steps to task execution identity and context isolation', () => {
+  const plan = validPlanRevisionRecord();
+  assert.doesNotThrow(() => validatePlanRevisionRecord(plan, {
+    taskId: 'task-a',
+    operationId: 'operation-a',
+    executionEpoch: 1,
+  }));
+  assert.equal(assertPlanStepDispatchBinding(plan, {
+    boundPlanRevisionId: plan.planRevisionId,
+    boundPlanStepId: plan.steps[0]!.stepId,
+  }), plan.steps[0]);
+
+  assert.match(
+    (captureContractError(() => assertPlanStepDispatchBinding(plan, {
+      boundPlanRevisionId: plan.planRevisionId,
+      boundPlanStepId: 'step:not-in-this-plan:0',
+    })) as Error).message,
+    /orchestration\.unbound-plan-step/,
+  );
+  assert.throws(
+    () => validatePlanRevisionRecord(validPlanRevisionRecord({
+      committedRef: { ...plan.committedRef, state: 'pending' } as unknown as PlanRevisionRecord['committedRef'],
+    })),
+    ContractError,
+  );
+  assert.throws(
+    () => validatePlanRevisionRecord(validPlanRevisionRecord({
+      steps: [{
+        ...plan.steps[0]!,
+        contextIsolation: {
+          ...plan.steps[0]!.contextIsolation,
+          inheritsOrchestratorContext: true as unknown as false,
+        },
+      }],
+    }) as never),
+    ContractError,
+  );
+});
+
+test('recovery facts deterministically choose auto-resume unless a mutating effect is unknown', () => {
+  const unknownMutation = {
+    callId: 'call-write',
+    boundPlanStepId: 'step:plan-rev:task-a:operation-a:1:0',
+    toolName: 'file.write',
+    effectPolicy: 'mutating' as const,
+    idempotencyKey: 'idem-write-1',
+    state: 'dispatched-effect-unknown' as const,
+    outputArtifactRef: null,
+  };
+
+  assert.equal(decideTurnSegmentRecovery([]), 'recovery-auto-resumed');
+  assert.equal(decideTurnSegmentRecovery([unknownMutation]), 'recovery-hold-effect-unknown');
+  assert.doesNotThrow(() => validateTurnSegmentRecoveryFact(validRecoveryFact()));
+  assert.doesNotThrow(() => validateTurnSegmentRecoveryFact(validRecoveryFact({
+    toolEffects: [unknownMutation],
+    recoveryOutcome: 'recovery-hold-effect-unknown',
+  })));
+  assert.throws(
+    () => validateTurnSegmentRecoveryFact(validRecoveryFact({ toolEffects: [unknownMutation] })),
+    ContractError,
+  );
+  assert.throws(
+    () => validateTurnSegmentRecoveryFact(validRecoveryFact({
+      recoveryResponsibilityOwner: 'packages/runtime',
+    } as unknown as Partial<TurnSegmentRecoveryFact>)),
+    ContractError,
+  );
+});
+
+test('agent invocation and debug contracts preserve role identity and explicit token absence states', () => {
+  assert.doesNotThrow(() => validateAgentInvocationIdentity(validInvocationIdentity()));
+  assert.doesNotThrow(() => validateTokenUsageInspection({
+    state: 'data-not-collected',
+    reason: 'provider-protocol-omitted',
+  }));
+  assert.doesNotThrow(() => validateTokenUsageInspection({
+    state: 'not-applicable',
+    reason: 'no-model-call',
+  }));
+  assert.doesNotThrow(() => validateAgentDebugInspection(validDebugInspection()));
+
+  assert.throws(
+    () => validateTokenUsageInspection({ state: 'collected', inputTokens: 1, outputTokens: 2, totalTokens: 4 }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateAgentDebugInspection(validDebugInspection({
+      latestInvocation: validInvocationIdentity({ agentRole: 'review' }),
+    })),
+    ContractError,
+  );
+  assert.throws(
+    () => validateAgentInvocationIdentity(validInvocationIdentity({
+      contextIsolation: {
+        contextRootId: 'ctx:task-a:operation-a:step-0:1',
+        parentContextId: 'parent',
+        inheritsOrchestratorContext: true,
+      },
+    })),
+    ContractError,
+  );
 });

@@ -1,12 +1,13 @@
 {
   "id": "humanagent-native-turn-checkpoint",
-  "version": "1",
+  "version": "2",
   "meta": {
     "title": "原生 turn 的唯一 checkpoint 保存边界",
     "baseline": "f410f134aba33e73c1c783a843389d7fdc8f9d37",
     "status": "DESIGN-PLANNED",
     "scope": "由 admitted-turn 外层图复用；仅表达保存和恢复结果，不派发下一 turn，也不声称 Operator 已注册或运行",
-    "routingContract": "Edges express unconditional ARC dependencies only; installed DAGpipe grammar/runtime provides no conditional-edge routing evidence. After the durable phase envelope, pure success and recovery-hold projections both execute and converge at the unique checkpoint_boundary_outcome Z. Exactly one projection is active by envelope state; this is target topology/contract only, not proof of runtime routing."
+    "routingContract": "Edges express unconditional ARC dependencies only; installed DAGpipe grammar/runtime provides no conditional-edge routing evidence. After the durable phase envelope, pure success and recovery-hold projections both execute and converge at the unique checkpoint_boundary_outcome Z. Exactly one projection is active by envelope state; this is target topology/contract only, not proof of runtime routing.",
+    "effectLedgerContract": "每次工具调用或子代理派发前先追加 dispatched-effect-unknown 条目，结果落盘后立即追加 effect-committed；mutating 且未知的条目要求进入 recovery hold，readonly 或已提交条目允许自动续跑。"
   },
   "inputs": [
     { "id": "semantic_closure_candidate", "schema": "Object" }
@@ -23,17 +24,27 @@
       "iterator": "Whole"
     },
     {
-      "id": "reconcile_operations",
-      "operator": "humanagent-native-checkpoint-reconcile",
+      "id": "record_operation_effect_ledger",
+      "operator": "humanagent-native-checkpoint-effect-ledger",
       "operator_version": "1",
       "inputs": ["candidate_validation_result"],
+      "output": { "id": "effect_ledger_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "reconcile_in_flight_operations",
+      "operator": "humanagent-native-checkpoint-reconcile",
+      "operator_version": "1",
+      "inputs": ["effect_ledger_result"],
       "output": { "id": "operation_reconcile_result", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "persist_recovery_state",
+      "id": "persist_recovery_checkpoint",
       "operator": "humanagent-native-checkpoint-persist-recovery",
       "operator_version": "1",
       "inputs": ["operation_reconcile_result"],
@@ -83,17 +94,17 @@
       "iterator": "Whole"
     },
     {
-      "id": "project_durable_success",
-      "operator": "humanagent-native-checkpoint-success-projection",
+      "id": "auto_resume_same_turn_segment",
+      "operator": "humanagent-native-checkpoint-auto-resume",
       "operator_version": "1",
       "inputs": ["history_publication_result"],
-      "output": { "id": "durable_success_disposition", "schema": "Object" },
+      "output": { "id": "auto_resume_disposition", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "recovery_hold",
+      "id": "enter_recovery_hold",
       "operator": "humanagent-native-checkpoint-recovery-hold",
       "operator_version": "1",
       "inputs": ["history_publication_result"],
@@ -106,7 +117,7 @@
       "id": "resolve_boundary_outcome",
       "operator": "humanagent-native-checkpoint-boundary-outcome",
       "operator_version": "1",
-      "inputs": ["durable_success_disposition", "checkpoint_recovery_hold"],
+      "inputs": ["auto_resume_disposition", "checkpoint_recovery_hold"],
       "output": { "id": "checkpoint_boundary_outcome", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -114,16 +125,17 @@
     }
   ],
   "edges": [
-    { "from": "validate_candidate", "to": "reconcile_operations", "arc_id": "candidate_validation_result" },
-    { "from": "reconcile_operations", "to": "persist_recovery_state", "arc_id": "operation_reconcile_result" },
-    { "from": "persist_recovery_state", "to": "commit_checkpoint_fact", "arc_id": "recovery_persistence_result" },
+    { "from": "validate_candidate", "to": "record_operation_effect_ledger", "arc_id": "candidate_validation_result" },
+    { "from": "record_operation_effect_ledger", "to": "reconcile_in_flight_operations", "arc_id": "effect_ledger_result" },
+    { "from": "reconcile_in_flight_operations", "to": "persist_recovery_checkpoint", "arc_id": "operation_reconcile_result" },
+    { "from": "persist_recovery_checkpoint", "to": "commit_checkpoint_fact", "arc_id": "recovery_persistence_result" },
     { "from": "commit_checkpoint_fact", "to": "commit_closure_fact", "arc_id": "checkpoint_commit_result" },
     { "from": "commit_closure_fact", "to": "commit_context_view_fact", "arc_id": "closure_commit_result" },
     { "from": "commit_context_view_fact", "to": "publish_qualified_history", "arc_id": "context_view_commit_result" },
-    { "from": "publish_qualified_history", "to": "project_durable_success", "arc_id": "history_publication_result" },
-    { "from": "publish_qualified_history", "to": "recovery_hold", "arc_id": "history_publication_result" },
-    { "from": "project_durable_success", "to": "resolve_boundary_outcome", "arc_id": "durable_success_disposition" },
-    { "from": "recovery_hold", "to": "resolve_boundary_outcome", "arc_id": "checkpoint_recovery_hold" }
+    { "from": "publish_qualified_history", "to": "auto_resume_same_turn_segment", "arc_id": "history_publication_result" },
+    { "from": "publish_qualified_history", "to": "enter_recovery_hold", "arc_id": "history_publication_result" },
+    { "from": "auto_resume_same_turn_segment", "to": "resolve_boundary_outcome", "arc_id": "auto_resume_disposition" },
+    { "from": "enter_recovery_hold", "to": "resolve_boundary_outcome", "arc_id": "checkpoint_recovery_hold" }
   ],
   "outputs": ["checkpoint_boundary_outcome"]
 }

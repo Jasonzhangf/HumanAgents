@@ -97,6 +97,71 @@ export interface TaskPlanRevisionPublicationInput extends Omit<PublishedTaskPlan
   readonly snapshot: TaskPlanSnapshot;
 }
 
+/** Provider/model identity carried by one independently dispatched plan step. */
+export interface AgentModelBinding {
+  readonly provider: string;
+  readonly requestedModel: string;
+  readonly actualModel: string | null;
+}
+
+/** The independent context contract for a subagent step. */
+export interface SubagentContextIsolationPolicy {
+  readonly contextRootId: string;
+  readonly parentContextId: string | null;
+  readonly inheritsOrchestratorContext: false;
+  readonly allowedInputSources: readonly (
+    | 'explicit-dispatch-template'
+    | 'subagent-own-checkpoints'
+    | 'declared-evidence-refs'
+  )[];
+}
+
+export interface PlanRevisionStep {
+  readonly stepId: string;
+  readonly kind: 'explore' | 'plan' | 'execute' | 'review';
+  readonly targetAgentRole: 'orchestration' | 'execution' | 'review';
+  readonly objective: string;
+  readonly state: 'pending' | 'running' | 'completed' | 'failed';
+  readonly effectPolicy: 'readonly' | 'mutating';
+  readonly modelBinding: AgentModelBinding;
+  readonly contextIsolation: SubagentContextIsolationPolicy;
+  readonly inputEvidenceRefs: readonly EvidenceRef[];
+  readonly outputEvidenceRefs: readonly EvidenceRef[];
+}
+
+export interface PlanRevisionCommittedRef {
+  readonly eventKind: 'task-plan-revision.published';
+  readonly commitId: string;
+  readonly journalSeq: number;
+  readonly state: 'committed';
+}
+
+/**
+ * The immutable execution plan consumed by the dynamic orchestrator. Runtime
+ * status and execution attempts remain outside this record.
+ */
+export interface PlanRevisionRecord {
+  readonly planRevisionId: string;
+  readonly taskId: string;
+  readonly operationId: string;
+  readonly executionEpoch: number;
+  readonly predecessorCheckpointId: string | null;
+  readonly decision: 'continue' | 'complete' | 'replan' | 'blocked';
+  readonly steps: readonly PlanRevisionStep[];
+  readonly committedRef: PlanRevisionCommittedRef;
+}
+
+export interface PlanStepDispatchBinding {
+  readonly boundPlanRevisionId: string;
+  readonly boundPlanStepId: string;
+}
+
+export interface PlanRevisionExpectedIdentity {
+  readonly taskId: string;
+  readonly operationId: string;
+  readonly executionEpoch: number;
+}
+
 const SHA256 = /^sha256:[a-f0-9]{64}$/;
 const NON_EMPTY = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 
@@ -309,4 +374,124 @@ export function validateTaskPlanRevisionMetadata(revision: PublishedTaskPlanRevi
   if (!isCanonicalInstant(revision.publishedAt)) throw new ContractError('task plan publishedAt must be a canonical instant');
   requireText(revision.publishedBy, 'task plan publishedBy');
   requireText(revision.journalCommitRef, 'task plan journalCommitRef');
+}
+
+const PLAN_REVISION_KINDS = ['explore', 'plan', 'execute', 'review'] as const;
+const PLAN_TARGET_AGENT_ROLES = ['orchestration', 'execution', 'review'] as const;
+const PLAN_STEP_STATES = ['pending', 'running', 'completed', 'failed'] as const;
+const PLAN_EFFECT_POLICIES = ['readonly', 'mutating'] as const;
+const PLAN_DECISIONS = ['continue', 'complete', 'replan', 'blocked'] as const;
+const PLAN_INPUT_SOURCES = [
+  'explicit-dispatch-template',
+  'subagent-own-checkpoints',
+  'declared-evidence-refs',
+] as const;
+
+export function validateAgentModelBinding(binding: AgentModelBinding): void {
+  if (!binding || typeof binding !== 'object') throw new ContractError('agent model binding must be an object');
+  requireText(binding.provider, 'agent model provider');
+  requireText(binding.requestedModel, 'agent requested model');
+  if (binding.actualModel !== null) requireText(binding.actualModel, 'agent actual model');
+}
+
+export function validateSubagentContextIsolationPolicy(policy: SubagentContextIsolationPolicy): void {
+  if (!policy || typeof policy !== 'object') throw new ContractError('subagent context isolation policy must be an object');
+  requireText(policy.contextRootId, 'subagent context root id');
+  if (policy.parentContextId !== null) requireText(policy.parentContextId, 'subagent parent context id');
+  if (policy.inheritsOrchestratorContext !== false) {
+    throw new ContractError('subagent must not inherit orchestrator context');
+  }
+  if (!Array.isArray(policy.allowedInputSources)) {
+    throw new ContractError('subagent allowed input sources must be an array');
+  }
+  const seen = new Set<string>();
+  for (const source of policy.allowedInputSources) {
+    if (!PLAN_INPUT_SOURCES.includes(source)) throw new ContractError(`unsupported subagent input source: ${String(source)}`);
+    if (seen.has(source)) throw new ContractError('subagent allowed input sources must not contain duplicates');
+    seen.add(source);
+  }
+}
+
+function requirePlanStepShape(step: PlanRevisionStep, planRevisionId: string, index: number): void {
+  requireText(step.stepId, 'plan revision step id');
+  if (step.stepId !== `step:${planRevisionId}:${index}`) {
+    throw new ContractError(`plan revision step ${step.stepId} is not stable for its plan revision`);
+  }
+  if (!PLAN_REVISION_KINDS.includes(step.kind)) throw new ContractError(`unsupported plan step kind: ${String(step.kind)}`);
+  if (!PLAN_TARGET_AGENT_ROLES.includes(step.targetAgentRole)) {
+    throw new ContractError(`unsupported plan target agent role: ${String(step.targetAgentRole)}`);
+  }
+  requireText(step.objective, `plan revision step ${step.stepId} objective`);
+  if (!PLAN_STEP_STATES.includes(step.state)) throw new ContractError(`unsupported plan step state: ${String(step.state)}`);
+  if (!PLAN_EFFECT_POLICIES.includes(step.effectPolicy)) {
+    throw new ContractError(`unsupported plan effect policy: ${String(step.effectPolicy)}`);
+  }
+  validateAgentModelBinding(step.modelBinding);
+  validateSubagentContextIsolationPolicy(step.contextIsolation);
+  if (!step.contextIsolation.contextRootId.startsWith(`ctx:`)) {
+    throw new ContractError('plan revision step context root id must be a context identity');
+  }
+  if (!Array.isArray(step.inputEvidenceRefs) || !Array.isArray(step.outputEvidenceRefs)) {
+    throw new ContractError('plan revision step evidence refs must be arrays');
+  }
+  for (const ref of step.inputEvidenceRefs) assertEvidenceRef(ref);
+  for (const ref of step.outputEvidenceRefs) assertEvidenceRef(ref);
+}
+
+export function validatePlanRevisionRecord(
+  record: PlanRevisionRecord,
+  expected?: PlanRevisionExpectedIdentity,
+): void {
+  if (!record || typeof record !== 'object') throw new ContractError('plan revision record must be an object');
+  requireText(record.planRevisionId, 'plan revision id');
+  requireText(record.taskId, 'plan revision task id');
+  requireText(record.operationId, 'plan revision operation id');
+  requireSequence(record.executionEpoch, 'plan revision execution epoch');
+  if (record.predecessorCheckpointId !== null) {
+    requireText(record.predecessorCheckpointId, 'plan revision predecessor checkpoint id');
+  }
+  if (!PLAN_DECISIONS.includes(record.decision)) {
+    throw new ContractError(`unsupported plan revision decision: ${String(record.decision)}`);
+  }
+  if (!Array.isArray(record.steps) || record.steps.length === 0) {
+    throw new ContractError('plan revision steps must be a non-empty array');
+  }
+  const stepIds = new Set<string>();
+  for (const [index, step] of record.steps.entries()) {
+    requirePlanStepShape(step, record.planRevisionId, index);
+    if (stepIds.has(step.stepId)) throw new ContractError('plan revision step ids must be unique');
+    stepIds.add(step.stepId);
+  }
+  const committed = record.committedRef;
+  if (!committed || typeof committed !== 'object') throw new ContractError('plan revision committed ref must be an object');
+  if (committed.eventKind !== 'task-plan-revision.published' || committed.state !== 'committed') {
+    throw new ContractError('plan revision must reference a committed task-plan-revision.published event');
+  }
+  requireText(committed.commitId, 'plan revision commit id');
+  if (committed.commitId !== `plan-commit:v1:${record.planRevisionId}`) {
+    throw new ContractError('plan revision commit id does not match its revision identity');
+  }
+  requireSequence(committed.journalSeq, 'plan revision journal sequence');
+  if (expected !== undefined) {
+    if (record.taskId !== expected.taskId
+      || record.operationId !== expected.operationId
+      || record.executionEpoch !== expected.executionEpoch) {
+      throw new ContractError('plan revision does not match the current execution identity');
+    }
+  }
+}
+
+export function assertPlanStepDispatchBinding(
+  record: PlanRevisionRecord,
+  binding: PlanStepDispatchBinding,
+): PlanRevisionStep {
+  validatePlanRevisionRecord(record);
+  requireText(binding.boundPlanRevisionId, 'bound plan revision id');
+  requireText(binding.boundPlanStepId, 'bound plan step id');
+  if (binding.boundPlanRevisionId !== record.planRevisionId) {
+    throw new ContractError('orchestration.unbound-plan-step');
+  }
+  const step = record.steps.find((candidate) => candidate.stepId === binding.boundPlanStepId);
+  if (step === undefined) throw new ContractError('orchestration.unbound-plan-step');
+  return step;
 }

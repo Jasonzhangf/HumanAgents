@@ -1,11 +1,17 @@
 {
   "graph": "humanagent-native-turn-segment-recovery",
-  "requirements_version": 14,
+  "requirements_version": 19,
   "labels": {
     "read_exact_predecessor_facts": "读取前驱 segment 的真实事实：已提交 captured recovery receipt、打开但未保存的 interrupted anchor，或无前驱保存的 initial-open 原 turn anchor（binding commit + records-through）；核验同一业务 turn 与新 handle 身份。未保存不等于 capture。",
     "register_current_grant_business": "持锁读取当前 grant，并在同一 held 登记事务内登记本次 segment-open 的精确 business reservation，分别取得 grant commit 与 business registration commit",
     "append_segment_opened": "核验 reservation、本 segment 的 predecessor（captured/interrupted/initial-open）与 chain tail 后，向 Organ Journal 追加 segment-opened 并取得独立 segment commit；旧 epoch 迟到写被拒绝",
     "establish_epoch_window": "恢复本 epoch 的执行窗口与当前语义；新 physical parent control 的 executionEpoch 取实际 segment execution，admissionCommitRef 绑定该段已提交业务登记，但保留原父 operation 的不可变 intent、namespaceKey 与 fingerprintKey。释放新段 child/effect 前，以 segmentOpenedFromRecord 和 decodeActiveTurnRecords 做精确 typed join：已提交 segment-open → 其 businessRegistrationCommitRef/inputIdentity → businessTurnRef.bindingCommitRef 的原 binding-opened 与 businessTurnRef.execution → 原 execution namespace 中的祖先父 control envelope → 该 control admissionCommitRef 指向的原业务登记。initial-open 只发一次 initial input，合并历史段与当前段的未决义务并保留已完成 effect，旧 epoch 迟到写被拒绝",
+    "record_operation_effect_ledger": "记录每个工具或子代理动作的只读或变更策略、幂等身份、执行状态与输出资产引用",
+    "reconcile_in_flight_operations": "按租约退出、Provider 停止确认与响应结束事实收拢在途请求和副作用",
+    "persist_recovery_checkpoint": "持久保存恢复事实、副作用账本、Provider settle 回执与恢复责任",
+    "evaluate_effect_safety": "按是否存在未知变更副作用执行确定性安全分流",
+    "auto_resume_same_turn_segment": "无未知变更副作用时自动续跑同一轮并复用已提交输出",
+    "enter_recovery_hold": "存在未知变更副作用时进入持久恢复挂起，禁止自动重放",
     "resolve_resume_outcome": "返回实际 receipts，或返回保留恢复责任且无新执行的 typed outcome；工具轮次预算拒绝已收到的调用时，先持久保存真实 failed/tool.round-limit/executed:false 结果，再抛原 typed error，恢复请求保留 call/output 配对，不执行被拒工具、不重放已接受 effect"
   },
   "arcs": {
@@ -13,6 +19,12 @@
     "grant_registration_result": "当前 grant commit 与精确 business registration commit",
     "segment_opened_commit_result": "已提交的 segment-opened 与独立 segment commit",
     "resumed_turn_state_result": "恢复后的执行窗口、当前语义与保留的旧段未决义务",
+    "effect_ledger_result": "已记录的工具或子代理副作用账本",
+    "operation_reconcile_result": "已收拢的在途请求、Provider settle 回执与副作用状态",
+    "recovery_checkpoint_result": "已持久化的恢复检查点与恢复责任",
+    "effect_safety_predicate": "按是否存在未知变更副作用确定的安全分流条件",
+    "auto_resume_result": "可安全自动续跑的同一轮恢复结果",
+    "recovery_hold_result": "需要人工确认的恢复挂起结果",
     "segment_recovery_outcome": "typed 恢复结果：resumed receipts 或 retained recovery responsibility"
   },
   "owners": {
@@ -20,6 +32,12 @@
     "register_current_grant_business": "packages/runtime",
     "append_segment_opened": "packages/adapters/jsonl",
     "establish_epoch_window": "packages/runtime",
+    "record_operation_effect_ledger": "packages/runtime",
+    "reconcile_in_flight_operations": "packages/runtime",
+    "persist_recovery_checkpoint": "packages/runtime",
+    "evaluate_effect_safety": "packages/runtime",
+    "auto_resume_same_turn_segment": "packages/runtime",
+    "enter_recovery_hold": "packages/runtime",
     "resolve_resume_outcome": "packages/runtime"
   },
   "design": {

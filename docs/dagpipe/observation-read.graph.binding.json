@@ -27,6 +27,26 @@
       "ownerSymbol": "readUiRuntimeTaskJournal/readDurableInventory",
       "implementationStatus": "candidate-declared-project-journal-read"
     },
+    "bind_agent_invocation_identity": {
+      "ownerPath": "packages/runtime/src/observation/agent-activity.ts",
+      "ownerRel": "packages/runtime/src/observation/agent-activity.ts",
+      "ownerSymbol": "selectTaskAgentActivity",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "从同范围 Journal 事实绑定五类 Agent 的真实 invocation identity，不创建第二身份源。"
+    },
+    "project_five_dimension_agent_debug": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "只读投影当前轮、上下文、模型、工具与错误五维 AgentDebugInspection，不写 Journal。"
+    },
+    "render_readonly_agent_drawer": {
+      "ownerPath": "docs/ui/observation.js",
+      "ownerRel": "docs/ui/observation.js",
+      "ownerSymbol": "mountSemanticObservationPanel",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "只读渲染 Agent Debug 抽屉，不提供控制动作或写请求。"
+    },
     "normalize_context_events": {
       "ownerPath": "packages/context-events/src/normalize.ts",
       "ownerRel": "packages/context-events/src/normalize.ts"

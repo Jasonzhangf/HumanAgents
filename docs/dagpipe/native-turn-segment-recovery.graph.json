@@ -1,9 +1,9 @@
 {
   "id": "humanagent-native-turn-segment-recovery",
-  "version": "1",
+  "version": "2",
   "meta": {
     "title": "同一业务 turn 的 segment 冷恢复",
-    "requirements_version": 14,
+    "requirements_version": 19,
     "requirements": [
       "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery",
       "humanagent-explicit-brain-semantic-turn-context",
@@ -17,6 +17,7 @@
     ],
     "designStatus": "USER-REQUIREMENT-DESIGN",
     "implementationStatus": "UNVERIFIED",
+    "effectLedgerContract": "恢复前重新读取在途 effect ledger；readonly 或已提交条目可复用，任何 mutating 且 dispatched-effect-unknown 条目必须进入 recovery hold，禁止自动重放。",
     "scope": "一次同一业务 turn 的 resume intent；单输入单输出 SESE；不派发固定 observation/plan/execute/review 角色流水线，无重复/回退边，下一次恢复是本图的新执行",
     "seseBoundary": "一个 resume intent 输入 ARC（唯一公开产出者为 App 选择器 resolveColdExecutionResumeRequest(input:{taskId,operationId})，DESIGN-PLANNED/UNVERIFIED target；组合与索引入口只暴露这一个 owner，不新增 select/fallback 平行路径；HTTP 调用方只提供 operationId），一个 typed recovery/resume outcome 输出 ARC。",
     "routingContract": "已安装 DAGpipe 0.1.1 grammar 只有无条件 from/to/arc_id 边，执行器按拓扑波次调度全部节点，无条件边。因此 prerequisite/error 由 typed envelope 承载：节点只在其入边 envelope 声明精确前置成功后执行副作用，否则输出 not-executed 并保留原首错；链条仍到达唯一输出节点，由该节点解析 typed outcome。此为目标拓扑与合同，不证明 runtime 路由。",
@@ -28,7 +29,7 @@
     "revokeOrder": "reservation 提交前撤权：零登记、零 append、零 dispatch；reservation 提交后撤权：允许完成本次已登记 segment 的 append 与收拢，但新 request、child、effect 仍各自按当前 grant 逐次准入。",
     "immutability": "原 v1 initial capture、原 binding commit 与原业务 turn 身份（originalBusinessIdentity）保持不可变；本图只追加新 segment，不重标旧 epoch、不重写 v1 receipt、不要求旧 interrupted segment 补写 v2 capture。",
     "reuseBoundary": "复用 native-turn-checkpoint.graph.json 的节点 schema；本图不证明 Operator 已注册、runtime 已执行或产品已验收。",
-    "nodeGranularity": "消融后保留 5 个节点：读取前驱真实事实、当前 grant/业务登记、append 新 segment、恢复 epoch/window 与当前语义及旧义务、typed 结果。三类前驱（captured/interrupted/initial-open）在同一读节点内分类，不为各 union 变体新增分支节点。移除原 persist_segment_recovery_assets 假前置；不把模块内部普通函数拆成节点。",
+    "nodeGranularity": "保留前驱事实、grant/业务登记、append 新 segment、恢复 epoch/window、effect ledger、reconciliation、recovery checkpoint、安全分流和 typed 结果；不把模块内部普通函数拆成节点。",
     "bindingCompanion": "native-turn-segment-recovery.graph.binding.json",
     "semanticCompanion": "native-turn-segment-recovery.graph.semantic.json"
   },
@@ -77,10 +78,70 @@
       "iterator": "Whole"
     },
     {
-      "id": "resolve_resume_outcome",
-      "operator": "humanagent-native-turn-segment-recovery-resolve-outcome",
+      "id": "record_operation_effect_ledger",
+      "operator": "humanagent-native-turn-recovery-effect-ledger",
       "operator_version": "1",
       "inputs": ["resumed_turn_state_result"],
+      "output": { "id": "effect_ledger_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "reconcile_in_flight_operations",
+      "operator": "humanagent-native-turn-recovery-reconcile",
+      "operator_version": "1",
+      "inputs": ["effect_ledger_result"],
+      "output": { "id": "operation_reconcile_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "persist_recovery_checkpoint",
+      "operator": "humanagent-native-turn-recovery-persist-checkpoint",
+      "operator_version": "1",
+      "inputs": ["operation_reconcile_result"],
+      "output": { "id": "recovery_checkpoint_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "evaluate_effect_safety",
+      "operator": "humanagent-native-turn-recovery-effect-safety",
+      "operator_version": "1",
+      "inputs": ["recovery_checkpoint_result"],
+      "output": { "id": "effect_safety_predicate", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "auto_resume_same_turn_segment",
+      "operator": "humanagent-native-turn-recovery-auto-resume",
+      "operator_version": "1",
+      "inputs": ["effect_safety_predicate"],
+      "output": { "id": "auto_resume_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "enter_recovery_hold",
+      "operator": "humanagent-native-turn-recovery-hold",
+      "operator_version": "1",
+      "inputs": ["effect_safety_predicate"],
+      "output": { "id": "recovery_hold_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_resume_outcome",
+      "operator": "humanagent-native-turn-recovery-resolve-outcome",
+      "operator_version": "1",
+      "inputs": ["auto_resume_result", "recovery_hold_result"],
       "output": { "id": "segment_recovery_outcome", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -91,7 +152,14 @@
     { "from": "read_exact_predecessor_facts", "to": "register_current_grant_business", "arc_id": "predecessor_facts_result" },
     { "from": "register_current_grant_business", "to": "append_segment_opened", "arc_id": "grant_registration_result" },
     { "from": "append_segment_opened", "to": "establish_epoch_window", "arc_id": "segment_opened_commit_result" },
-    { "from": "establish_epoch_window", "to": "resolve_resume_outcome", "arc_id": "resumed_turn_state_result" }
+    { "from": "establish_epoch_window", "to": "record_operation_effect_ledger", "arc_id": "resumed_turn_state_result" },
+    { "from": "record_operation_effect_ledger", "to": "reconcile_in_flight_operations", "arc_id": "effect_ledger_result" },
+    { "from": "reconcile_in_flight_operations", "to": "persist_recovery_checkpoint", "arc_id": "operation_reconcile_result" },
+    { "from": "persist_recovery_checkpoint", "to": "evaluate_effect_safety", "arc_id": "recovery_checkpoint_result" },
+    { "from": "evaluate_effect_safety", "to": "auto_resume_same_turn_segment", "arc_id": "effect_safety_predicate" },
+    { "from": "evaluate_effect_safety", "to": "enter_recovery_hold", "arc_id": "effect_safety_predicate" },
+    { "from": "auto_resume_same_turn_segment", "to": "resolve_resume_outcome", "arc_id": "auto_resume_result" },
+    { "from": "enter_recovery_hold", "to": "resolve_resume_outcome", "arc_id": "recovery_hold_result" }
   ],
   "outputs": ["segment_recovery_outcome"]
 }

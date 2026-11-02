@@ -1,8 +1,8 @@
 {
   "id": "humanagent-explicit-requirement",
-  "version": "5",
+  "version": "6",
   "meta": {
-    "title": "用户新任务从可读草稿、修订、精确确认到单次最终提交并进入需求队列与执行计划",
+    "title": "用户新任务一次提交即整理、确认并进入 FIFO 需求队列与执行计划",
     "requirements_version": 19,
     "requirements": [
       "humanagent-explicit-brain-semantic-turn-context",
@@ -47,7 +47,7 @@
     "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
     "singleConfirmationContract": "新建任务表单提交本身就是用户对该新任务的确认；同一次提交处理中整理并按 FIFO 投递 RequirementEnvelope，不要求第二次确认。已有任务的目标、范围或处理方式变更须单独确认。",
     "controlBoundaryContract": "steer、停止、权限撤销等控制命令不混入业务需求队列或 task payload；消息式介入不构成新建任务。User task account 的 interaction 入口与新建草稿确认路径复用 existing 语义，不从 UI actor 字段自报授权。",
-    "nodeContract": "新建任务相关节点只沿 sensory_inbox → explicit_normalize → create_reviewable_draft → revise_draft_to_approval → confirm_exact_revision → validate_draft_revision → submit_single_authorization → compile_execution_policy → persist_authorized_plan → requirement_result 单链确认；已有任务变更不重复走新建确认。"
+    "nodeContract": "新建任务相关节点只沿 sensory_inbox → explicit_normalize → normalize_and_commit_requirement_envelope → enqueue_fifo_requirement → {stay_on_single_entry_surface, establish_task_identity, compile_execution_policy} → requirement_result 分流；不接受第二次确认，已有任务变更单独走确认分支。"
   },
   "inputs": [
     {
@@ -60,13 +60,8 @@
       "id": "sensory_inbox",
       "operator": "humanagent-sensory-inbox",
       "operator_version": "1",
-      "inputs": [
-        "user_task_input"
-      ],
-      "output": {
-        "id": "raw_interaction",
-        "schema": "Object"
-      },
+      "inputs": ["user_task_input"],
+      "output": { "id": "raw_interaction", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -75,88 +70,38 @@
       "id": "explicit_normalize",
       "operator": "humanagent-explicit-normalize",
       "operator_version": "1",
-      "inputs": [
-        "raw_interaction"
-      ],
-      "output": {
-        "id": "normalized_intent",
-        "schema": "Object"
-      },
+      "inputs": ["raw_interaction"],
+      "output": { "id": "normalized_intent", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "create_reviewable_draft",
-      "operator": "humanagent-explicit-draft",
+      "id": "normalize_and_commit_requirement_envelope",
+      "operator": "humanagent-single-submit-envelope",
       "operator_version": "1",
-      "inputs": [
-        "normalized_intent"
-      ],
-      "output": {
-        "id": "reviewable_draft",
-        "schema": "Object"
-      },
+      "inputs": ["normalized_intent"],
+      "output": { "id": "authorized_requirement", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "revise_draft_to_approval",
-      "operator": "humanagent-draft-revision",
+      "id": "enqueue_fifo_requirement",
+      "operator": "humanagent-requirement-fifo",
       "operator_version": "1",
-      "inputs": [
-        "reviewable_draft"
-      ],
-      "output": {
-        "id": "approved_draft_revision",
-        "schema": "Object"
-      },
+      "inputs": ["authorized_requirement"],
+      "output": { "id": "queued_requirement", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "confirm_exact_revision",
-      "operator": "humanagent-draft-confirmation",
+      "id": "stay_on_single_entry_surface",
+      "operator": "humanagent-single-entry-surface",
       "operator_version": "1",
-      "inputs": [
-        "approved_draft_revision"
-      ],
-      "output": {
-        "id": "confirmed_draft_revision",
-        "schema": "Object"
-      },
-      "input_selector": { "include": [], "exclude": [], "predicate": null },
-      "output_selector": { "include": [], "exclude": [], "predicate": null },
-      "iterator": "Whole"
-    },
-    {
-      "id": "validate_draft_revision",
-      "operator": "humanagent-draft-revision-invariants",
-      "operator_version": "1",
-      "inputs": [
-        "confirmed_draft_revision"
-      ],
-      "output": {
-        "id": "validated_draft_revision",
-        "schema": "Object"
-      },
-      "input_selector": { "include": [], "exclude": [], "predicate": null },
-      "output_selector": { "include": [], "exclude": [], "predicate": null },
-      "iterator": "Whole"
-    },
-    {
-      "id": "submit_single_authorization",
-      "operator": "humanagent-final-submit",
-      "operator_version": "1",
-      "inputs": [
-        "validated_draft_revision"
-      ],
-      "output": {
-        "id": "authorized_requirement",
-        "schema": "Object"
-      },
+      "inputs": ["queued_requirement"],
+      "output": { "id": "entry_surface_state", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -165,7 +110,7 @@
       "id": "establish_task_identity",
       "operator": "humanagent-task-identity",
       "operator_version": "1",
-      "inputs": ["authorized_requirement"],
+      "inputs": ["queued_requirement"],
       "output": { "id": "identity_result", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -182,26 +127,11 @@
       "iterator": "Whole"
     },
     {
-      "id": "requirement_result",
-      "operator": "humanagent-requirement-result",
-      "operator_version": "1",
-      "inputs": ["dispatch_result", "persisted_execution_plan"],
-      "output": { "id": "requirement_processing_result", "schema": "Object" },
-      "input_selector": { "include": [], "exclude": [], "predicate": null },
-      "output_selector": { "include": [], "exclude": [], "predicate": null },
-      "iterator": "Whole"
-    },
-    {
       "id": "compile_execution_policy",
       "operator": "humanagent-execution-policy",
       "operator_version": "1",
-      "inputs": [
-        "authorized_requirement"
-      ],
-      "output": {
-        "id": "execution_plan",
-        "schema": "Object"
-      },
+      "inputs": ["queued_requirement"],
+      "output": { "id": "execution_plan", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -210,63 +140,35 @@
       "id": "persist_authorized_plan",
       "operator": "humanagent-plan-persist",
       "operator_version": "1",
-      "inputs": [
-        "execution_plan"
-      ],
-      "output": {
-        "id": "persisted_execution_plan",
-        "schema": "Object"
-      },
+      "inputs": ["execution_plan"],
+      "output": { "id": "persisted_execution_plan", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "requirement_result",
+      "operator": "humanagent-requirement-result",
+      "operator_version": "1",
+      "inputs": ["entry_surface_state", "dispatch_result", "persisted_execution_plan"],
+      "output": { "id": "requirement_processing_result", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     }
   ],
   "edges": [
-    { "from": "submit_single_authorization", "to": "establish_task_identity", "arc_id": "authorized_requirement" },
+    { "from": "sensory_inbox", "to": "explicit_normalize", "arc_id": "raw_interaction" },
+    { "from": "explicit_normalize", "to": "normalize_and_commit_requirement_envelope", "arc_id": "normalized_intent" },
+    { "from": "normalize_and_commit_requirement_envelope", "to": "enqueue_fifo_requirement", "arc_id": "authorized_requirement" },
+    { "from": "enqueue_fifo_requirement", "to": "stay_on_single_entry_surface", "arc_id": "queued_requirement" },
+    { "from": "enqueue_fifo_requirement", "to": "establish_task_identity", "arc_id": "queued_requirement" },
+    { "from": "enqueue_fifo_requirement", "to": "compile_execution_policy", "arc_id": "queued_requirement" },
+    { "from": "stay_on_single_entry_surface", "to": "requirement_result", "arc_id": "entry_surface_state" },
     { "from": "establish_task_identity", "to": "admit_task_execution", "arc_id": "identity_result" },
     { "from": "admit_task_execution", "to": "requirement_result", "arc_id": "dispatch_result" },
-    { "from": "persist_authorized_plan", "to": "requirement_result", "arc_id": "persisted_execution_plan" },
-    {
-      "from": "sensory_inbox",
-      "to": "explicit_normalize",
-      "arc_id": "raw_interaction"
-    },
-    {
-      "from": "explicit_normalize",
-      "to": "create_reviewable_draft",
-      "arc_id": "normalized_intent"
-    },
-    {
-      "from": "create_reviewable_draft",
-      "to": "revise_draft_to_approval",
-      "arc_id": "reviewable_draft"
-    },
-    {
-      "from": "revise_draft_to_approval",
-      "to": "confirm_exact_revision",
-      "arc_id": "approved_draft_revision"
-    },
-    {
-      "from": "confirm_exact_revision",
-      "to": "validate_draft_revision",
-      "arc_id": "confirmed_draft_revision"
-    },
-    {
-      "from": "validate_draft_revision",
-      "to": "submit_single_authorization",
-      "arc_id": "validated_draft_revision"
-    },
-    {
-      "from": "submit_single_authorization",
-      "to": "compile_execution_policy",
-      "arc_id": "authorized_requirement"
-    },
-    {
-      "from": "compile_execution_policy",
-      "to": "persist_authorized_plan",
-      "arc_id": "execution_plan"
-    }
+    { "from": "compile_execution_policy", "to": "persist_authorized_plan", "arc_id": "execution_plan" },
+    { "from": "persist_authorized_plan", "to": "requirement_result", "arc_id": "persisted_execution_plan" }
   ],
   "outputs": [
     "requirement_processing_result"

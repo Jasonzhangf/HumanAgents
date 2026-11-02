@@ -6,50 +6,61 @@
   },
   "status": "DESIGN-UNVERIFIED",
   "nodes": {
-    "compress": {
-      "ownerPath": "packages/runtime/src/context/index.ts",
-      "ownerRel": "packages/runtime/src/context/index.ts",
-      "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "工作上下文装配与压缩 owner。语义设计责任名称，不声明 Operator 已注册或 runtime 执行。"
-    },
-    "summarize": {
-      "ownerPath": "packages/runtime/src/agent-loop/runtime.ts",
-      "ownerRel": "packages/runtime/src/agent-loop/runtime.ts",
-      "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "agent-loop checkpoint 与 summary 状态 owner；四段总结（目标、行动、结果、下一步）在此边界产生，尚未声明 runtime 已接通。"
-    },
-    "deliver": {
-      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "标准 turn 交付记录 owner。捕获真实已接受的标准交付来源，区别于后续 canonical public-output 发布；不声明传输完成或任务成功，不重复保存正文。typed readDelivery 的 runtime 消费为待实现契约。"
-    },
-    "checkpoint": {
-      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
-      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
-      "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "唯一 checkpoint 与 closure 提交边界；保留未完成恢复责任。"
-    },
-    "planner": {
-      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
-      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
-      "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "planStage 与独立 Planner 派发边界；Planner 调用为待实现契约，本绑定不声明已注册或已执行。"
-    },
-    "adopt": {
+    "orchestrator_select_action": {
       "ownerPath": "packages/runtime/src/admission/implicit-orchestrator.ts",
       "ownerRel": "packages/runtime/src/admission/implicit-orchestrator.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "编排者核实计划适合性并接受正式 plan 与 definition。自由文本、refined 结果或角色顺序不构成执行契约。"
+      "designNote": "编排者按当前检查点和最新轮次自主选择下一步，不固定探索、规划、执行、审查的顺序。"
     },
-    "next_state": {
+    "subagent_explore": {
+      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
+      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "subagent_plan": {
+      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
+      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "tool_execute": {
+      "ownerPath": "packages/runtime/src/agent-loop/runtime.ts",
+      "ownerRel": "packages/runtime/src/agent-loop/runtime.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "subagent_review": {
+      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
+      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "commit_subagent_checkpoint": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "每个子代理完成即提交独立检查点，并绑定 planRevisionId 与 stepId。"
+    },
+    "commit_turn_checkpoint": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "轮次收口提交目标、行动、结果、下一步四段检查点。"
+    },
+    "validate_canonical_public_output": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "终态推进 owner，推进前结算本 logical turn。COMPLETED 分支须先消费 typed readDelivery 校验过的 delivery body 并通过同一 canonical public-output commit 与 exact readback 才接受 succeeded/final，且只有真实终态才关闭共享 cycle；否则保留原错误与恢复责任。CONTINUE 分支保持既有 checkpoint 与 Planner 语义，只结束当前 turn，不关闭共享 cycle。canonical output 不得使用 native drain 或 summary。",
-      "settlementContract": "普通结算输入为权威 recoverTurn 的 closure、committed alignment 与可选 summaryEvidenceContext，先用 Core binding assertion 及 exact checkpoint scope/cycle 关联后才追加。checkpoint.next 是 Planner 前屏障；实际 alignment continue 映射 continue，complete/failed 映射 cycle stop，引用由 turnBoundaryRecordRefs 产生。cycle stop 不表示用户停止或 Task 成功。已知 close 在追加 settlement 前比较全部现有关联和精确 milestoneAlignmentCommitRefs；用户停止保留独立 settleStop 路径。不固定探索、计划、执行、审查顺序。",
-      "runtimeCoordinationOwnerPath": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts",
-      "runtimeCoordinationStatus": "planned/unimplemented"
+      "designNote": "唯一公开交付校验；只接受结构化 summary.result.text 或声明的资产引用。"
+    },
+    "force_continuation_reasoning": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "公开交付校验失败或不完整时保留恢复责任并要求同一轮继续推理。"
+    },
+    "planner_align_iteration": {
+      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
+      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "独立 Planner 使用独立上下文对齐目标并产出下一计划版本。"
     }
   }
 }

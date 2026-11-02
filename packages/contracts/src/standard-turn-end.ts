@@ -1,14 +1,11 @@
-import { assertEvidenceRef, assertSameScope, type ActiveTurnProviderExecutionIdentityRef,
-  type EvidenceRef, type ScopeRef } from './index.js';
-import { validateAdmittedTurnIdentity, type AdmittedTurnIdentity } from './native-reasoning.js';
 import {
-  assertTurnSummaryContextIdentity,
-  isAllowlistedTurnSummaryEvidence,
-  turnSummaryEvidenceAllowSet,
-  validateTurnCloseSummary,
-  type TurnCloseSummary,
-  type TurnSummaryEvidenceContext,
-} from './turn-closure.js';
+  assertEvidenceRef,
+  assertSameScope,
+  type ActiveTurnProviderExecutionIdentityRef,
+  type EvidenceRef,
+  type ScopeRef,
+} from './index.js';
+import { validateAdmittedTurnIdentity, type AdmittedTurnIdentity } from './native-reasoning.js';
 import { ContractError } from './errors.js';
 
 /**
@@ -37,8 +34,8 @@ export function isStandardTurnEndToolId(toolId: string): boolean {
 /**
  * The trusted identity of the actual accepted end call. The App captures it at
  * the end control edge from the real Provider request/call/scope; it is never
- * taken from model arguments or metadata. The Runtime binds the text delivery
- * source to this exact call instead of selecting a call by tool name.
+ * taken from model arguments or metadata. The Runtime binds the publication to
+ * this exact call instead of selecting a call by tool name.
  */
 export interface StandardTurnEndCallReference {
   readonly requestId: string;
@@ -53,119 +50,159 @@ export interface StandardTurnEndCallReference {
   readonly scope: ScopeRef;
 }
 
+export type StandardTurnEndOutcome = 'completed' | 'continue' | 'blocked';
+export type StandardTurnEndResultStatus = 'completed' | 'partial' | 'blocked';
+
 /**
- * The model-visible semantic arguments of the standard-turn end action.
- *
- * It reuses the existing four-part `TurnCloseSummary` and the delivery
- * references the model claims. It never carries authority, turn/request
- * identity, grants, epochs, checkpoint or alignment receipts, or a completion
- * flag: those come from the actual typed Provider request and the admitted turn.
+ * The canonical public result. `summary.result.text` is the only canonical
+ * public result text field. `outcome` and `result.status` remain separate typed
+ * decision fields and must not be derived from one another.
  */
-export interface StandardTurnEndInput {
-  readonly summary: TurnCloseSummary;
-  /**
-   * The exact text body this turn delivers. It is a first-class material of the
-   * delivery, independent of the four summary parts: it is never derived from
-   * `summary.result.text` or from the last assistant message. A text-only
-   * delivery leaves `deliveryRefs` empty; at least one of the two must carry
-   * material.
-   */
-  readonly deliveryText?: string;
-  readonly deliveryRefs: readonly string[];
+export interface StandardTurnEndSummary {
+  readonly goal: string;
+  readonly actions: readonly string[];
+  readonly result: {
+    readonly status: StandardTurnEndResultStatus;
+    readonly text: string;
+  };
+  readonly nextStep: string;
 }
 
 /**
+ * The canonical standard-turn-end payload accepted at the control boundary.
+ *
+ * `deliveryRefs` is optional and asset-only. A completed result may use a
+ * non-empty `summary.result.text`, an asset reference, or both. It must not use
+ * a second text field or an alias for `summary.result.text`.
+ */
+export interface StandardTurnEndPayload {
+  readonly outcome: StandardTurnEndOutcome;
+  readonly summary: StandardTurnEndSummary;
+  readonly deliveryRefs?: readonly string[];
+}
+
+/** The model-visible semantic arguments are exactly the canonical payload. */
+export type StandardTurnEndInput = StandardTurnEndPayload;
+
+/**
  * The accepted control event the App adapter routes to the caller. It binds the
- * validated semantic input to the trusted admitted-turn identity and to the
+ * validated canonical payload to the trusted admitted-turn identity and to the
  * delivery evidence the owner resolved.
  *
  * It is a request, not a completion: it carries no terminal decision and no
  * lifecycle receipt. The caller still owns request drain, capture, `closeTurn`
  * and next-turn admission. This module never marks a Task complete.
  */
-export interface StandardTurnEndCommand {
+export interface StandardTurnEndCommand extends StandardTurnEndPayload {
   readonly kind: 'standard-turn-end';
   readonly identity: AdmittedTurnIdentity;
-  readonly summary: TurnCloseSummary;
-  /** The exact delivery text accepted from the model arguments, if any. */
-  readonly deliveryText?: string;
   /** The actual accepted end call captured from the trusted end control edge. */
   readonly acceptedEndCall?: StandardTurnEndCallReference;
-  readonly deliveryRefs: readonly string[];
-  readonly resolvedEvidenceRefs: readonly EvidenceRef[];
+  /** Optional resolved evidence for asset-only delivery refs. */
+  readonly resolvedEvidenceRefs?: readonly EvidenceRef[];
+}
+
+function requireNonEmptyString(value: unknown, label: string): asserts value is string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new ContractError(`${label} must be a non-empty string`);
+  }
+}
+
+function requireStringArray(value: unknown, label: string): asserts value is readonly string[] {
+  if (!Array.isArray(value)) throw new ContractError(`${label} must be an array`);
+  const seen = new Set<string>();
+  for (const entry of value) {
+    requireNonEmptyString(entry, `${label} entry`);
+    if (seen.has(entry)) throw new ContractError(`${label} must not contain duplicates`);
+    seen.add(entry);
+  }
+}
+
+function validateOutcome(outcome: unknown): asserts outcome is StandardTurnEndOutcome {
+  if (outcome !== 'completed' && outcome !== 'continue' && outcome !== 'blocked') {
+    throw new ContractError('standard-turn-end.outcome');
+  }
+}
+
+function validateResultStatus(status: unknown): asserts status is StandardTurnEndResultStatus {
+  if (status !== 'completed' && status !== 'partial' && status !== 'blocked') {
+    throw new ContractError('standard-turn-end.result-status');
+  }
 }
 
 /**
- * Validates the model-supplied semantic input against the trusted admitted-turn
- * scope. The four-part summary and its evidence must be bound to that scope, and
- * the delivery must carry material: a non-empty delivery text, or at least one
- * unique, non-empty delivery reference. A malformed or foreign input is
- * rejected; nothing is silently repaired.
+ * Validates the canonical payload. The retired top-level field is rejected by
+ * own property, so a runtime caller cannot silently revive it through an
+ * untyped or legacy JSON payload.
  */
-export function validateStandardTurnEndInput(
-  input: StandardTurnEndInput,
-  scope: AdmittedTurnIdentity['scopeRef'],
-  context?: TurnSummaryEvidenceContext,
-): void {
-  if (typeof input !== 'object' || input === null) {
-    throw new ContractError('standard turn end input must be an object');
+export function validateStandardTurnEndPayload(input: StandardTurnEndPayload): void {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw new ContractError('standard-turn-end.payload');
   }
-  validateTurnCloseSummary(input.summary, scope, context);
-  const hasDeliveryText = input.deliveryText !== undefined;
-  if (hasDeliveryText && (typeof input.deliveryText !== 'string' || !input.deliveryText.trim())) {
-    throw new ContractError('standard turn end deliveryText must be a non-empty string');
+  if (Object.prototype.hasOwnProperty.call(input, 'deliveryText')) {
+    throw new ContractError('standard-turn-end.retired-delivery-text');
   }
-  if (!Array.isArray(input.deliveryRefs)) {
-    throw new ContractError('standard turn end delivery references must be an array');
+  validateOutcome(input.outcome);
+  const summary = input.summary;
+  if (typeof summary !== 'object' || summary === null || Array.isArray(summary)) {
+    throw new ContractError('standard-turn-end.summary');
   }
-  if (!hasDeliveryText && input.deliveryRefs.length === 0) {
-    throw new ContractError('standard turn end requires delivery text or at least one delivery reference');
+  requireNonEmptyString(summary.goal, 'standard-turn-end.summary.goal');
+  requireStringArray(summary.actions, 'standard-turn-end.summary.actions');
+  requireNonEmptyString(summary.nextStep, 'standard-turn-end.summary.nextStep');
+  if (typeof summary.result !== 'object' || summary.result === null || Array.isArray(summary.result)) {
+    throw new ContractError('standard-turn-end.summary.result');
   }
-  const seen = new Set<string>();
-  for (const reference of input.deliveryRefs) {
-    if (typeof reference !== 'string' || !reference.trim()) {
-      throw new ContractError('standard turn end delivery reference must be a non-empty string');
-    }
-    if (seen.has(reference)) throw new ContractError('standard turn end delivery references must be unique');
-    seen.add(reference);
+  validateResultStatus(summary.result.status);
+  if (typeof summary.result.text !== 'string') {
+    throw new ContractError('standard-turn-end.summary.result.text');
+  }
+  const deliveryRefs = input.deliveryRefs;
+  if (deliveryRefs !== undefined) requireStringArray(deliveryRefs, 'standard-turn-end.delivery-refs');
+  const hasText = summary.result.text.trim().length > 0;
+  const hasAsset = deliveryRefs !== undefined && deliveryRefs.length > 0;
+  if (input.outcome === 'completed' && summary.result.status === 'completed' && !hasText && !hasAsset) {
+    throw new ContractError('standard-turn-end.missing-public-deliverable');
+  }
+}
+
+/** True only when the canonical payload may enter the public publication path. */
+export function isStandardTurnEndPublicationEligible(input: StandardTurnEndPayload): boolean {
+  validateStandardTurnEndPayload(input);
+  return input.outcome === 'completed'
+    && input.summary.result.status === 'completed'
+    && (input.summary.result.text.trim().length > 0 || (input.deliveryRefs?.length ?? 0) > 0);
+}
+
+/** Rejects a payload that must not be published as a completed public result. */
+export function assertStandardTurnEndPublicationEligible(input: StandardTurnEndPayload): void {
+  validateStandardTurnEndPayload(input);
+  if (!isStandardTurnEndPublicationEligible(input)) {
+    throw new ContractError('standard-turn-end.non-completed-publication');
   }
 }
 
 /**
  * Validates the accepted command. The identity must be a real admitted-turn
- * identity, the semantic input must pass the same scope-bound validation, and
- * every resolved delivery evidence reference must be well formed and bound to
- * the admitted-turn scope. Resolved evidence is required only when the delivery
- * carries references; a text-only delivery resolves no external evidence.
+ * identity, the payload must be canonical, and any explicitly resolved delivery
+ * evidence must be well formed and bound to the admitted-turn scope.
  */
-export function validateStandardTurnEndCommand(command: StandardTurnEndCommand, context?: TurnSummaryEvidenceContext): void {
-  if (typeof command !== 'object' || command === null) {
+export function validateStandardTurnEndCommand(command: StandardTurnEndCommand): void {
+  if (typeof command !== 'object' || command === null || Array.isArray(command)) {
     throw new ContractError('standard turn end command must be an object');
   }
   if (command.kind !== 'standard-turn-end') {
     throw new ContractError('standard turn end command kind is invalid');
   }
   validateAdmittedTurnIdentity(command.identity);
-  if (context !== undefined) assertTurnSummaryContextIdentity(context, command.identity);
-  validateStandardTurnEndInput(
-    { summary: command.summary, deliveryText: command.deliveryText, deliveryRefs: command.deliveryRefs },
-    command.identity.scopeRef,
-    context,
-  );
-  if (!Array.isArray(command.resolvedEvidenceRefs)) {
-    throw new ContractError('standard turn end command resolved delivery evidence must be an array');
+  validateStandardTurnEndPayload(command);
+  const resolved = command.resolvedEvidenceRefs;
+  if (resolved === undefined) return;
+  if (!Array.isArray(resolved)) {
+    throw new ContractError('standard-turn-end.resolved-evidence-refs');
   }
-  if (command.deliveryRefs.length > 0 && command.resolvedEvidenceRefs.length === 0) {
-    throw new ContractError('standard turn end command requires resolved delivery evidence for its references');
-  }
-  const allow = context === undefined ? undefined : turnSummaryEvidenceAllowSet(context, command.identity.scopeRef);
-  for (const reference of command.resolvedEvidenceRefs) {
+  for (const reference of resolved) {
     assertEvidenceRef(reference);
-    try {
-      assertSameScope(command.identity.scopeRef, reference.scope);
-    } catch (error) {
-      if (isAllowlistedTurnSummaryEvidence(allow, reference)) continue;
-      throw error;
-    }
+    assertSameScope(command.identity.scopeRef, reference.scope);
   }
 }

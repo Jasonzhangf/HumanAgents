@@ -1,9 +1,9 @@
 {
   "id": "humanagent-implicit-turn-closure",
-  "version": "1",
+  "version": "2",
   "meta": {
-    "title": "implicit-turn-closure",
-    "requirements_version": 14,
+    "title": "隐式编排者动态选择子代理、提交步骤检查点并在轮次收口时校验公开交付",
+    "requirements_version": 19,
     "requirements": [
       "humanagent-explicit-brain-semantic-turn-context",
       "humanagent-implicit-brain-budgeted-independent-orchestration",
@@ -19,13 +19,13 @@
     "designStatus": "USER-REQUIREMENT-DESIGN-REVIEWED",
     "implementationStatus": "UNVERIFIED",
     "bindingBoundary": "语义设计责任名称，不声明 Operator 已注册或 runtime 执行",
-    "outcomeBoundary": "缺标准动作则同 turn 继续推理；错误可多次 retry 后暂停，恢复同 turn；阶段未完成/提交未知时下游不得伪造 closure 或开始新 turn。",
+    "outcomeBoundary": "编排者自主选择探索、规划、执行或审查步骤；每一步绑定 planRevisionId 与 stepId 并使用独立上下文；每次子代理完成先提交该步骤检查点；轮次收口只在校验公开交付通过后进入下一计划，否则强制续推。",
     "existingCheckpointDesign": "native-turn-checkpoint.graph.json",
-    "trigger": "已派发复杂任务的阶段 turn 收口申请；不套用于简单问答。",
-    "deliveryContract": "deliver 节点捕获真实已接受的标准交付来源（acceptedEndCall 与原始 rawArguments 中的 exact deliveryText），它不同于后续 canonical public-output 发布。它不声明传输完成、任务成功，也不重复保存 body。",
-    "terminalAcceptanceContract": "next_state 的 COMPLETED 分支必须先消费 typed readDelivery 校验过的 delivery body，并在同一 canonical public-output 上完成 commit 与 exact readback，之后才可接受 succeeded/final；否则保留原错误与恢复责任。CONTINUE 分支保持既有 checkpoint 与独立 Planner 语义。canonical output 不得使用 native drain 或 summary。不强制角色顺序，也不新增模型完成标签。",
-    "adoptionContract": "adopt 接受正式 plan 与 definition；不把角色顺序或自由文本当作执行契约。",
-    "logicalTurnSettlementContract": "next_state 在推进前消费权威恢复结果中的 closure、已提交 Planner alignment 与 summaryEvidenceContext，结算本 logical turn。checkpoint.next 是 Planner 前的屏障，不是最终 cycle 决策。alignment 的 continue 保留共享 cycle；complete/failed 以 canonical alignment 引用关闭 cycle，不冒充用户停止或改写 Task 状态。追加前绑定 closure/checkpoint 的 scope 与 cycle；重放须保持全部关联引用及 milestoneAlignmentCommitRefs 一致。"
+    "trigger": "已派发复杂任务的隐式编排轮次；不套用于简单问答。",
+    "deliveryContract": "校验节点只消费已确认的标准交付来源与结构化 summary.result.text；不声明传输完成、任务成功，也不重复保存正文。",
+    "terminalAcceptanceContract": "validate_canonical_public_output 在声明完成时执行唯一公开交付校验；通过后接受 succeeded/final，未通过进入 force_continuation_reasoning。canonical output 不得使用 native drain 或 summary。不强制角色顺序，也不新增模型完成标签。",
+    "adoptionContract": "planner_align_iteration 接受正式计划与定义；不把角色顺序或自由文本当作执行契约。",
+    "logicalTurnSettlementContract": "提交轮次检查点后由独立 Planner 对齐并产出下一计划；continue 保留共享轮次，complete/failed 以 canonical alignment 引用关闭轮次，不冒充用户停止或改写任务状态。"
   },
   "inputs": [
     {
@@ -35,200 +35,122 @@
   ],
   "nodes": [
     {
-      "id": "compress",
-      "operator": "humanagent-implicit-turn-closure-compress",
+      "id": "orchestrator_select_action",
+      "operator": "humanagent-implicit-orchestrator-select-action",
       "operator_version": "1",
-      "inputs": [
-        "turn_closure_request"
-      ],
-      "output": {
-        "id": "compress_result",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["turn_closure_request"],
+      "output": { "id": "selected_step", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "summarize",
-      "operator": "humanagent-implicit-turn-closure-summarize",
+      "id": "subagent_explore",
+      "operator": "humanagent-implicit-subagent-explore",
       "operator_version": "1",
-      "inputs": [
-        "compress_result"
-      ],
-      "output": {
-        "id": "summarize_result",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["selected_step"],
+      "output": { "id": "explore_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "deliver",
-      "operator": "humanagent-implicit-turn-closure-deliver",
+      "id": "subagent_plan",
+      "operator": "humanagent-implicit-subagent-plan",
       "operator_version": "1",
-      "inputs": [
-        "summarize_result"
-      ],
-      "output": {
-        "id": "deliver_result",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["selected_step"],
+      "output": { "id": "plan_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "checkpoint",
-      "operator": "humanagent-implicit-turn-closure-checkpoint",
+      "id": "tool_execute",
+      "operator": "humanagent-implicit-tool-execute",
       "operator_version": "1",
-      "inputs": [
-        "deliver_result"
-      ],
-      "output": {
-        "id": "checkpoint_result",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["selected_step"],
+      "output": { "id": "execute_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "planner",
-      "operator": "humanagent-implicit-turn-closure-planner",
+      "id": "subagent_review",
+      "operator": "humanagent-implicit-subagent-review",
       "operator_version": "1",
-      "inputs": [
-        "checkpoint_result"
-      ],
-      "output": {
-        "id": "planner_result",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["selected_step"],
+      "output": { "id": "review_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "adopt",
-      "operator": "humanagent-implicit-turn-closure-adopt",
+      "id": "commit_subagent_checkpoint",
+      "operator": "humanagent-implicit-step-checkpoint",
       "operator_version": "1",
-      "inputs": [
-        "planner_result"
-      ],
-      "output": {
-        "id": "adopted_formal_plan_and_definition",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["explore_result", "plan_result", "execute_result", "review_result"],
+      "output": { "id": "step_checkpoint_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "next_state",
-      "operator": "humanagent-implicit-turn-closure-next_state",
+      "id": "commit_turn_checkpoint",
+      "operator": "humanagent-implicit-turn-checkpoint",
       "operator_version": "1",
-      "inputs": [
-        "adopted_formal_plan_and_definition"
-      ],
-      "output": {
-        "id": "settled_logical_turn_and_next_state",
-        "schema": "Object"
-      },
-      "input_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
-      "output_selector": {
-        "include": [],
-        "exclude": [],
-        "predicate": null
-      },
+      "inputs": ["step_checkpoint_result"],
+      "output": { "id": "turn_checkpoint_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "validate_canonical_public_output",
+      "operator": "humanagent-implicit-canonical-public-output",
+      "operator_version": "1",
+      "inputs": ["turn_checkpoint_result"],
+      "output": { "id": "public_output_validation", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "force_continuation_reasoning",
+      "operator": "humanagent-implicit-force-continuation",
+      "operator_version": "1",
+      "inputs": ["public_output_validation"],
+      "output": { "id": "continuation_reasoning_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "planner_align_iteration",
+      "operator": "humanagent-implicit-planner-align",
+      "operator_version": "1",
+      "inputs": ["public_output_validation", "continuation_reasoning_result"],
+      "output": { "id": "aligned_plan_revision", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     }
   ],
   "edges": [
-    {
-      "from": "compress",
-      "to": "summarize",
-      "arc_id": "compress_result"
-    },
-    {
-      "from": "summarize",
-      "to": "deliver",
-      "arc_id": "summarize_result"
-    },
-    {
-      "from": "deliver",
-      "to": "checkpoint",
-      "arc_id": "deliver_result"
-    },
-    {
-      "from": "checkpoint",
-      "to": "planner",
-      "arc_id": "checkpoint_result"
-    },
-    {
-      "from": "planner",
-      "to": "adopt",
-      "arc_id": "planner_result"
-    },
-    {
-      "from": "adopt",
-      "to": "next_state",
-      "arc_id": "adopted_formal_plan_and_definition"
-    }
+    { "from": "orchestrator_select_action", "to": "subagent_explore", "arc_id": "selected_step" },
+    { "from": "orchestrator_select_action", "to": "subagent_plan", "arc_id": "selected_step" },
+    { "from": "orchestrator_select_action", "to": "tool_execute", "arc_id": "selected_step" },
+    { "from": "orchestrator_select_action", "to": "subagent_review", "arc_id": "selected_step" },
+    { "from": "subagent_explore", "to": "commit_subagent_checkpoint", "arc_id": "explore_result" },
+    { "from": "subagent_plan", "to": "commit_subagent_checkpoint", "arc_id": "plan_result" },
+    { "from": "tool_execute", "to": "commit_subagent_checkpoint", "arc_id": "execute_result" },
+    { "from": "subagent_review", "to": "commit_subagent_checkpoint", "arc_id": "review_result" },
+    { "from": "commit_subagent_checkpoint", "to": "commit_turn_checkpoint", "arc_id": "step_checkpoint_result" },
+    { "from": "commit_turn_checkpoint", "to": "validate_canonical_public_output", "arc_id": "turn_checkpoint_result" },
+    { "from": "validate_canonical_public_output", "to": "force_continuation_reasoning", "arc_id": "public_output_validation" },
+    { "from": "validate_canonical_public_output", "to": "planner_align_iteration", "arc_id": "public_output_validation" },
+    { "from": "force_continuation_reasoning", "to": "planner_align_iteration", "arc_id": "continuation_reasoning_result" }
   ],
   "outputs": [
-    "settled_logical_turn_and_next_state"
+    "aligned_plan_revision"
   ]
 }

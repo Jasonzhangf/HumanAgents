@@ -6,7 +6,7 @@ import {
   validateTurnCloseSummary,
   validateTurnClosureReference,
   validateStandardTurnEndCommand,
-  validateStandardTurnEndInput,
+  validateStandardTurnEndPayload,
   type AdmittedTurnIdentity,
   type EvidenceRef,
   type JournalCommitRef,
@@ -91,7 +91,13 @@ function commandWith(ref: EvidenceRef): StandardTurnEndCommand {
   return {
     kind: 'standard-turn-end',
     identity,
-    summary: summaryWith(ref),
+    outcome: 'completed',
+    summary: {
+      goal: summaryWith(ref).goal.text,
+      actions: [summaryWith(ref).actions.text],
+      result: { status: 'completed', text: summaryWith(ref).result.text },
+      nextStep: summaryWith(ref).expectedNextStep.text,
+    },
     deliveryRefs: [ref.locator],
     resolvedEvidenceRefs: [ref],
   };
@@ -106,20 +112,16 @@ function captureError(run: () => unknown): unknown {
   throw new Error('expected the call to throw');
 }
 
-// r16 confirmed this failure: direct text was rejected before its delivery asset
-// could exist. One small public-consumer case guards the summary cardinality.
-test('four semantic sections may have empty evidence arrays with a direct text delivery', () => {
-  const section = (text: string) => ({ text, evidenceRefs: [] });
-  assert.doesNotThrow(() => validateStandardTurnEndInput({
+test('canonical payload keeps summary.result.text as the only public text field', () => {
+  assert.doesNotThrow(() => validateStandardTurnEndPayload({
+    outcome: 'completed',
     summary: {
-      goal: section('Complete reasoning from the current input'),
-      actions: section('Formed an answer without external tools'),
-      result: section('Submit the independent delivery text'),
-      expectedNextStep: section('Let Planner align after standard closure'),
+      goal: 'Complete reasoning from the current input',
+      actions: ['Formed an answer without external tools'],
+      result: { status: 'completed', text: 'The canonical result text.' },
+      nextStep: 'Let Planner align after standard closure',
     },
-    deliveryText: 'The independent delivery text.',
-    deliveryRefs: [],
-  }, parentScope));
+  }));
 });
 
 test('inspection outcome stays optional and uses the existing outcome contract', () => {
@@ -145,12 +147,7 @@ test('without context the exact parent scope is still required', () => {
 test('a trusted context lets the parent turn cite its real child evidence at the child scope', () => {
   assert.doesNotThrow(() => validateTurnCloseSummary(summaryWith(childEvidence), parentScope, context));
   assert.doesNotThrow(() => validateTurnCloseSummary(summaryWith(parentEvidence), parentScope, context));
-  assert.doesNotThrow(() => validateStandardTurnEndInput(
-    { summary: summaryWith(childEvidence), deliveryRefs: [childEvidence.locator] },
-    parentScope,
-    context,
-  ));
-  assert.doesNotThrow(() => validateStandardTurnEndCommand(commandWith(childEvidence), context));
+  assert.doesNotThrow(() => validateStandardTurnEndCommand(commandWith(parentEvidence)));
 });
 
 test('a changed child reference is not the real child evidence', () => {
@@ -163,7 +160,7 @@ test('a changed child reference is not the real child evidence', () => {
   } as unknown as EvidenceRef;
   assert.throws(() => validateTurnCloseSummary(summaryWith(malformed), parentScope, context), ContractError);
   assert.throws(
-    () => validateStandardTurnEndCommand({ ...commandWith(childEvidence), resolvedEvidenceRefs: [malformed] }, context),
+    () => validateStandardTurnEndCommand({ ...commandWith(childEvidence), resolvedEvidenceRefs: [malformed] }),
     ContractError,
   );
 });
@@ -171,7 +168,7 @@ test('a changed child reference is not the real child evidence', () => {
 test('an unrelated operation in the same task is not an allowlisted child', () => {
   const unrelated: EvidenceRef = { ...childEvidence, scope: { ...childScope, operationId: id('operation', 'ui-operation-9') } };
   assert.throws(() => validateTurnCloseSummary(summaryWith(unrelated), parentScope, context), ContractError);
-  assert.throws(() => validateStandardTurnEndCommand(commandWith(unrelated), context), ContractError);
+  assert.throws(() => validateStandardTurnEndCommand(commandWith(unrelated)), ContractError);
 });
 
 test('a foreign task child is rejected by the context itself', () => {
@@ -191,7 +188,7 @@ test('a context for another parent turn is rejected', () => {
   const otherIdentity: AdmittedTurnIdentity = { ...identity, scopeRef: { ...parentScope, operationId: id('operation', 'ui-operation-9') } };
   const wrongParentContext: TurnSummaryEvidenceContext = { identity: otherIdentity, children: context.children };
   assert.throws(() => validateTurnCloseSummary(summaryWith(childEvidence), parentScope, wrongParentContext), ContractError);
-  assert.throws(() => validateStandardTurnEndCommand(commandWith(childEvidence), wrongParentContext), ContractError);
+  assert.throws(() => validateStandardTurnEndCommand(commandWith(childEvidence)), ContractError);
   assert.throws(
     () => validateTurnClosureReference({
       identity,

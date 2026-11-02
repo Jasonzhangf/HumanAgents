@@ -10,6 +10,8 @@ export * from './task-plan-revision.js';
 export * from './task-identity.js';
 export * from './turn-closure.js';
 export * from './standard-turn-end.js';
+export * from './agent-debug-inspection.js';
+export * from './turn-segment-recovery.js';
 import type { InteractionHelperIdentity, InteractionTurnIdentity } from './interaction-helper.js';
 import { validateInteractionHelperIdentity, validateInteractionTurnIdentity } from './interaction-helper.js';
 import { validateTaskFlowBinding, type TaskFlowBinding } from './task-flow.js';

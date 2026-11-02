@@ -5,7 +5,7 @@
     "operator_version": "1"
   },
   "status": "DESIGN-PLANNED",
-  "requirements_version": 14,
+  "requirements_version": 19,
   "requirements": [
     "humanagent-standard-turn-closure-forced-reasoning-and-same-turn-recovery",
     "humanagent-explicit-brain-semantic-turn-context",
@@ -161,6 +161,36 @@
         "packages/app/src/ui-runtime/execution-admission.ts:bindCommittedSegment"
       ],
       "designNote": "按全部真实 durable floor facts 计算 successor epoch，取得真实 handle 后恢复 incarnation 执行窗口，并恢复当前语义与旧段未决义务。新 physical parent control 的 executionEpoch 取实际 segment execution，binding.admissionCommitRef 指向该段已提交的 business registration，但原父 operation 的 intent、namespaceKey 与 fingerprintKey 保持不变。释放新段 child/effect 前，只做必需 contract identity/resource 校验：用 segmentOpenedFromRecord 找 admissionCommitRef 匹配的已提交 segment-opened，用 decodeActiveTurnRecords 校验其 businessTurnRef.bindingCommitRef 指向同 turn 的原 binding-opened、businessTurnRef.execution 与原 turn 及当前 physical handle 一致；再在 opened 之前的 records 中按该原 execution namespace 找祖先父 control envelope，要求其 intent/keys 与原父 control 相同，且其 admissionCommitRef 解析出的原业务登记 inputIdentity 与 intent.inputRef/inputDigest 相同。原父/registration/history、task/op/businessTurn、grant 与 physical segment admission 全部保留。旧 epoch 迟到写按 fencing 拒绝；不重投旧 request/child，不自动 settle。initial-open 分支只发一次 initialInput，保留全部 open request/child obligation（segmentId 归属 businessTurnId），并保留已完成 effect（已 settle 的 file.write 不重放）。interrupted 段语义读取（readSegmentInterruptedExact）、initial-open 语义读取（readInitialOpenExact + materializeLiveAcceptedPrefix）与跨段义务 segmentId 归属尚未落地，标 DESIGN-PLANNED/UNVERIFIED target。"
+    },
+    "record_operation_effect_ledger": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "reconcile_in_flight_operations": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "persist_recovery_checkpoint": {
+      "ownerPath": "packages/adapters/filesystem/src/index.ts",
+      "ownerRel": "packages/adapters/filesystem/src/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "evaluate_effect_safety": {
+      "ownerPath": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "auto_resume_same_turn_segment": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "enter_recovery_hold": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
     },
     "resolve_resume_outcome": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",

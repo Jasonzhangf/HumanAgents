@@ -85,6 +85,51 @@
       "iterator": "Whole"
     },
     {
+      "id": "bind_agent_invocation_identity",
+      "operator": "humanagent-observation-agent-invocation-identity",
+      "operator_version": "1",
+      "inputs": [
+        "event_history"
+      ],
+      "output": {
+        "id": "agent_invocation_identity",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_five_dimension_agent_debug",
+      "operator": "humanagent-observation-agent-debug-projection",
+      "operator_version": "1",
+      "inputs": [
+        "agent_invocation_identity"
+      ],
+      "output": {
+        "id": "agent_debug_inspection",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "render_readonly_agent_drawer",
+      "operator": "humanagent-observation-agent-debug-drawer",
+      "operator_version": "1",
+      "inputs": [
+        "agent_debug_inspection"
+      ],
+      "output": {
+        "id": "agent_debug_view",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
       "id": "normalize_context_events",
       "operator": "humanagent-observation-context-normalize",
       "operator_version": "1",
@@ -150,7 +195,8 @@
       "operator": "humanagent-browser-view",
       "operator_version": "1",
       "inputs": [
-        "status_model"
+        "status_model",
+        "agent_debug_view"
       ],
       "output": {
         "id": "rendered_view",
@@ -171,6 +217,26 @@
       "from": "load_task_truth",
       "to": "load_event_history",
       "arc_id": "task_projection"
+    },
+    {
+      "from": "load_event_history",
+      "to": "bind_agent_invocation_identity",
+      "arc_id": "event_history"
+    },
+    {
+      "from": "bind_agent_invocation_identity",
+      "to": "project_five_dimension_agent_debug",
+      "arc_id": "agent_invocation_identity"
+    },
+    {
+      "from": "project_five_dimension_agent_debug",
+      "to": "render_readonly_agent_drawer",
+      "arc_id": "agent_debug_inspection"
+    },
+    {
+      "from": "render_readonly_agent_drawer",
+      "to": "browser_view",
+      "arc_id": "agent_debug_view"
     },
     {
       "from": "load_event_history",
