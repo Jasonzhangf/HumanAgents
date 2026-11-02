@@ -517,12 +517,36 @@ export async function evaluateAndPersistTurnRecovery(
     });
     const entries = ledgerRecords.map((item) => item.entry);
     const providerSettlements = input.providerSettlements ?? [];
+    const latestSettle = providerSettlements.at(-1);
+    const priorFact =
+      latestSettle === undefined
+        ? await input.ledger.readLatestTurnSegmentRecoveryFact({
+            scope: input.scope,
+            turnId: input.turnId,
+          })
+        : null;
+    const resolvedSettleReceipt: ProviderSettleReceipt = latestSettle
+      ? {
+          providerRequestId: latestSettle.providerRequestId,
+          state: latestSettle.state,
+          verifiedBy: latestSettle.verifiedBy,
+          verifiedAt: latestSettle.verifiedAt,
+        }
+      : priorFact?.providerSettleReceipt ?? {
+          providerRequestId: null,
+          state: 'unknown',
+          verifiedBy: 'lease-process-exit-reconcile',
+          verifiedAt: new Date().toISOString(),
+        };
     const recoveryOutcome = decideTurnSegmentRecovery(entries);
 
     const digestToken = sha256Hex(
       canonicalJsonStringify({
         turnId: input.turnId,
         outcome: recoveryOutcome,
+        settleState: resolvedSettleReceipt.state,
+        providerRequestId: resolvedSettleReceipt.providerRequestId,
+        verifiedBy: resolvedSettleReceipt.verifiedBy,
         entries: entries.map((e) => ({ id: e.toolCallId ?? e.callId, state: e.state, key: e.idempotencyKey })),
       }),
     ).slice(0, 24);
@@ -535,6 +559,7 @@ export async function evaluateAndPersistTurnRecovery(
     if (existingRecoveryCheckpoint) {
       const existingFact =
         existingRecoveryCheckpoint.checkpoint.recoveryFact
+        ?? priorFact
         ?? (await input.ledger.readLatestTurnSegmentRecoveryFact({
           scope: input.scope,
           turnId: input.turnId,
@@ -549,7 +574,6 @@ export async function evaluateAndPersistTurnRecovery(
         ownerId,
       };
     }
-    const latestSettle = providerSettlements.at(-1);
 
     const fact: TurnSegmentRecoveryFact = {
       taskId: input.scope.taskId.value,
@@ -560,12 +584,7 @@ export async function evaluateAndPersistTurnRecovery(
       predecessorCheckpointId: recalled?.checkpoint.id.value ?? null,
       planRevisionId: null,
       recoveryResponsibilityOwner: 'humanagent.runtime',
-      providerSettleReceipt: {
-        providerRequestId: latestSettle?.providerRequestId ?? null,
-        state: latestSettle?.providerRequestId ? 'stopped' : 'not-sent',
-        verifiedBy: 'lease-process-exit-reconcile',
-        verifiedAt: new Date().toISOString(),
-      },
+      providerSettleReceipt: resolvedSettleReceipt,
       toolEffects: entries,
       recoveryOutcome,
       outcome: recoveryOutcome,

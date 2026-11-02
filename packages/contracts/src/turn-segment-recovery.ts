@@ -1,7 +1,7 @@
 import { ContractError } from './errors.js';
 import { isCanonicalInstant } from './time.js';
 
-export type ProviderSettleState = 'not-sent' | 'stopped' | 'settled';
+export type ProviderSettleState = 'not-sent' | 'stopped' | 'settled' | 'unknown';
 export type ProviderSettleVerification =
   | 'lease-process-exit-reconcile'
   | 'provider-adapter-stop-ack'
@@ -75,7 +75,7 @@ export function validateProviderSettleReceipt(receipt: ProviderSettleReceipt): v
   if (!receipt || typeof receipt !== 'object') {
     throw new ContractError('provider settle receipt must be an object');
   }
-  if (!['not-sent', 'stopped', 'settled'].includes(receipt.state)) {
+  if (!['not-sent', 'stopped', 'settled', 'unknown'].includes(receipt.state)) {
     throw new ContractError(`unsupported provider settle state: ${String(receipt.state)}`);
   }
   if (![
@@ -88,6 +88,10 @@ export function validateProviderSettleReceipt(receipt: ProviderSettleReceipt): v
   if (receipt.state === 'not-sent') {
     if (receipt.providerRequestId !== null) {
       throw new ContractError('not-sent provider settle receipt cannot carry a provider request id');
+    }
+  } else if (receipt.state === 'unknown') {
+    if (receipt.providerRequestId !== null) {
+      requireText(receipt.providerRequestId, 'provider settle request id');
     }
   } else {
     requireText(receipt.providerRequestId, 'provider settle request id');

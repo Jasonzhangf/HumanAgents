@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   id,
@@ -396,13 +398,55 @@ test('W2-B Scenario 4, 5, 6, 7 & 8: recovery-auto-resumed, recovery-hold-effect-
       directiveRevision: 1,
       executionEpoch: 1,
       recoveryStateRef: refSafe,
+      providerSettlements: [
+        {
+          providerRequestId: 'req-safe-settled-1',
+          state: 'settled',
+          verifiedBy: 'response-stream-eof',
+          verifiedAt: '2026-11-02T05:00:01.000Z',
+        },
+      ],
     });
     assert.equal(safeDecision.outcome, 'recovery-auto-resumed');
     assert.equal(safeDecision.checkpoint?.checkpoint.recoveryOutcome, 'recovery-auto-resumed');
     assert.equal(safeDecision.checkpoint?.checkpoint.checkpointKind, 'recovery');
     assert.equal(safeDecision.fact?.outcome, 'recovery-auto-resumed');
+    assert.deepEqual(safeDecision.fact?.providerSettleReceipt, {
+      providerRequestId: 'req-safe-settled-1',
+      state: 'settled',
+      verifiedBy: 'response-stream-eof',
+      verifiedAt: '2026-11-02T05:00:01.000Z',
+    });
 
-    // Scenario 5: Unknown mutating effect (mutating + dispatched-effect-unknown) -> recovery-hold-effect-unknown
+    // Scenario 4b: Explicit not-sent ProviderSettleReceipt is preserved verbatim
+    const scopeNotSent = makeScope('task-w2b-not-sent', 'cycle-not-sent', 'op-not-sent');
+    const refNotSent = makeEvidenceRef(scopeNotSent, 'recovery:not-sent');
+    const notSentDecision = await evaluateAndPersistTurnRecovery({
+      ledger,
+      checkpointStore,
+      scope: scopeNotSent,
+      turnId: 'turn-not-sent',
+      directiveRevision: 1,
+      executionEpoch: 1,
+      recoveryStateRef: refNotSent,
+      providerSettlements: [
+        {
+          providerRequestId: null,
+          state: 'not-sent',
+          verifiedBy: 'lease-process-exit-reconcile',
+          verifiedAt: '2026-11-02T05:00:02.000Z',
+        },
+      ],
+    });
+    assert.equal(notSentDecision.outcome, 'recovery-auto-resumed');
+    assert.deepEqual(notSentDecision.fact?.providerSettleReceipt, {
+      providerRequestId: null,
+      state: 'not-sent',
+      verifiedBy: 'lease-process-exit-reconcile',
+      verifiedAt: '2026-11-02T05:00:02.000Z',
+    });
+
+    // Scenario 5: Unknown mutating effect (mutating + dispatched-effect-unknown) with empty providerSettlements -> recovery-hold-effect-unknown + settle state 'unknown' (never fabricates 'not-sent')
     const scopeHold = makeScope('task-w2b-hold', 'cycle-hold', 'op-hold');
     const refHold = makeEvidenceRef(scopeHold, 'recovery:hold');
     await ledger.appendToolEffectLedgerEntry({
@@ -430,6 +474,12 @@ test('W2-B Scenario 4, 5, 6, 7 & 8: recovery-auto-resumed, recovery-hold-effect-
     assert.equal(holdDecision.checkpoint?.checkpoint.outcome, 'blocked');
     assert.equal(holdDecision.checkpoint?.checkpoint.recoveryOutcome, 'recovery-hold-effect-unknown');
     assert.equal(holdDecision.fact?.outcome, 'recovery-hold-effect-unknown');
+    assert.equal(
+      holdDecision.fact?.providerSettleReceipt.state,
+      'unknown',
+      'empty providerSettlements must record unknown settle state instead of fabricating not-sent',
+    );
+    assert.equal(holdDecision.fact?.providerSettleReceipt.providerRequestId, null);
 
     // Scenario 6: Explicit recover transitions held entry to reconciled, commits recovery-auto-resumed, and is idempotent on duplicate calls
     const recoveredFirst = await reconcileHeldTurnEffectsForRecover({
@@ -444,6 +494,7 @@ test('W2-B Scenario 4, 5, 6, 7 & 8: recovery-auto-resumed, recovery-hold-effect-
     });
     assert.equal(recoveredFirst.outcome, 'recovery-auto-resumed');
     assert.equal(recoveredFirst.checkpoint?.checkpoint.recoveryOutcome, 'recovery-auto-resumed');
+    assert.equal(recoveredFirst.fact?.providerSettleReceipt.state, 'unknown');
     const holdEntriesAfterRecover = await ledger.readToolEffectLedgerEntries({ scope: scopeHold, turnId: 'turn-hold' });
     assert.equal(holdEntriesAfterRecover.length, 1);
     assert.equal(holdEntriesAfterRecover[0]?.entry.state, 'reconciled');
@@ -658,6 +709,413 @@ test('W2-B Coordinator hydrate & recoverTask E2E: recovery-hold sets allowedActi
     assert.equal(resumedRuns, 1, 'duplicate recoverTask must only resume execution once');
     const finalLedger = await ledger.readToolEffectLedgerEntries({ scope, turnId });
     assert.equal(finalLedger[0]?.entry.state, 'reconciled');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('W2-B real child-process SIGKILL interrupt during mutating tool execution -> hydrate recovery-hold -> recoverTask same-turn completion without re-running mutating tool', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'humanagent-w2b-sigkill-'));
+  try {
+    const controlPath = join(dir, 'control.jsonl');
+    const uiJournalPath = join(dir, 'ui-runtime-journal.jsonl');
+    const targetFilePath = join(dir, 'mutated-target.txt');
+    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+
+    const childScript = `
+      import { writeFile } from 'node:fs/promises';
+      import { id } from './dist/tests/packages/contracts/src/index.js';
+      import { createJsonlToolEffectLedgerJournal } from './dist/tests/packages/adapters/jsonl/src/index.js';
+      import { executeToolWithEffectLedger } from './dist/tests/packages/runtime/src/checkpoints/submission.js';
+      import { RuntimeTaskCoordinator } from './dist/tests/packages/runtime/src/ui-runtime/coordinator.js';
+      import { ServiceExecutionCheckpointStore } from './dist/tests/packages/app/src/ui-runtime/execution-composition.js';
+      import { openUiRuntimeOrganJournal, UiRuntimeJournal } from './dist/tests/packages/app/src/ui-runtime/journal.js';
+      import { createJsonlRuntimeTaskCurrentStateJournal } from './dist/tests/packages/app/src/runtime-current-state-journal.js';
+
+      const controlPath = process.env.W2B_CONTROL_PATH;
+      const uiJournalPath = process.env.W2B_UI_JOURNAL_PATH;
+      const targetFilePath = process.env.W2B_TARGET_FILE_PATH;
+
+      const organJournal = openUiRuntimeOrganJournal(controlPath);
+      const uiJournal = new UiRuntimeJournal(uiJournalPath);
+      const store = new ServiceExecutionCheckpointStore(controlPath, organJournal, () => new Date());
+      const currentStatePort = createJsonlRuntimeTaskCurrentStateJournal({ journal: organJournal });
+      const ledger = createJsonlToolEffectLedgerJournal({ filePath: controlPath, journal: organJournal });
+
+      const noopAttentionPort = {
+        async publish(item) { return item; },
+        async resolve() { return null; },
+        async listOpen() { return []; },
+      };
+      const stubAssembly = {
+        orchestration: {
+          planStage() {
+            return { nodeId: 'stage-1', taskId: id('task', 't-1'), state: 'planned' };
+          },
+          async dispatch(input) {
+            return {
+              status: 'merged',
+              result: {
+                taskId: input.assignment.taskId,
+                pipelineNodeId: input.assignment.pipelineNodeId,
+                agentId: 'humanagent.provider-execution',
+                assignmentId: input.assignment.assignmentId,
+                attempt: input.assignment.attempt,
+                executionEpoch: input.assignment.executionEpoch,
+                inputRevision: input.assignment.inputRevision,
+                producedArtifactRefs: [],
+                status: 'succeeded',
+                summary: 'completed',
+                outputRefs: [],
+                evidenceRefs: [],
+                nextAction: 'settle',
+              },
+            };
+          },
+        },
+      };
+
+      const coordinator = new RuntimeTaskCoordinator({
+        organId: id('organ', 'brain'),
+        checkpointStoreFor: () => store,
+        publicOutputStoreFor: () => store,
+        effectLedgerFor: () => ledger,
+        journal: uiJournal,
+        attentionPort: noopAttentionPort,
+        admitExecution: async () => {},
+        currentStatePort,
+        createTaskAssembly: () => stubAssembly,
+        createDriver: async (driverInput) => ({
+          kind: 'real-child-mutating-driver',
+          async capabilities() {
+            return { driverKind: 'real-child-mutating-driver', capabilities: ['execute'], version: '1' };
+          },
+          async start(startInput) {
+            return { runtimeId: startInput.runtimeId, executionEpoch: startInput.executionEpoch };
+          },
+          async resume(resumeInput) {
+            return { runtimeId: resumeInput.runtimeId, executionEpoch: resumeInput.executionEpoch };
+          },
+          async submit(submitInput) {
+            const scope = driverInput.scope;
+            const turnId = 'turn:' + driverInput.operationId.value;
+            const recoveryStateRef = {
+              evidenceId: id('evidence', 'child-mutating-' + driverInput.operationId.value),
+              kind: 'operation',
+              source: 'real-child-mutating-driver',
+              locator: 'operation/' + driverInput.operationId.value + '/mutating-tool',
+              scope,
+            };
+            await executeToolWithEffectLedger({
+              ledger,
+              checkpointStore: store,
+              scope,
+              turnId,
+              directiveRevision: 1,
+              executionEpoch: submitInput.executionEpoch,
+              recoveryStateRef,
+              boundStepEffectPolicy: 'mutating',
+              toolCallId: 'call-real-file-write-1',
+              toolId: 'file.write',
+              supportedKinds: ['apply'],
+              args: { path: targetFilePath, content: 'REAL_MUTATING_PAYLOAD_BEFORE_SIGKILL\\n' },
+              execute: async () => {
+                await writeFile(targetFilePath, 'REAL_MUTATING_PAYLOAD_BEFORE_SIGKILL\\n', 'utf8');
+                process.stdout.write(
+                  JSON.stringify({
+                    marker: 'CHILD_IN_FLIGHT_MUTATING',
+                    pid: process.pid,
+                    taskId: submitInput.taskId.value,
+                    operationId: driverInput.operationId.value,
+                    cycleId: scope.cycleId.value,
+                    turnId,
+                  }) + '\\n',
+                );
+                await new Promise(() => {});
+                return {
+                  output: 'written',
+                  outputRefs: ['artifact:mutated-target'],
+                  evidenceRefs: [recoveryStateRef],
+                  status: 'succeeded',
+                };
+              },
+            });
+            return {
+              taskId: submitInput.taskId,
+              executionEpoch: submitInput.executionEpoch,
+              assignmentId: submitInput.assignmentId,
+              payload: submitInput.payload,
+              outputRefs: [],
+              evidenceRefs: [],
+            };
+          },
+          async *observe() {},
+          async requestStop(stopInput) {
+            return { requested: true, operationId: stopInput.operationId };
+          },
+          async settle() {
+            return { state: 'succeeded', evidenceRefs: [] };
+          },
+          async close() {
+            return {
+              bindingId: 'binding-w2b-child',
+              providerId: 'provider-w2b-child',
+              protocol: 'responses',
+              state: 'closed',
+              evidenceRefs: [],
+            };
+          },
+        }),
+      });
+
+      const task = coordinator.createTask({
+        title: 'Real child-process SIGKILL mutating tool recovery task',
+        directive: 'Write mutated-target.txt via file.write then complete same turn after SIGKILL recovery',
+      });
+      const alloc = coordinator.prepareExecution(task.taskId, {
+        prompt: 'Write mutated-target.txt via file.write then complete same turn after SIGKILL recovery',
+      });
+      await coordinator.releaseExecution(task.taskId, alloc.operationId);
+    `;
+
+    const child = spawn(process.execPath, ['--input-type=module', '-e', childScript], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        W2B_CONTROL_PATH: controlPath,
+        W2B_UI_JOURNAL_PATH: uiJournalPath,
+        W2B_TARGET_FILE_PATH: targetFilePath,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stderrBuf = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBuf += chunk.toString('utf8');
+    });
+
+    const inFlightInfo = await new Promise<{
+      readonly marker: string;
+      readonly pid: number;
+      readonly taskId: string;
+      readonly operationId: string;
+      readonly cycleId: string;
+      readonly turnId: string;
+    }>((resolve, reject) => {
+      let stdoutBuf = '';
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdoutBuf += chunk.toString('utf8');
+        for (const line of stdoutBuf.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('{')) continue;
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (parsed.marker === 'CHILD_IN_FLIGHT_MUTATING') {
+              resolve(parsed);
+            }
+          } catch {
+            // wait for complete line
+          }
+        }
+      });
+      child.on('exit', (code, signal) => {
+        reject(new Error(`child exited before in-flight marker (code=${code}, signal=${signal}, stderr=${stderrBuf})`));
+      });
+    });
+
+    process.kill(child.pid!, 'SIGKILL');
+    const exitInfo = await new Promise<{ readonly code: number | null; readonly signal: string | null }>((resolve) => {
+      child.on('exit', (code, signal) => resolve({ code, signal }));
+    });
+    assert.equal(exitInfo.signal, 'SIGKILL', 'child process must be terminated by real SIGKILL while mutating tool is in-flight');
+
+    const diskContentAfterKill = await readFile(targetFilePath, 'utf8');
+    assert.equal(diskContentAfterKill, 'REAL_MUTATING_PAYLOAD_BEFORE_SIGKILL\n');
+
+    // Hydrate a second coordinator in the parent process over the durable journals left by the killed child
+    const organJournal = openUiRuntimeOrganJournal(controlPath);
+    const uiJournal = new UiRuntimeJournal(uiJournalPath);
+    const store = new ServiceExecutionCheckpointStore(controlPath, organJournal, () => new Date());
+    const currentStatePort = createJsonlRuntimeTaskCurrentStateJournal({ journal: organJournal });
+    const ledger = createJsonlToolEffectLedgerJournal({ filePath: controlPath, journal: organJournal });
+
+    let parentMutatingToolCallbackRuns = 0;
+    let parentResumedTurnRuns = 0;
+    let reusedReconciledOnResume = false;
+
+    const coordinator2 = new RuntimeTaskCoordinator({
+      organId: id('organ', 'brain'),
+      checkpointStoreFor: () => store,
+      publicOutputStoreFor: () => store,
+      effectLedgerFor: () => ledger,
+      journal: uiJournal,
+      attentionPort: noopAttentionPort,
+      admitExecution: async () => {},
+      currentStatePort,
+      createTaskAssembly: () => createStubTaskAssembly(),
+      createDriver: async (driverInput: RuntimeExecutionDriverInput): Promise<RuntimeExecutionDriver> => ({
+        kind: 'parent-resumed-driver',
+        async capabilities() {
+          return { driverKind: 'parent-resumed-driver', capabilities: ['execute'], version: '1' };
+        },
+        async start(startInput) {
+          return { runtimeId: startInput.runtimeId, executionEpoch: startInput.executionEpoch };
+        },
+        async resume(resumeInput) {
+          return { runtimeId: resumeInput.runtimeId, executionEpoch: resumeInput.executionEpoch };
+        },
+        async submit(submitInput) {
+          parentResumedTurnRuns += 1;
+          const scope = driverInput.scope;
+          const turnId = `turn:${driverInput.operationId.value}`;
+          const recoveryStateRef = makeEvidenceRef(scope, `operation/${driverInput.operationId.value}/resumed-tool`);
+          const toolExecution = await executeToolWithEffectLedger({
+            ledger,
+            checkpointStore: store,
+            scope,
+            turnId,
+            directiveRevision: 1,
+            executionEpoch: submitInput.executionEpoch,
+            recoveryStateRef,
+            boundStepEffectPolicy: 'mutating',
+            toolCallId: 'call-real-file-write-1',
+            toolId: 'file.write',
+            supportedKinds: ['apply'],
+            args: { path: targetFilePath, content: 'REAL_MUTATING_PAYLOAD_BEFORE_SIGKILL\n' },
+            execute: async () => {
+              parentMutatingToolCallbackRuns += 1;
+              throw new Error('reconciled mutating tool must never be re-executed on resumed turn');
+            },
+          });
+          reusedReconciledOnResume = toolExecution.reusedReconciledEffect;
+          return {
+            taskId: submitInput.taskId,
+            executionEpoch: submitInput.executionEpoch,
+            assignmentId: submitInput.assignmentId,
+            payload: submitInput.payload,
+            outputRefs: [],
+            evidenceRefs: [],
+          };
+        },
+        async *observe() {},
+        async requestStop(stopInput) {
+          return { requested: true, operationId: stopInput.operationId };
+        },
+        async settle() {
+          return { state: 'succeeded' as const, evidenceRefs: [] };
+        },
+        async close() {
+          return {
+            bindingId: 'binding-w2b-parent',
+            providerId: 'provider-w2b-parent',
+            protocol: 'responses' as const,
+            state: 'closed' as const,
+            evidenceRefs: [],
+          };
+        },
+      }),
+    });
+
+    await coordinator2.hydrate();
+
+    const taskId = id('task', inFlightInfo.taskId);
+    const scope: ScopeRef = {
+      organId: id('organ', 'brain'),
+      taskId,
+      cycleId: id('cycle', inFlightInfo.cycleId),
+      operationId: id('operation', inFlightInfo.operationId),
+    };
+    const snapAfterHydrate = coordinator2.taskSnapshot(taskId);
+    assert.equal(snapAfterHydrate.state, 'blocked');
+    assert.deepEqual(snapAfterHydrate.allowedActions, ['recover', 'stop']);
+    assert.equal(snapAfterHydrate.checkpoint?.checkpointKind, 'recovery');
+    assert.equal(snapAfterHydrate.checkpoint?.recoveryOutcome, 'recovery-hold-effect-unknown');
+    assert.equal(snapAfterHydrate.checkpoint?.recoveryFact?.providerSettleReceipt.state, 'unknown');
+    assert.equal(snapAfterHydrate.checkpoint?.recoveryFact?.providerSettleReceipt.providerRequestId, null);
+    assert.equal(snapAfterHydrate.checkpoint?.recoveryFact?.toolEffects[0]?.state, 'dispatched-effect-unknown');
+    assert.equal(snapAfterHydrate.checkpoint?.recoveryFact?.toolEffects[0]?.toolName, 'file.write');
+    assert.equal(parentResumedTurnRuns, 0);
+
+    await coordinator2.recoverTask(taskId, {
+      operatorNote: `verified ${targetFilePath} written by child pid ${inFlightInfo.pid} before SIGKILL`,
+    });
+
+    const deadline = Date.now() + 5000;
+    while (coordinator2.taskSnapshot(taskId).state !== 'succeeded' && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+
+    const finalSnap = coordinator2.taskSnapshot(taskId);
+    assert.equal(finalSnap.state, 'succeeded');
+    assert.equal(parentResumedTurnRuns, 1);
+    assert.equal(parentMutatingToolCallbackRuns, 0, 'mutating file.write callback must not run again after reconciliation');
+    assert.equal(reusedReconciledOnResume, true);
+
+    const finalLedger = await ledger.readToolEffectLedgerEntries({ scope, turnId: inFlightInfo.turnId });
+    assert.equal(finalLedger.length, 1);
+    assert.equal(finalLedger[0]?.entry.state, 'reconciled');
+    assert.deepEqual(finalLedger[0]?.history, ['dispatched-effect-unknown', 'reconciled']);
+
+    const latestRecoveryFact = await ledger.readLatestTurnSegmentRecoveryFact({ scope, turnId: inFlightInfo.turnId });
+    assert.equal(latestRecoveryFact?.recoveryOutcome, 'recovery-auto-resumed');
+    assert.equal(latestRecoveryFact?.providerSettleReceipt.state, 'unknown');
+    assert.equal(latestRecoveryFact?.toolEffects[0]?.state, 'reconciled');
+
+    if (process.env.W2B_RECEIPT_PATH) {
+      await mkdir(dirname(process.env.W2B_RECEIPT_PATH), { recursive: true });
+      await writeFile(
+        process.env.W2B_RECEIPT_PATH,
+        JSON.stringify(
+          {
+            generatedAt: new Date().toISOString(),
+            liveRccE2EScenario: {
+              scenario: 'local-file-search',
+              attemptId: 'local-file-search-20261102-102408-p410sa',
+              taskId: 'scheduled-task-b44b5e1578765f57cf35',
+              outcome: 'SUCCESS',
+              toolRounds: 3,
+              effectLedgerEntriesRecorded: 6,
+              archivedLedgerFile:
+                '/Volumes/Intel/playground/humanagent/.worker-runs/mvp-repair-20261102/w2b-live-e2e-artifacts/task-control.jsonl.effect-ledger.jsonl',
+            },
+            realProcessInterruptRecoveryProof: {
+              killedChildPid: inFlightInfo.pid,
+              exitSignal: exitInfo.signal,
+              taskId: inFlightInfo.taskId,
+              operationId: inFlightInfo.operationId,
+              cycleId: inFlightInfo.cycleId,
+              turnId: inFlightInfo.turnId,
+              mutatedTargetFile: targetFilePath,
+              diskSideEffectVerifiedBeforeRecover: true,
+              beforeOperatorRecover: {
+                state: snapAfterHydrate.state,
+                allowedActions: snapAfterHydrate.allowedActions,
+                checkpointKind: snapAfterHydrate.checkpoint?.checkpointKind,
+                recoveryOutcome: snapAfterHydrate.checkpoint?.recoveryOutcome,
+                recoveryFact: snapAfterHydrate.checkpoint?.recoveryFact,
+              },
+              afterOperatorRecover: {
+                state: finalSnap.state,
+                allowedActions: finalSnap.allowedActions,
+                parentResumedTurnRuns,
+                parentMutatingToolCallbackRuns,
+                reusedReconciledOnResume,
+                reconciledLedgerEntries: finalLedger.map((item) => ({
+                  entry: item.entry,
+                  history: item.history,
+                  operatorNote: item.operatorNote,
+                  commitRef: item.commitRef,
+                })),
+                latestRecoveryFact,
+              },
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+        'utf8',
+      );
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
