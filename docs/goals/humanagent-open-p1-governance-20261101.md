@@ -1082,3 +1082,26 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   collab-mcp 与三套 Skill bundle；未重启运行中的 collab 守护进程（PID 98548
   仍为旧 inode），临时构建 worktree 已 remove+prune。本轮未合并、未删他人
   worktree、未杀进程。
+
+- 2026-11-02 23:27 UTC: goal deadline `m1793661991635-1568` 已消费
+  （receive `receive-11280-1793662006583789000-0`）并显式重订阅 20m
+  （one-shot armed，project patrol `sub-m1793413132850-18` armed）。巡检：
+  worktree 7 个（main + `mvp-real-path-dispatch-20261102` +
+  `mvp-remaining-p0-followups-20261102` + 4 locked provider `PROTECTED_HOLD`），
+  未超 10；open bug 31，P0 仍 3（`45f92c8`、`a9dc797`、`4c21e74`），
+  `47b26dd` 已关闭。board 仅 Alice `mvp-remaining-p0-followups-20261102`
+  (rev3 working, completion_missing review)；Alice snapshot 显示她在
+  `mvp-remaining-p0-followups-20261102` 有 7 处未提交改动（observation 五维
+  投影、service.ts、agent-debug-inspection.ts 与对应测试），behind main 4，
+  未交付，不抢 writer。`mvp-real-path-dispatch-20261102` 仅剩证据截图
+  提交 `35b9c043e`（docs evidence refresh d20 live-card proofs）未合并，
+  `f5f13f05d` 已在 main，树 clean、ahead 1/behind 38、约 16.5h 未动，未到
+  48h 不清理，保持待 owner 收口。RCC `127.0.0.1:4444/health` 200；生产
+  `127.0.0.1:10086` 000。已核对 W1-A `626969fb3`（步骤中文化，`486ddd4`）
+  与 W1-B `37c38dd56`（corner safe-area，`28c9738`）均已在 main，但两 bug
+  仍 open，缺真实入口双视口验收。已落盘观察合同
+  `/Volumes/Intel/playground/humanagent/p1-ui-verify-20261102/contract.md`
+  并派一次性 GCM 观察者做隔离 `serve --mode rcc`（真实 RCC 4444、
+  独立端口、双视口 Playwright）验收 `486ddd4`/`28c9738`；观察者只读产品源码，
+  结束后停止本次独立 serve 并证明端口关闭。本轮未合并、未删他人 worktree、
+  未杀进程。
