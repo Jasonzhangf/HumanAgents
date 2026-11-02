@@ -185,6 +185,24 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ## Update Log
 
+- 2026-11-02 18:34 UTC: W2-B 已交付并进入审查边界。Alice 提交
+  `879332f5a8b5b4bf4d2c035579fc6727564ebed8`（21 files，worktree clean），
+  `dagpipe-validate-graphs` 31 图、`pnpm test:contracts` 143/143、专项与
+  回归 73/73 通过；真实 RCC 4444 `local-file-search` E2E PASS（3 toolRounds、
+  6 条 tool-effect-ledger）。board `mvp-w2b-...` 转 `delivered`/rev6，
+  缺 review/integration/close。Emma 边界成立：`w2b-recovery-receipt.json`
+  的 `candidateInterruptRecoveryProof` 是构造候选
+  （`call-mutating-receipt-1`、`argsDigest=sha256:abcdef...`、
+  `providerSettleReceipt.state=not-sent`/`lease-process-exit-reconcile`），
+  不是真实中断与真实 mutating 副作用。故 mutating/recovery 的真实中断、
+  Provider settle、同 turn/epoch 与恢复后可见结果在真实入口层为
+  `UNVERIFIED`，只由 focused tests 覆盖；UI recover 按钮未接入。
+  该边界列为 W2-B 里程碑审查门。
+- 2026-11-02 18:33 UTC: proof8 真实 lane 任务行缺陷已建独立 board 任务
+  `mvp-real-lane-entry-task-row-20261102`（priority p0，executor Alice，
+  状态 invited/rev2），要求独立分支、红测先行、T22c 真实 RCC 段 PASS 且
+  succeeded pipeline + 非空 output，不得放宽断言。Alice 已回执愿意承担。
+
 - 2026-11-02 18:08 UTC: master 在当前 main `61855a517` + 现有 dist
   （11-02 08:13 构建，无 source 新于 dist）上复跑 T22c 真实入口，
   结果 `56/57`，唯一 FAIL 为 `real RCC section completed`：
