@@ -634,3 +634,78 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `127.0.0.1:10086` still down pending explicit install approval for the
   verified `humanagent-cli-0.1.0043.tgz`. No merge, install, worktree delete
   or process kill was performed.
+
+- 2026-11-02 17:29 UTC: patrol recheck after the 17:25 W2-B 401 stall notice.
+  `collab worker snapshot` for Alice shows the stall is cleared and progress is
+  live: her pane is actively reasoning on `Gemini 4 Argon` (thought 4m09s,
+  then edited `packages/runtime/src/checkpoints/effect-ledger-recovery.ts` and
+  is exploring the `TurnSegmentRecoveryFact` structure with a running cursor).
+  The integration worktree
+  `/Volumes/Intel/playground/humanagent/mvp-w2a-orch-20261102` now carries 18
+  dirty paths for W2-B: graph files (native-turn-checkpoint and
+  native-turn-segment-recovery, binding/semantic/json), jsonl index,
+  `effect-ledger-recovery.ts` (new, jsonl+runtime), runtime checkpoints
+  coordinator/submission, ui-runtime cold-execution-resume/coordinator, app
+  ui-runtime server/service, contracts index/native-reasoning/
+  turn-segment-recovery, plus new `tests/app/w2b-effect-ledger-recovery.test.ts`.
+  The Google `UNAUTHENTICATED (code 401)` was a transient transport error on a
+  dispatched GCM worker and is not a W2-B code failure; Alice resumed on the
+  original path and no model switch occurred. Board unchanged: W2-A revision 16
+  `merged` at `351a17ca0` (Alice owns worktree/branch close), W2-B revision 4
+  `working`, `completion_missing=["review"]`, no delivery evidence yet. Four P0
+  remain open (`45f92c8`, `a9dc797`, `4c21e74`, `47b26dd`); MVP end-to-end path
+  still `未达成`. Worktrees 7/10. Production `127.0.0.1:10086` still down
+  pending explicit install approval for the verified
+  `humanagent-cli-0.1.0043.tgz`; no agent-side install/restart. No merge,
+  install, worktree delete or process kill was performed.
+
+- 2026-11-02 17:55 UTC: CEO follow-up audit for the two entry UI complaints
+  ("no current-turn step/timer" and "输入后需要二次确认"), the Carol progress
+  request, and the long-horizon list. Both UI complaints are already fixed on
+  `main` and are proven by the real-browser harnesses, not by code reading
+  alone:
+  - `node tests/ui/entry-submit-progress-browser.mjs` -> 31/31 checks pass. The
+    live submit banner renders `步骤 <n>` from the runtime `explicit.step`
+    `seq`, plus the total timer and the per-step timer; the per-step timer
+    resets on each real step; the block is removed on settle. Screenshots:
+    `docs/ui/evidence/mvp-progress-20261102/step-progress-1280x720.png` and
+    `step-progress-390x844.png`.
+  - `node tests/ui/entry-submit-stays-browser.mjs` -> 0 failures. A submitted
+    new task stays on the single entry interface, the live card shows the real
+    execution steps, the detail drawer opens on click and closes back without
+    navigating, and there is no second confirmation. Screenshots:
+    `entry-live-card-1280x720.png` and `entry-live-card-detail-1280x720.png`.
+  Bug mapping already recorded upstream: `473735a` (submit progress did not
+  show real step + total/per-step timer) is closed; `6f5a88ff` (submit landed
+  on a static confirm dead page with a second confirmation) is closed;
+  `22a689b` (Carol could not snapshot progress) is closed. `docs/ui/entry.js`
+  `executeSubmission` calls `confirmExplicitRequirement` directly, so the form
+  submit is the only human confirmation; a clarification form is shown only
+  when the runtime reports `awaiting-clarification`.
+  Remaining UX gap to open as a bug: that clarification form renders a bare
+  free-text `澄清` input, and the explicit-brain clarification outcome carries
+  only `question` (no `options`), so the runtime cannot offer selectable
+  confirm choices. The user asked "就算要确认，直接提供确认选项". Recorded as
+  new bug `db7f3ba` `MVP：新任务澄清/确认只有自由文本，缺少可选确认项`.
+  Deployment gap: the user-facing production instance `127.0.0.1:10086` is
+  down, and the globally installed `humanagent-cli` is `0.1.43` from
+  2026-10-26, which predates the 2026-11-01 UI fixes. A global install of the
+  verified `humanagent-cli-0.1.0043.tgz` needs the user's explicit one-time
+  approval; no agent-side install or restart was performed.
+  Carol has no tmux pane, so `collab worker snapshot` cannot read her; per the
+  user's instruction the master asked her progress directly via durable
+  message `m1793641812518-1279` (`--reply-required`). Alice's W2-B is still
+  blocked by macOS `Operation not permitted` on `/Volumes/Intel`: master
+  reproduced it this round (`ls` and a direct `head package.json` on
+  `mvp-w2a-orch-20261102` both fail EPERM, while `stat`/`test -r` pass), so
+  the fault is the removable-volume grant for this process, not the W2-B
+  code. Any new peer implementation worktree under
+  `/Volumes/Intel/playground/humanagent/<task>` is blocked by the same gate
+  until the user restores access.
+  Board unchanged: W2-A revision 16 `merged` at `351a17ca0` (Alice owns
+  worktree/branch close), W2-B revision 4 `working`,
+  `completion_missing=["review"]`. Four P0 remain open (`45f92c8`, `a9dc797`,
+  `4c21e74`, `47b26dd`); MVP end-to-end path still `未达成`. Goal re-armed
+  with `appsdk goal subscribe --interval 20m`; project patrol armed
+  (`sub-m1793413132850-18`). No merge, install, worktree delete or process
+  kill was performed.
