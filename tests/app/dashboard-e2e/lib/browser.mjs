@@ -977,12 +977,25 @@ async function readHomepageSubmissionOutcome(binding) {
     if (error && !error.hidden) {
       return { kind: 'error', text: (error.textContent || '').trim().slice(0, 800) };
     }
+    const directCard = document.querySelector('[data-direct-answer="true"]');
+    if (directCard) {
+      return { kind: 'status-only', reply: (directCard.textContent || '').trim() };
+    }
     const banner = document.querySelector('.status-banner');
+    const liveTaskId = banner?.dataset?.liveTaskId ?? null;
+    const liveTaskHref = banner?.dataset?.liveTaskHref ?? null;
+    if (liveTaskId && liveTaskHref) {
+      return { kind: 'in-page-task', taskId: liveTaskId, href: liveTaskHref };
+    }
     const tone = banner?.dataset?.tone ?? null;
     const text = (banner?.textContent || '').trim();
-    // The confirmed path writes a "…正在刷新任务进展…/已刷新" success banner right
-    // before it navigates; only a genuine status-only reply is a non-task result.
-    const isConfirmationRefresh = text.includes('正在刷新任务进展') || text.includes('任务进展已刷新');
+    const hasLiveProgress = banner?.querySelector('.progress.progress--live') !== null;
+    const isConfirmationRefresh = hasLiveProgress
+      || text.includes('正在刷新任务进展')
+      || text.includes('任务进展已刷新')
+      || text.includes('任务已提交')
+      || text.includes('需求已接收')
+      || text.includes('需求已提交');
     if (tone === 'success' && text && !isConfirmationRefresh) {
       return { kind: 'status-only', reply: text };
     }
@@ -1105,6 +1118,20 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
       binding.entryDiagnostics = await describeDraftStage(binding).catch((error) => ({ diagnosticError: error.message }));
       navigationPromise.catch(() => {});
       throw new Error(`Homepage explicit brain classified new-task input as status-only; no requirement was authorized: ${outcome.reply}`);
+    }
+    if (outcome && outcome.kind === 'in-page-task') {
+      navigationPromise.catch(() => {});
+      if (captureConfirmation) {
+        const capture = await confirmationResponsePromise;
+        if (capture?.bodyResult) await capture.bodyResult;
+      }
+      const resolvedUrl = new URL(outcome.href, binding.serveBaseUrl).href;
+      await page.goto(resolvedUrl, { waitUntil: 'domcontentloaded', timeout });
+      navigation = taskScopedNavigation(page.url(), binding.serveBaseUrl);
+      if (!navigation) {
+        throw new Error(`Homepage in-page task landing href did not resolve to a valid task-scoped navigation: ${resolvedUrl}`);
+      }
+      break;
     }
     // The navigation observer won (or a diagnosis timeout resolved null): await
     // the navigation, which is the only accepted success signal.

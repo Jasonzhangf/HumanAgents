@@ -1037,7 +1037,7 @@ function renderTask() {
   const heading = element('section', undefined, 'section')
   const copy = element('div')
   copy.append(element('p', 'Task Detail', 'eyebrow'), element('h2', readable(detail.title)))
-  const chip = element('span', readable(detail.currentState), 'state-chip')
+  const chip = element('span', readable(detail.stateLabel || detail.data?.label || detail.state), 'state-chip')
   chip.dataset.tone = stateTone(detail.state)
   copy.append(chip)
   heading.append(copy)

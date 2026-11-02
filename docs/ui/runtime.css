@@ -710,10 +710,11 @@ pre {
     gap: 4px;
   }
 
-  /* On a phone the corner controls are 44px tall. A larger vertical inset
-     keeps the top and bottom content clear of both rows. */
+  /* On a phone the corner controls are 44px tall at the top and bottom edges.
+     A vertical safe inset keeps the content clear of both rows without
+     squeezing the 390px viewport horizontally. */
   .page {
-    padding: 24px 76px 84px;
+    padding: 72px 0 88px;
   }
 }
 
@@ -1023,6 +1024,7 @@ pre {
    scrollIntoView brings it to the top viewport edge. */
 .progress--live {
   scroll-margin-top: 60px;
+  flex-wrap: wrap;
 }
 .progress[data-tone="waiting"] .progress-spinner {
   opacity: 0;

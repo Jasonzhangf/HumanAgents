@@ -339,6 +339,10 @@ export interface RuntimeSemanticObservationInput {
 
 export type RuntimeSemanticObservationProjection = RuntimeSemanticObservationEnvelope;
 
+export function runtimeTaskStateLabel(state: LifecycleState): string {
+  return STATE_LABELS[state];
+}
+
 function stateLabel(state: LifecycleState): string {
   return STATE_LABELS[state];
 }
@@ -382,7 +386,7 @@ function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
     requirementAdmissionLabel: source.requirementAdmissionLabel,
     ...(source.identitySource === undefined ? {} : { identitySource: source.identitySource }),
     currentState: source.currentState,
-    nextStep: source.nextStep,
+    nextStep: source.state === 'succeeded' ? '' : source.nextStep,
     updatedAt: source.updatedAt,
     allowedActions: source.allowedActions,
     output: source.output,
@@ -581,7 +585,7 @@ export function projectRuntimeTaskDashboard(
     recentEvents: source.recentEvents.slice(-20),
     checkpoint: source.checkpoint,
     error: source.error,
-    nextStep: source.nextStep,
+    nextStep: source.state === 'succeeded' ? '' : source.nextStep,
     operationId: source.operationId,
     executionEpoch: source.executionEpoch,
     allowedActions: source.allowedActions,

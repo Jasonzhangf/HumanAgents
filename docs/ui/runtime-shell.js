@@ -680,7 +680,7 @@ export function renderTaskExecutions(task, readScope = undefined) {
 }
 
 export function taskRowStateText(task) {
-  const state = task?.currentState || task?.stateLabel || task?.state || ''
+  const state = task?.stateLabel || task?.currentState || task?.state || ''
   if (!task) return state
   const facts = taskCurrentExecutionChild(task) || task
   if (facts.error) {

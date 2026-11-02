@@ -259,6 +259,7 @@ import {
   projectRuntimeTaskDashboard,
   projectRuntimeTaskWaitingStatus,
   projectRuntimeTaskList,
+  runtimeTaskStateLabel,
 } from '../../../ui/projection/runtime.js';
 import {
   projectMemoryInteraction,
@@ -1212,8 +1213,8 @@ function observationProjection(
             : task.state === 'waiting'
               ? 'waiting'
               : 'ready',
-      label: task.currentState,
-      detail: task.nextStep,
+      label: runtimeTaskStateLabel(task.state),
+      detail: task.state === 'succeeded' ? '' : task.nextStep,
       updatedAt: task.updatedAt,
     },
     scopes,
@@ -4303,8 +4304,8 @@ export class UiRuntimeService {
                   : task.state === 'stale'
                     ? 'stale'
                     : 'ready',
-          label: task.currentState,
-          detail: task.nextStep,
+          label: runtimeTaskStateLabel(task.state),
+          detail: task.state === 'succeeded' ? '' : task.nextStep,
           updatedAt: task.updatedAt,
         },
         task: {
@@ -4329,8 +4330,8 @@ export class UiRuntimeService {
               .map((event) => event.summary)
               .filter((summary) => summary.trim() !== '')
               .slice(-5),
-        proposal: task.nextStep,
-        nextAction: task.nextStep,
+        proposal: task.state === 'succeeded' ? '' : task.nextStep,
+        nextAction: task.state === 'succeeded' ? '' : task.nextStep,
         requiredDecisions: task.state === 'waiting' && task.executionRelease === 'prepared'
           ? ['批准继续执行任务']
           : [],

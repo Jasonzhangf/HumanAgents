@@ -246,6 +246,8 @@ const INTERNAL_STEP_LABELS = new Map([
   ['provider request settled', '模型请求已收束'],
   ['provider requested model work settled', '模型工作已收束'],
   ['execution started', '执行已开始'],
+  ['execution admitted and released', '已准入并启动执行'],
+  ['execution admitted', '执行已准入'],
   ['execution succeeded', '执行成功'],
   ['execution failed', '执行失败'],
   ['execution cancelled', '执行已取消'],
@@ -391,10 +393,15 @@ export function createSubmitStatusBanner(target, { onOpenDetail } = {}) {
     const seq = event?.seq
     const summary = typeof event?.summary === 'string' ? event.summary.trim() : ''
     const humanSummary = localizedStepSummary(summary)
-    if (Number.isFinite(seq)) phase.textContent = `步骤 ${seq}/${steps.length + 1}`
+    const ordinal = steps.length + 1
+    const total = Number.isFinite(event?.total) && event.total >= ordinal ? event.total : null
+    if (Number.isFinite(seq) || summary !== '') {
+      phase.textContent = total !== null ? `步骤 ${ordinal}/${total}` : `步骤 ${ordinal}`
+    }
     if (humanSummary !== '' && detail) detail.textContent = humanSummary
     if (event && (Number.isFinite(seq) || summary !== '')) {
       steps.push({
+        ordinal,
         seq: Number.isFinite(seq) ? seq : null,
         summary: humanSummary,
         kind: typeof event.kind === 'string' ? event.kind : undefined,
@@ -927,10 +934,12 @@ function openSubmitProgressDetail(trigger) {
       content.append(element('p', '等待运行时返回执行步骤…', 'empty'))
     } else {
       const list = element('ol', undefined, 'progress-step-list')
-      for (const step of steps) {
+      for (let idx = 0; idx < steps.length; idx += 1) {
+        const step = steps[idx]
+        const ordinal = Number.isFinite(step.ordinal) ? step.ordinal : idx + 1
         const item = element('li', undefined, 'progress-step')
         item.append(
-          element('span', Number.isFinite(step.seq) ? `步骤 ${step.seq}` : '步骤', 'progress-step-seq'),
+          element('span', `步骤 ${ordinal}`, 'progress-step-seq'),
           element('span', step.summary || step.kind || '执行事件', 'progress-step-summary'),
         )
         if (step.occurredAt) item.append(element('time', formatTime(step.occurredAt), 'progress-step-time'))
@@ -939,7 +948,7 @@ function openSubmitProgressDetail(trigger) {
       content.append(list)
     }
     const link = element('a', '打开完整任务看板', 'button button--sm')
-    link.href = submittedTaskLandingHref(progress.taskId, progress.scope)
+    link.href = submittedTaskLandingHref(progress.executingTaskId || progress.taskId, progress.scope)
     content.append(link)
   }
   openTechnicalDetail({ title: '任务执行进度', eyebrow: '实时进度', content, trigger })
@@ -1025,7 +1034,13 @@ async function startLiveTaskProgress({ taskId, scope }) {
     if (pageLeaving || liveTaskProgress !== progress) return
     progress.dashboard = nextDashboard
     progress.operationId = nextDashboard?.operationId
+    const resolvedTaskId = nextDashboard?.taskId?.value || nextDashboard?.taskId || progress.taskId
     if (progress.operationId) {
+      if (typeof resolvedTaskId === 'string' && resolvedTaskId.trim() !== '') {
+        progress.executingTaskId = resolvedTaskId
+        status.dataset.liveTaskId = resolvedTaskId
+        status.dataset.liveTaskHref = submittedTaskLandingHref(resolvedTaskId, progress.scope)
+      }
       submitBanner.text('任务已提交，正在执行…')
       streamStop = subscribeExecutionStepStream(progress.operationId, (event) => {
         if (pageLeaving || liveTaskProgress !== progress) return
@@ -1044,6 +1059,11 @@ async function startLiveTaskProgress({ taskId, scope }) {
       return
     }
     if (!['created', 'admitted', 'running', 'settling'].includes(nextDashboard?.state)) {
+      if (typeof resolvedTaskId === 'string' && resolvedTaskId.trim() !== '') {
+        progress.executingTaskId = resolvedTaskId
+        status.dataset.liveTaskId = resolvedTaskId
+        status.dataset.liveTaskHref = submittedTaskLandingHref(resolvedTaskId, progress.scope)
+      }
       submitBanner.text(nextDashboard?.stateLabel || nextDashboard?.state || '任务状态已更新')
       return
     }
