@@ -173,18 +173,20 @@
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
     "persist_recovery_checkpoint": {
-      "ownerPath": "packages/adapters/filesystem/src/index.ts",
-      "ownerRel": "packages/adapters/filesystem/src/index.ts",
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "journalWriterOwnerPath": "packages/adapters/jsonl/src/index.ts",
+      "journalWriterOwnerRel": "packages/adapters/jsonl/src/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
     "evaluate_effect_safety": {
-      "ownerPath": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
     "auto_resume_same_turn_segment": {
-      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
-      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerPath": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/cold-execution-resume.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
     "enter_recovery_hold": {

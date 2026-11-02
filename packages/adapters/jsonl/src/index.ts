@@ -730,3 +730,10 @@ export type {
   ExplicitBrainStateCodecOptions,
   ExplicitBrainStateTailRead,
 } from './explicit-brain-state-journal.js';
+export { createJsonlToolEffectLedgerJournal } from './effect-ledger-recovery.js';
+export type {
+  PersistedToolEffectCachedOutput,
+  PersistedToolEffectLedgerRecord,
+  ToolEffectLedgerAppendInput,
+  ToolEffectLedgerJournalPort,
+} from './effect-ledger-recovery.js';

@@ -37,7 +37,7 @@ import {
   filesystemProviderEvidenceSink,
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
-import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import { createJsonlToolEffectLedgerJournal, JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import { listTaskActiveTurnBindings } from '../../../adapters/jsonl/src/active-turn.js';
 import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
 import { JsonlTaskPlanRevisionJournal } from '../../../adapters/jsonl/src/task-plan-revisions.js';
@@ -491,6 +491,10 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   // store, so the producer and the reader resolve one authority, not two files.
   const checkpointStoreFor = (_taskId: TaskId, _cycleId: CycleId): PublicOutputCheckpointStore =>
     new ServiceExecutionCheckpointStore(taskControlJournalPath, taskControlJournal, clock ?? (() => new Date()));
+  const effectLedgerPath = `${taskControlJournalPath}.effect-ledger.jsonl`;
+  const effectLedgerJournal = new JsonlOrganJournal(effectLedgerPath);
+  const effectLedgerFor = () =>
+    createJsonlToolEffectLedgerJournal({ filePath: effectLedgerPath, journal: effectLedgerJournal });
   const i2Journal = createJsonlI2JournalPort({ filePath: taskControlJournalPath, journal: taskControlJournal });
   const providerToolExecutor = options.mode === 'rcc'
     && options.binding.protocol === 'responses'
@@ -623,6 +627,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     binding: options.binding,
     port: options.port,
     checkpointStoreFor,
+    effectLedgerFor,
     i2History: {
       journal: i2Journal,
       ...(options.i2CurrentPosition === undefined ? {} : { currentPosition: options.i2CurrentPosition }),

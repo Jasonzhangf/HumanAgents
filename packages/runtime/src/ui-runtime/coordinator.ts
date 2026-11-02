@@ -13,6 +13,7 @@ import {
   type AgentOutput,
   type AdmittedTurn,
   type Checkpoint,
+  type CheckpointBoundaryKind,
   type CycleId,
   type DecisionTraceRecord,
   type DurableCheckpointReceipt,
@@ -35,6 +36,8 @@ import {
   type PreparedRecoveryCapture,
   type ProviderToolCall,
   type ToolExecutionFact,
+  type TurnSegmentRecoveryFact,
+  type TurnSegmentRecoveryOutcome,
   type ScopeRef,
   type Task,
   type TaskId,
@@ -55,6 +58,11 @@ import {
   type StandardTurnDeliveryReadback,
 } from './standard-turn-delivery.js';
 import { checkpointCommitId, completeCheckpoint, completeNativeCheckpoint, recallCheckpoint, sameCheckpoint, sameJournalCommitRef } from '../checkpoints/coordinator.js';
+import {
+  evaluateAndPersistTurnRecovery,
+  reconcileHeldTurnEffectsForRecover,
+  type ToolEffectLedgerPort,
+} from '../checkpoints/effect-ledger-recovery.js';
 import type { CommittedCheckpointRecord, LatestCheckpointRecord, NativeCheckpointJournalPort } from '../checkpoints/ports.js';
 import type { AdvanceTurnResult } from '../agent-loop/runtime.js';
 import { selectRuntimeTaskCurrentState } from './current-state.js';
@@ -252,6 +260,9 @@ export interface RuntimeTaskSnapshot {
     readonly seq: number;
     readonly outcome: string;
     readonly summary: string;
+    readonly checkpointKind?: CheckpointBoundaryKind;
+    readonly recoveryOutcome?: TurnSegmentRecoveryOutcome;
+    readonly recoveryFact?: TurnSegmentRecoveryFact;
     readonly committedAt?: string;
     readonly committedAtUnavailableReason?: string;
     readonly evidenceRefs: readonly EvidenceRef[];
@@ -654,6 +665,8 @@ export interface RuntimeTaskCoordinatorOptions {
     readonly createDriverForBinding: RuntimeExecutionDriverForBindingFactory;
   };
   readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => TaskCheckpointStore;
+  readonly effectLedgerFor?: (taskId: TaskId, cycleId: CycleId) => ToolEffectLedgerPort;
+  readonly autoResumeOnHydrate?: boolean;
   readonly attentionPort: AttentionPort;
   readonly journal?: RuntimeTaskJournalPort;
   readonly currentStatePort?: RuntimeTaskCurrentStatePort;
@@ -959,6 +972,7 @@ export interface TaskRecord {
     readonly actorKind: 'human-operator' | 'harness-control';
   };
   postCommitRecoveryPending?: boolean;
+  recoveryPromise?: Promise<RuntimeTaskSnapshot>;
   executionReady?: Promise<boolean>;
   resolveExecutionReady?: (ready: boolean) => void;
 }
@@ -1401,6 +1415,9 @@ function taskSnapshotFromRecord(record: TaskRecord, scopes: ReadonlyMap<string, 
           seq: record.checkpoint.seq,
           outcome: record.checkpoint.outcome,
           summary: record.checkpoint.summary,
+          ...(record.checkpoint.checkpointKind === undefined ? {} : { checkpointKind: record.checkpoint.checkpointKind }),
+          ...(record.checkpoint.recoveryOutcome === undefined ? {} : { recoveryOutcome: record.checkpoint.recoveryOutcome }),
+          ...(record.checkpoint.recoveryFact === undefined ? {} : { recoveryFact: record.checkpoint.recoveryFact }),
           ...(record.checkpointReceipt === undefined
             ? { committedAtUnavailableReason: 'no durable native checkpoint receipt for this checkpoint identity' }
             : { committedAt: record.checkpointReceipt.committedAt }),
@@ -2964,7 +2981,143 @@ export class RuntimeTaskCoordinator {
       operations: this.operations,
       producer: this.options.coldExecution,
       lifecycle: this.coldLifecycle(),
+      effectLedgerFor: this.options.effectLedgerFor,
+      checkpointStoreFor: this.options.checkpointStoreFor,
     }, taskId, operationId, request);
+  }
+
+  /**
+   * Explicit operator recovery from a `recovery-hold-effect-unknown` hold.
+   * Reconciles held mutating tool effects (`dispatched-effect-unknown` ->
+   * `reconciled`), commits a `recovery-auto-resumed` checkpoint, and resumes
+   * the same business Turn without replaying the held mutating tool call.
+   * Duplicate or concurrent calls for the same held Turn are idempotent.
+   */
+  async recoverTask(
+    taskId: TaskId,
+    options?: { readonly operatorNote?: string },
+  ): Promise<RuntimeTaskSnapshot> {
+    const record = this.requireTask(taskId);
+    if (record.recoveryPromise) {
+      return record.recoveryPromise;
+    }
+    if (record.running || record.state === 'running' || record.state === 'succeeded') {
+      return this.snapshot(record);
+    }
+    if (!record.operationId) {
+      throw new RuntimeTaskControlError(
+        'task.recover.no-operation',
+        RUNTIME_OWNER,
+        `task ${taskId.value} has no operation to recover`,
+        record.nextStep,
+      );
+    }
+    const operation = this.operations.get(record.operationId.value);
+    const scope = this.scopes.get(record.operationId.value);
+    if (!operation || !scope?.cycleId) {
+      throw new RuntimeTaskControlError(
+        'task.recover.scope-missing',
+        RUNTIME_OWNER,
+        `task ${taskId.value} has no recoverable operation scope`,
+        record.nextStep,
+      );
+    }
+    if (
+      !record.allowedActions.includes('recover')
+      && record.checkpoint?.recoveryOutcome !== 'recovery-hold-effect-unknown'
+      && record.checkpoint?.recoveryOutcome !== 'recovery-auto-resumed'
+    ) {
+      throw new RuntimeTaskControlError(
+        'task.recover.not-allowed',
+        RUNTIME_OWNER,
+        `task ${taskId.value} is not in a recoverable state (${record.state})`,
+        record.nextStep,
+      );
+    }
+    if (!this.options.effectLedgerFor) {
+      throw new RuntimeTaskControlError(
+        'task.recover.ledger-unbound',
+        RUNTIME_OWNER,
+        'effect ledger port is not bound for task recovery',
+        'bind effectLedgerFor on RuntimeTaskCoordinator',
+      );
+    }
+
+    const promise = (async (): Promise<RuntimeTaskSnapshot> => {
+      try {
+        const ledger = this.options.effectLedgerFor!(record.taskId, scope.cycleId!);
+        const checkpointStore = this.options.checkpointStoreFor(record.taskId, scope.cycleId!);
+        const entries = await ledger.readToolEffectLedgerEntries({ scope });
+        const turnId =
+          entries[0]?.entry.turnId
+          ?? record.activeTurn?.admittedTurn.turnId
+          ?? record.requestIdentity?.turnId
+          ?? `turn:${operation.operationId.value}`;
+        const recoveryStateRef = this.operationScopeEvidence(
+          scope,
+          `recovery/${operation.operationId.value}`,
+        );
+        const decision = await reconcileHeldTurnEffectsForRecover({
+          ledger,
+          checkpointStore,
+          ownerId: RUNTIME_OWNER,
+          scope,
+          turnId,
+          directiveRevision: record.directiveRevision,
+          executionEpoch: record.executionEpoch ?? operation.executionEpoch,
+          recoveryStateRef,
+          operatorNote: options?.operatorNote,
+        });
+        if (decision.checkpoint) {
+          record.checkpoint = decision.checkpoint.checkpoint;
+          record.checkpointSeq = decision.checkpoint.checkpoint.seq;
+          const durableReceipt = await readDurableCheckpointReceipt(checkpointStore, decision.checkpoint);
+          if (durableReceipt) {
+            record.checkpointReceipt = durableReceipt;
+          }
+        }
+        if (decision.outcome === 'recovery-auto-resumed') {
+          record.state = 'waiting';
+          record.currentState = '已对账安全副作用，自动恢复中';
+          record.nextStep = '在同一业务 Turn 继续执行';
+          this.resumeInterruptedTaskTurn(record, operation, scope);
+        }
+        return this.snapshot(record);
+      } finally {
+        record.recoveryPromise = undefined;
+      }
+    })();
+
+    record.recoveryPromise = promise;
+    return promise;
+  }
+
+  private resumeInterruptedTaskTurn(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+  ): void {
+    if (record.running || record.releasePending) return;
+    const allocation: RuntimeExecutionAllocation = operation.allocation ?? {
+      taskId: record.taskId,
+      operationId: operation.operationId,
+      scope,
+      runtimeId: this.runtimeId(operation.operationId),
+      assignmentId: `assignment-${operation.operationId.value}`,
+      executionEpoch: record.executionEpoch ?? operation.executionEpoch,
+      inputRevision: 1,
+      directiveRevision: record.directiveRevision,
+      inputRefs: [`operation://${operation.operationId.value}/input/${record.directiveRevision}`],
+      ownerId: RUNTIME_OWNER,
+      orchestrated: operation.orchestrated,
+    };
+    operation.allocation = allocation;
+    record.allocation = allocation;
+    record.release = { state: 'prepared' };
+    record.stopping = false;
+    record.error = undefined;
+    record.allowedActions = ['stop'];
+    void this.releaseExecution(record.taskId, operation.operationId).catch(() => {});
   }
 
   private createProviderExecutionAgent(
@@ -6603,6 +6756,12 @@ export class RuntimeTaskCoordinator {
         : checkpointOutcome === 'cancelled'
           ? { kind: 'stop', ref: `task://${record.taskId.value}/terminal` }
           : { kind: 'continue', ref: `task://${record.taskId.value}/next` };
+    const store = this.options.checkpointStoreFor(record.taskId, businessScope.cycleId!);
+    const latestInStore = await store.readLatest(businessScope) ?? await store.readLatest(executionScope);
+    if (latestInStore && latestInStore.checkpoint.seq > record.checkpointSeq) {
+      record.checkpoint = latestInStore.checkpoint;
+      record.checkpointSeq = latestInStore.checkpoint.seq;
+    }
     const checkpoint: Checkpoint = {
       // The checkpoint sequence is per task, but execution epochs reuse the
       // same task id. Include the epoch so a later execution cannot commit
@@ -7223,6 +7382,101 @@ export class RuntimeTaskCoordinator {
           cycleId: scope.cycleId,
         };
         const latest = await store.readLatest(scope) ?? await store.readLatest(businessScope);
+        if (this.options.effectLedgerFor) {
+          const isTerminalCheckpoint =
+            latest !== null
+            && sameCheckpointBusinessScope(scope, latest.checkpoint.scope)
+            && (latest.checkpoint.outcome === 'succeeded'
+              || latest.checkpoint.outcome === 'stopped'
+              || latest.checkpoint.outcome === 'failed'
+              || latest.checkpoint.outcome === 'cancelled');
+          if (!isTerminalCheckpoint) {
+            const ledger = this.options.effectLedgerFor(task.taskId, scope.cycleId);
+            const fullStore = this.options.checkpointStoreFor(task.taskId, scope.cycleId);
+            let ledgerEntries: Awaited<ReturnType<typeof ledger.readToolEffectLedgerEntries>> | undefined;
+            let ledgerReadError: unknown;
+            try {
+              ledgerEntries = await ledger.readToolEffectLedgerEntries({ scope });
+            } catch (err) {
+              ledgerReadError = err;
+            }
+            const hasIncrementalOrRecoveryCheckpoint =
+              latest !== null
+              && sameCheckpointBusinessScope(scope, latest.checkpoint.scope)
+              && (latest.checkpoint.checkpointKind === 'tool-incremental'
+                || latest.checkpoint.checkpointKind === 'subagent-incremental'
+                || latest.checkpoint.checkpointKind === 'recovery');
+            if (
+              ledgerReadError !== undefined
+              || (ledgerEntries !== undefined && ledgerEntries.length > 0)
+              || hasIncrementalOrRecoveryCheckpoint
+            ) {
+              const turnId =
+                ledgerEntries?.[0]?.entry.turnId
+                ?? task.activeTurn?.admittedTurn.turnId
+                ?? task.requestIdentity?.turnId
+                ?? `turn:${operation.operationId.value}`;
+              const recoveryStateRef = this.operationScopeEvidence(
+                scope,
+                `recovery/${operation.operationId.value}`,
+              );
+              const decision = await evaluateAndPersistTurnRecovery({
+                ledger,
+                checkpointStore: fullStore,
+                ownerId: RUNTIME_OWNER,
+                scope,
+                turnId,
+                directiveRevision: task.directiveRevision,
+                executionEpoch: task.executionEpoch ?? operation.executionEpoch,
+                recoveryStateRef,
+              });
+              if (decision.checkpoint) {
+                task.checkpoint = decision.checkpoint.checkpoint;
+                task.checkpointSeq = decision.checkpoint.checkpoint.seq;
+                const durableReceipt = await readDurableCheckpointReceipt(fullStore, decision.checkpoint);
+                task.checkpointReceipt = durableReceipt ?? undefined;
+              }
+              if (decision.outcome === 'recovery-hold-effect-unknown') {
+                task.state = 'blocked';
+                task.running = false;
+                task.stopping = false;
+                task.currentState = '变更副作用待确认';
+                task.nextStep = '确认外部变更结果后执行恢复或停止任务';
+                task.allowedActions = ['recover', 'stop'];
+                continue;
+              }
+              if (decision.outcome === 'corrupt-blocked') {
+                task.state = 'blocked';
+                task.running = false;
+                task.stopping = false;
+                task.currentState = '恢复事实损坏或缺失';
+                task.nextStep = decision.error ?? '修复权威恢复日志后再试';
+                task.allowedActions = [];
+                task.error = {
+                  code: 'recovery.facts.corrupt',
+                  ownerId: decision.ownerId,
+                  message: decision.error ?? 'recovery facts corrupt',
+                  retryable: false,
+                  nextAction: 'inspect recovery journal',
+                  evidenceRefs: [recoveryStateRef],
+                };
+                continue;
+              }
+              if (decision.outcome === 'recovery-auto-resumed') {
+                task.state = 'waiting';
+                task.running = false;
+                task.stopping = false;
+                task.currentState = '已对账安全副作用，自动恢复中';
+                task.nextStep = '在同一业务 Turn 继续执行';
+                task.allowedActions = ['stop'];
+                if (this.options.autoResumeOnHydrate !== false) {
+                  this.resumeInterruptedTaskTurn(task, operation, scope);
+                }
+                continue;
+              }
+            }
+          }
+        }
         if (!latest || !sameCheckpointBusinessScope(scope, latest.checkpoint.scope)) {
           await this.hydratePublicOutput(task, scope);
           if (await this.isUnreleasedPreparedExecution(task, operation, scope, source)) {
@@ -7464,6 +7718,9 @@ export class RuntimeTaskCoordinator {
             seq: record.checkpoint.seq,
             outcome: record.checkpoint.outcome,
             summary: record.checkpoint.summary,
+            ...(record.checkpoint.checkpointKind === undefined ? {} : { checkpointKind: record.checkpoint.checkpointKind }),
+            ...(record.checkpoint.recoveryOutcome === undefined ? {} : { recoveryOutcome: record.checkpoint.recoveryOutcome }),
+            ...(record.checkpoint.recoveryFact === undefined ? {} : { recoveryFact: record.checkpoint.recoveryFact }),
             ...(record.checkpointReceipt === undefined
               ? { committedAtUnavailableReason: 'no durable native checkpoint receipt for this checkpoint identity' }
               : { committedAt: record.checkpointReceipt.committedAt }),

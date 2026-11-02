@@ -22,8 +22,10 @@
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
     "persist_recovery_checkpoint": {
-      "ownerPath": "packages/adapters/filesystem/src/index.ts",
-      "ownerRel": "packages/adapters/filesystem/src/index.ts",
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "journalWriterOwnerPath": "packages/adapters/jsonl/src/index.ts",
+      "journalWriterOwnerRel": "packages/adapters/jsonl/src/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation"
     },
     "commit_checkpoint_fact": {

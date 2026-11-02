@@ -22,12 +22,18 @@ export type ToolEffectState =
 
 export interface ToolEffectLedgerEntry {
   readonly callId: string;
+  readonly toolCallId?: string;
+  readonly turnId?: string;
   readonly boundPlanStepId: string;
   readonly toolName: string;
   readonly effectPolicy: 'readonly' | 'mutating';
+  readonly argsDigest?: string;
   readonly idempotencyKey: string;
   readonly state: ToolEffectState;
   readonly outputArtifactRef: string | null;
+  readonly dispatchedAt?: string;
+  readonly settledAt?: string | null;
+  readonly reconciliationNote?: string | null;
 }
 
 export type TurnSegmentRecoveryOutcome =
@@ -47,6 +53,10 @@ export interface TurnSegmentRecoveryFact {
   readonly providerSettleReceipt: ProviderSettleReceipt;
   readonly toolEffects: readonly ToolEffectLedgerEntry[];
   readonly recoveryOutcome: TurnSegmentRecoveryOutcome;
+  readonly outcome?: TurnSegmentRecoveryOutcome;
+  readonly recoveryCheckpointRef?: string;
+  readonly unknownMutatingCallIds?: readonly string[];
+  readonly recordedAt?: string;
 }
 
 function requireText(value: unknown, label: string): asserts value is string {

@@ -2008,6 +2008,24 @@ async function handleRequest(
       writeJson(response, 202, resumed);
       return;
     }
+    const taskRecover = /^\/api\/tasks\/([^/]+)\/recover$/.exec(path);
+    if (taskRecover && method === 'POST') {
+      const body = await readBody(request);
+      const operatorNote = typeof body.operatorNote === 'string' && body.operatorNote.trim().length > 0
+        ? body.operatorNote.trim()
+        : undefined;
+      const task = await service.recoverTask(
+        id('task', decodeURIComponent(taskRecover[1]!)),
+        operatorNote === undefined ? {} : { operatorNote },
+      );
+      writeJson(response, 200, {
+        state: task.state,
+        taskId: task.taskId.value,
+        allowedActions: task.allowedActions,
+        checkpoint: task.checkpoint,
+      });
+      return;
+    }
     const taskStop = /^\/api\/tasks\/([^/]+)\/stop$/.exec(path);
     if (taskStop && method === 'POST') {
       const taskId = id('task', decodeURIComponent(taskStop[1]!));

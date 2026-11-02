@@ -7,7 +7,7 @@
     "status": "DESIGN-PLANNED",
     "scope": "由 admitted-turn 外层图复用；仅表达保存和恢复结果，不派发下一 turn，也不声称 Operator 已注册或运行",
     "routingContract": "Edges express unconditional ARC dependencies only; installed DAGpipe grammar/runtime provides no conditional-edge routing evidence. After the durable phase envelope, pure success and recovery-hold projections both execute and converge at the unique checkpoint_boundary_outcome Z. Exactly one projection is active by envelope state; this is target topology/contract only, not proof of runtime routing.",
-    "effectLedgerContract": "每次工具调用或子代理派发前先追加 dispatched-effect-unknown 条目，结果落盘后立即追加 effect-committed；mutating 且未知的条目要求进入 recovery hold，readonly 或已提交条目允许自动续跑。"
+    "effectLedgerContract": "每次工具调用或子代理派发前先追加 dispatched-effect-unknown 条目，结果落盘后立即追加 effect-committed 并提交增量 checkpoint；区分工具增量保存、子代理增量保存、Turn 收拢保存与恢复保存，正常增量或收拢保存不得触发恢复重放；恢复路径中 mutating 且未知的条目要求进入 recovery hold，readonly 或已提交条目允许自动续跑。"
   },
   "inputs": [
     { "id": "semantic_closure_candidate", "schema": "Object" }

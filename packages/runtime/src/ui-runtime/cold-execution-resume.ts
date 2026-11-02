@@ -1,11 +1,15 @@
 import {
-  assertExecutionEpoch, canonicalJsonStringify,
+  assertExecutionEpoch, canonicalJsonStringify, id,
   type ScopeRef, type WorkAssignment,
 } from '../../../contracts/src/index.js';
 import type { ActiveTurnInitialSegmentSource, ActiveTurnSegmentPredecessorRef,
   ResumedTurnSegmentOpened } from '../../../contracts/src/active-turn-segments.js';
 import { AgentLoopRuntime, type RecoverTurnResult } from '../agent-loop/runtime.js';
-import type { ContextHistoryPort } from '../checkpoints/ports.js';
+import {
+  evaluateAndPersistTurnRecovery,
+  type ToolEffectLedgerPort,
+} from '../checkpoints/effect-ledger-recovery.js';
+import type { CheckpointJournalPort, ContextHistoryPort } from '../checkpoints/ports.js';
 import type { ColdCurrentFacts } from './cold-current.js';
 import type { NativeSaveKey } from '../checkpoints/native-save-contract.js';
 import type { ActiveTurnSegmentJournalPort } from '../context/active-turn-journal.js';
@@ -101,6 +105,14 @@ export interface ColdExecutionResumeOwner {
   readonly operations: Map<string, OperationRecord>;
   readonly producer: RuntimeColdExecutionProducer | undefined;
   readonly lifecycle: ColdExecutionLifecycleBinding | undefined;
+  readonly effectLedgerFor?: (
+    taskId: RuntimeExecutionAllocation['taskId'],
+    cycleId: NonNullable<ScopeRef['cycleId']>,
+  ) => ToolEffectLedgerPort;
+  readonly checkpointStoreFor?: (
+    taskId: RuntimeExecutionAllocation['taskId'],
+    cycleId: NonNullable<ScopeRef['cycleId']>,
+  ) => CheckpointJournalPort;
 }
 
 /** Coordinator owns the same actual lifecycle and resource transfer. */
@@ -215,6 +227,53 @@ export async function resumeColdExecution(
   }
   if (preparation.kind === 'generation-ready' && preparation.turnId !== request.businessTurnId) {
     hold('cold-execution.original-turn-held', 'generation preparation does not name the original business turn');
+  }
+  if (
+    preparation.kind === 'generation-ready'
+    && owner.effectLedgerFor
+    && owner.checkpointStoreFor
+    && source.scope.cycleId
+  ) {
+    const ledger = owner.effectLedgerFor(taskId, source.scope.cycleId);
+    const checkpointStore = owner.checkpointStoreFor(taskId, source.scope.cycleId);
+    const recoveryDecision = await evaluateAndPersistTurnRecovery({
+      ledger,
+      checkpointStore,
+      scope: source.scope,
+      turnId: request.businessTurnId,
+      directiveRevision: allocation.directiveRevision,
+      executionEpoch: allocation.executionEpoch,
+      recoveryStateRef: {
+        evidenceId: id('evidence', `cold-recovery-${operationId.value}`),
+        kind: 'operation',
+        source: OWNER,
+        locator: `operation/${operationId.value}/cold-recovery`,
+        scope: source.scope,
+      },
+    });
+    if (recoveryDecision.checkpoint) {
+      record.checkpoint = recoveryDecision.checkpoint.checkpoint;
+      record.checkpointSeq = recoveryDecision.checkpoint.checkpoint.seq;
+    }
+    if (recoveryDecision.outcome === 'recovery-hold-effect-unknown') {
+      record.state = 'blocked';
+      record.running = false;
+      record.stopping = false;
+      record.currentState = '变更副作用待确认';
+      record.nextStep = '确认外部变更结果后执行恢复或停止任务';
+      record.allowedActions = ['recover', 'stop'];
+      hold(
+        'cold-execution.recovery-hold-effect-unknown',
+        'mutating tool effect is dispatched-effect-unknown; awaiting operator recover or stop',
+      );
+    }
+    if (recoveryDecision.outcome === 'corrupt-blocked') {
+      record.state = 'blocked';
+      record.running = false;
+      record.stopping = false;
+      record.allowedActions = [];
+      hold('cold-execution.recovery-facts-corrupt', recoveryDecision.error ?? 'recovery facts corrupt');
+    }
   }
   const lifecycle = owner.lifecycle;
   if (!lifecycle) hold('cold-execution.lifecycle-unbound',
