@@ -185,6 +185,89 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ## Update Log
 
+- 2026-11-02 15:25 UTC: fifth main-tree real-RCC run
+  (`tests/ui/entry-flow-browser.mjs` T22c, isolated `serve --mode rcc` on
+  `127.0.0.1:4444`, model `goaichat.glm-5.3`) scored `77/78`. The once
+  execution path now PASSES: committed task row `ui-task-implicit-draft-2`
+  renders, live card reaches `步骤 7 provider request dispatching` with
+  `总耗时 00:15 本步 00:01`, execution child
+  `scheduled-task-665227213af5adf02045` dispatches, observation projection
+  terminal `succeeded`, provider tool steps `file.list`/`file.read` and a real
+  turn id are present, and the detail layer exposes the explicit
+  full-dashboard link. The remaining failure is `real RCC section completed`:
+  the recurring plan (`report current weekday name`, interaction-3) never
+  produced `执行计划已保存` within 90s; the live card sat at `步骤 4 Model is
+  streaming output 总耗时 01:29 本步 01:25` and no terminal provider event was
+  captured before teardown. The scheduled plan (interaction-2) did save and
+  created `ui-task-implicit-draft-4`; the once interpret (interaction-1) also
+  completed. Evidence:
+  `/Volumes/Intel/playground/humanagent/.worker-runs/master-ui-proof5-20261102/checks.json`
+  (77/78, one FAIL) plus the interaction artifacts under the isolated
+  `t22c-entry-flow-*` control root. This is the user screenshot symptom (live
+  card animates but never advances to a visible step/dispatch) on the
+  scheduled/recurring lane, not the once lane. Worker worktree
+  `mvp-real-path-dispatch-20261102` reported `80/80` twice on the same
+  code/dist, so the once-path fix is real; the recurring timeout is a
+  reproducible-or-latency question being decided by a sixth main-tree rerun
+  (proof6). Main HEAD `f5f13f05d`; evidence commit `35b9c043e` not yet
+  fast-forwarded (the three d20 PNGs show as modified in main). Next: read
+  proof6; if recurring reproduces, register/refine the plan-save timeout as a
+  product defect (no bounded interpret deadline) rather than loosening the
+  assertion; only after the real path passes move to milestone review, merge,
+  push, restart 10086, dual-viewport screenshots, and worktree cleanup.
+
+- 2026-11-02 14:02 UTC: master re-verified the real frontend path on the fresh
+  05:20 build (includes W2-A merge `351a17ca0`). `tests/ui/entry-flow-browser.mjs`
+  T22c ran end-to-end: Section A scripted runtime 55/55 checks pass, but Section
+  B real RCC 4444 FAILS with `the committed task row never rendered in
+  #entry-live` after 30s. The live card stays `已确认，等待调度` with frozen
+  `总耗时 00:00 本步 00:00`, no `步骤 <seq>`, and no task row. Evidence:
+  `/Volumes/Intel/playground/humanagent/.worker-runs/master-ui-proof-20261102/artifacts/defect-b-task-row-desktop.png`
+  plus `checks.json`. This reproduces the user's screenshot exactly (animation,
+  no current turn step, no timer movement, no dispatched task). The run used a
+  fresh isolated `serve --mode rcc` process, not the shared 10086 instance, so
+  the failure is not a stale-binary artifact. Bug evidence attached to
+  `60d2e73`; same root symptom as `a7f56b9`, `a9dc797`, `45f92c8`.
+  Delivery list for the user (M 列):
+  1. MVP real path: real RCC submission must render the committed task row,
+     dispatch to the implicit orchestrator, and show live steps + total/per-step
+     timers. Status: BLOCKED (this entry). Owner: MVP repair (Alice) + one-shot
+     GCM diagnosis.
+  2. Answers to the user's three questions: Q1 arbitrary frontend execution ->
+     only scripted path works; real RCC stays waiting. Q2 wait animation +
+     step/timer -> card renders but `explicit.step` never arrives, timers frozen
+     at 00:00. Q3 completion + dialog->orchestration dispatch -> not achieved on
+     the real lane. Evidence: defect-b screenshot + checks.json.
+  3. Confirmation UX: single-submit, no second confirmation is implemented and
+     passes scripted checks; the real blocker is the missing dispatch, not a
+     duplicate confirm button. Re-confirm against the fresh build after the
+     real-path fix.
+  4. appsdk upgrade to latest: installed `0.1.0015` (= Cargo `0.1.15`) is the
+     latest published release; source main is 364 commits ahead. Build/test the
+     main candidate before any global install (L2 runtime-install approval).
+  5. Fault-tolerant retry loop (D17) and `## 符号探索` nn-code section in
+     `AGENTS.md` are already present on main; no action.
+  6. Peer patrol: Alice is executing W2-B inside the
+     `mvp-w2a-orch-20261102` worktree (uncommitted effect-ledger + checkpoint
+     files) — do NOT clean it. Emma is idle. Carol/Bob/David idle; ask Carol
+     directly for progress rather than expecting a snapshot.
+  7. Stale runtime: the shared 10086 instance has run since 2026-11-01 03:25,
+     before the W2-A merge; it must be restarted through the project restart
+     path once the real-path fix lands, not left on the old in-memory build.
+  Next action: dispatch a one-shot GCM diagnosis+minimal-fix worker for the real
+  RCC task-row/dispatch gap, keep Alice on W2-B, and re-run T22c after the fix.
+  2026-11-02 13:28 local: dispatched. Worktree
+  `/Volumes/Intel/playground/humanagent/mvp-real-path-dispatch-20261102`
+  (branch `codex/mvp-real-path-dispatch-20261102`, base origin/main `351a17ca0`).
+  Contract `/Volumes/Intel/playground/humanagent/.worker-runs/mvp-real-path-dispatch-20261102/worker-task.md`.
+  GCM worker runs in tmux session `gcm-real-path-062823`; events and result land
+  in that worker-run directory. appsdk main install runs in tmux session
+  `appsdk-main-install-063524` from clean worktree
+  `/Volumes/Intel/playground/appsdk-main-install-20261102`, log
+  `.worker-runs/appsdk-upgrade-20261102.log`; it waits on a cargo package-cache
+  lock held by an unrelated `craft-anything` build. The project appsdk version
+  is unchanged at `0.1.0015` (= Cargo `0.1.15`), the latest published release.
+
 - 2026-11-02 12:39 UTC: goal deadline `m1793623110942-915` consumed via
   `collab recv` and re-armed with `appsdk goal subscribe --interval 20m`.
   Board still has one task, `mvp-w2a-implicit-orchestration-20261102`,
