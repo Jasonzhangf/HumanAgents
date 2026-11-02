@@ -772,3 +772,14 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `UNVERIFIED`，不按 complete 放行。已向 Alice 发 durable 指示
   `m1793645962786-1339`：继续 P0 且交付必须附可打开的前端截图/录屏
   路径，P0 完成后关闭 W2-A 任务并回收自有工作树，不合并 main。
+
+- 2026-11-02 19:04 UTC: W2-B 交付 `879332f5a` 经 master review 退回
+  `rework`。finding 位于 `packages/runtime/src/checkpoints/effect-ledger-recovery.ts:552`
+  起：recovery fact 的 `providerSettleReceipt` 由 `providerSettlements.at(-1)`
+  重写，有 request id 就写 `stopped`，数组为空就写 `not-sent`，没有保留
+  真实 typed state；这会把已 settle 或未知的 Provider 请求误判为未发送，
+  存在恢复时重复副作用风险。交付的 `w2b-recovery-receipt.json` 仍是
+  构造候选（`call-mutating-receipt-1`、合成 `argsDigest`），不能证明真实
+  中断、真实 mutating 副作用和同 turn 恢复。要求补最小红测（settled /
+  not-sent / unknown）和真实进程中断回执，保留 W2-B 为 open，不合并 main。
+  Bug `180f971` 已写入同一证据边界。
