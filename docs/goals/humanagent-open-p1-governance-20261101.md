@@ -936,3 +936,23 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   其他未受影响工作继续维护 goal。longhorizon 目标已 armed
   (`sub-m1793649521586-1383`，下一次 deadline 20m)，project patrol
   `sub-m1793413132850-18` 仍 armed；本轮未合并、未安装、未删 worktree、未杀进程。
+
+- 2026-11-02 21:06 UTC: W2-B `mvp-w2b-effect-ledger-checkpoint-recovery-20261102`
+  返工交付 `592d9399e` 未通过 master review，已用
+  `collab task review --rework` 退回。阻断一：
+  `reconcileHeldTurnEffectsForRecover` 只把 mutating ledger entry 标为
+  `reconciled`，随后 `evaluateAndPersistTurnRecovery` 在
+  `providerSettleReceipt.state=unknown` 时仍返回 `recovery-auto-resumed` 并继续
+  同一 Turn，没有先核对旧 Provider 请求是否收拢。修复要求：Provider settle
+  未确认时不得 auto-resume；必须要求调用方提供明确的 settled/stopped/not-sent
+  receipt，或保持独立 provider-settle-unknown hold 并有正反红测。阻断二：
+  `w2b-recovery-receipt.json` 的子进程 `SIGKILL` + stub driver 不等于真实 RCC
+  Provider 请求中断；`liveRccE2EScenario` 的 `local-file-search` 成功也不能证明
+  中断恢复。要求补真实 RCC 同入口的中断/恢复回执，或显式标
+  `UNVERIFIED` 并仅提交不扩大结论的最小修复。已发送 durable 返工消息
+  `m1793653545795-1426` 给 Alice（`--reply-on-completion`），要求继续使用原
+  `/Volumes/Intel/playground/humanagent/mvp-w2a-orch-20261102`，EPERM 时保留
+  现场并报告，不换路径。goal deadline `m1793653538622-1425` 已消费并重新武装
+  20m；project patrol 仍 armed。`/Volumes/Intel` 本进程当前仍可 `stat` 但不能
+  `cat`/`git status`，外置卷门禁未解除；本轮未合并、未安装、未删除 worktree、
+  未杀进程。
