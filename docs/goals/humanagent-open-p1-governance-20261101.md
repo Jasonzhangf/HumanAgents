@@ -183,6 +183,20 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ## Update Log
 
+- 2026-11-02 22:34 UTC: project-patrol `m1793658767157-1511`。RCC
+  `127.0.0.1:4444/health` 现返回 200（此前 22:16 记录未监听），真实入口可继续
+  验收。`appsdk bug list` 的 git-bug 锁已由遗留 pid 30117 释放，现可读取；open
+  仍为 32（P0 4、P1 11、P2 6，另有未分级审计/通信项）。board 现仅
+  `mvp-remaining-p0-followups-20261102`（Alice，working rev3，范围 W3-B
+  observation 五维投影 + W2-A Planner 决策端口接线），其 worktree 在
+  `/Volumes/Intel/playground/humanagent/mvp-remaining-p0-followups-20261102`
+  clean。`appsdk goal status --json` 目标仍 active/armed，deadline
+  `sub-m1793658341736-1500`（20m）已武装；project-patrol 运行 900000ms、目标
+  1500000ms，仍 `PATROL_CADENCE_RUNTIME_GAP`。appsdk `0.1.0015`、collab
+  `0.2.0415`，均已是本地最新。Carol 为 DSH peer 无 tmux snapshot，已按
+  「直接问 Carol」发 durable 进度请求 `m1793659062726-1525`。已向 CEO 记录巡检
+  回执。下一动作：等 Alice 交付后走独立 review + integration，不抢其 writer。
+
 - 2026-11-02 20:50 UTC: 消费 goal deadline `m1793651994627-1409` 后，
   `appsdk goal status --json` 显示目标仍 active，已重新武装后续一次性 deadline
   `sub-m1793652337880-1413`（20m）；`collab notify status` 仍报告
