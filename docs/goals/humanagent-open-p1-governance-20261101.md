@@ -15,37 +15,29 @@ reminder. The native RCC corrective-retry gap was reopened from D15 and is now
 owned by D17 (GCM executor). The project patrol remains the standing mechanism
 for new work.
 
-## Open P1
+## Active Goal Items
 
 1. W1-A `mvp-w1a-chain-delivery-planner-20261101`
-   - Status: `working`; GCM PID 45538. This run implements B3 planner/intake
-     resilience and A4 Chinese step text; B1 canonical publication follows in
-     r5 per the v2 scope addendum. Worktree:
-     `/Volumes/Intel/playground/humanagent/mvp-w1a-chain-delivery-planner-20261101`.
-     Alice owns acceptance and integration after the worker returns; Jenny
-     must not re-dispatch, merge, or duplicate this target.
-   - Tracking: `.worker-runs/mvp-w1a-chain-delivery-planner-20261101/task-contract-w1a.md`
-     plus `task-contract-w1a-v2-addendum.md`. Acceptance: red-before-green,
-     `pnpm typecheck`/`pnpm build:app` exit 0, real RCC 4444
-     `local-file-search` receipt SUCCESS with non-empty `dashboard.output` and
-     page state `已完成 · 结果可用`.
+   - Status: `已进入 origin/main`; commits `3c0b49f89` and `626969fb3`.
+     The GCM worker and its worktree are closed. Remaining behavior is tracked
+     by the current P0/P1 queue and must not be re-dispatched as W1-A.
 
 2. W1-B `mvp-w1b-explicit-ui-clarity-20261101`
-   - Status: `working`; GCM PID 58804. Worktree:
-     `/Volumes/Intel/playground/humanagent/mvp-w1b-explicit-ui-clarity-20261101`.
-     Alice owns acceptance and integration after the worker returns; Jenny
-     must not re-dispatch, merge, or duplicate this target.
-   - Tracking: `.worker-runs/mvp-w1b-explicit-ui-clarity-20261101/task-contract-w1b.md`.
-   - Acceptance: A1 direct answer no collapse, A3 main chip equals business
-     task state, A4 four corner buttons no overlay + live current step ordinal,
-     A5 no internal prefix / one evidence control; real RCC 4444 dual-viewport
-     browser evidence with screenshots.
+   - Status: `已进入 origin/main`; commit `37c38dd56`. The GCM worker and its
+     worktree are closed. Remaining behavior is tracked by the current P0/P1
+     queue and must not be re-dispatched as W1-B.
 
 3. MVP end-to-end user path (the user's primary acceptance)
    - Status: `未达成`. Four P0 remain open: `45f92c8` native lane bypasses
      implicit Brain orchestration, `a9dc797` completed native task public
      output empty, `4c21e74` observation lacks per-agent facts, `47b26dd`
      direct answer collapses main column.
+   - P0 `mvp-real-lane-entry-task-row-20261102`: Alice confirmed from
+     proof1-proof8 millisecond SSE evidence that RCC starts an unrequested
+     `continue_execution` Round 2 after a single-round request receives the
+     Round 1 message item. The red test is in
+     `/Volumes/Intel/playground/humanagent/mvp-w2a-orch-20261102/tests/adapters/provider/rcc-v3-transport.test.ts`
+     and failed with `stream.no-progress` as expected. The fix is incomplete.
    - Acceptance: arbitrary task input through the single interface reaches
      completion and dispatches to orchestration, with visible current turn
      step + timer and no second confirmation.
@@ -83,9 +75,10 @@ for new work.
 - `Carol` (peer): no active board task or owned candidate worktree. W1-A/W1-B
   are dispatched to GCM workers directly; Carol remains available for a later
   ready review/observation task only when a concrete gap appears.
-- `Alice` (peer): idle with no active board task or owned worktree. Available
-  for a bounded verification task if a concrete review or observation gap
-  appears; no dispatch while the W1-A/W1-B GCM workers are active.
+- `Alice` (peer): owns all four open board tasks: the real RCC task-row P0 and
+  clarification-options P1 are `working`; W2-A is `merged` awaiting close; W2-B
+  is `rework`. Her shared worktree is currently blocked by macOS EPERM on
+  `/Volumes/Intel`; do not switch paths or open a competing worktree.
 - `Bob` (peer): no active board task; do not invent work.
 - `David` (peer, test engineer): no active board task; available for focused
   test execution when a concrete test gap appears.
@@ -157,7 +150,7 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 | M | 交付物 | 状态 | 证据 / 缺口 | 下一动作 | 验收与停止条件 |
 |---|---|---|---|---|---|
 | M1 | 常驻 longhorizon 目标与 open bug 真源维护 | `active`：goal `ad967f01…` 每 20m 显式重 arm；`appsdk bug list` 当前 33 项 open，其中 P0 4、P1 12、P2 6，另有 11 项未分级审计/UX/通信项 | `appsdk goal status` 返回 active/observed=subscribed；`appsdk bug list --json` 已核对 `45f92c8`、`a9dc797`、`4c21e74`、`47b26dd` 四项 P0；旧清单只覆盖其中的 22 项 | 每轮刷新；未分级项补 owner；Alice 修复后同步 bug 状态 | 目标持续 active；所有 open 项有 owner、证据路径、下一动作；不能把 22 项旧队列冒称全部 |
-| M2 | 项目巡检（四项） | `armed`：project-patrol `sub-m1793413132850-18`，interval 900000ms，目标 1500000ms；`collab notify status` 仍为 `PATROL_CADENCE_RUNTIME_GAP`；goal deadline 已在 10:50 UTC 消费并用 `appsdk goal subscribe --interval 20m` 显式重订阅（`fired_count=0`、status=armed） | `collab notify status`；`appsdk goal status --json`；worktree 6（main + W2-A + 4 locked provider `PROTECTED_HOLD`），未超 10；10:50 UTC 复核 `/Volumes/Intel` 已恢复 | 每轮核对 worker、未关闭 board、资源和权限真源；不声称节奏已对齐；已通知 Alice 继续 W2-A | 四项均核对并有回执；gap 未解除时如实报告 |
+| M2 | 项目巡检（四项） | `armed`：project-patrol `sub-m1793413132850-18`，interval 900000ms，目标 1500000ms；`collab notify status` 仍为 `PATROL_CADENCE_RUNTIME_GAP`；goal deadline 已于 20:18 UTC 消费，并在 20:19 UTC 用 `appsdk goal subscribe --interval 20m` 显式重订阅 | `collab notify status`；`appsdk goal status --json`；worktree 7（main + W2-A 集成树 + real-path-dispatch + 4 locked provider `PROTECTED_HOLD`）；20:20 UTC 重试 `/Volumes/Intel` worktree 仍 EPERM | 每轮核对 worker、未关闭 board、资源和权限真源；不声称节奏已对齐；已向 Alice 发出当前进度与解除条件询问 | 四项均核对并有回执；gap 未解除时如实报告 |
 | M3 | W1-A/W1-B 结果转交 Alice，不再续派或合并 | `已进入 origin/main`：W1-A `3c0b49f89`/`626969fb3` 与 W1-B `37c38dd56` 均为 `origin/main` 祖先 | `git merge-base --is-ancestor` 实测三个提交均 `yes`；Alice 工作树已由她收走 | 保持不续派；后续 W1 相关 P0 由 Alice 按 W1-W3 计划验收 | W1 提交已入 main；剩余 P0 状态以 `appsdk bug list` 为准，不重复合并 |
 | M4 | W2/W3 证据接收与核对 | W2-A 实现已入 main（`7b51b8076` 与返工 `0e9696a9e` 均为 `origin/main` 祖先，集成 commit `351a17ca0` 也在 main）；board 任务 `mvp-w2a-implicit-orchestration-20261102` rev16 `merged`，但独立审查记录了两项后续：w2a-result.md 图描述回边需更正、Planner 决策端口未在 `packages/app` 接线；W2-B `879332f5a` 不是 main 祖先，board rev8 `rework` | `collab board show`；`git merge-base --is-ancestor`；`collab worker snapshot` | W2-B 完成真实中断/效果恢复证据后由 Alice 交回；W2-A 两项后续和 W2-B 都不得因“已入集成分支”标完成 | W2-A 可交付面已入 main，但两项后续未闭环；W2-B 未并入 main，真实 mutating/recovery 证据缺失时标 `UNVERIFIED` |
 | M5 | 自有 worktree 与资源收口 | `open`：main、`mvp-real-path-dispatch-20261102`、`mvp-w2a-orch-20261102` 与 4 个 locked provider 树 `PROTECTED_HOLD`，共 7/10 | `git worktree list` 实测 7 个，未超 10 | 每轮核对；W2-B 收口后移除 `mvp-w2a-orch`；`mvp-real-path-dispatch` 由 Alice 完成后关闭 | 每个候选合入后 remove+prune；不触他人树 |
@@ -184,6 +177,32 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - **Bob / Carol / David**：可用 peer。Carol 无 tmux snapshot 能力时按「直接问 Carol」方式发 durable message（上次 `m1793534323235-241`），不把 snapshot 缺失当阻塞；无 ready 长程目标时不空邀请。
 
 ## Update Log
+
+- 2026-11-02 20:20 UTC: goal deadline `m1793650721655-1396` 已消费并显式
+  续期为 20m；project patrol `sub-m1793413132850-18` 仍 armed，但运行
+  interval=900000ms、target=1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除。
+  `/Volumes/Intel/playground/humanagent/mvp-w2a-orch-20261102` 当前可 stat，
+  但进入后 `ls .` 与 `git status` 仍返回 `Operation not permitted`；按规则
+  不换路径、不复制到主树、不新建竞争 worktree。board 四个未关闭任务均归
+  Alice：real-lane P0 与 clarification P1 为 `working`，W2-A 为
+  `merged` 待 close，W2-B 为 `rework`。Alice 已定位 red-test 根因：
+  `packages/adapters/provider/src/rcc-v3-transport.ts` 在 Round 1 已收到
+  message item 且没有 pending tool call 后，RCC 4444 仍发起未请求的
+  `continue_execution` Round 2；proof8 中 Round 1 约 4.1s、Round 2 挂起
+  37.5s，超过 30s task-row 预算。新红测当前按预期失败
+  `RCC v3 stream made no forward progress ... 1500 ms`，但修复、绿测和真实
+  RCC 同入口验收尚未完成。已向 Alice 发 durable message
+  `m1793650839968-1398`，要求报告原错和可继续工作；修复必须只结束符合
+  条件的 message-only 单轮流，不能截断 pending tool 或真实多轮请求。
+  Alice 回执 `m1793650874509-1401` 已确认：partial hunks 已写入同一
+  worktree；`postMessageCompletionGraceMs=300` 与
+  `singleRoundMessageTerminal` 已加入，剩余 observe 收口与
+  `docs/ui/entry.js` 修改因 EPERM 暂停。主树只读核查确认 codec 只在
+  `response.completed` / `response.incomplete` 上产出 terminal event，
+  因此已向 Alice 发 `m1793651154893-1403`：不能在未产出 terminal event 时
+  仅改 transport 状态并丢流；单轮条件收口可由 transport 生成可审计的
+  `response.completed`，且必须补 pending tool、真实工具轮和
+  `humanagent_turn_end` 请求不得被截断的负向测试。
 
 - 2026-11-02 18:50 UTC: project-patrol。Alice 已接受 proof8 真实 lane
   修复任务 `mvp-real-lane-entry-task-row-20261102`，board `working`/rev3，
