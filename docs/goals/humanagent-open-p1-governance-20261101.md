@@ -185,6 +185,14 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ## Update Log
 
+- 2026-11-02 18:50 UTC: project-patrol。Alice 已接受 proof8 真实 lane
+  修复任务 `mvp-real-lane-entry-task-row-20261102`，board `working`/rev3，
+  owner Alice，正在定位 explicit confirm 后 implicit intake 未创建/渲染
+  task row 的首次偏离。board 另两项：W2-A `merged`/缺 close（worktree
+  仍被集成分支使用），W2-B `delivered`/缺 review+integration+close。
+  worktree 7（main + mvp-real-path-dispatch + mvp-w2a-orch + 4 locked
+  provider），未超 10。10086 生产实例仍 down。goal re-armed 20m。
+
 - 2026-11-02 18:34 UTC: W2-B 已交付并进入审查边界。Alice 提交
   `879332f5a8b5b4bf4d2c035579fc6727564ebed8`（21 files，worktree clean），
   `dagpipe-validate-graphs` 31 图、`pnpm test:contracts` 143/143、专项与
