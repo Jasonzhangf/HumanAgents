@@ -3128,14 +3128,14 @@ export class RuntimeTaskCoordinator {
     // derived from the actual call, never a second control fact.
     this.publishTaskStep(record.taskId, {
       state: 'planner.aligning',
-      summary: 'Closed turn planner alignment started',
+      summary: '执行完成，正在核对结果',
     });
     const advance = await standardTurn.align();
     this.publishTaskStep(record.taskId, {
       state: 'planner.aligned',
       summary: advance.decision === undefined
-        ? `Closed turn planner aligned: ${advance.state}`
-        : `Closed turn planner aligned: ${advance.state}/${advance.decision}`,
+        ? `结果核对完成：${advance.state}`
+        : `结果核对完成：${advance.state}/${advance.decision}`,
     });
     // The direct native lane owns its public result through the typed accepted
     // delivery. Commit and read it back through the same public-output owner
@@ -3194,13 +3194,22 @@ export class RuntimeTaskCoordinator {
         'assemble the runtime delivery reader before accepting a terminal complete turn');
     }
     const readback = await standardTurn.readDelivery();
-    // A refs-only accepted end declares no `deliveryText`. Bind its real
-    // material bundle to the retained assignment through the existing
-    // assignment-level binder (non-empty materials, business-turn identity,
-    // artifact refs/digests/bodies and evidence) against the original readback
-    // assignment; that binding is the whole gate and generates no public text.
-    // The assignment is never rebuilt from the current physical epoch.
-    if (readback.acceptedEnd.deliveryText === undefined) {
+    const acceptedEnd = readback.acceptedEnd;
+    const acceptedText = acceptedEnd.summary.result.text;
+    const completedPublication = acceptedEnd.outcome === 'completed'
+      && acceptedEnd.summary.result.status === 'completed';
+    if (!completedPublication) return;
+    if (acceptedText.trim().length === 0) {
+      // An empty canonical result is valid only when the accepted end declares
+      // a real non-text asset. It is never valid to finish as a public success
+      // with no deliverable at all.
+      if ((acceptedEnd.deliveryRefs?.length ?? 0) === 0) {
+        throw new RuntimeTaskControlError('standard-turn-end.missing-public-deliverable', RUNTIME_OWNER,
+          'a completed turn carries no public result text and no non-text delivery asset',
+          'continue the same turn and produce summary.result.text or a non-text delivery asset');
+      }
+      // Asset-only delivery: bind the real material bundle to the retained
+      // assignment. No text publication is synthesized from refs or summaries.
       bindAssignmentDelivery({ assignment: readback.assignment, readback });
       return;
     }
@@ -3226,7 +3235,7 @@ export class RuntimeTaskCoordinator {
         'resolve the delivery bound to this exact operation and epoch');
     }
     const exactText = new TextDecoder('utf-8', { fatal: true }).decode(material.bytes);
-    if (exactText !== readback.acceptedEnd.deliveryText) {
+    if (exactText !== acceptedText) {
       throw new RuntimeTaskControlError('standard-turn-delivery.text-mismatch', RUNTIME_OWNER,
         'the immutable delivery body does not equal the accepted delivery text',
         'resolve the immutable body bound to the accepted delivery text');
@@ -3244,9 +3253,10 @@ export class RuntimeTaskCoordinator {
         'resolve the execution cycle before accepting a terminal complete turn');
     }
     const binding = this.publicOutputSelection(scope, expectedExecutionEpoch);
+    const publicationId = `pub:${operation.operationId.value}:${acceptedEnd.identity.turnId}`;
     const candidate: PublicOutputCandidate = {
       binding,
-      sourceId: `standard-turn-delivery:${material.acceptedEndCall.envelope.request.requestId}:${endCall.call.callId}`,
+      sourceId: publicationId,
       text: exactText,
     };
     record.publicOutput = this.pendingPublicOutput(record.publicOutput);
@@ -3255,11 +3265,12 @@ export class RuntimeTaskCoordinator {
       const committed = await store.commitPublicOutput(candidate);
       const publication = await store.readPublicOutputs(binding);
       record.publicOutput = publication;
-      const match = publication.commits.find((commit) =>
-        commit.ref.sourceId === candidate.sourceId && commit.text === exactText);
-      if (match === undefined || match.ref.commitId !== committed.commitId) {
+      const matches = publication.commits.filter((commit) => commit.ref.sourceId === candidate.sourceId);
+      const match = matches[0];
+      if (matches.length !== 1 || match === undefined
+        || match.ref.commitId !== committed.commitId || match.text !== exactText) {
         throw new RuntimeTaskControlError('public-output.readback-mismatch', RUNTIME_OWNER,
-          'the canonical public output did not read back the exact committed delivery text',
+          'the canonical public output did not read back exactly one committed delivery text for this turn',
           'inspect the canonical public-output journal for this binding');
       }
       return exactText;
