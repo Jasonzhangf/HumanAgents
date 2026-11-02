@@ -65,7 +65,7 @@ export async function loadRuntimeStatus() {
   }
 }
 
-export function renderRuntimeStatus(target, status, error) {
+export function renderRuntimeStatus(target, status, error, { extraEntries = [] } = {}) {
   clearNode(target)
   if (error) {
     const copy = readFailureCopy(error)
@@ -83,7 +83,6 @@ export function renderRuntimeStatus(target, status, error) {
   }
   target.dataset.tone = status.state === 'ready' ? 'success' : 'warning'
   if (status.implicitScheduling) target.dataset.tone = status.implicitScheduling.state === 'failed' ? 'danger' : 'warning'
-  const modeLabel = status.mode === 'fake' ? '演示模式' : `模式 ${status.mode}`
   const stateLabel = status.state === 'ready' ? '运行正常' : '运行状态需要注意'
   const summary = [status.connected ? '服务已连接。' : '服务当前未连接。']
   if (status.providerError) summary.push('提供方状态需要注意，可打开技术详情核对。')
@@ -93,6 +92,7 @@ export function renderRuntimeStatus(target, status, error) {
       : '隐式调度需要注意，可打开技术详情核对。')
   }
   const entries = [
+    ...extraEntries,
     ['mode', status.mode, 'data-detail-mode'],
     ['state', status.state, 'data-detail-state'],
     ['providerState', status.providerState, 'data-detail-provider-state'],
@@ -115,7 +115,7 @@ export function renderRuntimeStatus(target, status, error) {
     )
   }
   target.append(
-    element('strong', `${modeLabel} · ${stateLabel}`),
+    element('strong', stateLabel),
     element('p', summary.join('')),
     technicalDetailTrigger(() => ({ title: '技术详情', entries })),
   )
@@ -618,9 +618,23 @@ function publishedOutputText(publicOutput) {
  * link is the result/detail entry. It never appends a required nextStep or
  * advertises a control that the row did not receive.
  */
+// Internal occurrence and subscription identity tokens are never part of a
+// human-facing task title. The display projection strips the internal prefix
+// only; the raw Journal identity is never rewritten.
+const INTERNAL_TITLE_TOKENS = ['subscription:requirement:']
+
+export function displayTaskTitle(title) {
+  if (typeof title !== 'string') return title
+  let cleaned = title
+  for (const token of INTERNAL_TITLE_TOKENS) {
+    if (cleaned.includes(token)) cleaned = cleaned.split(token).join('')
+  }
+  return cleaned.trim()
+}
+
 export function taskRowTitle(task) {
   return typeof task?.semanticTitle === 'string' && task.semanticTitle.trim() !== ''
-    ? task.semanticTitle
+    ? displayTaskTitle(task.semanticTitle)
     : '未整理名称的任务'
 }
 
@@ -2691,6 +2705,53 @@ export function taskIdFromQuery(required = true) {
  * @param {{ taskId: string, scope?: Object, apiClient?: Object, onModeChange?: (mode: string) => void, onEvidenceRequest?: (evidence: Object, trigger: HTMLButtonElement) => void }} options
  * @returns {{ reload: () => Promise<void>, setMode: (mode: string) => void, setScopeRef: (scopeRef: string) => void, dispose: () => void }}
  */
+/**
+ * Unclassified observation records arrive one per coverage issue. Rendering a
+ * per-record "查看只读证据" control turns a long journal into thousands of
+ * identical buttons. Collapse each coverage section into a single aggregated
+ * read-only evidence entry that reports the real count and keeps every source
+ * reference reachable in one drawer.
+ */
+export function aggregateReadOnlyEvidence(projection) {
+  if (!projection || typeof projection !== 'object' || !Array.isArray(projection.sections)) return projection
+  return {
+    ...projection,
+    sections: projection.sections.map((section) => {
+      if (section?.id !== 'coverage' || !Array.isArray(section.items) || section.items.length <= 1) return section
+      const items = section.items
+      const first = items[0] ?? {}
+      const count = items.length
+      const refs = items.flatMap((item) => (Array.isArray(item?.evidence?.refs) ? item.evidence.refs : []))
+      const baseEvidence = first.evidence && typeof first.evidence === 'object' ? first.evidence : {}
+      const evidence = {
+        ...baseEvidence,
+        evidenceId: `coverage-aggregate:${count}`,
+        summary: `共 ${count} 条未归类记录。展开只读证据可查看全部来源引用，单条记录不表示成功。`,
+        refs: refs.length > 0 ? refs : (Array.isArray(baseEvidence.refs) ? baseEvidence.refs : []),
+      }
+      const description = typeof section.description === 'string' && section.description.trim() !== ''
+        ? `${section.description.trim()} 共 ${count} 项，已合并为一条只读证据入口。`
+        : `共 ${count} 项未归类记录，已合并为一条只读证据入口。`
+      return {
+        ...section,
+        description,
+        items: [{
+          id: 'coverage-aggregate',
+          title: typeof first.title === 'string' && first.title.trim() !== ''
+            ? `${first.title}（共 ${count} 项）`
+            : `覆盖缺口（共 ${count} 项）`,
+          detail: '这些记录暂时无法完整归类或关联，保持未知，不表示成功。',
+          state: 'unknown',
+          stateLabel: `共 ${count} 项`,
+          tone: 'warning',
+          kind: first.kind,
+          evidence,
+        }],
+      }
+    }),
+  }
+}
+
 export function mountSemanticObservationPanel(host, {
   taskId,
   scope,
@@ -2780,13 +2841,13 @@ export function mountSemanticObservationPanel(host, {
       })
       return
     }
-    view.update(buildSemanticObservationProjection(envelope, {
+    view.update(aggregateReadOnlyEvidence(buildSemanticObservationProjection(envelope, {
       mode: displayMode,
       ...(scopeRef ? { scopeRef } : {}),
       stale: streamDisconnected || readError !== null,
       streamDisconnected,
       ...(readError ? { error: readError } : {}),
-    }))
+    })))
   }
 
   function closeStream() {

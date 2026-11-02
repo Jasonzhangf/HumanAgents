@@ -2,6 +2,7 @@ import {
   api,
   clearNode,
   createScopedReadPublication,
+  displayTaskTitle,
   element,
   loadRuntimeStatus,
   mountProductShell,
@@ -3475,8 +3476,9 @@ function renderDashboard() {
   fullBrief.type = 'button'
   fullBrief.addEventListener('click', () => {
     const content = element('div')
-    if (dashboard.taskTitle && dashboard.taskTitle !== taskRowTitle(dashboard) && dashboard.taskTitle !== dashboard.input) {
-      content.append(element('h3', '原始任务名称'), element('p', dashboard.taskTitle, 'business-output-text'))
+    const rawTitle = displayTaskTitle(dashboard.taskTitle)
+    if (rawTitle && rawTitle !== taskRowTitle(dashboard) && rawTitle !== dashboard.input) {
+      content.append(element('h3', '原始任务名称'), element('p', rawTitle, 'business-output-text'))
     }
     content.append(renderTaskDescriptionContent({ input: dashboard.input }))
     openPageDetail({ title: '任务说明', eyebrow: '任务说明', content })
