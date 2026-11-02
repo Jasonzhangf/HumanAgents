@@ -866,3 +866,22 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   盲目唤醒。`mvp-real-path-dispatch` 分支 ahead 1/behind 18，未并入
   main；W2-B `879332f5a` 仍不是 main 祖先。worktree 7/10；RCC 4444 监听，
   生产 `127.0.0.1:10086` 仍无监听；本轮未合并、未安装、未删 worktree、未杀进程。
+
+- 2026-11-02 20:12 UTC: Alice 报告 `mvp-real-lane-entry-task-row-20261102`
+  根因与红测。根因位于 `packages/adapters/provider/src/rcc-v3-transport.ts`
+  的 RCC v3 responses 单轮消息请求：Round 1 `response.output_item.done`
+  已产出完整结果且无 pending tool call 时，RCC 4444 仍发起未请求的
+  `continue_execution` Round 2，proof8 中 Round 2 将 SSE 挂到 37.5 秒，
+  总耗时 41.7 秒超过 `waitForCommittedTaskId` 的 30 秒预算。Alice 已写
+  `tests/adapters/provider/rcc-v3-transport.test.ts` 红测，并执行得到预期失败
+  `ProviderAdapterError: RCC v3 stream made no forward progress`。这只是诊断
+  证据，修复和多视口/真实 RCC 绿测尚未完成，不得标 delivered。
+  修复补丁写入前，Alice 和我本机进程先后对
+  `/Volumes/Intel/playground/humanagent/mvp-w2a-orch-20261102` 返回
+  `Operation not permitted`，`git status` 也为 `Unable to read current working
+  directory`；这是外置卷宿主授权门禁，不是 provider 代码失败。按规则不换路径
+  绕过；`mvp-clarification-selectable-options-20261102` 已由 Alice 接受为
+  revision 4 `working`，但共享同一外置卷 writer 域，同样暂停实际写入。
+  其他未受影响工作继续维护 goal。longhorizon 目标已 armed
+  (`sub-m1793649521586-1383`，下一次 deadline 20m)，project patrol
+  `sub-m1793413132850-18` 仍 armed；本轮未合并、未安装、未删 worktree、未杀进程。
