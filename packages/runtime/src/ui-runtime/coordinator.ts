@@ -1656,15 +1656,19 @@ function errorFromUnknown(error: unknown): RuntimeTaskError {
   };
 }
 
-function retryableNativeStartFailure(error: unknown): RuntimeTaskError {
+function retryableNativeStartFailure(error: unknown): {
+  readonly failure: RuntimeTaskError;
+  readonly retryable: boolean;
+} {
   const failure = errorFromUnknown(error);
-  if (failure.retryable || error === null || typeof error !== 'object' || !('providerError' in error)) {
-    return failure;
+  if (error === null || typeof error !== 'object' || !('providerError' in error)) {
+    return { failure, retryable: false };
   }
   const providerError = (error as { readonly providerError?: ProviderError }).providerError;
-  return providerError?.phase === 'start' && /^http\.5\d\d$/.test(providerError.code)
-    ? { ...failure, retryable: true }
-    : failure;
+  return {
+    failure,
+    retryable: providerError?.phase === 'start' && /^http\.5\d\d$/.test(providerError.code),
+  };
 }
 
 function recoveryProjection(recovery: StopSettlementRecovery): RuntimeTaskError {
@@ -5351,25 +5355,39 @@ export class RuntimeTaskCoordinator {
         };
         const nativeMaxAttempts = 2;
         let nativeAttemptNumber = 1;
+        let nativeFirstFailure: RuntimeTaskError | undefined;
         while (true) {
           let outcome: { readonly closure: AgentRuntimeClosure | undefined; readonly status: 'succeeded' | 'failed' | 'blocked' | 'cancelled' };
           try {
             outcome = await nativeAttempt();
           } catch (error) {
-            const failure = retryableNativeStartFailure(error);
+            const decision = retryableNativeStartFailure(error);
+            const failure = decision.failure;
             const committedSideEffects = record.checkpointReceipt !== undefined
               || operation.events.some((entry) => entry.kind === 'provider.tool' || entry.kind === 'provider.tool-result');
-            if (
-              !failure.retryable
-              || nativeAttemptObserved
-              || committedSideEffects
-              || record.stopping
-              || record.postCommitRecoveryPending
-              || nativeAttemptNumber >= nativeMaxAttempts
-            ) throw error;
+            const nativeRetryDriver = driver ?? record.driver;
+            const nativeRetryEligible = nativeRetryDriver?.standardTurn !== undefined
+              && decision.retryable
+              && !nativeAttemptObserved
+              && !committedSideEffects
+              && !record.stopping
+              && !record.postCommitRecoveryPending;
+            if (!nativeRetryEligible) throw error;
+            if (nativeAttemptNumber >= nativeMaxAttempts) {
+              // 耗尽：保留首次失败原因与证据，投影 blocked 后走既有失败 closure。
+              const originalFailure = nativeFirstFailure ?? failure;
+              const exhaustedFailure: RuntimeTaskError = { ...originalFailure, retryable: false };
+              record.error = exhaustedFailure;
+              this.pushEvent(record, operation, 'execution.retry', 'blocked',
+                `已达尝试上限（${nativeMaxAttempts} 次），保留首次失败原因：${exhaustedFailure.message}`,
+                exhaustedFailure.evidenceRefs ?? [], exhaustedFailure.ownerId, false, exhaustedFailure.nextAction,
+                { error: exhaustedFailure });
+              throw error;
+            }
+            nativeFirstFailure ??= failure;
             submission = `${prompt}\n\n纠正说明：第 ${nativeAttemptNumber} 次尝试执行失败，原因：${failure.message}。请根据上一轮失败原因修正后再次执行。`;
             this.pushEvent(record, operation, 'execution.retry', 'retrying',
-              `第 ${nativeAttemptNumber + 1} 次尝试（重试原因：${failure.message}）`, [],
+              `第 ${nativeAttemptNumber + 1} 次尝试（重试原因：${failure.message}）`, failure.evidenceRefs ?? [],
               STEP_OWNER, true, `recover:execution.retry.${record.taskId.value}`);
             nativeAttemptNumber += 1;
             continue;
@@ -5538,7 +5556,7 @@ export class RuntimeTaskCoordinator {
         await this.tryPersistCurrentState(record,
           `turn-pending:${record.taskId.value}:${operation.operationId.value}:${effectiveError.code}`, scope);
         this.pushEvent(record, operation, 'execution.terminal', 'blocked', effectiveError.message,
-          closedProviderEvidenceRefs, effectiveError.ownerId, true, effectiveError.nextAction, { error: effectiveError }, 'final');
+          closedProviderEvidenceRefs, effectiveError.ownerId, effectiveError.retryable, effectiveError.nextAction, { error: effectiveError }, 'final');
         return;
       }
       const businessScope: ScopeRef = { organId: this.options.organId, taskId: record.taskId, cycleId: scope.cycleId };

@@ -21,14 +21,25 @@ The fix keeps the retry in the native lane's `else` branch:
 - `packages/runtime/src/ui-runtime/coordinator.ts` starts the admitted
   composition once and re-submits the same admitted execution with a corrective
   prompt on a clean retryable failure, hard-capped at 2 attempts.
-- `retryableNativeStartFailure()` classifies only provider `start` errors whose
-  code matches `http.5xx` as retryable for this loop; the original error is
-  rethrown on exhaustion, and other errors keep existing policy.
+- `retryableNativeStartFailure()` returns `retryable: true` only when the
+  original error carries a `providerError` with `phase === 'start'` and a code
+  matching `^http\.5\d\d$`. An error that is already flagged retryable for a
+  different reason (for example an RCC transport/timeout error) is not retried
+  and keeps its own retryable value.
 - Retry is rejected once observation began, a tool event exists, a checkpoint
-  was committed, the task is stopping, or recovery is pending.
-- `tests/app/execution-corrective-retry.test.ts` adds a native-lane red/green
-  test using `ProviderAgentDriver` and a port whose first `start()` throws
-  `ProviderAdapterError(http.503)`.
+  was committed, the task is stopping, or recovery is pending, and the loop is
+  gated on the typed native-driver capability `driver.standardTurn`, so a
+  non-native `orchestrate:false` driver keeps its prior single-attempt path.
+- On a second native HTTP 5xx start failure, the loop emits one
+  `execution.retry` / `blocked` event that names the attempt cap and the first
+  failure reason, sets `record.error` to the first failure with
+  `retryable: false`, and routes the error through the existing terminal
+  failure closure, so the task ends `execution.terminal blocked` with the
+  original provider error and evidence preserved.
+- `tests/app/execution-corrective-retry.test.ts` covers the native success path,
+  the retryable non-`http.5xx` negative path, the native exhaustion path, and
+  the non-native no-retry path using `ProviderAgentDriver` and a port whose
+  `start()` throws a scripted `ProviderAdapterError`.
 
 ## Real RCC black-box acceptance (green)
 
@@ -42,13 +53,13 @@ isolated tmp control root (never `~/.humanagent`).
 - `task.terminalState: succeeded`
 - `checkpointCommitted: 1`
 - `cleanup.branch: settled`, `cleaned: true`
-- Injection: `injectedCount: 1` (`/v1/responses`), `forwardedCount: 19`,
+- Injection: `injectedCount: 1` (`/v1/responses`), `forwardedCount: 15`,
   `errors: []` — exactly one execution turn failed once; the corrective attempt
   and every interpretation turn were served by real RCC.
 - Authoritative journal retry fact (`seq: 4`):
   `kind: execution.retry`, `state: retrying`,
   summary `第 2 次尝试（重试原因：RCC v3 returned HTTP 503: ...harness_injected_retryable_failure...）`
-- Requested model `gpt-5.5`, resolved `MiniMax-M3`; 5 request-start turns; 3
+- Requested model `gpt-5.5`, resolved `MiniMax-M3`; 4 request-start turns; 3
   provider tool rounds.
 
 Key facts are captured in `retry-proof.json`. The full run receipt
@@ -58,7 +69,7 @@ are intentionally not committed.
 ## Screenshots
 
 - `retry-step-1280x720.png` — dashboard execution trace, desktop viewport, shows
-  `execution.retry · retrying`, time `11/01 19:55:30`, the HTTP 503 retry reason
+  `execution.retry · retrying`, time `11/01 21:23:38`, the HTTP 503 retry reason
   and `seq=4`.
 - `retry-step-390x844.png` — same retry row at the mobile viewport.
 
@@ -67,8 +78,10 @@ are intentionally not committed.
 - `pnpm typecheck` — exit 0
 - `pnpm build:app` — exit 0
 - `node --test tests/app/dashboard-e2e/retry-injection-contract.test.mjs` — 3/3 pass
-- `node --test dist/tests/tests/app/execution-corrective-retry.test.js` — 4/4
-  pass, including the native-lane HTTP 503 retry test
+- `node --test dist/tests/tests/app/execution-corrective-retry.test.js` — 7/7
+  pass, including the native-lane HTTP 503 retry test, the retryable
+  non-`http.5xx` negative test, the native exhaustion test, and the non-native
+  no-retry test
 - `node tests/app/dashboard-e2e/retry-visual-proof.mjs` — receipt SUCCESS
 
 ## Residual risk
