@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createServer } from 'node:http';
@@ -36,9 +36,7 @@ import { UiTaskGrantControl, TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY
 import { acquireDaemonLease } from '../../packages/app/src/supervisor/index.js';
 
 test('scoped task control rejects a different bound target before grant or release', async () => {
-  const base = join(homedir(), '.humanagent', 'test-fixtures');
-  await mkdir(base, { recursive: true });
-  const root = await mkdtemp(join(base, 'task-grant-scoped-target-http-'));
+  const root = await mkdtemp(join(tmpdir(), 'task-grant-scoped-target-http-'));
   let server: UiRuntimeServer | undefined;
   try {
     const workspace = join(root, 'workspace');
@@ -214,9 +212,7 @@ test('scoped task control rejects a different bound target before grant or relea
 });
 
 test('HTTP grant control uses verified owner and durable readback without releasing execution', async () => {
-  const base = join(homedir(), '.humanagent', 'test-fixtures');
-  await mkdir(base, { recursive: true });
-  const root = await mkdtemp(join(base, 'task-grant-http-'));
+  const root = await mkdtemp(join(tmpdir(), 'task-grant-http-'));
   let server: UiRuntimeServer | undefined;
   try {
     const organId = id('organ', 'http-grant-organ');
@@ -265,7 +261,7 @@ test('HTTP grant control uses verified owner and durable readback without releas
     const request = async (suffix: string, body?: unknown, authenticated = true) => {
       const response = await fetch(`${server!.url}${path}/${suffix}`, {
         method: body === undefined ? 'GET' : 'POST',
-        headers: { ...(authenticated ? { cookie } : {}), origin: server!.url, 'content-type': 'application/json' },
+        headers: { cookie: authenticated ? cookie : 'HA_SESSION=invalid', origin: server!.url, 'content-type': 'application/json' },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
       return { status: response.status, body: await response.json() as TaskGrantControlReceipt & { error?: { code: string }; execution?: { state: string } } };
@@ -326,14 +322,11 @@ test('HTTP grant control uses verified owner and durable readback without releas
 });
 
 test('restart blocks a prepared allocation with committed preparation entry before active turn', async () => {
-  const base = join(homedir(), '.humanagent', 'test-fixtures');
-  await mkdir(base, { recursive: true });
-  const root = await mkdtemp(join(base, 'task-grant-prepared-entry-http-'));
+  const root = await mkdtemp(join(tmpdir(), 'task-grant-prepared-entry-http-'));
   let runtime: UiRuntime | undefined;
   let orchestration: ReturnType<typeof createServeRuntimeComposition> | undefined;
   let posts = 0;
   let factories = 0;
-  let passed = false;
   const controlJournal = new JsonlOrganJournal(uiRuntimeControlJournalPath(uiRuntimeModeRoot(root, 'rcc')));
   const provider = createServer((request, response) => {
     if (request.method !== 'POST') {
@@ -435,14 +428,12 @@ test('restart blocks a prepared allocation with committed preparation entry befo
     assert.equal(posts, 0);
     assert.equal(factories, 0);
     assert.equal(active.runtime.service.eventsSince(preparedOperationId).some((event) => event.kind === 'execution.started'), false);
-    passed = true;
   } finally {
     await runtime?.close();
     await orchestration?.dispose();
     provider.closeIdleConnections?.();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
-    if (passed) await rm(root, { recursive: true, force: true });
-    else console.log(JSON.stringify({ retainedFailureFixture: root }));
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -474,14 +465,11 @@ const preparedHttpScenarios: readonly {
 ];
 for (const { label, refuseRelease, executionPolicy } of preparedHttpScenarios) {
 test(`HTTP prepared execution keeps one responsibility; case=${label}`, async () => {
-  const base = join(homedir(), '.humanagent', 'test-fixtures');
-  await mkdir(base, { recursive: true });
-  const root = await mkdtemp(join(base, 'task-grant-prepared-http-'));
+  const root = await mkdtemp(join(tmpdir(), 'task-grant-prepared-http-'));
   let runtime: UiRuntime | undefined;
   let orchestration: ReturnType<typeof createServeRuntimeComposition> | undefined;
   let posts = 0;
   let factories = 0;
-  let passed = false;
   const schedulerWorkspace = join(root, 'scheduler-workspace');
   await mkdir(schedulerWorkspace, { recursive: true });
   const schedulerPaths = await resolveRuntimePaths({
@@ -528,12 +516,16 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
         const coverage = records.find((record) => record.payload?.['kind'] === 'operation-control-coverage/v1');
         const admission = (coverage?.payload as { admissionCommitRef?: { commitId?: string } } | undefined)?.admissionCommitRef?.commitId;
         if (!admission) throw new Error('real TG1 admission coverage missing');
-        const section = (text: string) => ({ text, evidenceRefs: [admission] });
         frames = [{ type: 'response.output_item.done', output_index: 0, item: {
           type: 'function_call', call_id: 'grant-end', name: 'humanagent_turn_end', arguments: JSON.stringify({
-            summary: { goal: section('Deliver controlled result'), actions: section('Produce text'),
-              result: section('Result ready'), expectedNextStep: section('Close task') },
-            deliveryText: 'controlled HTTP grant result', deliveryRefs: [],
+            outcome: 'completed',
+            summary: {
+              goal: 'Deliver controlled result',
+              actions: ['Produce text'],
+              result: { status: 'completed', text: 'controlled HTTP grant result' },
+              nextStep: 'Close task',
+            },
+            deliveryRefs: [],
           }),
         } }];
       }
@@ -743,7 +735,6 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
         'a terminal occurrence must not reexecute on the next patrol');
       }
       console.log(JSON.stringify({ label, prepared, posts, factories, occurrenceId, childTaskId: resolvedChildTaskId, granted }));
-      passed = true;
       return;
     }
     assert.ok(prepared.operationId);
@@ -828,7 +819,6 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
       assert.equal(factories, 1);
     }
     console.log(JSON.stringify({ refuseRelease, prepared, receipt, posts, factories }));
-    passed = true;
   } finally {
     finish();
     await runtime?.close();
@@ -836,8 +826,7 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
     await schedulerLease.release();
     provider.closeIdleConnections?.();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
-    if (passed) await rm(root, { recursive: true, force: true });
-    else console.log(JSON.stringify({ retainedFailureFixture: root }));
+    await rm(root, { recursive: true, force: true });
   }
 });
 }

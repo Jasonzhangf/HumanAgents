@@ -25,7 +25,11 @@
     "deliveryContract": "校验节点只消费已确认的标准交付来源与结构化 summary.result.text；不声明传输完成、任务成功，也不重复保存正文。",
     "terminalAcceptanceContract": "validate_canonical_public_output 在声明完成时执行唯一公开交付校验；通过后接受 succeeded/final，未通过进入 force_continuation_reasoning。canonical output 不得使用 native drain 或 summary。不强制角色顺序，也不新增模型完成标签。",
     "adoptionContract": "planner_align_iteration 接受正式计划与定义；不把角色顺序或自由文本当作执行契约。",
-    "logicalTurnSettlementContract": "提交轮次检查点后由独立 Planner 对齐并产出下一计划；continue 保留共享轮次，complete/failed 以 canonical alignment 引用关闭轮次，不冒充用户停止或改写任务状态。"
+    "logicalTurnSettlementContract": "提交轮次检查点后由独立 Planner 对齐并产出下一计划；continue 保留共享轮次，complete/failed 以 canonical alignment 引用关闭轮次，不冒充用户停止或改写任务状态。",
+    "singleDecisionExecutionContract": "一次图执行表示一次编排决策，不表示整个长程循环；继续由外层状态机重新进入一次决策，不在 DAG 内加回边。",
+    "selectedStepDispatchContract": "selected_step 携带唯一动作并绑定已提交 PlanRevisionRecord 的 planRevisionId 与 stepId；未选角色只输出 typed not-selected，不调用模型、不执行工具。",
+    "stepCheckpointContinuationContract": "commit_subagent_checkpoint 后输出继续当前 Turn 或请求 Turn 收口的 typed 结果；标准结束校验失败时继续原 Turn，不触发下一业务 Turn。",
+    "seseExitConvergenceContract": "所有失败、取消与等待均汇聚到唯一决策结果出口 aligned_plan_revision。"
   },
   "inputs": [
     {

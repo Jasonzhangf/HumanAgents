@@ -4,6 +4,7 @@ import {
   id,
   validateTaskIdentityRecord,
   type JournalCommitRef,
+  type PlanRevisionRecord,
   type PublishedTaskPlanRevision,
   type ScopeRef,
   type TaskIdentityRecord,
@@ -11,6 +12,7 @@ import {
 } from '../../../contracts/src/index.js';
 import {
   JournalCommitConflictError,
+  type ExecutionPlanRevisionAppendInput,
   type JsonlTaskPlanRevisionJournal,
 } from '../../../adapters/jsonl/src/index.js';
 import { validatePublishedTaskPlanRevision } from '../../../core/src/task-plan-revision.js';
@@ -42,6 +44,9 @@ export interface TaskPlanRevisionConsumerPort {
   list(scope: ScopeRef): Promise<readonly PublishedTaskPlanRevision[]>;
   replay(scope?: ScopeRef): Promise<readonly PublishedTaskPlanRevision[]>;
   getCommitRef(scope: ScopeRef, revisionId: string): Promise<JournalCommitRef | null>;
+  publishExecutionPlanRevision(input: ExecutionPlanRevisionAppendInput): Promise<PlanRevisionRecord>;
+  getExecutionPlanRevision(scope: ScopeRef, planRevisionId: string): Promise<PlanRevisionRecord | null>;
+  replayExecutionPlanRevisions(scope?: ScopeRef): Promise<readonly PlanRevisionRecord[]>;
 }
 
 const OWNER_ID = 'runtime.orchestration.task-plan-revisions';
@@ -133,6 +138,20 @@ export class TaskPlanRevisionConsumer implements TaskPlanRevisionConsumerPort {
    */
   async getCommitRef(scope: ScopeRef, revisionId: string): Promise<JournalCommitRef | null> {
     return this.guard(() => this.journal.getCommitRef(scope, revisionId));
+  }
+
+  async publishExecutionPlanRevision(input: ExecutionPlanRevisionAppendInput): Promise<PlanRevisionRecord> {
+    const existing = await this.getExecutionPlanRevision(input.scope, input.record.planRevisionId);
+    if (existing) return existing;
+    return this.guard(() => this.journal.appendExecutionPlanRevision(input));
+  }
+
+  async getExecutionPlanRevision(scope: ScopeRef, planRevisionId: string): Promise<PlanRevisionRecord | null> {
+    return this.guard(() => this.journal.getExecutionPlanRevision(scope, planRevisionId));
+  }
+
+  async replayExecutionPlanRevisions(scope?: ScopeRef): Promise<readonly PlanRevisionRecord[]> {
+    return this.guard(() => this.journal.replayExecutionPlanRevisions(scope));
   }
 
   private async guard<T>(action: () => Promise<T>): Promise<T> {

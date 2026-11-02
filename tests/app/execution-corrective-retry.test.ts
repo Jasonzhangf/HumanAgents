@@ -512,8 +512,16 @@ function nonOrchestratedServiceFor(root: string, port: ExecutionRuntimePort, nat
                   acceptedEnd: {
                     kind: 'standard-turn-end' as const,
                     identity,
-                    summary,
-                    deliveryText: 'native retry request completed',
+                    outcome: 'completed' as const,
+                    summary: {
+                      goal: 'complete the native retry request',
+                      actions: ['execute the provider turn'],
+                      result: {
+                        status: 'completed' as const,
+                        text: 'native retry request completed',
+                      },
+                      nextStep: 'complete the task',
+                    },
                     deliveryRefs: [],
                     resolvedEvidenceRefs: [],
                   },

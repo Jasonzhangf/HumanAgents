@@ -37,6 +37,8 @@
     "adoption": "planner_align_iteration 接受正式 plan 与 definition，不以自由文本或角色顺序代替。",
     "logicalTurnSettlement": "commit_turn_checkpoint 后由独立 Planner 对齐并产出下一计划；validate_canonical_public_output 未通过时由 force_continuation_reasoning 保留恢复责任并强制同轮续推。continue 保留共享 cycle，complete/failed 以 canonical alignment 引用结束 cycle，不冒充用户停止或接管 Task 状态。",
     "coordinationOwner": "packages/runtime/src/agent-loop/inspection-turn-boundary.ts 已实现巡检选择、交付接受及轮次结算；inspection-runtime-helpers.ts 提供真实计划、定义和精确 capture 事实。模块已组合到候选，App 最终资源接线与原生整链仍未验收。",
-    "appWiring": "App 只做 wiring，不拥有 turn settlement 或 inspection 状态。"
+    "appWiring": "App 只做 wiring，不拥有 turn settlement 或 inspection 状态。",
+    "singleDecisionScope": "一次图执行只表达一次编排决策；selected_step 携带唯一动作并强制绑定 committed PlanRevisionRecord，未选中分支只产出 typed not-selected 且零模型/工具调用。",
+    "stepCheckpointContinuation": "subagent checkpoint 完成后产出继续当前 Turn 或进入 Turn 收口的 typed 结果；所有成功、继续、失败、取消与阻塞均汇聚到单出口。"
   }
 }

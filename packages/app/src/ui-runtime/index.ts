@@ -40,6 +40,7 @@ import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import { listTaskActiveTurnBindings } from '../../../adapters/jsonl/src/active-turn.js';
 import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
+import { JsonlTaskPlanRevisionJournal } from '../../../adapters/jsonl/src/task-plan-revisions.js';
 import { JsonlTaskGrantJournal } from '../../../adapters/jsonl/src/task-grants.js';
 import { createJsonlI2JournalPort } from '../i2-journal.js';
 import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/index.js';
@@ -80,6 +81,7 @@ import type { SupervisorLease } from '../supervisor/index.js';
 import { OccurrenceConsumerRouter } from './occurrence-router.js';
 import type { OccurrenceDispatchPort } from './occurrence-consumer.js';
 import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-identity.js';
+import { TaskPlanRevisionConsumer } from '../../../runtime/src/orchestration/task-plan-revisions.js';
 import { UiRuntimeScheduler } from './scheduler.js';
 import { AccessControlService } from './access-control.js';
 import {
@@ -601,6 +603,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           },
           currentStatePort: currentState,
           currentStateFacts: composition.currentStateFacts,
+          executionPlanRevisionPort: new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(taskControlJournal)),
           resolveColdExecutionResumeRequest: composition.resolveColdExecutionResumeRequest,
           executeConfirmedTaskContextCorrection: composition.executeConfirmedTaskContextCorrection,
           executeConfirmedTaskCheckpointReentry: composition.executeConfirmedTaskCheckpointReentry,

@@ -68,6 +68,7 @@ import {
   type ContextReplacement,
   type ContextView,
   type JournalCommitRef,
+  type PlanRevisionRecord,
   type TaskIdentityScope,
   type TaskIdentityRecord,
 } from '../../../contracts/src/index.js';
@@ -404,6 +405,9 @@ type RuntimeTaskDashboardView = RuntimeTaskDashboardProjection & {
   };
   /** The persisted plan this task belongs to; absent when the task has no plan. */
   readonly plan?: RuntimeTaskPlanProjection;
+  readonly orchestrated?: boolean;
+  readonly planRevision?: PlanRevisionRecord;
+  readonly planRevisions?: readonly PlanRevisionRecord[];
 };
 
 const LIFECYCLE_STATES = new Set([
@@ -451,7 +455,7 @@ export interface UiRuntimeMemoryComposition {
 type ServiceExecutionPorts = Pick<
   RuntimeTaskCoordinatorOptions,
   'admitExecution' | 'createDriver' | 'coldExecution' | 'currentStatePort' | 'currentStateFacts' | 'preparedExecutionStop'
-  | 'inspectionStop'
+  | 'inspectionStop' | 'executionPlanRevisionPort' | 'roleModelBindings'
 > & {
   /**
    * The one canonical cold-resume selector. The launch execution composition
@@ -637,6 +641,8 @@ export interface UiRuntimeServiceOptions {
      * `createExecutionPorts` instead so it never opens a second coordinator.
      */
     readonly admitExecution?: RuntimeTaskCoordinatorOptions['admitExecution'];
+    readonly executionPlanRevisionPort?: RuntimeTaskCoordinatorOptions['executionPlanRevisionPort'];
+    readonly roleModelBindings?: RuntimeTaskCoordinatorOptions['roleModelBindings'];
     /**
      * Launch assembly of the full native execution ports. It is called exactly
      * once, before the coordinator is constructed; the supplied callbacks only
@@ -1361,6 +1367,9 @@ function runtimeTaskDashboard(
   const requestedStopWithoutReceipt = (task.state === 'stopped' || task.state === 'cancelled') && !hasCheckpoint;
   return {
     ...projected,
+    orchestrated: task.orchestrated,
+    ...(task.planRevision === undefined ? {} : { planRevision: task.planRevision }),
+    ...(task.planRevisions === undefined ? {} : { planRevisions: task.planRevisions }),
     history: {
       events: history.slice(),
       hasMore: omitted > 0,
@@ -2436,6 +2445,12 @@ export class UiRuntimeService {
       ...(executionPorts === undefined ? {} : executionPorts),
       ...(options.runtimeComposition?.admitExecution === undefined ? {} : {
         admitExecution: options.runtimeComposition.admitExecution,
+      }),
+      ...(options.runtimeComposition?.executionPlanRevisionPort === undefined ? {} : {
+        executionPlanRevisionPort: options.runtimeComposition.executionPlanRevisionPort,
+      }),
+      ...(options.runtimeComposition?.roleModelBindings === undefined ? {} : {
+        roleModelBindings: options.runtimeComposition.roleModelBindings,
       }),
       ...(options.workspaceRoot === undefined ? {} : {
         producedArtifacts: {
@@ -7240,7 +7255,7 @@ export class UiRuntimeService {
    * pipeline.execute assignment, so only non-native assemblies orchestrate.
    */
   private defaultOrchestrate(): { orchestrate?: true } {
-    return !this.nativeDriverBound && this.options.runtimeComposition?.createTaskAssembly !== undefined
+    return this.options.runtimeComposition?.createTaskAssembly !== undefined
       ? { orchestrate: true }
       : {};
   }

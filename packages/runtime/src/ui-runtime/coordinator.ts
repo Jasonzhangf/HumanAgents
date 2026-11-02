@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
 import {
+  assertPlanStepDispatchBinding,
   id,
   standardTurnEndPublicText,
+  validatePlanRevisionRecord,
   type AgentDriver,
+  type AgentModelBinding,
   type AgentRoleDisplay,
   type AgentEvent,
   type AgentHandle,
@@ -19,6 +22,9 @@ import {
   type NextAction,
   type OperationId,
   type OrganId,
+  type PlanRevisionRecord,
+  type PlanRevisionStep,
+  type PlanStepDispatchBinding,
   type RawAsset,
   type RawFactEnvelope,
   type ProviderCloseResult,
@@ -42,6 +48,7 @@ import {
   type PublicOutputJournalPort,
   type PublicOutputPublication,
 } from '../../../contracts/src/index.js';
+import type { TaskPlanRevisionConsumerPort } from '../orchestration/task-plan-revisions.js';
 import {
   bindAssignmentDelivery,
   type StandardTurnDeliveryBinding,
@@ -198,6 +205,8 @@ export interface RuntimeTaskEvent {
   readonly outputRef?: string;
   readonly outputDigest?: string;
   readonly executionFact?: ToolExecutionFact;
+  readonly boundPlanRevisionId?: string;
+  readonly boundPlanStepId?: string;
 }
 
 /**
@@ -231,6 +240,10 @@ export interface RuntimeTaskSnapshot {
   /** Rebuildable committed public-output projection for the current operation/epoch. */
   readonly publicOutput?: PublicOutputPublication;
   readonly orchestrated: boolean;
+  readonly planRevision?: PlanRevisionRecord;
+  readonly planRevisions?: readonly PlanRevisionRecord[];
+  readonly boundPlanRevisionId?: string;
+  readonly boundPlanStepId?: string;
   readonly allowedActions: readonly string[];
   readonly recentEvents: readonly RuntimeTaskEvent[];
   readonly events: readonly RuntimeTaskEvent[];
@@ -687,6 +700,13 @@ export interface RuntimeTaskCoordinatorOptions {
    * App assembles the durable store; the Runtime only references it.
    */
   readonly refinedDeliveryStore?: RefinedDeliveryStore;
+  readonly executionPlanRevisionPort?: Pick<
+    TaskPlanRevisionConsumerPort,
+    'publishExecutionPlanRevision' | 'getExecutionPlanRevision' | 'replayExecutionPlanRevisions'
+  >;
+  readonly roleModelBindings?: Partial<
+    Readonly<Record<'orchestration' | 'execution' | 'review', AgentModelBinding>>
+  >;
   readonly createTaskAssembly?: (input: {
     readonly task: Task;
     readonly scope: ScopeRef;
@@ -815,6 +835,10 @@ export interface TaskRecord {
   checkpointReceipt?: DurableCheckpointReceipt;
   currentStateCommitRef?: JournalCommitRef;
   currentPlan?: RuntimeTaskCurrentPlan;
+  planRevision?: PlanRevisionRecord;
+  planRevisions?: PlanRevisionRecord[];
+  boundPlanRevisionId?: string;
+  boundPlanStepId?: string;
   error?: RuntimeTaskError;
   orchestrated: boolean;
   running: boolean;
@@ -856,6 +880,18 @@ export interface OperationRecord {
   readonly executionEpoch: number;
   readonly input: string;
   readonly orchestrated: boolean;
+  planRevision?: PlanRevisionRecord;
+  planRevisions?: PlanRevisionRecord[];
+  boundPlanRevisionId?: string;
+  boundPlanStepId?: string;
+  planStepBinding?: PlanStepDispatchBinding;
+  orchestratorPrivateContext?: string;
+  dynamicStepSequence?: readonly {
+    readonly kind: 'explore' | 'plan' | 'execute' | 'review';
+    readonly targetAgentRole: 'orchestration' | 'execution' | 'review';
+    readonly effectPolicy: 'readonly' | 'mutating';
+    readonly objective: string;
+  }[];
   zeroEffectAdmissionDenial?: true;
   /** Original in-process preparation error, for diagnostics only. */
   preparationFailure?: { readonly cause: unknown };
@@ -2582,6 +2618,14 @@ export class RuntimeTaskCoordinator {
      */
     readonly role?: AgentRoleDisplay;
     readonly configuredAgentId?: string;
+    readonly planStepBinding?: PlanStepDispatchBinding;
+    readonly orchestratorPrivateContext?: string;
+    readonly dynamicStepSequence?: readonly {
+      readonly kind: 'explore' | 'plan' | 'execute' | 'review';
+      readonly targetAgentRole: 'orchestration' | 'execution' | 'review';
+      readonly effectPolicy: 'readonly' | 'mutating';
+      readonly objective: string;
+    }[];
     readonly implicitRequirement?: {
       readonly envelope: RequirementEnvelope;
       readonly admission: RequirementAdmissionReceipt;
@@ -2666,6 +2710,9 @@ export class RuntimeTaskCoordinator {
         executionEpoch,
         input: prompt,
         orchestrated: input.orchestrate === true,
+        ...(input.planStepBinding === undefined ? {} : { planStepBinding: input.planStepBinding }),
+        ...(input.orchestratorPrivateContext === undefined ? {} : { orchestratorPrivateContext: input.orchestratorPrivateContext }),
+        ...(input.dynamicStepSequence === undefined ? {} : { dynamicStepSequence: input.dynamicStepSequence }),
         events: [],
         seq: 0,
       };
@@ -2742,6 +2789,10 @@ export class RuntimeTaskCoordinator {
     record.error = undefined;
     record.stopControl = undefined;
     record.orchestrated = operation.orchestrated;
+    record.planRevision = undefined;
+    record.planRevisions = undefined;
+    record.boundPlanRevisionId = undefined;
+    record.boundPlanStepId = undefined;
     record.updatedAt = this.now().toISOString();
     return allocation;
   }
@@ -3100,6 +3151,7 @@ export class RuntimeTaskCoordinator {
     readonly standardTurn: NonNullable<RuntimeExecutionDriver['standardTurn']>;
     readonly expectedExecutionEpoch: number;
     readonly closeOwned: () => Promise<void>;
+    readonly commitStandardDelivery?: boolean;
   }): Promise<AdvanceTurnResult> {
     const { record, operation, scope, standardTurn } = input;
     const previousCheckpoint = record.checkpoint ?? null;
@@ -3143,7 +3195,7 @@ export class RuntimeTaskCoordinator {
     // before the turn is accepted as succeeded, so a drain/empty turn can never
     // finish as a success with no delivered body. The orchestrated lane keeps
     // its existing WorkResult delivery binding (`bindAssignmentDelivery`).
-    if (!operation.orchestrated && advance.state === 'terminal' && advance.decision === 'complete') {
+    if ((input.commitStandardDelivery === true || !operation.orchestrated) && advance.state === 'terminal' && advance.decision === 'complete') {
       await this.commitStandardTurnDelivery(record, operation, scope, standardTurn,
         input.expectedExecutionEpoch);
     }
@@ -3200,7 +3252,16 @@ export class RuntimeTaskCoordinator {
     // material bundle to the retained assignment through the existing
     // assignment-level binder; that binding is the whole gate and generates no
     // public text. The assignment is never rebuilt from the current epoch.
-    const publicText = standardTurnEndPublicText(readback.acceptedEnd);
+    let publicText: string | undefined;
+    try {
+      publicText = standardTurnEndPublicText(readback.acceptedEnd);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'standard-turn-end.missing-public-deliverable') {
+        publicText = undefined;
+      } else {
+        throw error;
+      }
+    }
     if (publicText === undefined) {
       if ((readback.acceptedEnd.deliveryRefs?.length ?? 0) === 0) {
         throw new RuntimeTaskControlError('standard-turn-end.missing-public-deliverable', RUNTIME_OWNER,
@@ -4678,6 +4739,116 @@ export class RuntimeTaskCoordinator {
     driver.bindChildCallManager?.(assembly.orchestration);
   }
 
+  private async commitAndBindOrchestratedPlanSteps(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+  ): Promise<{ readonly boundStep: PlanRevisionStep; readonly isolatedPrompt: string }> {
+    const stepsToCommit = operation.dynamicStepSequence && operation.dynamicStepSequence.length > 0
+      ? operation.dynamicStepSequence
+      : [{
+          kind: 'execute' as const,
+          targetAgentRole: 'execution' as const,
+          effectPolicy: 'mutating' as const,
+          objective: operation.input,
+        }];
+    const committedRevisions: PlanRevisionRecord[] = [];
+    for (const [seqIdx, spec] of stepsToCommit.entries()) {
+      const planRevisionId = `plan-rev:${record.taskId.value}:${operation.operationId.value}:${operation.executionEpoch}:${seqIdx + 1}`;
+      const stepId = `step:${planRevisionId}:0`;
+      const modelBinding: AgentModelBinding = this.options.roleModelBindings?.[spec.targetAgentRole] ?? {
+        provider: 'configured-provider',
+        requestedModel: operation.allocation?.configuredAgentId ?? spec.targetAgentRole,
+        actualModel: null,
+      };
+      const contextRootId = `ctx:${record.taskId.value}:${operation.operationId.value}:${operation.executionEpoch}:${seqIdx + 1}:0`;
+      const step: PlanRevisionStep = {
+        stepId,
+        kind: spec.kind,
+        targetAgentRole: spec.targetAgentRole,
+        objective: spec.objective,
+        state: 'pending',
+        effectPolicy: spec.effectPolicy,
+        modelBinding,
+        contextIsolation: {
+          contextRootId,
+          parentContextId: null,
+          inheritsOrchestratorContext: false,
+          allowedInputSources: [
+            'explicit-dispatch-template',
+            'subagent-own-checkpoints',
+            'declared-evidence-refs',
+          ],
+        },
+        inputEvidenceRefs: [this.operationScopeEvidence(scope, `plan-step/${stepId}/input`)],
+        outputEvidenceRefs: [],
+      };
+      const predecessorCheckpointId = record.checkpoint?.id.value ?? null;
+      const committed = this.options.executionPlanRevisionPort
+        ? await this.options.executionPlanRevisionPort.publishExecutionPlanRevision({
+            scope: { organId: this.options.organId, taskId: record.taskId },
+            record: {
+              planRevisionId,
+              taskId: record.taskId.value,
+              operationId: operation.operationId.value,
+              executionEpoch: operation.executionEpoch,
+              predecessorCheckpointId,
+              decision: 'continue',
+              steps: [step],
+            },
+          })
+        : {
+            planRevisionId,
+            taskId: record.taskId.value,
+            operationId: operation.operationId.value,
+            executionEpoch: operation.executionEpoch,
+            predecessorCheckpointId,
+            decision: 'continue' as const,
+            steps: [step],
+            committedRef: {
+              eventKind: 'task-plan-revision.published' as const,
+              commitId: `plan-commit:v1:${planRevisionId}`,
+              journalSeq: seqIdx + 1,
+              state: 'committed' as const,
+            },
+          };
+      validatePlanRevisionRecord(committed, {
+        taskId: record.taskId.value,
+        operationId: operation.operationId.value,
+        executionEpoch: operation.executionEpoch,
+      });
+      committedRevisions.push(committed);
+    }
+    const latestRevision = committedRevisions.at(-1)!;
+    const binding: PlanStepDispatchBinding = operation.planStepBinding ?? {
+      boundPlanRevisionId: latestRevision.planRevisionId,
+      boundPlanStepId: latestRevision.steps[0]!.stepId,
+    };
+    let boundStep: PlanRevisionStep;
+    try {
+      boundStep = assertPlanStepDispatchBinding(latestRevision, binding);
+    } catch {
+      throw new RuntimeTaskControlError(
+        'orchestration.unbound-plan-step',
+        RUNTIME_OWNER,
+        'execution dispatch is not bound to a committed plan step',
+        'bind a valid planRevisionId and stepId before dispatching execution',
+      );
+    }
+    operation.planRevisions = committedRevisions;
+    operation.planRevision = latestRevision;
+    operation.boundPlanRevisionId = binding.boundPlanRevisionId;
+    operation.boundPlanStepId = binding.boundPlanStepId;
+    record.planRevisions = committedRevisions;
+    record.planRevision = latestRevision;
+    record.boundPlanRevisionId = binding.boundPlanRevisionId;
+    record.boundPlanStepId = binding.boundPlanStepId;
+    return {
+      boundStep,
+      isolatedPrompt: operation.input,
+    };
+  }
+
   private async runExecution(
     record: TaskRecord,
     operation: OperationRecord,
@@ -4731,6 +4902,11 @@ export class RuntimeTaskCoordinator {
         return;
       }
       await this.openActiveTurn(record, operation, scope);
+      let orchestratedStepPrompt = prompt;
+      if (record.orchestrated) {
+        const bound = await this.commitAndBindOrchestratedPlanSteps(record, operation, scope);
+        orchestratedStepPrompt = bound.isolatedPrompt;
+      }
       if (this.options.providerRetry) {
         retryCycle = createRetryCycleManager({
           config: this.options.providerRetry.config,
@@ -4823,7 +4999,7 @@ export class RuntimeTaskCoordinator {
       // `prepareExecution`; a corrective attempt must carry the previous
       // attempt's concrete failure reason instead of blindly re-sending the
       // original input.
-      let executionPrompt = prompt;
+      let executionPrompt = orchestratedStepPrompt;
       // Side effects committed by the latest provider attempt. Only a clean
       // failure (no tool execution, no produced files, no checkpoint commit)
       // may be re-executed through the same business operation.
@@ -4831,7 +5007,7 @@ export class RuntimeTaskCoordinator {
       let firstFailureReason: string | undefined;
       let firstFailureEvidence: readonly EvidenceRef[] = [];
       let firstFailureOwnerId: string | undefined;
-      if (record.orchestrated && this.options.createTaskAssembly) {
+      if (record.orchestrated && this.options.createTaskAssembly && driver?.standardTurn === undefined) {
         const outputRef = `operation://${operation.operationId.value}/output`;
         const coordinator = this;
         const activeTurn = await this.openActiveTurn(record, operation, scope);
@@ -5135,7 +5311,7 @@ export class RuntimeTaskCoordinator {
           // C3 accepts the completed review receipts on the retained turn before
           // the native close. Late reviews that land after the close stay the first
           // error; the frozen closure is never rewritten to claim completion.
-          await driver?.standardTurn?.acceptReviews(dispatched.reviewCommitRefs ?? []);
+          await (driver as RuntimeExecutionDriver | undefined)?.standardTurn?.acceptReviews(dispatched.reviewCommitRefs ?? []);
           if (record.stopping || record.postCommitRecoveryPending || record.state === 'stopped') return;
           if (dispatched.status === 'merged' || dispatched.status === 'succeeded') break;
           const problem = dispatched.issue;
@@ -5294,6 +5470,12 @@ export class RuntimeTaskCoordinator {
             scope,
             checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
           });
+          if (record.orchestrated) {
+            record.taskAssembly.orchestration.planStage({
+              nodeId: `stage-${operation.operationId.value}`,
+              taskId: record.taskId,
+            });
+          }
           this.bindChildCallManager(driver, record.taskAssembly);
         }
         // The Runtime/composition is started exactly once. A clean retryable
@@ -5304,7 +5486,7 @@ export class RuntimeTaskCoordinator {
         // would re-prepare an operation whose control coverage already belongs
         // to this runtime and be rejected.
         await composition!.start();
-        let submission = prompt;
+        let submission = orchestratedStepPrompt;
         let nativeAttemptObserved = false;
         const nativeAttempt = async () => {
           await composition!.submit(submission);
@@ -5443,6 +5625,7 @@ export class RuntimeTaskCoordinator {
           scope,
           standardTurn: closeDriver.standardTurn,
           expectedExecutionEpoch: operation.executionEpoch,
+          commitStandardDelivery: true,
           closeOwned: async () => {
             const closed = await closeProvider();
             if (closed.state !== 'closed') {
@@ -6424,6 +6607,8 @@ export class RuntimeTaskCoordinator {
       ...(details?.externalResponseId === undefined ? {} : { externalResponseId: details.externalResponseId }),
       ...(details?.responseModel === undefined ? {} : { responseModel: details.responseModel }),
       ...(details?.outputRefs === undefined ? {} : { outputRefs: details.outputRefs }),
+      ...(operation.boundPlanRevisionId === undefined ? {} : { boundPlanRevisionId: operation.boundPlanRevisionId }),
+      ...(operation.boundPlanStepId === undefined ? {} : { boundPlanStepId: operation.boundPlanStepId }),
     };
     operation.events.push(event);
     record.events.push(event);
@@ -6915,6 +7100,10 @@ export class RuntimeTaskCoordinator {
       cycleId: record.cycleId?.value,
       publicOutput: record.publicOutput,
       orchestrated: record.orchestrated,
+      ...(record.planRevision === undefined ? {} : { planRevision: record.planRevision }),
+      ...(record.planRevisions === undefined ? {} : { planRevisions: record.planRevisions }),
+      ...(record.boundPlanRevisionId === undefined ? {} : { boundPlanRevisionId: record.boundPlanRevisionId }),
+      ...(record.boundPlanStepId === undefined ? {} : { boundPlanStepId: record.boundPlanStepId }),
       allowedActions: record.allowedActions,
       recentEvents: record.events.slice(-20),
       events: record.events,

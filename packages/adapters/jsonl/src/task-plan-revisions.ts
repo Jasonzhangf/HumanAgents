@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
-import type {
-  JournalCommitRef,
-  PublishedTaskPlanRevision,
-  ScopeRef,
-  TaskPlanRevisionPublicationInput,
+import {
+  validatePlanRevisionRecord,
+  type JournalCommitRef,
+  type PlanRevisionRecord,
+  type PublishedTaskPlanRevision,
+  type ScopeRef,
+  type TaskPlanRevisionPublicationInput,
 } from '@humanagent/contracts';
 import {
   assertTaskPlanRevisionRetryMatches,
@@ -15,6 +17,11 @@ import { JournalCommitConflictError, JournalIntegrityError } from './index.js';
 import type { JournalRecord, JsonlOrganJournal } from './index.js';
 
 export type TaskPlanRevisionAppendInput = Omit<TaskPlanRevisionPublicationInput, 'journalCommitRef'>;
+
+export interface ExecutionPlanRevisionAppendInput {
+  readonly scope: ScopeRef;
+  readonly record: Omit<PlanRevisionRecord, 'committedRef'>;
+}
 
 const RECORD_TYPE = 'task-plan-revision.published';
 
@@ -45,6 +52,7 @@ function commitRef(record: JournalRecord): JournalCommitRef {
 
 function revisionFromRecord(record: JournalRecord): PublishedTaskPlanRevision | undefined {
   if (record.kind !== 'event' || record.payload?.type !== RECORD_TYPE) return undefined;
+  if (record.payload?.executionPlanRevision !== undefined && record.payload?.revision === undefined) return undefined;
   const revision = record.payload.revision as PublishedTaskPlanRevision | undefined;
   if (revision === undefined) throw new JournalIntegrityError('task plan revision record has no revision');
   try {
@@ -159,4 +167,92 @@ export class JsonlTaskPlanRevisionJournal {
     if (!sameTaskScope(revision.scope, scope) || revision.revisionId !== revisionId) return null;
     return commitRef(record);
   }
+
+  async appendExecutionPlanRevision(input: ExecutionPlanRevisionAppendInput): Promise<PlanRevisionRecord> {
+    const commitId = `plan-commit:v1:${input.record.planRevisionId}`;
+    const candidatePreview: PlanRevisionRecord = {
+      ...input.record,
+      committedRef: {
+        eventKind: RECORD_TYPE,
+        commitId,
+        journalSeq: 1,
+        state: 'committed',
+      },
+    };
+    validatePlanRevisionRecord(candidatePreview);
+    return this.journal.transaction(
+      ({ records }) => {
+        const existingRecord = records.find((candidate) => candidate.commitId === commitId);
+        if (existingRecord) {
+          const existing = executionPlanRevisionFromRecord(existingRecord);
+          if (!existing || existing.planRevisionId !== input.record.planRevisionId) {
+            throw new JournalCommitConflictError(commitId, existingRecord);
+          }
+          return { existing, append: false as const };
+        }
+        return { append: true as const };
+      },
+      async (plan, append) => {
+        if (!plan.append) return plan.existing;
+        const record = await append({
+          commitId,
+          kind: 'event',
+          scope: input.scope,
+          payload: {
+            type: RECORD_TYPE,
+            executionPlanRevision: input.record as unknown as Record<string, unknown>,
+          },
+        });
+        const committed = executionPlanRevisionFromRecord(record);
+        if (!committed) {
+          throw new JournalIntegrityError('appended execution plan revision record could not be decoded');
+        }
+        return committed;
+      },
+    );
+  }
+
+  async replayExecutionPlanRevisions(scope?: ScopeRef): Promise<readonly PlanRevisionRecord[]> {
+    const records = await this.journal.replay();
+    const revisions: PlanRevisionRecord[] = [];
+    for (const record of records) {
+      const rev = executionPlanRevisionFromRecord(record);
+      if (!rev) continue;
+      if (scope !== undefined) {
+        if (record.scope.organId.value !== scope.organId.value) continue;
+        if (scope.taskId && record.scope.taskId?.value !== scope.taskId.value) continue;
+      }
+      revisions.push(rev);
+    }
+    return revisions;
+  }
+
+  async getExecutionPlanRevision(scope: ScopeRef, planRevisionId: string): Promise<PlanRevisionRecord | null> {
+    const all = await this.replayExecutionPlanRevisions(scope);
+    return all.find((rev) => rev.planRevisionId === planRevisionId) ?? null;
+  }
+}
+
+function executionPlanRevisionFromRecord(record: JournalRecord): PlanRevisionRecord | undefined {
+  if (record.kind !== 'event' || record.payload?.type !== RECORD_TYPE) return undefined;
+  const raw = record.payload.executionPlanRevision as Omit<PlanRevisionRecord, 'committedRef'> | undefined;
+  if (raw === undefined) return undefined;
+  if (record.commitId === undefined) {
+    throw new JournalIntegrityError('execution plan revision record has no commitId');
+  }
+  const committed: PlanRevisionRecord = {
+    ...raw,
+    committedRef: {
+      eventKind: RECORD_TYPE,
+      commitId: record.commitId,
+      journalSeq: record.seq,
+      state: 'committed',
+    },
+  };
+  try {
+    validatePlanRevisionRecord(committed);
+  } catch (error) {
+    throw new JournalIntegrityError(error instanceof Error ? error.message : String(error), { cause: error });
+  }
+  return committed;
 }

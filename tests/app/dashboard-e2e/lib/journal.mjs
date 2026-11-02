@@ -618,15 +618,19 @@ function checkpointOperationLink(checkpoint, expectedOperation) {
 
 function checkpointProjectionOperationMatches(checkpoint, operationEvents, expectedOperation) {
   // The runtime's business checkpoint deliberately carries the operation only in
-  // its evidence refs. The matching projection event is the authoritative
-  // operation boundary, so a foreign operation's identical evidence refs cannot
-  // be used to claim this checkpoint.
+  // its evidence refs, whereas canonical native turn checkpoints bind
+  // `checkpoint.scope.operationId` directly and leave per-section summary
+  // evidenceRefs empty under the canonical StandardTurnEndSummary model.
   const expectedRefs = Array.isArray(checkpoint.evidenceRefs) ? checkpoint.evidenceRefs : [];
-  if (expectedRefs.length === 0) return false;
+  const hasScopedOperation = idValue(checkpoint.scope?.operationId) !== null;
+  if (expectedRefs.length === 0 && !hasScopedOperation) return false;
   const committed = operationEvents.filter((event) => KIND_PREFIX(event.kind) === 'checkpoint.committed');
   return committed.some((event) => {
     const operationId = event.operationId ?? event.__outerOperationId ?? null;
     if (!sameIdOrString(operationId, expectedOperation)) return false;
+    if (expectedRefs.length === 0) {
+      return event.summary === checkpoint.summary;
+    }
     const projected = Array.isArray(event.evidenceRefs) ? event.evidenceRefs : [];
     if (projected.length === 0) return false;
     return expectedRefs.every((expected) => projected.some((candidate) => sameEvidenceRef(candidate, expected)));

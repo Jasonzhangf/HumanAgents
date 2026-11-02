@@ -7,10 +7,10 @@
   "status": "DESIGN-UNVERIFIED",
   "nodes": {
     "orchestrator_select_action": {
-      "ownerPath": "packages/runtime/src/admission/implicit-orchestrator.ts",
-      "ownerRel": "packages/runtime/src/admission/implicit-orchestrator.ts",
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "编排者按当前检查点和最新轮次自主选择下一步，不固定探索、规划、执行、审查的顺序。"
+      "designNote": "编排者按当前检查点和最新轮次自主选择下一步，提交 PlanRevisionRecord 并在派发前执行 assertPlanStepDispatchBinding 强绑定，不固定探索、规划、执行、审查的顺序。"
     },
     "subagent_explore": {
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
