@@ -3232,11 +3232,7 @@ export class RuntimeTaskCoordinator {
         'resolve the delivery bound to this exact operation and epoch');
     }
     const exactText = new TextDecoder('utf-8', { fatal: true }).decode(material.bytes);
-<<<<<<< HEAD
     if (exactText !== publicText) {
-=======
-    if (exactText !== acceptedText) {
->>>>>>> codex/mvp-w1a-chain-delivery-planner-20261101
       throw new RuntimeTaskControlError('standard-turn-delivery.text-mismatch', RUNTIME_OWNER,
         'the immutable delivery body does not equal the accepted result text',
         'resolve the immutable body bound to the accepted delivery text');
@@ -3254,7 +3250,7 @@ export class RuntimeTaskCoordinator {
         'resolve the execution cycle before accepting a terminal complete turn');
     }
     const binding = this.publicOutputSelection(scope, expectedExecutionEpoch);
-    const publicationId = `pub:${operation.operationId.value}:${acceptedEnd.identity.turnId}`;
+    const publicationId = `pub:${operation.operationId.value}:${readback.acceptedEnd.identity.turnId}`;
     const candidate: PublicOutputCandidate = {
       binding,
       sourceId: publicationId,
