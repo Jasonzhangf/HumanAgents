@@ -956,3 +956,18 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   20m；project patrol 仍 armed。`/Volumes/Intel` 本进程当前仍可 `stat` 但不能
   `cat`/`git status`，外置卷门禁未解除；本轮未合并、未安装、未删除 worktree、
   未杀进程。
+
+- 2026-11-02 22:03 UTC: W2-B 与澄清选项已合入并推送
+  `origin/main`（merge `163b73350`，parents `7e5de34af` + `73f18132e`）。
+  W2-B `mvp-w2b-effect-ledger-checkpoint-recovery-20261102`（rev 16）与
+  `mvp-clarification-selectable-options-20261102`（rev 8）均
+  `collab task integrated --commit 163b73350`，状态 `merged`，待 owner 清理
+  worktree/branch 并 close。候选分支
+  `codex/mvp-repair-integration-20261102`（`73f18132e`）与
+  `9635ed5b5` 现已经 merge 成为 main 祖先；main 此前在 `ef8b19534` 将 W2-B
+  解析掉，本轮按验收恢复。冲突解析：W2-B/澄清代码取候选版本，goal 文档与
+  证据资产保留 main 版本。门禁：typecheck、build:contracts、build:app 通过；
+  W2-B 5/5；contracts 143/143；DAGpipe 31/31；intake draft-public 38/38；
+  澄清选项单测通过。`explicit-brain-runtime` 56/62，6 个失败与
+  `7e5de34af`（main 前身）逐项一致，属既有基线非合并引入。本轮已合并、
+  已推送、未安装、未删除 worktree、未杀进程。
