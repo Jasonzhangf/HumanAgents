@@ -75,6 +75,28 @@ test('the same executionEpoch tie-breaks by the later startedAt', () => {
   assert.equal(result.identity.operationId, 'op-later');
 });
 
+test('different operations tied at the latest execution position stay ambiguous without a bound operationId', () => {
+  const records = [
+    started({
+      executionEpoch: 4,
+      operationId: 'op-first',
+      cycleId: null,
+      startedAt: '2026-10-30T10:00:00Z',
+    }),
+    started({
+      executionEpoch: 4,
+      operationId: 'op-second',
+      cycleId: null,
+      startedAt: '2026-10-30T10:00:00Z',
+    }),
+  ];
+
+  const result = executionIdentityFromRecords(records, { ...binding(), operationId: null, cycleId: null });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /ambiguous/);
+});
+
 test('a matching start with a null record operationId is still resolved without an injected operationId', () => {
   const records = [
     started({ executionEpoch: 1, operationId: null, startedAt: '2026-10-30T09:00:00Z' }),

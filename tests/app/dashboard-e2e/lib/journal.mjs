@@ -438,6 +438,14 @@ function startedLater(left, right) {
   return false;
 }
 
+function sameStartPosition(left, right) {
+  const leftEpoch = Number.isSafeInteger(left.executionEpoch) ? left.executionEpoch : -Infinity;
+  const rightEpoch = Number.isSafeInteger(right.executionEpoch) ? right.executionEpoch : -Infinity;
+  const leftStarted = typeof left.startedAt === 'string' ? left.startedAt : '';
+  const rightStarted = typeof right.startedAt === 'string' ? right.startedAt : '';
+  return leftEpoch === rightEpoch && leftStarted === rightStarted;
+}
+
 /**
  * Resolve the real execution identity from verified `operation.started`
  * records. This is the only allowed source of organ/cycle identity: it is never
@@ -457,16 +465,27 @@ export function executionIdentityFromRecords(records, binding) {
   if (matches.length === 0) {
     return { ok: false, reason: 'no verified operation.started record matches the attempt task/operation' };
   }
-  // The binding must never require an externally injected operationId to
-  // disambiguate: several verified operation.started records can legitimately
-  // name the same task across executions (executionEpoch 1, 2, ...).
-  // Deterministically keep the latest start: max executionEpoch, tie-break by
-  // max startedAt, then stable array order. Never reject as ambiguous merely
-  // because operationId is null.
+  // A null binding operationId does not require an injected operationId when the
+  // latest start is unique: several verified operation.started records can
+  // legitimately name the same task across executions (executionEpoch 1, 2, ...).
+  // Deterministically keep that latest start, then fail closed when different
+  // operation/cycle identities tie at the same latest position.
   const record = matches.reduce(
     (latest, current) => (startedLater(current, latest) ? current : latest),
     matches[0],
   );
+  if (expected.operationId === null) {
+    const latestPeers = matches.filter((candidate) => sameStartPosition(candidate, record));
+    const identities = new Set(latestPeers.map((candidate) => (
+      `${idValue(candidate.operationId) ?? '<none>'}/${idValue(candidate.cycleId) ?? '<none>'}`
+    )));
+    if (identities.size > 1) {
+      return {
+        ok: false,
+        reason: `ambiguous verified operation.started records at the latest execution position: ${[...identities].join(', ')}`,
+      };
+    }
+  }
   return {
     ok: true,
     identity: {
