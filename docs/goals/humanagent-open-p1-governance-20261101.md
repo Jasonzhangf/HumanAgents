@@ -1031,3 +1031,22 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   五类 Agent 矩阵、Playwright 双视口 observation.html 断言和清理条件。Alice 已接受
   invite 并进入 working；`a9dc797`/`47b26dd` 修复已在 main，待 app/RCC 恢复后同入口
   验收再关闭 bug。本轮未合并、未安装、未删 worktree、未杀进程。
+
+- 2026-11-02 22:50 UTC: goal deadline `m1793659542681-1533` 回执复核已消费
+  （`consumed_by_recv=true`、state=`read`）；下一次一次性 deadline
+  `sub-m1793659570318-1534` 已 armed（20m）。尝试把 project patrol 从 900000ms
+  对齐到目标 1500000ms：`collab notify subscribe --event master-idle --subject
+  project-patrol --every-ms 1500000 --repeat-count 100 --ttl-seconds 604800`
+  返回 `deduplicated=true, changed=false`，仍复用
+  `sub-m1793413132850-18`（interval_ms=900000），`collab notify status` 仍为
+  `PATROL_CADENCE_RUNTIME_GAP`；不声称已对齐。board 仅 Alice 持有
+  `mvp-remaining-p0-followups-20261102`（rev3 `working`，completion_missing
+  `review`）；snapshot 显示她在当前 turn 编辑
+  `packages/app/src/ui-runtime/service.ts` 与 `packages/ui/projection/index.ts`，
+  并新增 `packages/ui/projection/agent-debug-inspection.ts`；工作树
+  `mvp-remaining-p0-followups-20261102` 分支 behind origin/main 2，未提交、
+  未交付，不抢 writer。Carol 的 DSH 状态为 running/can-accept-direct-input，
+  无 snapshot；此前进度请求 `m1793659062726-1525` 仍未收到回执
+  （answered=false，unacked=0，无 open task），未重复催发。RCC
+  `127.0.0.1:4444/health` HTTP 200；生产 `127.0.0.1:10086` 仍 `000`。
+  本轮未合并、未安装、未删 worktree、未杀进程。
