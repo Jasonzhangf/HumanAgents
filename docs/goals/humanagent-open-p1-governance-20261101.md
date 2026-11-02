@@ -823,3 +823,21 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   ready code item, but it overlaps Alice's current entry-UI area, so it is
   queued to avoid a competing writer. Production `127.0.0.1:10086` still down
   pending explicit install approval for `humanagent-cli-0.1.0043.tgz`.
+
+- 2026-11-02 19:42 UTC: project-patrol。核对无新的 board/bug 工作状态变化；
+  Alice 仍在 `mvp-real-lane-entry-task-row-20261102` 上活动（TUI 运行命令中）。
+  本轮把 `db7f3ba6` 落地：发布 board 任务
+  `mvp-clarification-selectable-options-20261102`（rev1→rev2，executor Alice，
+  reviewer Jenny），已 `collab board dispatch` 到 `humanagent.Alice`，并发送
+  durable 消息 `m1793648602192-1367`，要求她排在当前入口 UI P0 之后串行完成，
+  同时收口 W2-A。理由：`db7f3ba6` 与她的当前任务共享 `docs/ui` 与
+  `packages/runtime/src/intake` writer 域，保持单一 writer，不另起竞争分支。
+  另核实 `appsdk` CLI 已是最新安装版 `0.1.0015`（源码 `rust/Cargo.toml` 为
+  `0.1.15`，tag `v0.1.0015`），无需升级；appsdk 源码仓当前 dirty 分支与
+  HumanAgent MVP 无关，未改动。RCC 4444 可用（`rccv3` pid 83019 监听）；生产
+  `127.0.0.1:10086` 仍无监听，部署继续受限于用户对
+  `humanagent-cli-0.1.0043.tgz` 的一次性安装批准。board 现有 4 个 open 任务，
+  全部归 Alice：real-lane entry-task-row working/rev3、W2-A merged/rev16
+  （待 owner close）、W2-B rework/rev8（待真实中断恢复证据）、clarification
+  selectable invited/rev2。worktree 7/10 未变。本轮未合并、未安装、未删
+  worktree、未杀进程。
