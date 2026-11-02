@@ -375,7 +375,7 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   open split remains P0=4, P1=12, P2=6, and 11 items without a P label. The nine
   ablation/architecture candidates plus the MVP unique-interface bug were
   published as board task `minimality-ablation-owner-triage-20261102`
-  (priority p2, executor Emma, revision 2, status invited) for read-only
+  (priority p2, executor Emma, revision 3, status working after acceptance) for read-only
   consumer/reachability triage. The delivery is a single result file under
   `.worker-runs/minimality-ablation-triage-20261102/`; no product code, config,
   test asset, RCC configuration, production root, or bug status may be changed.
@@ -383,3 +383,9 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   still calls `location.assign`. `d442481` remains an external Collab protocol
   compatibility issue; current `collab context` succeeds, but the original
   error is preserved and is not a HumanAgent code fix.
+
+- 2026-11-02 11:50 UTC: Emma accepted
+  `minimality-ablation-owner-triage-20261102`; board moved to revision 3,
+  status=`working`, owner=Emma. Alice's W2-A worktree still has no commit at
+  `74fb7bb87` and now reports 13 dirty paths while she continues the contract
+  adaptation and test run. No master-side takeover or merge was performed.
