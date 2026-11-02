@@ -254,9 +254,10 @@ function renderNodeCard(node, index) {
   const owner = element('small', `归属：${node.roleDisplay || lane.label || UNASSIGNED_LANE.label}`)
   if (!role) owner.dataset.empty = 'true'
   meta.append(element('small', node.kindDisplay || node.kind || '未标注类型'), owner)
-  const summaryText = node.summary && node.summary !== node.title && node.summary !== node.kindDisplay
+  const rawSummary = node.summary && node.summary !== node.title && node.summary !== node.kindDisplay
     ? node.summary
     : ''
+  const summaryText = rawSummary.includes('尚未投影') ? '当前未触发（not-invoked）' : rawSummary
   card.append(head, meta)
   if (summaryText) card.append(element('span', summaryText, 'flow-node-summary'))
   // The drawer renders from the typed node detail, which only the projection carries. A click
@@ -350,7 +351,7 @@ function renderHandoffPane(node, handoffs) {
     (handoff) => handoff.fromNodeId === node.nodeId || handoff.toNodeId === node.nodeId,
   )
   if (touching.length === 0) {
-    const empty = element('p', '尚未投影与该节点相关的跨 agent 交接内容。', 'flow-empty')
+    const empty = element('p', '当前节点无跨 agent 交接记录。', 'flow-empty')
     empty.dataset.empty = 'true'
     panel.append(empty)
     return panel
@@ -363,8 +364,11 @@ function renderHandoffPane(node, handoffs) {
       `${handoff.fromRoleDisplay || handoff.fromAgentId || '未标注'} → ${handoff.toRoleDisplay || handoff.toAgentId || '未标注'}`,
     ))
     block.append(element('p', `${handoff.fromNodeId} → ${handoff.toNodeId}`, 'handoff-route'))
-    const carried = unresolvedList([handoff.carrySummary, handoff.payloadPreview], '未投影携带内容')
-    const notCarried = unresolvedList([handoff.notCarried], '未投影不回传内容')
+    const carried = unresolvedList([handoff.carrySummary, handoff.payloadPreview], '无携带内容')
+    const sanitizedNotCarried = typeof handoff.notCarried === 'string'
+      ? handoff.notCarried.replace('未投影的事实不传递给', '非交接字段不传递给')
+      : handoff.notCarried
+    const notCarried = unresolvedList([sanitizedNotCarried], '无不回传内容')
     const facts = element('dl', undefined, 'drawer-facts')
     for (const [label, group] of [['携带', carried], ['不回传', notCarried]]) {
       const cell = element('div')
@@ -382,6 +386,105 @@ function renderHandoffPane(node, handoffs) {
     panel.append(block)
   }
   return panel
+}
+
+const DEBUG_ROLE_LABELS = Object.freeze({
+  interaction: '交互 Agent',
+  orchestration: '编排 Agent',
+  execution: '执行 Agent',
+  review: '审核 Agent',
+  memory: '经验整理 Agent',
+})
+
+function renderAgentDebugCard(inspection) {
+  const card = element('article', undefined, 'agent-debug-card')
+  if (!inspection || typeof inspection !== 'object') {
+    card.dataset.agentDebugRole = 'unknown'
+    card.dataset.invocationStatus = 'not-invoked'
+    card.append(element('p', '当前节点未提供五维调试视图。', 'muted'))
+    return card
+  }
+  const roleId = inspection.agentRole || inspection.role || ''
+  const roleLabel = DEBUG_ROLE_LABELS[roleId] || roleId || '未知角色'
+  card.dataset.agentDebugRole = String(roleId)
+  card.dataset.invocationStatus = String(inspection.invocationStatus || '')
+  const head = element('header', undefined, 'agent-debug-card-head')
+  head.append(
+    element('h3', roleLabel),
+    element('span', String(inspection.invocationStatus || 'not-invoked'), 'state-chip'),
+  )
+  card.append(head)
+
+  const turn = inspection.turn || { state: 'not-invoked' }
+  const context = inspection.context || { state: 'not-invoked' }
+  const model = inspection.model || { state: 'not-invoked' }
+  const tools = inspection.tools || { availableToolsState: 'not-invoked', callsState: 'not-invoked' }
+  const error = inspection.error || { state: 'none' }
+
+  const turnText = turn.state === 'collected'
+    ? `${turn.turnId || '—'} · ${turn.lifecycleState || '—'}${turn.round !== undefined && turn.round !== null ? ` · round=${turn.round}` : ''}${turn.durationMs !== undefined && turn.durationMs !== null ? ` · ${turn.durationMs}ms` : ''}`
+    : turn.state
+  const contextText = context.state === 'collected'
+    ? `root=${context.contextRootId || '—'} · 继承编排=${context.inheritsOrchestratorContext ? '是' : '否'} · 注入引用 ${context.injectedRefs?.length ?? 0} 项${context.omissionReason ? ` · 裁剪/拒绝：${context.omissionReason}` : ''}`
+    : context.state
+  const tokenText = model.tokenUsage
+    ? model.tokenUsage.state === 'collected'
+      ? `tokens=${model.tokenUsage.totalTokens}`
+      : `${model.tokenUsage.state}${model.tokenUsage.reason ? ` (${model.tokenUsage.reason})` : ''}`
+    : 'not-applicable'
+  const providerName = model.provider || model.providerId || '—'
+  const requestedModelName = model.requestedModel || model.modelId || '—'
+  const actualModelName = model.actualModel || requestedModelName
+  const modelText = model.state === 'collected'
+    ? `${providerName}/${requestedModelName} (actual=${actualModelName}) · 重试 ${model.retryCount ?? 0} 次 · ${tokenText}`
+    : `${model.state}${model.provider ? ` (${model.provider}/${model.requestedModel || '—'})` : ''} · ${tokenText}`
+  const toolsText = `可用工具：${tools.availableToolsState === 'collected' ? (tools.availableTools?.join(', ') || '无') : tools.availableToolsState} · 调用：${tools.callsState === 'collected' ? `${tools.calls?.length ?? 0} 次` : tools.callsState}`
+  const errorOwner = error.owner || error.stage || '—'
+  const errorText = error.state === 'present'
+    ? `${errorOwner} · ${error.code || '—'}：${error.message || '—'}`
+    : error.state
+
+  const facts = element('dl', undefined, 'drawer-facts agent-debug-facts')
+  for (const [dimKey, label, text] of [
+    ['turn', '轮次 (Turn)', turnText],
+    ['context', '上下文 (Context)', contextText],
+    ['model', '模型请求 (Model)', modelText],
+    ['tools', '工具调用 (Tools)', toolsText],
+    ['error', '错误与恢复提示 (Error)', errorText],
+  ]) {
+    const cell = element('div')
+    cell.dataset.debugDimension = dimKey
+    cell.append(element('dt', label), element('dd', String(text)))
+    facts.append(cell)
+  }
+  card.append(facts)
+
+  if (error.state === 'present' && error.readonlyNextActionHint) {
+    const hint = element('p', error.readonlyNextActionHint, 'debug-readonly-hint')
+    hint.dataset.readonlyHint = 'true'
+    card.append(hint)
+  }
+  return card
+}
+
+function renderAgentDebugInspectionsSection(projection) {
+  const inspections = Array.isArray(projection?.agentDebugInspections) ? projection.agentDebugInspections : []
+  if (inspections.length === 0) return null
+  const section = element('section', undefined, 'section agent-debug-section')
+  section.dataset.agentDebugSection = 'true'
+  section.setAttribute('aria-label', '五角色五维只读调试视图')
+  const head = element('header', undefined, 'section-head')
+  head.append(
+    element('h2', 'Agent 五维调试视图（只读）'),
+    element('span', `${inspections.length} 个角色`, 'section-meta'),
+  )
+  section.append(head)
+  const grid = element('div', undefined, 'agent-debug-grid')
+  for (const inspection of inspections) {
+    grid.append(renderAgentDebugCard(inspection))
+  }
+  section.append(grid)
+  return section
 }
 
 function selectDrawerTab(tabs, panels, activeId) {
@@ -430,7 +533,21 @@ function renderNodeDrawer(node, handoffs, detail, purpose, trigger) {
     // Typed contract: `node.toolSteps` carries stepId / name / status / statusDisplay / returned.
     // The typed drawer detail owns those steps; the node card is only the fallback identity.
     const observationNode = detail || node
-    drawerCard.update({ node: { ...observationNode, toolSteps: observationNode.toolSteps || [] }, handoffs })
+    const roleForDebug = observationNode.ownerAgentRole || node?.ownerAgentRole
+    const debugInspection = observationNode.debugInspection || (
+      Array.isArray(lastProjection?.agentDebugInspections)
+        ? lastProjection.agentDebugInspections.find((item) => (item.agentRole || item.role) === roleForDebug)
+        : undefined
+    )
+    drawerCard.update({
+      node: {
+        ...observationNode,
+        toolSteps: observationNode.toolSteps || [],
+        ...(debugInspection ? { debugInspection } : {}),
+      },
+      handoffs,
+      ...(debugInspection ? { debugInspection } : {}),
+    })
 
     // Handoff lives on its own page inside the same sheet.
     const tabs = element('div', undefined, 'drawer-tabs')
@@ -440,6 +557,7 @@ function renderNodeDrawer(node, handoffs, detail, purpose, trigger) {
     const definitions = [
       { sheetId: 'handoff', label: '跨 agent 交接', render: renderHandoffPane },
       { sheetId: 'refs', label: '输入 / 输出 / evidence', render: (_node, _handoffs, detail) => renderReferences(detail) },
+      { sheetId: 'debug', label: '五维调试视图', render: () => renderAgentDebugCard(debugInspection) },
     ]
     const tabButtons = []
     const tabSheets = []
@@ -940,7 +1058,7 @@ function renderHeading(projection) {
     fake.dataset.tone = 'warning'
     headingMeta.append(fake)
   }
-  headingMeta.append(element('span', projection.data?.label || '未投影状态', 'state-chip'))
+  headingMeta.append(element('span', projection.data?.label || '未知状态', 'state-chip'))
   const technical = element('button', '技术详情', 'button button--quiet')
   technical.type = 'button'
   technical.dataset.observationTechnicalTrigger = 'true'
@@ -992,6 +1110,9 @@ function renderObservation(projection) {
 
   const actualGraphSection = renderActualExecutionGraphSection(projection?.agentActivity)
   if (actualGraphSection) support.append(actualGraphSection)
+
+  const debugSection = renderAgentDebugInspectionsSection(projection)
+  if (debugSection) primary.append(debugSection)
 
   primary.append(renderSemanticObservationSection())
 

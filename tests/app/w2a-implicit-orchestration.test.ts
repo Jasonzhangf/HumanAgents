@@ -8,6 +8,7 @@ import test from 'node:test';
 import {
   id,
   STANDARD_TURN_END_TOOL_ID,
+  validateAgentDebugInspection,
   validatePlanRevisionRecord,
   type AcceptedRawFact,
   type Attention,
@@ -713,6 +714,135 @@ test('W2-A (5 & 6): orchestrated native standardTurn has single admission/retry 
     const snap2 = coordinator.taskSnapshot(task2.taskId);
     assert.equal(snap2.state === 'succeeded', false, 'empty public deliverable must never be accepted as succeeded');
     assert.equal(snap2.error?.code, 'standard-turn-end.missing-public-deliverable');
+  } finally {
+    await new Promise((r) => setTimeout(r, 25));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('W2-A & W3-B (7): UiRuntimeService wires orchestratorDecisionPort and projects 5-role AgentDebugInspection including planner invalid-schema failure', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'w2a-w3b-service-wiring-'));
+  try {
+    const controlPath = join(dir, 'control.jsonl');
+    const organJournal = openUiRuntimeOrganJournal(controlPath);
+    const planConsumer = new TaskPlanRevisionConsumer(new JsonlTaskPlanRevisionJournal(organJournal));
+    const store = new ServiceExecutionCheckpointStore(controlPath, organJournal, () => new Date('2026-11-02T10:00:00.000Z'));
+    const currentStatePort = createJsonlRuntimeTaskCurrentStateJournal({ journal: organJournal });
+
+    const testBinding = {
+      bindingId: 'binding-w2a',
+      providerId: 'provider-w2a',
+      protocol: 'responses' as const,
+      endpointRef: 'http://127.0.0.1:4444/v1/responses',
+      modelRef: 'gpt-5.4',
+      configDigest: `sha256:${'1'.repeat(64)}`,
+      capabilityDigest: `sha256:${'2'.repeat(64)}`,
+      capabilities: ['execute'] as const,
+    };
+
+    const service = new UiRuntimeService({
+      mode: 'rcc',
+      organId,
+      binding: testBinding,
+      port: createFakeExecutionPort(testBinding),
+      closurePort: new UiRuntimeJournal(join(dir, 'ui-runtime.jsonl')),
+      memory: {
+        coordinator: new MemoryCoordinator(),
+        backend: new DeterministicMemoryBackend(),
+        projectKey: 'w2a-test',
+        roleId: 'execution',
+      },
+      checkpointStoreFor: () => store,
+      attentionPort: noopAttentionPort,
+      providerState: 'ready',
+      taskIdentity: new TaskIdentityConsumer(new JsonlTaskIdentityJournal(organJournal)),
+      explicitBrainInterpreter: {
+        async interpret() {
+          return {
+            kind: 'requirement',
+            intent: 'create',
+            normalizedInput: 'Trigger invalid planner decision schema',
+            proposal: 'Trigger invalid planner decision schema',
+            knownFacts: [],
+            decisionRefs: [],
+            structuredProposal: {
+              revision: 1,
+              intent: 'create',
+              title: 'Invalid planner schema test',
+              objective: 'Trigger invalid planner decision schema',
+              deliverable: 'Error receipt',
+              deliveryConditions: ['surface invalid schema error'],
+              evidenceRefs: [],
+              blockingGaps: [],
+            },
+          };
+        },
+      },
+      runtimeComposition: {
+        createTaskAssembly: () => createStubTaskAssembly(),
+        admitExecution: async () => {},
+        orchestratorDecisionPort: {
+          decide: (input) =>
+            input.phase === 'initial'
+              ? {
+                  decision: 'continue',
+                  step: {
+                    kind: 'explore',
+                    targetAgentRole: 'execution',
+                    effectPolicy: 'readonly',
+                    objective: 'Explore before invalid post-step decision',
+                  },
+                }
+              : ({ decision: 'invalid-json-decision' } as unknown as ReturnType<NonNullable<NonNullable<ConstructorParameters<typeof UiRuntimeService>[0]['runtimeComposition']>['orchestratorDecisionPort']>['decide']>),
+        },
+        createExecutionPorts: () => ({
+          admitExecution: async () => {},
+          createDriver: async (driverInput: RuntimeExecutionDriverInput) => createNativeStandardTurnDriver(driverInput, store),
+          currentStatePort,
+          currentStateFacts: knownCurrentStateFacts,
+          executionPlanRevisionPort: planConsumer,
+        } as unknown as ReturnType<NonNullable<NonNullable<ConstructorParameters<typeof UiRuntimeService>[0]['runtimeComposition']>['createExecutionPorts']>>),
+      },
+    });
+
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: 'ui:new-task-create',
+      rawInput: 'Trigger invalid planner decision schema',
+      channel: 'business',
+      requestKind: 'new-task-create',
+    });
+    await service.interpretExplicitInput({ interactionId });
+    const preview = await service.inspectExplicitInteraction(interactionId);
+    await service.confirmExplicitRequirement({
+      interactionId,
+      draftId: preview.draft!.draftId,
+      inputRevision: preview.draft!.inputRevision,
+      confirmationRef: 'confirm:w2a-invalid-schema',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-11-02T10:00:00.000Z',
+      payloadRef: 'asset://w2a-invalid-schema',
+      requestKind: 'new-task-create',
+    });
+    const dispatched = await service.dispatchNextExplicitRequirement();
+    const taskId = dispatched.taskId;
+    const deadline = Date.now() + 5000;
+    while (service.taskDashboard(taskId).state === 'running' && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    await new Promise((r) => setTimeout(r, 25));
+
+    const obs = await service.scopedObservation(taskId, 'task.correlate-or-create');
+    assert.equal(obs.agentDebugInspections.length, 5);
+    for (const inspection of obs.agentDebugInspections) {
+      validateAgentDebugInspection(inspection);
+    }
+    const orchDebug = obs.agentDebugInspections.find((item) => item.agentRole === 'orchestration');
+    assert.ok(orchDebug);
+    assert.equal(orchDebug!.invocationStatus, 'failed');
+    assert.equal(orchDebug!.error.state, 'present');
+    assert.equal(orchDebug!.error.code, 'orchestrator.decision.invalid-schema');
+    assert.ok(orchDebug!.error.readonlyNextActionHint);
+    assert.equal(obs.selectedNode?.debugInspection?.agentRole, 'orchestration');
   } finally {
     await new Promise((r) => setTimeout(r, 25));
     await rm(dir, { recursive: true, force: true });

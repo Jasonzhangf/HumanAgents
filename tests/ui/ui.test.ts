@@ -1284,7 +1284,7 @@ test('observation work-card adapter pairs tool calls with results and marks unpr
   assert.equal(tools.length, 2);
   assert.equal(tools[0].tool.paired, true);
   assert.equal(tools[1].tool.paired, false);
-  assert.equal(projection.history.items.some((item: { kind: string }) => item.kind === 'model-request'), true);
+  assert.equal(projection.history.items.some((item: { kind: string }) => item.kind === 'model-request'), false);
   assert.equal(projection.history.items.some((item: { kind: string }) => item.kind === 'conclusion'), true);
   // The real provider turn id the node reported reaches every entry whose
   // source carried it, and nothing is renamed to a synthesized turn key.
