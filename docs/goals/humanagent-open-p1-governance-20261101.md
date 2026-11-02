@@ -185,6 +185,17 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 ## Update Log
 
+- 2026-11-02 18:08 UTC: master 在当前 main `61855a517` + 现有 dist
+  （11-02 08:13 构建，无 source 新于 dist）上复跑 T22c 真实入口，
+  结果 `56/57`，唯一 FAIL 为 `real RCC section completed`：
+  `the committed task row never rendered in #entry-live`，30s 内未渲染。
+  这与 proof7 完全一致，说明原始用户症状在最新 main 仍可复现，不是旧
+  dist 或偶发。证据：
+  `/Volumes/Intel/playground/humanagent/.worker-runs/master-ui-proof8-20261102/checks.json`
+  与 `run.log`。已把证据追加到 bug `60d2e73`（explicit brain confirms
+  但 implicit intake 未创建/渲染 task row）。W2-B 仍归 Alice；真实
+  lane 的任务行渲染缺陷需要 Alice 纳入其 W2/W3 范围优先修复。
+
 - 2026-11-02 18:02 UTC: 用户纠正「这和 monid 有毛关系？」。确认
   monid 与 HumanAgent MVP 验收路径无关；它只是历史 D15 web.search 后端
   备注。真实重试/效果证据统一走 `local-file-search` + 真实 RCC 4444。
