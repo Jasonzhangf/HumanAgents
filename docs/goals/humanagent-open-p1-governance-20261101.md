@@ -811,3 +811,15 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   one-time human approval to install `dist/release/humanagent-cli-0.1.0043.tgz`
   and restart. No merge, install, worktree delete or process kill was
   performed this wake.
+
+- 2026-11-02 19:32 UTC: goal deadline `m1793647941635-1354` consumed
+  (LAST_REMINDER) and explicitly re-armed via `appsdk goal subscribe --goal
+  docs/goals/humanagent-open-p1-governance-20261101.md --interval 20m`
+  (one-shot armed; project patrol `sub-m1793413132850-18` still armed).
+  Alice's live tmux snapshot shows the entry-task-row P0 diagnostic still
+  active (thought 29m39s, 241 actions, now "Running command"), so the critical
+  path is not stalled. No board, bug, worktree or deployment change since
+  19:12. `db7f3ba6` (clarification/confirm selectable options) is the next
+  ready code item, but it overlaps Alice's current entry-UI area, so it is
+  queued to avoid a competing writer. Production `127.0.0.1:10086` still down
+  pending explicit install approval for `humanagent-cli-0.1.0043.tgz`.
