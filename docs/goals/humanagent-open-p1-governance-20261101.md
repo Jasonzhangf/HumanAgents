@@ -1880,3 +1880,40 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `PATROL_CADENCE_RUNTIME_GAP` 未解除，不声称巡检节奏已对齐。
 - 已按用户授权完成 master 恢复，并通过 `collab ceo reply` 向当前
   host-wide CEO 提交本轮巡检回执。
+
+### 2026-11-03 22:35 UTC：正式入口任务推进（focused 绿，真实回执 3/4）
+
+- 消费 goal deadline `m1793744014886-483`（`LAST_REMINDER=true`），
+  重新 `appsdk goal subscribe --goal
+  docs/goals/humanagent-open-p1-governance-20261101.md --interval 20m`，
+  goal 已 active/armed。
+- Alice 宿主 pane `%15` 仍停在 `MODEL_PLACEHOLDER_M418` 报错后的 AGY
+  空提示符，两条 durable 消息仍未消费。master 未替她改工作树，改为按其
+  board 合同允许路径派一次性 GCM worker（显式 `-m gpt-5.5`）在
+  `/Volumes/Intel/playground/humanagent/p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  （HEAD `b846f42bd`）继续。
+- 现有未提交改动已复核：coordinator 增加 `RuntimeChildLifecycleObserver`
+  与 `bindChildCallManager(manager, observer)` 链，child-producer 在
+  `child.prepared/returned/adopted/review.checkpointed` 提交后回调，
+  coordinator 投影为 `provider.model` 步骤；`service.ts` 转发
+  `standardTurn`；child/review prompt 补齐交付两步法。
+- focused 测试通过：`node --test --test-name-pattern="formal startUiRuntime
+  entry streams four child lifecycle steps through terminal succeeded"
+  dist/tests/tests/app/live-step-feedback.test.js` → pass 1 / fail 0。
+- 真实 RCC 4444 同入口回执（隔离 control root，未动生产 10086）：
+  `.worker-runs/c5d4671-rcc-receipt-alice.json` 与
+  `.worker-runs/c5d4671-rcc-receipt-final.json`。进展：
+  `childPrepared/childReturned/childAdopted` 由全 false 变为 true，
+  provider rounds 与 dispatch/settle 同 turnId 成立；`reviewCheckpointed`
+  仍 false，terminal blocked。
+- 残余缺陷（review child 交付协议/model 合规，owner 边界仍在本任务）：
+  依次暴露三种失败：(1) `finding 0 severity must be a registered review
+  severity`；(2) `a review delivery cannot carry an inspection outcome`；
+  (3) `invalid evidence id`（`packages/contracts/src/index.ts:807 id()`）。
+  根因之一已定位：`APP_CHILD_DELIVER_TOOL.inputSchema` 对执行子与审查子
+  共用，`inspectionOutcome` 对 review 无条件可见，schema 不能按 child
+  kind 排除；review child 由 RCC/MiniMax-M3 生成交付，字段合规不稳定。
+  这两点需要独立的最小修复任务（schema 按 kind 约束 + evidence id
+  解析/取证口径），不由本巡检直接改 product 语义。
+- 资源：worktree 仍 8/10；Alice 树保留全部未提交改动与证据，未提交、
+  未合并、未 push。生产 10086 未动，未执行 daemon/tmux 生命周期动作。
