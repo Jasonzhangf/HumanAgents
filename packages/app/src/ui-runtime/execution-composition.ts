@@ -46,7 +46,7 @@ import { createNativeBoundaryContinuation } from './native-boundary-continuation
 import { createJsonlNativeSaveProgressPort } from '../../../adapters/jsonl/src/native-save-progress.js';
 import { frozenTurnCloseRef, readCheckpointClosurePreparation } from '../../../runtime/src/checkpoints/closure.js';
 import { closeAgentProvider, type AgentProviderComposition } from '../agent-driver-composition.js';
-import type { RuntimeExecutionDriver, RuntimeExecutionPreparationInput } from '../../../runtime/src/ui-runtime/coordinator.js';
+import type { RuntimeChildLifecycleObserver, RuntimeExecutionDriver, RuntimeExecutionPreparationInput } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { ProviderAgentDriverOptions } from '../../../adapters/provider/src/agent-driver.js';
 import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/agent-driver.js';
 import type { AcceptedRawFact, AdmittedTurnIdentity, CompletionReadInput, EvidenceRef,
@@ -1647,7 +1647,7 @@ export function createDefaultExecutionComposition(input: {
       };
       const liveNative = native;
       const driver: RuntimeExecutionDriver = { standardTurn,
-        bindChildCallManager(manager) {
+        bindChildCallManager(manager, onChildLifecycle?: RuntimeChildLifecycleObserver) {
           if (input.agentRoster === undefined) return;
           if (!input.agentRoster.length) missing('the configured child roster is empty');
           if (!active || !composition || !toolScope) missing('the configured child producer requires a live parent, Provider and tool scope');
@@ -1657,6 +1657,7 @@ export function createDefaultExecutionComposition(input: {
             ...(toolScope.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: toolScope.webSearchProviderConfig }),
             principalOwner: input.principalOwner, now: input.now });
           childProducer = createAppChildProducer({ manager, parent: active, parentAssignment: assignment,
+            onChildLifecycle,
             checkpoints: createAppChildCheckpointAdapter({ store: nativeCheckpoints, parent: active,
               originalAdmittedTurn: admittedTurn, recoveryStateRef }),
             refinedDeliveryStore: createFilesystemRefinedDeliveryStore(new ImmutableAssetStore(input.artifactsRoot)),

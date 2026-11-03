@@ -295,13 +295,10 @@ function childInitialInput(
   assignment: WorkAssignment,
 ): string {
   if (request.kind === 'execution') return request.initialInputText;
-  const material = request.input.reviewMaterial;
-  return canonicalJsonStringify({
-    acceptanceCriteria: material.acceptanceCriteria,
-    reviewKind: request.input.reviewAssignment.reviewKind,
-    subjects: material.subjects,
-    executorEvidence: material.executorEvidence ?? [],
-  });
+  // The review prompt already carries the acceptance criteria, the subject
+  // bodies and the review delivery instructions, so it is the canonical
+  // initial input, mirroring the execution child's prompt delivery.
+  return request.initialInputText;
 }
 
 /**

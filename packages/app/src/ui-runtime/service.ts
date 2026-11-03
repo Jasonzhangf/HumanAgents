@@ -152,6 +152,7 @@ import {
   type RuntimeTaskCoordinatorOptions,
   type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
+  type RuntimeChildLifecycleObserver,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { RuntimeColdExecutionResumeRequest } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
 import type { RuntimeInspectionStopCompletionReadPort } from '../../../runtime/src/ui-runtime/coordinator.js';
@@ -8825,6 +8826,15 @@ export class MemoryBoundExecutionDriver implements AgentDriver {
     readonly receipt: MemoryContextReceipt;
   };
 
+  /**
+   * Forwards the native standard-turn lifecycle. The coordinator uses this
+   * presence to choose the native lane instead of opening a second coordinator
+   * active turn for the same business turn.
+   */
+  get standardTurn(): RuntimeExecutionDriver['standardTurn'] {
+    return (this.driver as Partial<RuntimeExecutionDriver>).standardTurn;
+  }
+
   constructor(
     private readonly driver: AgentDriver & { close(): Promise<ProviderCloseResult> },
     private readonly input: RuntimeExecutionDriverInput,
@@ -8870,9 +8880,9 @@ export class MemoryBoundExecutionDriver implements AgentDriver {
    * task's assembly. This wrapper only forwards the typed manager; it never
    * builds a manager, pool, driver or assembly of its own.
    */
-  bindChildCallManager(manager: Pick<OrchestrationManager, 'callChild'>): void {
-    (this.driver as Partial<RuntimeExecutionDriver & { bindChildCallManager?: (manager: Pick<OrchestrationManager, 'callChild'>) => void }>)
-      .bindChildCallManager?.(manager);
+  bindChildCallManager(manager: Pick<OrchestrationManager, 'callChild'>, observer?: RuntimeChildLifecycleObserver): void {
+    (this.driver as Partial<RuntimeExecutionDriver & { bindChildCallManager?: (manager: Pick<OrchestrationManager, 'callChild'>, observer?: RuntimeChildLifecycleObserver) => void }>)
+      .bindChildCallManager?.(manager, observer);
   }
 
   close(): Promise<ProviderCloseResult> {

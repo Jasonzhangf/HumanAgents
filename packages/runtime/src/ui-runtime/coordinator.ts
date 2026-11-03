@@ -277,6 +277,22 @@ export interface RuntimeTaskSnapshot {
   readonly error?: RuntimeTaskError;
 }
 
+/**
+ * One real child lifecycle fact produced by the child call port or the native
+ * child producer after the owning checkpoint / return / adoption mutation
+ * already committed. The runtime observes it to project the same
+ * `provider.model` step into the task event stream; it never synthesizes the
+ * event itself.
+ */
+export interface RuntimeChildLifecycleEvent {
+  readonly state: 'child.prepared' | 'child.returned' | 'child.adopted' | 'review.checkpointed';
+  readonly kind: 'execution' | 'review';
+  readonly invocationId: string;
+  readonly turnId: string;
+}
+
+export type RuntimeChildLifecycleObserver = (event: RuntimeChildLifecycleEvent) => void;
+
 export interface RuntimeExecutionDriver extends AgentDriver {
   close(): Promise<ProviderCloseResult>;
   /**
@@ -288,7 +304,10 @@ export interface RuntimeExecutionDriver extends AgentDriver {
    * compiling and running unchanged; the coordinator never mints a manager,
    * driver, pool or assembly just to bind one.
    */
-  bindChildCallManager?(manager: Pick<OrchestrationManager, 'callChild'>): void;
+  bindChildCallManager?(
+    manager: Pick<OrchestrationManager, 'callChild'>,
+    observer?: RuntimeChildLifecycleObserver,
+  ): void;
   /** Canonical turn owner; a transport or projection checkpoint cannot replace it. */
   readonly standardTurn?: {
     acceptReviews(refs: readonly JournalCommitRef[]): Promise<void>;
@@ -3231,7 +3250,7 @@ export class RuntimeTaskCoordinator {
     // executor, which resolves the driver from this record instead of a second
     // acquire or a stale placeholder.
     record.driver = prepared.driver;
-    this.bindChildCallManager(prepared.driver, assembly);
+    this.bindChildCallManager(prepared.driver, assembly, record, operation, scope);
     const assignment = prepared.source.assignment;
     const stageNodeId = `stage-${operation.operationId.value}`;
     record.currentNode = RUNTIME_NODE_MARKERS.orchestrationPlan;
@@ -5004,9 +5023,32 @@ export class RuntimeTaskCoordinator {
   private bindChildCallManager(
     driver: RuntimeExecutionDriver | undefined,
     assembly: RuntimeTaskAssembly | undefined,
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
   ): void {
     if (driver === undefined || assembly === undefined) return;
-    driver.bindChildCallManager?.(assembly.orchestration);
+    const observer: RuntimeChildLifecycleObserver = (event) => {
+      if (record.operationId === undefined || operation === undefined) return;
+      const canPushLive = record.executionEpoch === operation.executionEpoch
+        && !operation.events.some((entry) => entry.kind === 'execution.terminal' && entry.terminalPhase === 'final');
+      if (!canPushLive) return;
+      this.pushEvent(
+        record,
+        operation,
+        'provider.model',
+        event.state,
+        event.kind === 'execution'
+          ? `child ${event.state} ${event.invocationId}`
+          : `child review ${event.invocationId} ${event.state}`,
+        [this.operationScopeEvidence(scope, event.state)],
+        STEP_OWNER,
+        false,
+        undefined,
+        { turn: { turnId: event.turnId, requestId: event.invocationId } },
+      );
+    };
+    driver.bindChildCallManager?.(assembly.orchestration, observer);
   }
 
   private async decideOrchestratorAction(
@@ -5536,7 +5578,7 @@ export class RuntimeTaskCoordinator {
                   attemptPreparationInput,
                 );
                 record.driver = attemptDriver;
-                coordinator.bindChildCallManager(attemptDriver, record.taskAssembly);
+                coordinator.bindChildCallManager(attemptDriver, record.taskAssembly, record, operation, scope);
                 if (record.stopping) {
                   stoppingPreparation = true;
                   await coordinator.stopPreparedExecution(record, operation);
@@ -5594,7 +5636,7 @@ export class RuntimeTaskCoordinator {
                   attemptExecutionEpoch: operation.executionEpoch,
                 };
                 const retryDriver = await coordinator.options.createDriver(retryPreparationInput);
-                coordinator.bindChildCallManager(retryDriver, record.taskAssembly);
+                coordinator.bindChildCallManager(retryDriver, record.taskAssembly, record, operation, scope);
                 const retryBoundary = new ContextCheckpointBoundary(
                   coordinator.options.checkpointStoreFor(record.taskId, scope.cycleId!),
                   coordinator.now,
@@ -5754,7 +5796,7 @@ export class RuntimeTaskCoordinator {
           maxAttempts: 2,
           ...(childCallPort === undefined ? {} : { childCallPort }),
         });
-        this.bindChildCallManager(driver, record.taskAssembly);
+        this.bindChildCallManager(driver, record.taskAssembly, record, operation, scope);
         const stageNodeId = `stage-${operation.operationId.value}`;
         // Single Runtime assignment construction (shared with the admitted-turn
         // producer); never rebuilt per admission/composition/dispatch.
@@ -5956,7 +5998,7 @@ export class RuntimeTaskCoordinator {
               taskId: record.taskId,
             });
           }
-          this.bindChildCallManager(driver, record.taskAssembly);
+          this.bindChildCallManager(driver, record.taskAssembly, record, operation, scope);
         }
         // The Runtime/composition is started exactly once. A clean retryable
         // provider transport failure (the first real request never reached a

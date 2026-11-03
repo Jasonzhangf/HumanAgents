@@ -55,6 +55,7 @@ import type {
   TaskRuntimeIncarnation,
 } from '../../../runtime/src/orchestration/types.js';
 import type { OrchestrationManager } from '../../../runtime/src/orchestration/manager.js';
+import type { RuntimeChildLifecycleObserver } from '../../../runtime/src/ui-runtime/coordinator.js';
 import {
   assertReviewMaterial,
   resolveReviewMaterial,
@@ -240,6 +241,47 @@ export const APP_CHILD_DELIVER_TOOL: ProviderToolDefinition = {
 };
 
 /**
+ * One real child turn must never be invited to send a field its own kind cannot
+ * carry. The union constant above stays the superset the inspection consumer
+ * reads; this builder advertises only the legal fields to each child kind, so a
+ * review child is never offered `inspectionOutcome`.
+ */
+export function appChildDeliverTool(input: {
+  readonly kind: 'execution' | 'review';
+  readonly inspection: boolean;
+}): ProviderToolDefinition {
+  const base = APP_CHILD_DELIVER_TOOL.inputSchema.properties as Record<string, BusinessPayload>;
+  const findings = base.findings as { readonly items: BusinessPayload };
+  const findingItem = findings.items as Record<string, unknown>;
+  const properties: Record<string, BusinessPayload> = input.kind === 'review'
+    ? {
+        body: base.body,
+        judgment: base.judgment,
+        findings: {
+          type: 'array',
+          minItems: 1,
+          maxItems: MAX_CRITERIA_ITEMS,
+          items: {
+            ...findingItem,
+            required: ['detail', 'severity', 'locationRef', 'evidenceRefs'],
+          },
+        },
+        evidenceRefs: base.evidenceRefs,
+      }
+    : input.inspection
+      ? { body: base.body, evidenceRefs: base.evidenceRefs, inspectionOutcome: base.inspectionOutcome }
+      : { body: base.body, evidenceRefs: base.evidenceRefs };
+  const required = input.kind === 'review'
+    ? ['body', 'judgment', 'findings']
+    : input.inspection ? ['body', 'inspectionOutcome'] : ['body'];
+  return {
+    toolId: APP_CHILD_DELIVER_TOOL.toolId,
+    description: APP_CHILD_DELIVER_TOOL.description,
+    inputSchema: { type: 'object', additionalProperties: false, required, properties },
+  };
+}
+
+/**
  * Physical checkpoint owner for one genuine child call. The pre-call checkpoint
  * anchors recovery before the child runs; the post-review checkpoint is distinct
  * and is committed only after the durable review return. Both return the
@@ -284,6 +326,7 @@ export interface AppChildProducerInput {
   readonly manager: Pick<OrchestrationManager, 'callChild'>;
   readonly parent: ActiveTurnContext | ActiveTurnSegmentContext;
   readonly parentAssignment: WorkAssignment;
+  readonly onChildLifecycle?: RuntimeChildLifecycleObserver;
   readonly checkpoints: AppChildCheckpointPort;
   readonly refinedDeliveryStore: RefinedDeliveryStore;
   readonly bodyAssets: ChildBodyAssetPort;
@@ -328,7 +371,7 @@ export type ChildDriverNativePorts = Required<
 
 export type ChildCreatorRequest =
   | { readonly kind: 'execution'; readonly input: ExecutionAgentInput; readonly initialInputText: string }
-  | { readonly kind: 'review'; readonly input: ReviewAgentInput };
+  | { readonly kind: 'review'; readonly input: ReviewAgentInput; readonly initialInputText: string };
 
 /**
  * Narrow control-lifecycle seam for one real child run. The existing child run
@@ -760,9 +803,12 @@ function reorientationInstructions(scope: ScopeRef): string {
   void scope;
   return [
     'This child turn is still open and no delivery has been accepted yet.',
-    'Do the bounded work with the tools you were given, then record the complete result with the delivery tool.',
+    'Call the tool humanagent_child_deliver now with the complete final result as the body.',
     'A summary, a reference or a digest is not a delivery: the delivery body must be the complete final result on its own.',
-    'Only after a legal delivery is recorded, end this turn with the standard end action.',
+    'Omit evidenceRefs when this turn has no accepted tool-result evidence yet; never invent or guess an evidence reference.',
+    'Then read the exact evidenceId= value from the successful humanagent_child_deliver result footer.',
+    'Call humanagent_turn_end once with outcome "completed", a valid four-part summary (goal, actions, result with status and text, nextStep), and deliveryRefs containing that exact evidenceId value.',
+    'A plain-text reply without humanagent_child_deliver is not a valid child result.',
   ].join(' ');
 }
 
@@ -783,7 +829,13 @@ function executionPrompt(
     ]),
     ...(assignment.failureCriteria.length === 0 ? [] : [`Failure criteria: ${assignment.failureCriteria.join('; ')}`]),
     ...(assignment.incompleteCriteria.length === 0 ? [] : [`Incomplete criteria: ${assignment.incompleteCriteria.join('; ')}`]),
-    'Use the tools you were given for the real work, then record the complete result with the delivery tool, and end this turn with the standard end action.',
+    'Do the real work with the tools you were given, then deliver this child turn exactly as follows:',
+    '1. Call humanagent_child_deliver once. body is the complete final result on its own, not a summary or reference.',
+    '2. Omit evidenceRefs when this turn has no accepted tool-result evidence yet; never invent or guess an evidence reference.',
+    '3. For an execution child, humanagent_child_deliver may carry only body and evidenceRefs; do not pass judgment or findings, which belong to review children only.',
+    '4. Read the exact evidenceId= value from the successful humanagent_child_deliver result footer.',
+    '5. Call humanagent_turn_end once with outcome "completed", a valid four-part summary (goal, actions, result with status and text, nextStep), and deliveryRefs containing that exact evidenceId value.',
+    'A plain-text reply without humanagent_child_deliver is not a valid child result; this child turn is delivered only by these two calls.',
   ].join('\n');
 }
 
@@ -794,7 +846,15 @@ function reviewPrompt(assignment: ReviewAssignment, material: ReviewMaterial): s
     `Review kind: ${assignment.reviewKind}`,
     `Acceptance criteria: ${material.acceptanceCriteria}`,
     ...material.subjects.map((subject, index) => `Subject ${index + 1} (${subject.ref}):\n${subject.body}`),
-    'Record the complete review text as the delivery body, the business judgment, and each concrete finding together with the evidence that supports it.',
+    'Deliver this child review exactly as follows:',
+    '1. Read each subject body and the acceptance criteria above.',
+    '2. Persist the complete review text in the workspace with file.write so it becomes accepted evidence.',
+    '3. Read the exact evidenceId= value from the successful file.write result footer.',
+    '4. Prepare at least one concrete finding. Every finding is required to contain detail, severity, locationRef and a non-empty evidenceRefs array. severity must be exactly one of P0, P1, blocker, important or advisory, and evidenceRefs must cite the exact evidenceId returned by the successful file.write; never invent evidence.',
+    '5. Call humanagent_child_deliver once. body is the complete review text, judgment is exactly "passed", "failed" or "inconclusive", findings contains at least one concrete finding with the required fields above, and evidenceRefs cites that exact file.write evidenceId. Do not pass inspectionOutcome; it belongs only to inspection execution children.',
+    '6. Read the exact evidenceId= value from the successful humanagent_child_deliver result footer.',
+    '7. Call humanagent_turn_end once with outcome "completed". Pass summary as a JSON object, never as a JSON-encoded string: summary must have goal (string), actions (array of strings), result ({status, text}), and nextStep (string). Pass deliveryRefs containing the exact child delivery evidenceId printed by humanagent_child_deliver, not a guessed or reformatted value.',
+    'A plain-text reply without humanagent_child_deliver is not a valid child review result; this child review is delivered only by these calls.',
   ].join('\n');
 }
 
@@ -1249,7 +1309,11 @@ function childToolSurface(input: {
     standardEndOwner: input.run.standardEndOwner,
   });
   const existingToolIds = new Set(input.run.toolDefinitions.map((tool) => tool.toolId));
-  const additions = [APP_CHILD_DELIVER_TOOL, ADVERTISED_STANDARD_TURN_END_TOOL]
+  const deliverTool = appChildDeliverTool({
+    kind: input.kind,
+    inspection: input.inspection !== undefined,
+  });
+  const additions = [deliverTool, ADVERTISED_STANDARD_TURN_END_TOOL]
     .filter((tool) => !existingToolIds.has(tool.toolId));
   return {
     toolDefinitions: [...input.run.toolDefinitions, ...additions],
@@ -1525,12 +1589,13 @@ export function createConfiguredReviewAgent(input: ConfiguredChildAgentInput): R
           closer.hold(composition);
           const operationId = childOperationId(input.call.invocationId);
           const scope: ScopeRef = { ...review.scope, operationId };
+          const prompt = reviewPrompt(review.reviewAssignment, assertReviewMaterial(review.reviewMaterial));
           const run = await input.bindChildRun({
             call: input.call,
             operation: input.operation,
             incarnation: create.incarnation,
             scope,
-            request: { kind: 'review', input: review },
+            request: { kind: 'review', input: review, initialInputText: prompt },
           });
           const resolved = await runConfiguredChild({
             input,
@@ -1548,7 +1613,7 @@ export function createConfiguredReviewAgent(input: ConfiguredChildAgentInput): R
             agentId: create.incarnation.agentInstanceId,
             invocationId: input.call.invocationId,
             inputRefs: [...review.reviewAssignment.subjectRefs, `child:${input.call.invocationId}`],
-            prompt: reviewPrompt(review.reviewAssignment, assertReviewMaterial(review.reviewMaterial)),
+            prompt,
             signal: review.signal ?? new AbortController().signal,
           });
           if (resolved.state === 'blocked') {
@@ -1725,6 +1790,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
               }
             : { kind: 'review', assignment: prepareInput.assignment },
         });
+        input.onChildLifecycle?.({ state: 'child.prepared', kind: prepareInput.kind, invocationId: prepareInput.invocationId, turnId });
         return { invocationId: prepareInput.invocationId, checkpointReceiptRef };
       },
       async recordReturn(returnInput: ChildCallReturnInput): Promise<void> {
@@ -1754,6 +1820,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
               result: returnInput.result,
             });
           }
+          input.onChildLifecycle?.({ state: 'child.returned', kind: returnInput.kind, invocationId: returnInput.invocationId, turnId });
         }
         if (returnInput.kind === 'review') {
           const invocation = parent.childInvocations().find((record) => record.invocationId === returnInput.invocationId);
@@ -1770,6 +1837,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
               worker,
             });
             await parent.recordReviewCheckpoint(returnInput.invocationId, committed.checkpoint.id.value);
+            input.onChildLifecycle?.({ state: 'review.checkpointed', kind: 'review', invocationId: returnInput.invocationId, turnId });
           }
         }
       },
@@ -1780,10 +1848,12 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
           throw new Error(`child invocation ${adoption.invocationId} has no durable ${adoption.kind} delivery to adopt`);
         }
         await parent.recordChildAdoption(adoption.invocationId, delivery);
+        input.onChildLifecycle?.({ state: 'child.adopted', kind: adoption.kind, invocationId: adoption.invocationId, turnId });
       },
       async recordReviewCheckpoint(checkpoint: ChildCallReviewCheckpointInput): Promise<ChildCallReviewCheckpointReceipt> {
         const committed = await input.checkpoints.post({ call, returned: checkpoint, worker });
         await parent.recordReviewCheckpoint(checkpoint.invocationId, committed.checkpoint.id.value);
+        input.onChildLifecycle?.({ state: 'review.checkpointed', kind: 'review', invocationId: checkpoint.invocationId, turnId });
         return { checkpointReceiptRef: committed.checkpoint.id.value };
       },
     };
@@ -2142,6 +2212,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
       if (!delivery) throw new Error(`child invocation ${invocationId} has no durable delivery to adopt`);
       parent.assertProductionOpen();
       await parent.recordChildAdoption(invocationId, delivery);
+      input.onChildLifecycle?.({ state: 'child.adopted', kind: delivery.kind, invocationId, turnId });
       return {
         output: JSON.stringify({ state: 'adopted', invocationId, kind: delivery.kind }),
         outputRefs: [],

@@ -38,7 +38,7 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { createJsonlToolEffectLedgerJournal, JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
-import { listTaskActiveTurnBindings } from '../../../adapters/jsonl/src/active-turn.js';
+import { createJsonlActiveTurnJournal, listTaskActiveTurnBindings } from '../../../adapters/jsonl/src/active-turn.js';
 import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
 import { JsonlTaskPlanRevisionJournal } from '../../../adapters/jsonl/src/task-plan-revisions.js';
 import { JsonlTaskGrantJournal } from '../../../adapters/jsonl/src/task-grants.js';
@@ -69,6 +69,8 @@ import type {
 import { createPreparedOperationBoundary } from '../prepared-operation-boundary.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
+import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
+import { createFilesystemRefinedDeliveryStore } from './refined-delivery-store.js';
 import type { RuntimeExecutionAllocation } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 import {
@@ -512,6 +514,15 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     : undefined;
   const runtimeIdentity = options.accessControl.readRuntimeProductIdentity();
   const principalOwner = runtimeIdentity.owner;
+  // The formal entry already owns the control Organ Journal and the evidence
+  // root. Reuse them for the coordinator-owned active turn, initial input and
+  // child refined deliveries so the fake/orchestrated lane reaches the real
+  // child lifecycle projection points instead of a second store.
+  const recovery = createNativeRecoveryAssets({
+    journalPath: taskControlJournalPath,
+    journal: taskControlJournal,
+    assetRoot: options.evidenceRoot,
+  });
   const resourceBoundary = createPreparedOperationBoundary(journal);
   const currentState = createJsonlRuntimeTaskCurrentStateJournal({ journal: taskControlJournal });
   const executionNow = clock ?? (() => new Date());
@@ -624,6 +635,44 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     maxConcurrentTasks: options.maxConcurrentTasks,
     organId: options.organId,
     principalOwner,
+    // The coordinator-owned lane (fake mode) opens its own active turn from
+    // the canonical control Journal. The native RCC lane must not inject these
+    // deps: `createDefaultExecutionComposition` already owns that same turn,
+    // so binding a second coordinator open would conflict on `binding-opened`.
+    ...(!configuredNativeLaunch ? {
+      activeTurnJournalFor: (binding) => createJsonlActiveTurnJournal({
+        filePath: taskControlJournalPath,
+        journal: taskControlJournal,
+        turnId: binding.admittedTurn.turnId,
+      }),
+      initialInputStore: {
+        store: ({ binding, bytes }) => recovery.writeInitialInput({
+          scope: binding.scope,
+          turnId: binding.admittedTurn.turnId,
+          rawInput: new TextDecoder().decode(bytes),
+        }),
+      },
+      recoveryReferencesFor: async (binding) => ({
+        completionLookups: [],
+        recovery: {
+          commitIdentity: `active-turn://${binding.admittedTurn.turnId}`,
+          laterErrorRefs: [],
+          rawTurnRefs: [],
+          unresolvedOperationRefs: [],
+          stages: [],
+          durablePhases: [],
+          durableReceiptRefs: [],
+          recoveryResponsibilityRef: binding.admittedTurn.recoveryStateRef,
+        },
+      }),
+      permissionSnapshot: {
+        runtimeId: 'ui-runtime',
+        executionEpoch: 1,
+        ownerRef: principalOwner,
+        permissionRevision: '1',
+      },
+      refinedDeliveryStore: createFilesystemRefinedDeliveryStore(new ImmutableAssetStore(options.evidenceRoot)),
+    } : {}),
     binding: options.binding,
     port: options.port,
     checkpointStoreFor,

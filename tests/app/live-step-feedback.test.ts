@@ -35,9 +35,13 @@ import {
   FileCheckpointStore,
   UiRuntimeJournal,
   UiRuntimeService,
+  startUiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js';
+import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
+import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
+import { createDeterministicServeOrchestrationPorts } from '../../packages/app/src/serve-orchestration.js';
 import { createServiceExecutionAdmission } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
@@ -1118,6 +1122,90 @@ test('task events stream reports provider request rounds and child lifecycle ste
     assert.ok(dispatchTurn, 'dispatched provider event must carry turnId');
     assert.equal(dispatchTurn, settleTurn, 'dispatched and settled steps must report the same real turn');
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('formal startUiRuntime entry streams four child lifecycle steps through terminal succeeded', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-formal-child-'));
+  const checkpointRoot = join(root, 'checkpoints');
+  const evidenceRoot = join(root, 'evidence');
+  const eventJournal = createJsonlEventJournal({ filePath: join(root, 'events.jsonl') });
+  const publishers = { async resolvePublisher() { return null; } };
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  try {
+    const orchestration = createServeRuntimeComposition({
+      maxRuntimes: 2,
+      eventBusPorts: {
+        journal: eventJournal,
+        publishers,
+        consumers: { async resolveConsumer() { return null; } },
+        externalOperations: eventJournal,
+        barrierIntents: eventJournal,
+      },
+      feedbackPorts: { journal: eventJournal, publishers },
+      feedbackPublisherId: 'formal-child-lifecycle',
+      ...createDeterministicServeOrchestrationPorts(),
+    });
+    const accessControl = await AccessControlService.open({
+      credentialPath: join(root, 'security', 'web-access.json'),
+      create: true,
+    });
+    const challenge = await accessControl.issuePairingChallenge();
+    const session = await accessControl.consumePairingCode(challenge.code);
+    const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+    runtime = await startUiRuntime({
+      mode: 'fake',
+      accessControl,
+      // The serve runtime publisher scope is the canonical UI organ; the
+      // formal entry must use the same organ so orchestration feedback passes
+      // the trusted-publisher scope check.
+      organId: id('organ', 'humanagent-ui'),
+      binding,
+      port: buildFakeExecutionPort(binding, 1),
+      checkpointRoot,
+      productRoot: root,
+      evidenceRoot,
+      uiRoot: join(process.cwd(), 'docs', 'ui'),
+      portNumber: 0,
+      memory: testMemory('formal-child-lifecycle'),
+      explicitBrainInterpreter: {
+        async interpret() { throw new Error('formal child lifecycle test drives tasks directly'); },
+      },
+      runtimeComposition: { createTaskAssembly: orchestration.createTaskAssembly },
+    });
+    // Drive the real implicit-Brain consumer path so `defaultOrchestrate()`
+    // marks the operation orchestrated exactly as `serve` does.
+    await confirmRequirement(runtime.service, 'formal-child-lifecycle');
+    await runtime.service.dispatchNextExplicitRequirement();
+    try {
+      await waitFor(() => runtime!.service.listTasks().completed[0]?.state === 'succeeded', 15000);
+    } catch (error) {
+      const tasks = runtime.service.listTasks();
+      const issue = runtime.service.implicitSchedulingIssue();
+      throw new Error(`${(error as Error).message}\nissue=${issue === undefined ? 'none' : JSON.stringify(issue)}\nlist=${JSON.stringify(tasks)}`);
+    }
+    const taskId = runtime.service.listTasks().completed[0]!.taskId.value;
+    const sse = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(taskId)}/events`, {
+      headers: { accept: 'text/event-stream', cookie },
+    });
+    assert.equal(sse.status, 200, `event stream failed ${sse.status}`);
+    const events = sseFrames(await sse.text()).map((frame) => JSON.parse(frame.data) as {
+      readonly kind: string;
+      readonly state: string;
+      readonly turnId?: string;
+    });
+    const completed = runtime.service.listTasks().completed[0]!;
+    assert.equal(completed.state, 'succeeded');
+    const provider = events.filter((event) => event.kind === 'provider.model');
+    const states = provider.map((event) => event.state);
+    for (const childState of ['child.prepared', 'child.returned', 'child.adopted', 'review.checkpointed']) {
+      assert.ok(states.includes(childState), `missing ${childState}: ${states.join(',')}`);
+    }
+  } finally {
+    if (runtime !== undefined) {
+      try { await runtime.close(); } catch { /* preserve primary failure */ }
+    }
     await rm(root, { recursive: true, force: true });
   }
 });
