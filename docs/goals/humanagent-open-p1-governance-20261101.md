@@ -1492,3 +1492,28 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   board 最后更新 12:08；main 干净同步 origin/main（1a72121c4）；
   worktree 8/10；project patrol armed，`PATROL_CADENCE_RUNTIME_GAP`
   未解除；生产 10086 未动。
+
+- 2026-11-03 13:39 UTC：goal deadline `m1793712697827-1913` 与 Emma 退回
+  `m1793713070431-1926` 已消费（receive-id
+  `receive-32900-1793712808041460000-0`、
+  `receive-44235-1793713140829467000-0`），goal 一度因 one-shot 已消费
+  报 `GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED`，已重新 arm 成功（20m）。
+  David 已把候选提交到共享 main 并 push：`b4746dfb7`
+  `fix(runtime): derive checkpoint business scope from the observed
+  predecessor`、`144038fdc` 真实 RCC 回执、`277ce7ddb` 交付记录；
+  local 与 origin/main 均为 `277ce7ddb`，runtime worktree 已移除。但这
+  发生在指定 review 之前，属于先集成后验收的流程偏差，Emma 明确无需
+  回滚。Emma 复核后把任务退回：原始 `docs/evidence/c5d4671-rcc-receipt.json`
+  state=INCOMPLETE，缺 child.prepared/returned/adopted/review.checkpointed，
+  真实 RCC native succeeded 未证明本次修复的 child-assembly 前驱路径。
+  board `p1-runtime-checkpoint-identity-20261103` = `rework` rev 11，
+  `completion_missing=[review,integration,close]`。已发 David
+  `m1793713275854-1935`：在
+  `/Volumes/Intel/playground/humanagent/p1-runtime-checkpoint-identity-20261103`
+  新 worktree 补真实入口受影响路径回归（或证明不可达）、cold-resume 九项
+  基线与候选日志，红测→绿测→真实 RCC 后再交 Emma，由 Jenny review 后统一
+  集成，不再直接 merge/push main。Alice UI 任务仍 `working`（rev 7，
+  service.ts/projection/runtime.ts/runtime-projection.test.ts 未提交）。
+  worktree 7/10（main + mvp-real-path-dispatch + Alice UI + 4 locked
+  provider PROTECTED_HOLD）；project patrol armed，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除；生产 10086 未动。
