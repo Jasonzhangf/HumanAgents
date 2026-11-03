@@ -1844,3 +1844,6 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - `project_patrol` 仍 armed，但 `eligible=false`，缺陷为 `PROJECT_PATROL_PROGRESS_NOT_RECORDED`；不声称巡检节奏已对齐，继续如实报告差距。
 - 自有 worktree 8/10，未触他人资源，未执行 tmux/daemon 生命周期操作。
 - 下一步：等待 Alice 回交实际结果或精确原错；若 GCM 仍不可用，不再反复试探，改为向用户/通道 owner 申请变通，并同步把该派发层缺陷列入同一目标的未解决项。
+- 2026-11-03 22:02 UTC：master 只读复现并澄清 GCM 根因。`gtimeout 25 codex exec --profile gcm -m gpt-5.5 -s read-only 'Reply EXACTLY: GCM_MODEL_EXPLICIT_OK'` 在 14.7 秒内返回 `GCM_MODEL_EXPLICIT_OK`，provider=gcm、model=gpt-5.5。结论：GCM 通道和 gpt-5.5 可用；Alice 的 `MODEL_PLACEHOLDER_M418` 来自未显式传 `-m gpt-5.5` 的派发层模型键解析缺陷。已向 Alice 发 `m1793743348223-475`，要求按该参数在原 worktree 继续，完成 focused red/green 与真实 RCC 4444 同入口回执后回交；不再把 GCM 整体判为不可用，也不替她执行工作区修改。
+- 2026-11-03 22:06 UTC：Alice pane 真源核实。`tmux list-panes` 显示 Alice 所在 pane `%15` 的 PID 64709 是 `-zsh`，无 Codex/AGY 子进程；`capture-pane -S -100000` 只有 7 次 `MODEL_PLACEHOLDER_M418` 错误（1091..1097）和 `Gemini 4 Argon · medium` 提示符，没有消息正文或处理动作。两条 durable 消息 `m1793743214234-472`、`m1793743348223-475` 仍 `state=pending`、`consumed_by_recv=false`，`pane_output_changed_after_enter=true`，说明 daemon 已向 pane 投递但该 pane 没有可消费的 agent 会话。Alice 的任务和 worktree 均保留，但她当前宿主不可用，不能靠消息唤醒。
+- 处理结论：不伪造 Alice 已完成或推进，也不替她改 worktree。下一步应由 Alice 的宿主会话恢复（用户重新打开/恢复 `%15` 的 AGY/Codex 会话，或明确授权接管）后，她用 `-m gpt-5.5` 继续；在此之前保持 board `working` 与工作树未提交改动，等待真实宿主恢复。
