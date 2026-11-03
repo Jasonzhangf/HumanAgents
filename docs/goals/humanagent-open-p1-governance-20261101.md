@@ -1476,3 +1476,19 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   mvp-real-path-dispatch + 两个 P1 任务树 + 4 locked provider
   PROTECTED_HOLD）。两任务均未交付，仍缺 review；project patrol
   armed，`PATROL_CADENCE_RUNTIME_GAP` 未解除。生产 10086 未动。
+
+- 2026-11-03 13:06 UTC：goal deadline `m1793711099536-1835` 已消费
+  （receive-id `receive-8791-1793711111977215000-0`）并按 20m 重新武装。
+  David 已在 runtime worktree 提交候选 `640652956`
+  `fix(runtime): derive checkpoint business scope from the observed
+  predecessor`（coordinator.ts 16+/10-，分支
+  `codex/p1-runtime-checkpoint-identity-20261103`，base 1b0ac47b5），
+  工作树干净；但未提交红测文件新增、未留下运行证据目录、board 仍
+  `working`（rev 7）未 deliver。已发 `m1793711358827-1846` 提醒交付合同
+  （红测先失败→修复后绿、live-step-feedback 4/4 候选与组合 latest main、
+  真实 RCC 4444 同入口回执，再 deliver 给 Emma）。Alice 仍在
+  `p1-ui-terminal-nextstep-20261103` worktree 修改
+  service.ts/projection/runtime.ts/runtime-projection.test.ts（未提交）。
+  board 最后更新 12:08；main 干净同步 origin/main（1a72121c4）；
+  worktree 8/10；project patrol armed，`PATROL_CADENCE_RUNTIME_GAP`
+  未解除；生产 10086 未动。
