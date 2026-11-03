@@ -1629,3 +1629,18 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   durable=true，等待 Alice 接受。CEO 当前未配置，未宣称已向 CEO 报告；
   worktree 7/10，project patrol 仍 armed 但
   `PATROL_CADENCE_RUNTIME_GAP` 未解除；生产 10086 未动。
+
+- 2026-11-03 15:39 UTC：Alice 已接受正式入口任务并开始执行。board
+  `p1-checkpoint-formal-entry-child-lifecycle-20261103` rev3
+  `working`，owner=Alice，reviewer=Emma；独立 worktree
+  `/Volumes/Intel/playground/humanagent/p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  已创建，worktree 8/10（main + mvp-real-path-dispatch + 正式入口任务 +
+  runtime rework + 4 locked provider `PROTECTED_HOLD`）。期间 Collab
+  daemon 变为不可达：`collab status --all` 返回
+  `DAEMON_UNKNOWN: cannot reach collab daemon at
+  /Users/fanzhang/.collab/server.sock`；`appsdk goal status --json`
+  返回 `GOAL_OWNER_CONTEXT_FAILED:exit=1`、`active=false`。续订命令在
+  daemon 离线前的回执显示 one-shot armed（next after 20m），但当前
+  无法经 daemon 验证订阅真源，不声称已对齐。该故障只影响本轮状态
+  查询，不重试同命令、不重启 daemon、不触碰 tmux；daemon 由用户管理。
+  生产 10086 未动。
