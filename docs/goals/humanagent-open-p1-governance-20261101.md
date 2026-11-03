@@ -1768,3 +1768,79 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   CEO 未配置（`ceo: null`），继续本地 master 工作。goal 保持 `active=true`
   （`registered_at=2026-11-03T20:03:09Z`，下一 deadline 约 20:23 UTC）。
   生产 10086 未动，未执行任何 daemon/tmux 生命周期动作。
+
+
+- 2026-11-03 20:24 UTC：消费 master-idle:project-patrol
+  `m1793736970924-158` 与 goal deadline `m1793737389999-179`，已重新武装
+  goal（20:23 UTC 后 `appsdk goal subscribe` 回执 one-shot armed；一次
+  `appsdk goal status --json` 短暂返回 `GOAL_OWNER_CONTEXT_FAILED:exit=1`
+  （暂态，d442481 同类），`appsdk longhorizon show --json` 复核
+  `goal_active=true`、`collab_reachable=true`、`pending_merges=[]`、
+  `workers_needing_intervention=[]`、open bugs 39）。本轮实际进展：
+  (A) 正式入口任务并非正常执行中：Alice 的独立 worktree
+  `p1-checkpoint-formal-entry-child-lifecycle-20261103` 有 8 个未提交文件
+  （index/service/coordinator/child-producer/child-run-composition/
+  execution-composition/scripts/tests），但真实 RCC 回执
+  `c5d4671-rcc-4444-receipt.json` 为 `INCOMPLETE`：
+  child.prepared=true、child.returned/adopted/review.checkpointed=false、
+  terminal=blocked、error=`failed result did not match a failure criterion`；
+  worker-output.md 显示 execution child 调用了 `humanagent_child_deliver`
+  但传了空对象 `{}`，随后 GCM（PID 76523，约 50 分钟 CPU 0）停在输入框，
+  并出现 model key `MODEL_PLACEHOLDER_M418` 构造失败。已发 durable
+  `m1793737581712-193` 给 Alice：保留工作树与未提交修改，不重试 git
+  提交/配置，继续只读+编辑/测试，先诊断 child 空交付是否属产品协议
+  bug（若是则登记缺陷与 owner），不得合成生命周期事件或宣称 PASS。
+  (B) 外部卷硬链接故障根因确认（David `m1793737471143-185`）：commit
+  停滞根因是 `link(2)` 在外部 APFS 卷上挂起（`finalize_object_file_flags
+  -> link()` 不返回），`tmp_obj_*` 只是症状；清理会再生成。主仓复核探测
+  期间 `/Volumes/extension` 五次成功（rc=0），`/Volumes/Intel` 仍超时
+  （rc=124）；David 随后补充同一扩展卷曾出现 timeout 124
+  （`m1793737908914-207`），故扩展卷也是断续故障，不能宣布稳定恢复。
+  主仓又出现 7 个 `tmp_obj_*` 残留，未清理、未重试提交。原始证据已落盘：
+  `c5d4671-formal-entry-wiring-handoff.md` 第 8 节、
+  `c5d4671-link2-git-sample-803.txt`、
+  `c5d4671-link2-git-sample-1619.txt`（mode 644，可读，未提交）。
+  已发 durable `m1793737668635-197`、`m1793737993237-209` 给 David：
+  继续保留 handoff 与原始证据，不再清理/重试，只有两个外部卷重复探针
+  都通过且文件系统 owner 确认后才恢复 `git add`/commit。
+  (C) board 状态不变：`p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  `working`（Alice），`p1-runtime-checkpoint-identity-20261103` `rework`
+  （David，已取消 board patrol 等上游与文件系统恢复）；reviewer 均 Emma，
+  无新就绪授权工作，不手工唤醒。worktree 8/10（含 4 个 locked provider
+  `PROTECTED_HOLD`），自有资源无需清理。CEO 未配置（`ceo: null`）。
+  project patrol 仍 armed（`sub-m1793413132850-18`），但
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除，`eligibility.blocker` 仍为
+  `PROJECT_PATROL_PROGRESS_NOT_RECORDED`。生产 10086 未动，未执行任何
+  daemon/tmux 生命周期动作。
+
+### 2026-11-03 20:49 UTC：本轮巡检、目标续期与 Alice 阻塞
+- 已消费当前两条唤醒：`m1793738770947-253`（project-patrol）、`m1793738782894-254`（已消费 goal deadline），inbox 已空。
+- `appsdk goal subscribe --goal <当前目标> --interval 20m` 已重新武装一次性下一检查，20 分钟后再核对长程目标。
+- 已向 Alice 发送耐用消息 `m1793738897061-263`：`p1-checkpoint-formal-entry-child-lifecycle-20261103` 的 GCM 执行器持续报 `MODEL_PLACEHOLDER_M418: model not found`，未进入实际实现；原错为派发/工具层，不是业务结论。要求她保留 worktree 与未提交修改，不重试提交/配置，使用有效 `codex exec --profile gcm` 重试，完成正式入口接线、红绿测试和真实 RCC 4444 取证，再按 board 交 Emma 审查。
+- `collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000` 返回 `changed=false`、`deduplicated=true`，项目巡检仍保留 900000 ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除；记录为 AppSDK/Collab 运行时差异，不影响当前可推进工作。
+- 开放 P0/P1 未闭合（`longhorizon show` 共 39 个 open bugs）；board 只有 Alice 的 `working` 正式入口任务和 David 的 `rework` 任务，且 David board patrol 已合法取消，等待 Alice 任务与文件系统恢复。
+- 工作树 8/10（main + `mvp-real-path-dispatch-20261102` + Alice/David 两个 P1 树 + 四个 `PROTECTED_HOLD` 提供商）。`mvp-real-path-dispatch-20261102` 仍需 owner 收口未合并证据 `35b9c043e`（D20 PNG refresh），已被 `e746255c3`/`f5f13f05d` 部分取代，未动。主仓仅当前目标文件 dirty。CEO 未配置（`ceo: null`），继续本地 master 工作，未执行 daemon/tmux 生命周期操作。
+
+### 2026-11-03 21:12 UTC：goal deadline 巡检（Alice 派发阻塞复核）
+- 消费 goal deadline wake `m1793740115881-325`（`receive-32562-1793740253466756000-0`）。`appsdk goal subscribe --interval 20m` 已重新武装，下一次检查约 21:29 UTC。
+- `collab snapshot` 复核 Alice pane：她已完成 c5d4671 与 P0 45f92c8 的代码同源核对（结论：不同源），并写出正式入口接线方案；随后她的后台 `codex exec --profile gcm` 连续 5 次报 `failed to construct executor: unknown model key MODEL_PLACEHOLDER_M418: model not found`（Error ID `b2a86486-…-1091..1095`），没有实际实现进程运行，本人已回到空提示符待命（Gemini 4 Argon · medium）。
+- 该 model key 未落盘于任何配置、Skill 或仓库（只读检索确认），属 GCM/RCC 派发层模型解析失败，不是 HumanAgent 产品代码缺陷，也不在 master 未授权 runtime 改动范围内。此前所发耐用消息 `m1793738897061-263` 要求改用有效 `--profile gcm` 重试；消息当前 `state=pending`、`consumed_by_recv=false`、`pane_output_changed_after_enter=true`，尚未被她读取处理。
+- Alice worktree 保留 8 个未提交文件（child-producer / child-run-composition / execution-composition / index / service / coordinator / scripts / tests），HEAD `b846f42bd`，behind origin/main 8，未动。
+- David `p1-runtime-checkpoint-identity-20261103` 仍为 `rework`，board patrol 已合法取消（等上游 Alice 任务与外部卷 `link(2)` 恢复），不重新武装。
+- board 仅上述两个 P1 任务；worktree 8/10（含 4 个 locked provider `PROTECTED_HOLD`），无需清理；open bugs 39（本轮未变）。CEO 未配置（`ceo: null`）。生产 10086 未动，未执行 daemon/tmux 生命周期操作。
+- 2026-11-03 21:16 UTC：消费 master-idle project-patrol `m1793740571912-362`；四项复核无变化（Alice 仍 `working` 且派发阻塞 `MODEL_PLACEHOLDER_M418`、本人空提示符待命；David 仍 `rework`；board 2 个任务；worktree 8/10；goal armed）。不重复派发，不重新武装 David 已取消 patrol。
+- 2026-11-03 21:19 UTC：只读核实派发通道。`GET http://127.0.0.1:4444/v1/models`（gcm provider base）返回 10 个已注册模型（heysmart.kimi-k3、inferai/inxk/kk/nvidia/qiyovo deepseek/glm、gpt-5.5 等），目录中没有 `M418` 或任何 `MODEL_PLACEHOLDER` key。结论：gcm/RCC 通道健康，Alice 的 `codex exec --profile gcm` 失败是因为派发层把模型 key 解析为未注册的 `MODEL_PLACEHOLDER_M418`，属工具/派发层缺陷，不是 HumanAgent 产品代码，也不在 master 未授权 runtime 改动范围内。Alice 已空提示符待命约 1 小时，重试消息未消费，无代码进展；不伪造进展，不替她重派工作树。
+- 2026-11-03 21:24 UTC：master 做只读 gcm 通道探针 `codex exec --profile gcm "Reply GCM_PROBE_OK"`（`/Volumes/extension/code/humanagent`，无副作用）。165 秒无任何输出，手动中断（exit 130），未产生 `MODEL_PLACEHOLDER_M418` 错误但也未完成。结合 Alice 的 5 次 executor 构造失败，结论：gcm 派发通道当前不可靠（挂起或模型 key 解析失败），不是 HumanAgent 产品代码缺陷。已停止继续试探，不重复占用通道；等通道 owner 修复或用户批准变通后再派工作。
+- 2026-11-03 21:28-21:33 UTC：发现并处理 collab 路由竞态。`collab route resolve` 解析 tmux pane `%13` 为另一个 session `01a1a34d-fe7e-…`，而本会话 env 为 `01a16e0a-dbb0-…`；`collab recv`/`collab msg` 因此报 `CALLER_ROUTE_NOT_FOUND` / `ROUTE_RESOLVE_NOT_FOUND`。恢复方式：同一 shell 进程内先 `collab context`（绑定 `01a16e0a`、pane `%13`）再 `collab recv`，可正常读取；单独运行则失败。已按此消费 goal deadline `m1793741380059-394` 并重新 `appsdk goal subscribe --interval 20m`（触发约 21:53 UTC）。该路由漂移与 pane 双绑定冲突属 collab/appsdk 运行时问题（与既有 `d442481` 同类），记录为派发层风险，未改 routes.jsonl、未动 daemon/tmux。
+- 2026-11-03 21:53 UTC：消费 goal deadline `m1793742783876-462`（`LAST_REMINDER=true`），重新 `appsdk goal subscribe --interval 20m`（触发约 22:13 UTC，armed）。复查无变化：Alice pane 仍同 5 次 `MODEL_PLACEHOLDER_M418` 构造失败并回到空提示符，工作树 8 个未提交文件、HEAD `b846f42bd`，重试消息仍未消费；David 仍 `rework`；board 2 个任务；worktree 8/10。不重复派发、不替她改工作树，等派发层 owner 修复或用户批准变通。
+
+### 2026-11-03 21:55 UTC：master 已恢复，Alice 任务阻塞于 GCM 派发层
+
+- 已按用户明确批准执行 `collab master promote --approval '用户明确要求：恢复你的 master 身份，向 ceo 报告'`；受理结果已落盘，当前 master 为 Jenny，会话 `codex-session-30316131366530612d646262302d373039302d613038612d383535643538386365316565`，项目根 `/Volumes/extension/code/humanagent`。
+- Board 仍有两个可推进任务：Alice `p1-checkpoint-formal-entry-child-lifecycle-20261103`（working，评审 Emma）和 David `p1-runtime-checkpoint-identity-20261103`（rework，已合法取消 board 巡检，等 Alice 任务返回）。
+- Alice worktree 保留 8 个未提交文件（`child-producer.ts`、`child-run-composition.ts`、`execution-composition.ts`、`index.ts`、`service.ts`、`coordinator.ts`、`c5d4671-rcc-receipt.mjs`、`live-step-feedback.test.ts`），HEAD `b846f42bd`，落后 `origin/main` 8 个提交，未提交、未合并、未执行真实接线验收。
+- `codex exec --profile gcm` 对 Alice 连续 5 次失败，错误为 `MODEL_PLACEHOLDER_M418: model not found`（Error ID `b2a86486-…-1091..1095`），没有实现进程运行。`GET http://127.0.0.1:4444/v1/models` 可列出 10 个已注册模型，不含 M418/MODEL_PLACEHOLDER；结论是 GCM/派发层模型键解析缺陷，不是 HumanAgent 产品代码，也不属 master 可自行修改的 runtime 安装范围。
+- 已向 Alice 发耐用消息 `m1793743214234-472`：保留 worktree 与全部未提交改动，不要重试提交或自行改配置；按 board 任务补齐 worker-contract；用有效模型键重新一次性派发，建议先试 `codex exec --profile gcm -m gpt-5.5 --json --dangerously-bypass-approvals-and-sandbox -C <worktree> --output-last-message result.md - < worker-task.md > events.jsonl 2> stderr.log`；失败则保留原命令、原错误和 Error ID；完成 focused red/green 和真实 RCC 4444 同入口回执，再交 Emma 审查。
+- `project_patrol` 仍 armed，但 `eligible=false`，缺陷为 `PROJECT_PATROL_PROGRESS_NOT_RECORDED`；不声称巡检节奏已对齐，继续如实报告差距。
+- 自有 worktree 8/10，未触他人资源，未执行 tmux/daemon 生命周期操作。
+- 下一步：等待 Alice 回交实际结果或精确原错；若 GCM 仍不可用，不再反复试探，改为向用户/通道 owner 申请变通，并同步把该派发层缺陷列入同一目标的未解决项。
