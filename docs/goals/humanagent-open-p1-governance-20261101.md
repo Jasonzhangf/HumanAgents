@@ -1665,3 +1665,21 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   不声称 goal status 查询已对齐，底层注册真源以 longhorizon 投影为准。
   P0 45f92c8/a9dc797/4c21e74 与 P1 c5d4671/209de7c 等保持 open。生产
   10086 未动，未执行任何 daemon/tmux 生命周期动作。
+
+- 2026-11-03 19:43 UTC：消费 goal deadline `m1793734759251-69`
+  （`DEADLINE_REACHED`，已 read）。本轮无新交付，`pending_merges=[]`、
+  `workers_needing_intervention=[]`；两个开放任务状态不变：
+  `p1-checkpoint-formal-entry-child-lifecycle-20261103` `working`（Alice）、
+  `p1-runtime-checkpoint-identity-20261103` `rework`（David），reviewer 均
+  Emma。worker 真实状态：Alice、David 为 `present`+`unknown` 且各持活动任务，
+  Emma `idle`，Bob/Carol `cold`，Jenny `idle`；不盲发唤醒。worktree 8/10，
+  含 4 个 locked provider `PROTECTED_HOLD`，无需清理；CEO 未配置（`ceo: null`，
+  `CEO_NOT_CONFIGURED`）。project patrol 仍 armed
+  （`sub-m1793413132850-18`，`notify status` 实测 `armed=true`），但
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除，`eligibility.blocker` 仍为
+  `PROJECT_PATROL_PROGRESS_NOT_RECORDED`（两任务 working/rework）。本轮
+  于 19:42:16Z 显式重新武装 goal；`appsdk goal status --json` 已恢复正常，
+  返回 `active=true`、`desired=subscribed`、`observed=subscribed`、
+  `collab_subscribed=true`、`error=null`；上一轮的
+  `GOAL_OWNER_CONTEXT_FAILED` 判定为暂态，不再作为未对齐缺口。生产 10086
+  未动，未执行任何 daemon/tmux 生命周期动作。
