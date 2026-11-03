@@ -1429,3 +1429,50 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   executor David（测试工程师）、reviewer Emma。两任务均 `invited`（durable
   msg `...-6`），等待实现者接受。goal 已重新武装（`appsdk goal subscribe
   --interval 20m`，Active=true/subscribed）。CEO 报告 revision 17 已记录。
+
+- 2026-11-03 12:14 UTC：两张 P1 已被实现者接受并进入执行。`collab board
+  show` 复核：`p1-runtime-checkpoint-identity-20261103` owner=David
+  status=working revision=7；`p1-ui-terminal-nextstep-20261103` owner=Alice
+  status=working revision=7；reviewer 均为 Emma，`needs_reassignment=false`，
+  两者 `completion_missing=['review']`（未交付）。已用
+  `collab send --in-reply-to m1793707393474-1662` 回复 Emma 确认分工
+  （msg `m1793708279492-1689`）。资源收口：lost peer `%128`
+  （worker codex-session-6637…，tmux pane 缺失、无 active task、无 pending
+  notifications）经 `collab worker close` 退役，outcome=complete。
+  已向 CEO 交回本项目巡检（`collab ceo reply`，revision 19，
+  recorded=true/notified=false）。project patrol 仍 armed，`collab notify
+  status` 仍报 `PATROL_CADENCE_RUNTIME_GAP`；worktree 6/10（main +
+  mvp-real-path-dispatch + 4 locked provider PROTECTED_HOLD）；生产 10086
+  未动。
+
+- 2026-11-03 12:24 UTC：goal deadline `m1793708565537-1702` 已消费并按
+  20m 显式重新武装（Active=true/subscribed）。本轮四项巡检：两个 P1 仍
+  `working`（rev 7，最后更新 12:08，owner David/Alice，reviewer Emma）；
+  Alice 已创建 `p1-ui-terminal-nextstep-20261103` 独立 worktree 且
+  `git status` 干净；David 尚未创建 runtime worktree，共享 main 树 12:19
+  出现未提交诊断修改 `packages/runtime/src/ui-runtime/coordinator.ts`
+  （`[DIAG-CHK]` console.error 打印 checkpoint scope/id/inherited），已发
+  `m1793708762263-1708` 要求保留证据、收口前移除、候选改在
+  `/Volumes/Intel/playground/humanagent/p1-runtime-checkpoint-identity-20261103`
+  worktree 完成。worktree 7/10（main + mvp-real-path-dispatch + Alice UI
+  task + 4 locked provider PROTECTED_HOLD）。peer activity 均 unknown，
+  `%128` 已退役但 master_wake 快照仍短暂列出。project patrol armed
+  900000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除，progress_revision=0、
+  blocker=PROJECT_PATROL_PROGRESS_NOT_RECORDED。生产 10086 未动。
+
+- 2026-11-03 12:44 UTC：goal deadline `m1793709796710-1767` 经
+  `collab recv` 正确消费（receive-id
+  `receive-65428-1793709884336624000-0`）并按 20m 重新武装。两个 P1
+  仍 `working`（rev 7，board 最后更新 12:08），但均已有实际候选修改：
+  David 在
+  `/Volumes/Intel/playground/humanagent/p1-runtime-checkpoint-identity-20261103`
+  worktree 修改 `coordinator.ts`（16+/10-，把 out-of-band checkpoint 的
+  `store.readLatest` 提前到 business scope 派生之前，针对 c5d4671 首次
+  偏离）；Alice 在 `p1-ui-terminal-nextstep-20261103` worktree 修改
+  `service.ts`、`packages/ui/projection/runtime.ts` 与
+  `tests/ui/runtime-projection.test.ts`（7+/6-，针对 1e9099b 终态
+  nextStep）。共享 main 树已恢复干净，仅 goal 文档自身 dirty；
+  `coordinator.ts` 的 main 诊断修改已移除。worktree 8/10（main +
+  mvp-real-path-dispatch + 两个 P1 任务树 + 4 locked provider
+  PROTECTED_HOLD）。两任务均未交付，仍缺 review；project patrol
+  armed，`PATROL_CADENCE_RUNTIME_GAP` 未解除。生产 10086 未动。
