@@ -386,7 +386,11 @@ test('explicit interaction events stream dispatch, return, and acceptance in lif
       sourceRef: 'ui:w2-explicit', rawInput: 'dispatch one helper', channel: 'business',
     });
     const liveSteps: string[] = [];
-    const live = await service.subscribeExplicitSteps(interactionId, (step) => liveSteps.push(step.kind));
+    const liveStepSummaries = new Map<string, string>();
+    const live = await service.subscribeExplicitSteps(interactionId, (step) => {
+      liveSteps.push(step.kind);
+      liveStepSummaries.set(step.kind, step.summary);
+    });
 
     const interpreted = await service.interpretExplicitInput({ interactionId });
     assert.equal(interpreted.state, 'answered');
@@ -421,6 +425,17 @@ test('explicit interaction events stream dispatch, return, and acceptance in lif
     assert.ok(ordered.indexOf('helper.response') > ordered.indexOf('helper.dispatched'), 'helper response must follow dispatch');
     assert.ok(ordered.indexOf('helper.response') < secondDispatched, 'helper return must precede the second request');
     assert.ok(ordered.indexOf('turn.completed') > secondDispatched, 'turn must complete after the final request');
+
+    // The progress card copies the runtime's step summaries straight to the
+    // page, so each model-facing step must publish a readable label. A raw
+    // decision payload or an internal English stage name would leak to a
+    // Chinese surface; both appeared in the bug 486ddd4 evidence.
+    for (const kind of ['response.reasoning', 'response.streaming']) {
+      const summary = (liveStepSummaries.get(kind) ?? '').trim();
+      assert.ok(summary !== '', `${kind} must publish a readable step summary`);
+      assert.ok(!/^[\[{]/.test(summary), `${kind} summary must not be raw JSON: ${summary}`);
+      assert.ok(!/Model is (reasoning|streaming output)/.test(summary), `${kind} summary leaked an internal English label: ${summary}`);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

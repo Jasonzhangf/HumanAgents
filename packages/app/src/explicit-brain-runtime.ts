@@ -1486,7 +1486,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             responseReasoningStepEmitted = true;
             request.onStep?.({
               kind: 'response.reasoning',
-              summary: providerEvent.summary ?? 'Model is reasoning',
+              summary: '模型正在思考',
               ...(providerEvent.turnId === undefined ? {} : { turnId: providerEvent.turnId }),
               ...(providerEvent.requestId === undefined ? {} : { requestId: providerEvent.requestId }),
             });
@@ -1495,7 +1495,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             responseStreamingStepEmitted = true;
             request.onStep?.({
               kind: 'response.streaming',
-              summary: providerEvent.summary ?? 'Model is streaming output',
+              summary: '模型正在输出',
               ...(providerEvent.turnId === undefined ? {} : { turnId: providerEvent.turnId }),
               ...(providerEvent.requestId === undefined ? {} : { requestId: providerEvent.requestId }),
             });

@@ -710,11 +710,12 @@ pre {
     gap: 4px;
   }
 
-  /* On a phone the corner controls are 44px tall at the top and bottom edges.
-     A vertical safe inset keeps the content clear of both rows without
-     squeezing the 390px viewport horizontally. */
+  /* On a phone the corner controls are 44px tall at the top and bottom edges
+     and 70px wide at the side edges. A vertical and horizontal safe inset
+     keeps every content column clear of all four controls at any scroll
+     position, so a card never shares a bounding box with a floating button. */
   .page {
-    padding: 72px 0 88px;
+    padding: 72px 72px 88px;
   }
 }
 
