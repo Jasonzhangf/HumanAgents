@@ -1721,3 +1721,32 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   仍 armed（`sub-m1793413132850-18`），但 `PATROL_CADENCE_RUNTIME_GAP` 未解除，
   `eligibility.blocker` 仍为 `PROJECT_PATROL_PROGRESS_NOT_RECORDED`。生产
   10086 未动，未执行任何 daemon/tmux 生命周期动作。
+
+- 2026-11-03 20:14 UTC：消费 David 巡检回执 `m1793736599442-135`
+  （`p1-runtime-checkpoint-identity-20261103` rev19 rework 保持，UNVERIFIED
+  于正式入口）。本轮一次性处理两件事：
+  (A) 进展核实：Alice 的正式入口任务仍在活跃实现，worktree HEAD
+  `b846f42bd`，8 个未提交文件（`index.ts` +51、`service.ts` +16、
+  `coordinator.ts` +56、`child-producer.ts`、`child-run-composition.ts`、
+  `execution-composition.ts`、`scripts/c5d4671-rcc-receipt.mjs` +174、
+  `tests/app/live-step-feedback.test.ts` +88）；已复用
+  `createJsonlActiveTurnJournal`/`createFilesystemRefinedDeliveryStore`/
+  `createNativeRecoveryAssets` 并新增 `RuntimeChildLifecycleObserver`
+  （`coordinator.ts:294`）与 native-lane 观测注入。David 已向 Alice 发
+  durable `m1793736589674-134` 两条代码级验收输入，现场核实属实：
+  ① `index.ts:672` 的 `permissionSnapshot` 硬编码 `permissionRevision:'1'`、
+  `runtimeId:'ui-runtime'`，而 `execution-composition.ts:572` 用
+  `String(grant.grant.revision)`，属被 Emma 在 rev15 拒绝过的同类伪造控制真源；
+  ② 端口接线被 `!configuredNativeLaunch`（`index.ts:642/555`）门控，rcc 正式
+  路径可能仍显示四个 child 标志 false。正式入口 RCC 回执前必须做一次真实
+  rcc 运行，不得直接凭聚焦测试宣称正式入口可用。
+  (B) 环境缺陷定位并清除：David 报 repo-wide git 对象写入停滞。master 复核
+  发现共享对象库 `.git/objects` 堆积 13 个陈旧 `tmp_obj_*` 临时对象
+  （mtime 11:52–12:13 UTC），`git count-objects -v` 报 garbage；并发/后续
+  `hash-object -w`、`commit-tree`、`commit` 抢占超时。确认无活跃 git 写入
+  与 gc/repack 进程后删除这 13 个废弃临时文件，`count-objects -v` 现报
+  `garbage:0`，`hash-object -w`/`commit-tree` 复测即时成功。仅清理不可达
+  临时对象，未改任何可达对象、ref、历史，未触碰 daemon/tmux。已通知 David
+  在其 worktree 重试 `handoff(c5d4671)` 提交（此前被 `timeout 90` 误杀）。
+  goal 保持 `active=true`（`registered_at=2026-11-03T20:03:09Z`，下一 deadline
+  约 20:23 UTC）。生产 10086 未动。
