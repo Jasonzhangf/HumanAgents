@@ -26,6 +26,47 @@ test('projectAgentDebugInspections projects all 5 canonical roles in not-invoked
   }
 });
 
+test('projectAgentDebugInspections omits incomplete tool-call records instead of fabricating tool activity', () => {
+  const inspections = projectAgentDebugInspections({
+    byRole: {
+      interaction: {
+        agentRole: 'interaction',
+        invocationStatus: 'completed',
+        turn: { state: 'collected', turnId: 'turn-incomplete-tools' },
+        context: { state: 'collected' },
+        model: { state: 'invoked-without-model' },
+        tools: {
+          availableToolsState: 'collected',
+          availableTools: [],
+          callsState: 'collected',
+          calls: [
+            { callId: 'tool-call-real', toolName: 'read.file', state: 'succeeded' },
+            { callId: '   ', toolName: 'write.file', state: 'succeeded' },
+            { callId: 'tool-call-no-name', toolName: '', state: 'succeeded' },
+            { callId: 'tool-call-real', toolName: 'write.file', state: 'succeeded' },
+          ],
+        },
+        error: { state: 'none' },
+      },
+    },
+  });
+  const interaction = inspections.find((entry) => entry.agentRole === 'interaction');
+  assert.ok(interaction);
+  if (!interaction) {
+    throw new Error('interaction inspection missing');
+  }
+  validateAgentDebugInspection(interaction);
+
+  assert.equal(interaction.tools.callsState, 'data-not-collected');
+  assert.equal(interaction.tools.availableToolsState, 'data-not-collected');
+  assert.equal(interaction.tools.availableTools.length, 0);
+  assert.equal(interaction.tools.calls.length, 1);
+  assert.equal(interaction.tools.calls[0]?.callId, 'tool-call-real');
+  assert.equal(interaction.tools.calls[0]?.toolName, 'read.file');
+  assert.equal(interaction.tools.calls.some((call) => call.callId === 'call-1'), false);
+  assert.equal(interaction.tools.calls.some((call) => call.toolName === 'unknown.tool'), false);
+});
+
 test('projectAgentDebugInspections covers collected, invoked-without-model, invoked-without-tools, data-not-collected, planner failed, memory rejected, and not-invoked', () => {
   const inspections = projectAgentDebugInspections({
     byRole: {

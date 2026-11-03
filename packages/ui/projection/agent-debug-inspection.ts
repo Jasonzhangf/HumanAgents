@@ -377,14 +377,19 @@ function normalizeToolsDimension(
   );
   const seenCallIds = new Set<string>();
   const calls: AgentDebugInspection['tools']['calls'][number][] = [];
-  for (const [idx, call] of (input.calls ?? []).entries()) {
-    const baseCallId = call.callId?.trim() || `call-${idx + 1}`;
-    const callId = seenCallIds.has(baseCallId) ? `${baseCallId}-${idx + 1}` : baseCallId;
+  let hadIncompleteCall = false;
+  for (const call of input.calls ?? []) {
+    const callId = call.callId?.trim() || '';
+    const toolName = call.toolName?.trim() || '';
+    if (callId.length === 0 || toolName.length === 0 || seenCallIds.has(callId)) {
+      hadIncompleteCall = true;
+      continue;
+    }
     seenCallIds.add(callId);
     const rawSummary = typeof call.redactedInputSummary === 'string' ? call.redactedInputSummary : '';
     calls.push({
       callId,
-      toolName: call.toolName?.trim() || 'unknown.tool',
+      toolName,
       state: call.state,
       durationMs:
         typeof call.durationMs === 'number' && Number.isSafeInteger(call.durationMs) && call.durationMs >= 0
@@ -396,9 +401,12 @@ function normalizeToolsDimension(
     });
   }
   return {
-    availableToolsState: input.availableToolsState,
+    availableToolsState:
+      input.availableToolsState === 'collected' && availableTools.length === 0 && hadIncompleteCall
+        ? 'data-not-collected'
+        : input.availableToolsState,
     availableTools,
-    callsState: input.callsState,
+    callsState: hadIncompleteCall ? 'data-not-collected' : input.callsState,
     calls,
   };
 }
