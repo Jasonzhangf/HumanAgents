@@ -1550,3 +1550,27 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   armed，`PATROL_CADENCE_RUNTIME_GAP` 未解除；生产 10086 未动。
   已向 CEO（Alice，is_current=false）记录进度（recorded=true，reported=false）。
   下一步：Emma 对 runtime rework 裁决；Alice Step B 完成后提交并由 review。
+
+- 2026-11-03 14:33 UTC：目标巡检通知 m1793715878600-2009 已消费（inbox 空）。
+  两项 P1 均已落盘提交，但 board 尚未 formal deliver。UI（owner Alice）：
+  worktree 分支 codex/p1-ui-terminal-nextstep-20261103 已有提交 f6ce5426e
+  （仅 3 允许文件），browser-receipt.json 14:22 UTC 真实 127.0.0.1:63432
+  HTTP+browser 17/17 checks PASS，index/tasks/task-dashboard 三张截图保存；
+  board 仍 working rev 7。Alice 后台 GCM pid 40797 已 CPU 冻结 idle 约 1
+  分钟未退出，worker-run result.md 仍是 04:57 旧 INCOMPLETE。已发 durable
+  消息 m1793716357938-2018 请其更新 result.md 并 deliver、设 reviewer Emma。
+  Runtime（owner David）：worktree 已有提交 ed285ac92（rework receipt 14:26
+  SUCCESS、终态 succeeded、provider 34 rounds、missing=[]、child-lifecycle
+  可达性证明全 gate ok、cold-resume baseline/candidate 日志）；board 仍
+  rework rev 11。已发 durable 消息 m1793716466559-2021 请其 deliver 交 Emma
+  复核。worktree 仍 7/10，project patrol armed，`PATROL_CADENCE_RUNTIME_GAP`
+  未解除；生产 10086 未动。
+
+- 2026-11-03 14:35 UTC：UI 任务已正式交付。Alice 回执 m1793716485958-2022
+  （已 read）：候选 9b77d7209 已 rebase 至最新 origin/main（6f7eea380），严格
+  3 个允许文件、git status clean；result.md 已写入完整 PASS 证据（红测
+  red-before.log、绿测 green-after.log 71/71、真实 HTTP+Playwright
+  browser-receipt.json 17/17、三张截图）；已 collab task deliver，required
+  reviewer Emma（review_message_id m1793716449819-2020），board 转
+  `delivered`（rev 1）；后台 idle GCM worker 已由 Alice 显式终止、临时资源已清。
+  下一步：Emma 对 UI 候选做独立 review；David runtime rework 待正式 deliver。
