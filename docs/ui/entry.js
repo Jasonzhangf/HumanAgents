@@ -271,7 +271,7 @@ export function localizedStepSummary(summary) {
     if (text.startsWith(`${prefix}:`)) return `${label}${text.slice(prefix.length)}`
     if (text.startsWith(`${prefix} `)) return `${label} ${text.slice(prefix.length + 1)}`
   }
-  return text
+  return '执行进度'
 }
 
 /**

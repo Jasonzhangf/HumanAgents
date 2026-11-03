@@ -2488,3 +2488,17 @@ test('entry page presents an answered snapshot as a success result instead of fa
   assert.equal(harness.status.dataset.tone, 'success');
   assert.equal(harness.status.textContent, '13 加 14 等于 27。');
 });
+
+/*
+ * 未识别的 provider 内部文案不得原样返回给用户可见面板。这是 P1 review finding
+ * 要求的消除点：raw-summary fallback 不能保留。
+ */
+test('localizedStepSummary hides unknown provider copy and raw JSON', async () => {
+  const { localizedStepSummary } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/entry.js')}`,
+  ).href) as { localizedStepSummary: (summary: string) => string };
+
+  assert.equal(localizedStepSummary('Volatile internal detail'), '执行进度', '未识别英文内部文案必须返回固定中文占位');
+  assert.equal(localizedStepSummary('{"kind":"decision","payload":{"x":1}}'), '执行进度', '原始 JSON 决策负载必须返回固定中文占位');
+  assert.equal(localizedStepSummary('Model request dispatched'), '模型请求已派发', '已知精确映射保持不变');
+});
