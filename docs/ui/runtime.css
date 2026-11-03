@@ -717,6 +717,14 @@ pre {
   .page {
     padding: 72px 72px 88px;
   }
+
+  /* Keep the real step summary readable on a phone. The fixed-width phase,
+     timers and detail hint can otherwise consume the first line and squeeze
+     the flexible detail to zero width. Reserving a readable minimum makes the
+     timers wrap instead of hiding the concrete execution summary. */
+  .progress--live .progress-detail {
+    min-width: 4.5em;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

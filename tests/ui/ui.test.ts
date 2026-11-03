@@ -2558,3 +2558,32 @@ test('localizedStepSummary hides unknown provider copy and raw JSON', async () =
   assert.equal(localizedStepSummary('已收到模型推理摘要'), '已收到模型推理摘要', 'runtime 已给出的可读中文步骤必须原样保留');
   assert.equal(localizedStepSummary('Model request dispatched'), '模型请求已派发', '已知精确映射保持不变');
 });
+
+/*
+ * P1 rework-4：真实 RCC 4444 执行阶段抓到的原始帧 summary 都是具体英文短语
+ * （provider request/model lifecycle、tool result）。此前这些未命中映射表，UI
+ * 一律回退成通用「执行进度」，把源端已有的过程信息丢掉了。这里固定每条真实摘要
+ * 的中文标签，同时保留未识别英文/JSON 的通用回退。
+ */
+test('localizedStepSummary maps real RCC execution stage summaries to concrete Chinese', async () => {
+  const { localizedStepSummary } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/entry.js')}`,
+  ).href) as { localizedStepSummary: (summary: string) => string };
+
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ['provider request dispatching', '正在派发模型请求'],
+    ['provider request dispatched', '模型请求已派发'],
+    ['provider request waiting', '等待模型请求返回'],
+    ['provider prepared model output', '模型正在准备输出'],
+    ['provider provided model reasoning', '模型正在推理'],
+    ['provider completed tool request details', '模型已生成工具调用'],
+    ['file.read succeeded', '工具 file.read 已完成'],
+    ['humanagent_turn_end succeeded', '工具 humanagent_turn_end 已完成'],
+    ['Closed turn planner aligned: complete', '回合计划已对齐：完成'],
+    ['durable closure and planner alignment end the task with decision: complete', '执行已完成（决策：完成）'],
+  ];
+  for (const [summary, expected] of cases) {
+    assert.equal(localizedStepSummary(summary), expected, `真实执行阶段摘要 ${summary} 必须显示具体中文步骤`);
+  }
+  assert.equal(localizedStepSummary('Volatile internal detail'), '执行进度', '未识别英文仍必须回退固定中文占位');
+});
