@@ -221,3 +221,99 @@
 - 2026-11-02 09:10 UTC：W2-A 冲突修复已提交并 clean。复检 `mvp-w2a-orch-20261102` HEAD=`c53ec529a`（merge `codex/mvp-w1a-chain-delivery-planner-20261101` into 集成分支），worktree `git status --short` 为空；W1-A `3c0b49f89`/`626969fb3`、W1-B `37c38dd56` 已在集成分支。`origin/main` 仍为 `751580a17`，Alice 尚未把 W2-A 集成分支合入 main；master 不代合并。worktree 5（main + W2-A + 4 locked provider `PROTECTED_HOLD`），未超 10。MVP 结论仍为未达成，四项 P0 open；继续巡检。
 
 - 2026-11-02 09:22 UTC：project-patrol 巡检（四项）+ goal deadline 重 arm。identity=Jenny/role=master，boundary=project，授权来源 user；`collab board show` `tasks=[]`，无 board 未关闭归属；`collab inbox` 空，`collab notify status` project-patrol armed `sub-m1793413132850-18`、interval 900000ms/目标 1500000ms、`PATROL_CADENCE_RUNTIME_GAP` 未解除。`appsdk goal status` 本轮一次性 deadline 已 consumed，随即 `appsdk goal subscribe --interval 20m` 重 arm 成功（deadline armed，next trigger 约 09:41 UTC）。`appsdk bug list` 34 项 open，其中 P0 4 项（`45f92c8`、`a9dc797`、`4c21e74`、`47b26dd`），其余为 P1/P2 审计追踪项。Alice W2-A 集成树 `mvp-w2a-orch-20261102` HEAD 由 `c53ec529a` 继续推进至 `74fb7bb87`（`fix(ui,app): Wave 1-B explicit UI clarity, authoritative stateLabel, and in-page E2E landing sync`，6 文件 +69/-17），现领先 `origin/main` 7 个提交、worktree clean；`origin/main` 仍为 `751580a17`，Alice 尚未合入 main。worktree 实测 5（main + W2-A + 4 locked provider `PROTECTED_HOLD`），未超 10；生产 10086 未动。peer：Bob/Carol/David/Emma online 且无 active board task，Alice 以集成树推进 W1-W3 而非 board task，无 ready peer 工作可派，不空邀请。MVP 交付结论仍为未达成：四项 P0 未收到真实入口回执与截图，端到端「前端输入→执行→对话 agent 完成后派发编排 agent」未收口；Alice 负责 W1-W3 验收/集成，Jenny 保留巡检、bug 真源、evidence handoff 与资源治理，不代合并。
+- 2026-11-03 01:48 UTC：用户要求恢复 master 并向 CEO 报告；live `collab context` 与 `collab master status` 已确认 Jenny role=master、boundary=project、endpoint live、授权原文“恢复你的 collab master 身份”。`collab recv` 已消费 `m1793670418635-37` 及其同批 reflow/unresponsive/D37 重复展示通知；board `mvp-remaining-p0-followups-20261102` 仍 working 但 owner Alice offline，`owner_offline` 需要重新 assign；Alice 的候选 HEAD `21a7c86da` 领先 main 1、behind 5，涵盖 W3-B 五维 AgentDebugInspection 与 W2-A orchestratorDecisionPort 接线，尚未验收/集成。D17 native RCC 有界重试候选 `ede3189ba` 已在 main，bug `3c8c433` closed，真实 RCC once-503 receipt SUCCESS、`execution.retry` seq=4、双视口截图在 `docs/evidence/execution-retry-native-rcc-lane-20261101/`；D20 强制跳转修复 `f5f13f05d` 已在 main，但最新实时卡片证明 `35b9c043e` 仍在 clean 候选分支 `codex/mvp-real-path-dispatch-20261102`（ahead 1/behind 39），需 owner 收口。`p1-ui-copy-corner-20261102` 另有 3 个未合并 UI 修复提交；当前 worktree 8 个（main + 3 活动分支 + 4 locked provider `PROTECTED_HOLD`），未超 10。新登记 open bug `d9f453f`：D37 移动端截图同一“13 加 14 等于 27”在进展、助手、直接回答显示三次，待按界面精简要求修复并做真实入口双视口复验。LayerFS 全项目 CLI 入口已核验，`layerfs --project humanagent project list_branches` 返回原错 `image 'layerfs-local-runtime:node24' not found via unix:///Volumes/extension/layerfs/.colima/layerfs/docker.sock`；按迁移规则不新建 worktree、不绕过 LayerFS，暂停受影响的新任务，旧活动树由 owner 完成。RCC 4444 未在本轮写；生产 10086 未动。下一步：重新分配 Alice 的 board task，验收候选 21a7c86da/35b9c043e，修复 d9f453f，并在 LayerFS runtime image 可用后完成 main 初始化与同步工作线。
+
+- 2026-11-03 02:08 UTC：project-patrol 巡检（四项）+ Alice 名字裁决与 P0 续接。已消费 `m1793671016299-67`、`m1793671165626`、`m1793671190962-74` 等消息；`collab snapshot` 对 Alice 的 tmux pane `%15`（pane_pid 64709、session `6616c844-cf99-4e1f-850d-33e87afd33ca`）成功返回 Antigravity CLI、Alice 初始化报告和 idle prompt，据此提交 `action:adjudicate_name`、`operation_id=presence-binding-codex-session-363631...-Alice-3-1793671157465`、`verdict=online`、完整 evidence；daemon `name_resolution.outcome=applied`，新 Alice worker `codex-session-36363136633834342d636639392d346531662d383530642d333365383761666433336361` 已接管名字与未关闭任务，旧 Alice session 保留为 `%128`/offline。board `mvp-remaining-p0-followups-20261102` revision 8 现 owner=Alice、reviewer=Emma、status=working、completion_missing=[review]；候选 `21a7c86da` 在既有 clean worktree `/Volumes/Intel/playground/humanagent/mvp-remaining-p0-followups-20261102`，`git merge-tree` 对当前 main 无文本冲突。已向 Alice 发送 `m1793671613020-85`：只用继承 worktree，不新建 worktree、不绕过 LayerFS、不写新的产品实现，合并最新 origin/main 后执行聚焦测试、真实 RCC 4444 同入口五类 Agent 状态矩阵、Playwright 双视口 observation.html 截图与 observation-api.json 核对、生产 10086 受影响入口检查，并把真实证据落盘后交付 Emma。LayerFS 原错仍为 `image 'layerfs-local-runtime:node24' not found via unix:///Volumes/extension/layerfs/.colima/layerfs/docker.sock`。当前 worktree 8 个（main + 3 活动分支 + 4 locked provider `PROTECTED_HOLD`），未超 10；生产 10086 未动；goal 一次性 deadline armed、project patrol armed 900000ms/目标 1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 仍未解除。开放 P0 仍为 `45f92c8`、`a9dc797`、`4c21e74`；P1 队列含 `5f80361`、`6a11c8d`、`28d01ec`、`1da2e49`、`180f971`、`111efcc`、`a7f56b9`，其中 `d9f453f` 的重复答案展示仍需真实入口双视口复验。CEO 两项 on_completion 回执仍待实际完成或已证实外部阻塞。
+
+- 2026-11-03 02:10 UTC：P1 UI copy/角落边界验收任务已发布为 `p1-ui-copy-corner-verify-20261102`（revision 1，pending，prefer-role 质检消融架构师，owner=publisher）。验收对象：既有 clean worktree `/Volumes/Intel/playground/humanagent/p1-ui-copy-corner-20261102`（branch `codex/p1-ui-copy-corner-20261102`），3 个提交 `5c74d0d47`/`34258f5e7`/`b1be09a8a`，`git merge-tree` 对当前 origin/main 无文本冲突。任务明确约定现有 worktree 验收，不新建 worktree、不绕过 LayerFS；待 Emma 或匹配角色接受后由其执行验收并交付，再由独立 reviewer 复核。board-idle-patrol `m1793671817495-91` 已消费。
+
+- 2026-11-03 03:05 UTC：project-patrol 巡检（四项）+ 生产入口状态异常。identity=Jenny/role=master，boundary=project，endpoint live；`collab inbox` 为空，无新回执。`origin/main=6aa7d0b5b`，Alice 的 P0 候选 `mvp-remaining-p0-followups-20261102` HEAD=`7c8cb154c`，已包含 `21a7c86da`，相对当前 main ahead 2/behind 0，worktree clean；但仍缺真实 RCC 4444 五类 Agent 状态矩阵、Playwright 双视口 `observation.html` 截图、`observation-api.json` 核对、生产 10086 受影响入口检查和交付回执，不能合并。P1 `p1-ui-copy-corner-verify-20261102` 仍 owner=Emma/status=blocked，候选 HEAD=`85f6cf922`，相对 main ahead 5，仅有未跟踪 `result.md`；`docs/evidence/p1-ui-copy-corner-verification-20261102.md` 记录 UI 测试 2 项失败、live-step-feedback 超时、脚本化步骤摘要失败，bug `79e1029` 仍 open，不能合并。`mvp-real-path-dispatch-20261102` HEAD=`35b9c043e` 仍 ahead 1/behind 39，不能作为当前 main 证据。开放 P0：`45f92c8`、`a9dc797`、`4c21e74`；开放 P1 含 `acca591`、`82af5dc`、`5f80361`、`6a11c8d`、`28d01ec`、`1da2e49`、`180f971`、`111efcc`、`a7f56b9`、`486ddd4`、`28c9738`、`79e1029`。生产 `127.0.0.1:10086` 的 `/` 与 `/api/liveness` 均为 connection refused（HTTP 000），未执行重启或写操作；这是本轮新增的运行状态异常，需由有生命周期的服务 owner 处理。worktree 8 个（main + 3 活动分支 + 4 locked provider `PROTECTED_HOLD`），未超 10；LayerFS 原错仍为 `image 'layerfs-local-runtime:node24' not found via unix:///Volumes/extension/layerfs/.colima/layerfs/docker.sock`。goal `active=true`/`observed=subscribed`，新 deadline `sub-m1793674883467-194` armed；project patrol `sub-m1793413132850-18` armed 900000ms/目标 1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除。MVP 仍不能声明达到交付标准，端到端「前端输入→执行→对话 agent 完成后派发编排 agent」未收口。
+
+- 2026-11-03 03:11 UTC：Alice live snapshot 复核。`collab worker read` 显示 Alice endpoint live、`active_status=working`、`active_task=mvp-remaining-p0-followups-20261102`，不是 idle；`collab snapshot` 显示后台 GCM task-86 已完成 `origin/main` 合并且候选 HEAD=`7c8cb154c`，正在收尾真实 RCC 4444 scheduled-task-2a1bf4a23e2f7238ab08 的 observation-api.json 与双视口截图，以及 `orchestrator.decision.invalid-schema`/`memory.candidate.rejected` 的只读提示 DOM 验证。Alice 已消费 `m1793675345641-202`，当前在查 supervisor/10086 lease 原错；master 不打断，不代合并。生产入口仍为 connection refused，未重启。MVP 结论不变。
+
+- 2026-11-03 03:16 UTC：master 独立核实 Alice P0 共享回执，结论仍为 FAIL，不能交付。`result.md` 与 `w3b-real-rcc-receipt.json` 确认：候选 `7c8cb154c` 相对 `origin/main` ahead 2、worktree clean、9 个允许文件；真实 RCC 4444 任务 `scheduled-task-2a1bf4a23e2f7238ab08` 的 Part A 有五角色 observation-api 和 `observation-desktop-1280x720.png`、`observation-drawer-desktop-1280x720.png`、`observation-mobile-390x844.png`，五角色状态矩阵与 `agentActivity.unknown=0` 已记录。失败项：focused UI tests 40/42、drawer browser 78/88、DOM `p.debug-readonly-hint` UNVERIFIED；Part B context 断言实际为 `collected` 而合同期望 `data-not-collected`，真实任务仍为 blocked。视觉复核同时确认 1280x720 与 390x844 截图里角落固定按钮仍遮挡底部内容，对应 P1 `28c9738`；已将证据追加到 bug `28c9738` 与 `4c21e74`。master 已发 `m1793675771865-217` 要求 Alice 先修复再交付，不合并 main；生产 10086 仍 connection refused。MVP 交付结论不变。
+
+- 2026-11-03 03:31 UTC：project-patrol + goal deadline 巡检。deadline
+  `m1793676083534-223` 已消费；当前一次性 deadline
+  `sub-m1793676095896-224` 已 armed，project patrol
+  `sub-m1793413132850-18` 仍 armed 900000ms，目标 1500000ms，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除。Alice live snapshot 确认仍在
+  `mvp-remaining-p0-followups-20261102` 内修复，task-86 的候选仍为
+  HEAD=`7c8cb154c`，没有新提交或新可验收回执；master 不抢 writer、
+  不合并。Emma 的 P1 task 仍 blocked，候选 HEAD=`85f6cf922`
+  仅多未跟踪 `result.md`；该 peer 不支持 tmux snapshot，不能以 snapshot
+  代替验收。生产 `127.0.0.1:10086` 仍无监听（HTTP 000），未重启或安装。
+  open P0 仍为 `45f92c8`、`a9dc797`、`4c21e74`、`2c8cb44`；本轮
+  未发现新的通过证据。MVP 交付结论不变：前端输入→执行→完成→派发
+  编排 agent 尚未达到可交付标准。
+- 2026-11-03 03:56 UTC：project-patrol 复核。P0
+  `mvp-remaining-p0-followups-20261102` 仍 revision 8、Alice working；
+  候选 worktree 有 `observation.js`、`service.ts`、
+  `w2a-implicit-orchestration.test.ts`、`interaction-observation-drawer-browser.mjs`
+  和 `ui.test.ts` 五个未提交文件，已确认无新 commit 或可验收回执。
+  真实 RCC Part A 已通过，但 focused UI tests 仍 40/42、drawer browser
+  仍 78/88，Part B `context.state` 仍未对齐 `data-not-collected`，
+  角落固定按钮遮挡仍待修复；不能合并。P1
+  `p1-ui-copy-corner-verify-20261102` 仍 blocked，Emma 的 tmux snapshot
+  不可用，不能把不支持当成验收证据。生产 `10086` 仍 connection refused，
+  未安装、未重启。目标 `sub-m1793677478771-288` 已 arm；project patrol
+  仍 900000ms、目标 1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除。
+  CEO `Alice` 已配置，本轮 `collab ceo reply` 已记录 revision 7，
+  `notified=false`、`reported=false`。
+
+- 2026-11-03 04:05 UTC：项目巡检与 CEO 回复义务已收口。`collab worker
+  status` 显示 Jenny 在线 idle、Emma 在线 idle 且持有 blocked P1、Alice
+  endpoint live 但 agent_state unknown 且持有 working P0、`%128` lost、
+  Bob/Carol cold/inactive、David online/running 但没有任务。Alice 的 P0
+  worktree 仍为 `7c8cb154c`，相对 origin/main ahead 2/behind 1，五个
+  修改文件未提交，不能交付。已向 CEO 回复 `m1793678376354-350`，回执
+  为 revision 8、`recorded=true`；旧义务 `m1793616523504-786` 与
+  `m1793624388194-945` 分别记录为 revision 9/10，均为 `recorded=true`、
+  `notified=false`、`reported=false`，不声称 CEO 已读。已重新武装
+  `appsdk goal subscribe`，当前 `active=true`、`observed=subscribed`，
+  新订阅 `sub-m1793678989346-409` 为 20m one-shot；project patrol
+  `sub-m1793413132850-18` 仍为 900000ms，目标 1500000ms，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除。LayerFS 命令行存在，但
+  `layerfs --project humanagent project list_branches` 返回
+  `Unsupported`：Store 目录
+  `/var/lib/docker/volumes/layerfs-humanagent-store/_data/global`
+  不存在；未新建替代 worktree、未绕过 LayerFS。生产 `10086` 未动。
+
+- 2026-11-03 04:32 UTC：消费 `master-idle` 巡检
+  `m1793680354561-487` 并完成四项巡检。Jenny 为项目 master；CEO
+  `Alice` 已配置，本轮 `collab ceo reply` 已记录 revision 11、
+  `recorded=true`、`notified=false`、`reported=false`。Alice P0 仍
+  working：候选 `7c8cb154c` 五个文件未提交，snapshot 显示 GCM
+  `task-503` 正在运行，修 4 项后重跑验收，未交回。Emma P1 仍 blocked，
+  候选 `85f6cf922` 仅多未跟踪 `result.md`。目标 deadline 已 armed
+  `sub-m1793680243582-477`。project patrol 仍 900000ms、目标
+  1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除。生产 `10086` 未动。
+
+- 2026-11-03 04:40 UTC：Alice P0 修复证据已全绿，但尚未正式交付。Part A
+  真实 RCC `scheduled-task-35fe371ff3cfe09b8ab4` 回执 `ok=true`，双视口
+  所有滚动位置角落重叠 0；drawer 检查 88/88 pass；Part B DOM 断言全
+  true，`orchestration.contextState=data-not-collected`。工作树已有
+  `stripJsComments` 与 `renderDirectAnswer` 桩，但 HEAD 仍
+  `7c8cb154c`、5 个文件未提交，`result.md` 仍为旧 FAIL。等 Alice 提交
+  并交回后，master 再独立跑全 gate 验收。
+
+- 2026-11-03 04:50 UTC：Alice 交回 `4f8c809d4`；master 组合
+  origin/main `c58aaf5b8` 得 `7e9bec54a`，构建 0 error、focused
+  42/42、drawer 88/88，真实 RCC `scheduled-task-35fe371ff3cfe09b8ab4`
+  succeeded，Part A/B 回执 PASS。独立 `codex-auto-review` 只读 Review
+  返回 1 个 P1：`agent-debug-inspection.ts:381/387` 合成
+  `call-N`/`unknown.tool`，把不完整工具记录渲染成真实调用。P1 判
+  fail，不能合并。已发返工合同
+  `.worker-runs/mvp-remaining-p0-followups-20261102/review-1/rework-contract.md`
+  给 Alice，要求不合成调用、保持显式 omission、补 negative test 并
+  重跑；生产 10086 未动。
+
+- 2026-11-03 05:41 UTC：P0 `mvp-remaining-p0-followups-20261102` 已
+  `delivered → reviewed accept → integrated → closed`。Alice 的交付候选
+  为 `9e7dda63c`，Emma 的独立 review 确认 tool-call identity 返工无
+  finding，master 在 main/origin/main 同点记录
+  `collab task integrated`；cleanup verified，worktree 与分支已删除，
+  共享证据保留。生产 10086 仍 INCOMPLETE，bug `2c8cb44` 继续跟踪。
+  P1 `p1-ui-copy-corner-verify-20261102` 仍由 Emma reviewer 保持
+  blocked；master 已按现有工作树启动 GCM `rework-2`，要求组合最新
+  main、修复 UI 测试/live-step 超时/真实步骤展示，并交回可审查候选。

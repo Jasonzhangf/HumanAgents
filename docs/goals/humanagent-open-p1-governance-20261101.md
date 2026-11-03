@@ -136,6 +136,13 @@ for new work.
   (closed 2026-11-02 after accepted real-RCC receipt).
 - D43 P2 `8000805` entry exposes feature copy and internal labels.
 - D44 P2 `db32833` semantic observation renders 1069 repeated evidence buttons.
+- D45 P0 `2c8cb44` production 10086 startup failure: installed
+  `humanagent-cli` 0.1.43 reads the 646 MB explicit-brain journal with
+  `readFileSync`, exceeding the V8 string limit. Main already has streaming
+  reads in `packages/app/src/ui-runtime/journal.ts` via `3ae7c8d32`,
+  `9a214a20e`, and `3a90267b7`; owner is `humanagent.app.serve`. Formal
+  install/restart is still a separate lifecycle action and is not authorized
+  by this goal record.
 
 Dependency note: D17 (native RCC retry) has landed on main, so the previous
 single-writer restriction on `coordinator.ts`/`service.ts` is lifted. W1-A
@@ -1105,3 +1112,131 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   独立端口、双视口 Playwright）验收 `486ddd4`/`28c9738`；观察者只读产品源码，
   结束后停止本次独立 serve 并证明端口关闭。本轮未合并、未删他人 worktree、
   未杀进程。
+
+- 2026-11-03 03:22 UTC: goal deadline `m1793676083534-223` 已通过
+  `collab recv` 消费（receive `receive-19318-1793676090275943000-0`），并显式
+  重新武装 20m（新 deadline `sub-m1793674883467-194` 已 armed；project patrol
+  `sub-m1793413132850-18` 仍 armed 900000ms，目标 1500000ms，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除）。master 独立核实 Alice 的 P0
+  候选 `7c8cb154c`：Part A 已有真实 RCC 4444 任务
+  `scheduled-task-2a1bf4a23e2f7238ab08`、五角色 observation-api、桌面/抽屉/移动
+  三张截图，但整体仍为 FAIL；focused UI tests 40/42、drawer browser 78/88，
+  DOM `p.debug-readonly-hint` UNVERIFIED，Part B 的 orchestration
+  `context.state` 实测为 `collected` 而合同期望 `data-not-collected`。视觉复核
+  同时确认 `28c9738` 的固定角落按钮仍遮挡底部内容；已把证据追加到
+  `28c9738` 与 `4c21e74`，并向 Alice 发 `m1793675771865-217` 要求先修复再交付。
+  新生产问题已走 canonical intake 创建 `2c8cb44`：全局安装的
+  `humanagent-cli` 0.1.43 在 `journal.js` 用 `readFileSync` 读取
+  `/Users/fanzhang/.humanagent/main/sessions/explicit-brain.jsonl`（646585180
+  bytes），触发 V8 字符串上限；main 已有流式读取修复。生产 10086 当前仍
+  connection refused；安装与正式重启未执行，等待单独生命周期授权。
+
+- 2026-11-03 03:48 UTC：goal deadline `m1793677296534-282` 已消费，
+  重新武装 20m（one-shot armed）。D45 `2c8cb44` 已派出隔离观察 worker
+  （`.worker-runs/2c8cb44-isolated-start-verify-20261103/worker-1`）：
+  在 worker 独占 control root 复制真实 646MB `explicit-brain.jsonl`，
+  用当前 main 编译产物 `serve` 独立端口启动，验证流式 Journal 读取不再
+  触发 V8 上限。Alice snapshot 确认已启动第二阶段修复 task-503，修复
+  service.ts orchestration context.state、ui.test.ts 两处、observation
+  drawer 与移动端角落安全边距，再重跑聚焦测试和真实 RCC 双视口验收；
+  master 不抢 writer，候选未交回前不合并。P1 copy 候选仍 blocked。
+  生产 10086 未启动未安装。
+
+- 2026-11-03 03:56 UTC：live `collab context` 与 `collab master status` 确认
+  Jenny 为项目 master。`collab recv` 本轮无新消息；目标
+  `sub-m1793677478771-288` 仍 armed。board 中 P0
+  `mvp-remaining-p0-followups-20261102` 仍为 revision 8、owner Alice、
+  status working；候选 worktree 现有 5 个未提交文件，尚无新 commit 或可验收
+  回执。已知证据仍为 focused UI tests 40/42、drawer browser 78/88、
+  Part B `context.state` 为 `collected` 而合同期望 `data-not-collected`；
+  Alice snapshot 显示 task-503 正在执行，不抢 writer、不合并。P1
+  `p1-ui-copy-corner-verify-20261102` 仍 blocked，候选取证不足以交付。
+  生产 `127.0.0.1:10086` 仍 connection refused，未安装、未重启。
+  project patrol `sub-m1793413132850-18` 仍为 900000ms、目标
+  1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除。CEO 进度已记录为
+  revision 7（`recorded=true`、`notified=false`、`reported=false`），
+  不声称 CEO 已读或用户已收到。
+
+- 2026-11-03 04:05 UTC：CEO `m1793678376354-350` 已按当前 board、notify
+  和 worker 状态回复，revision 8、`recorded=true`；旧义务
+  `m1793616523504-786`、`m1793624388194-945` 已分别记录 revision 9/10，
+  均为 `recorded=true`、`notified=false`、`reported=false`，保留
+  on_completion 义务。Alice P0 仍 working，候选
+  `7c8cb154c` 有五个未提交文件；Emma P1 仍 blocked；`%128` lost，
+  Bob/Carol cold，David 可接收输入但无任务。目标 deadline 已重新武装为
+  `sub-m1793678989346-409`，`active=true`、`observed=subscribed`。
+  LayerFS 当前被 Store 目录
+  `/var/lib/docker/volumes/layerfs-humanagent-store/_data/global`
+  缺失阻断，未绕过迁移规则。生产 `10086` 未动。
+
+- 2026-11-03 04:32 UTC：消费 `master-idle` 巡检
+  `m1793680354561-487`。live `collab context`、`collab master status` 与
+  `collab board show` 再次确认 Jenny 为项目 master，boundary=project。
+  CEO `Alice` 已配置（workspace `/Users/fanzhang`）；本轮
+  `collab ceo reply` 已记录 revision 11、`recorded=true`、
+  `notified=false`、`reported=false`，不声称 CEO 已读或用户已收到。
+  P0 `mvp-remaining-p0-followups-20261102` 仍 revision 8、Alice working；
+  候选 `7c8cb154c` 相对 origin/main ahead 2/behind 1，五个文件未提交，
+  无新 commit 或可验收回执。Alice snapshot（tmux pane `%15`）显示后台
+  GCM `task-503` 正在运行：修 service.ts orchestration context.state、
+  ui.test.ts 两处、observation drawer 与移动端角落安全边距 `28c9738`，
+  再重跑 focused tests、drawer browser 与真实 RCC 双视口验收；master
+  不抢 writer、不合并未过 gate 的候选。P1
+  `p1-ui-copy-corner-verify-20261102` 仍 blocked，候选 HEAD=`85f6cf922`
+  仅多未跟踪 `result.md`。目标 deadline 已 armed：
+  `sub-m1793680243582-477`（goal
+  sha256:ad967f…）。project patrol `sub-m1793413132850-18` 仍为
+  900000ms、目标 1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除。
+  生产 `127.0.0.1:10086` 未安装、未重启、未动。
+
+- 2026-11-03 04:50 UTC：Alice 正式交回 P0 候选 `4f8c809d4`
+  （含合并 `7c8cb154c`）。master 独立验收：fetch origin/main
+  （`c58aaf5b8` docs-only），组合为 `7e9bec54a`（ahead 4/behind 0）。
+  `pnpm typecheck` + `build:contracts` + `build:config` + `build:app` +
+  `tsc tests/ui + tests/app` 全 0 error。Focused tests 42/42 PASS。
+  Drawer browser 88/88 PASS。Alice 回执 `w3b-real-rcc-receipt.json`
+  `overall=PASS`，Part A 真实 RCC `scheduled-task-35fe371ff3cfe09b8ab4`
+  succeeded、五角色齐全、`agentActivityUnknownCount=0`；Part B
+  `status=PASS, domStatus=PASS, deviation=null`、
+  `orchestrationContextDataNotCollected=true`。角标重叠 0。
+  按 Review 合同启动独立 `codex exec --profile oauth --model
+  codex-auto-review` 只读 Review（review-1），退出码 0、有效 JSON。
+  Review 返回 1 个 P1 finding：
+  `packages/ui/projection/agent-debug-inspection.ts:381/387` 在缺
+  `callId`/`toolName` 时合成 `call-${idx+1}` / `unknown.tool`，把
+  不完整记录渲染成真实工具调用，违反“缺失事实显式未收集、不得
+  伪造占位”。P1 判 fail，不能合并。已落盘返工合同
+  （`review-1/rework-contract.md`）并发 `m1793682152653-610` 给
+  Alice，要求修唯一 owner、补 focused negative test、重跑受影响
+  验证，禁止 push/merge/10086。P1 仍 blocked，生产 10086 仍未动。
+  goal 已重新武装 `appsdk goal subscribe --goal … --interval 20m`。
+
+- 2026-11-03 04:40 UTC：修复证据已全绿，但 Alice 尚未正式交付。master
+  只读核对 repair-worker-2 产物：Part A 真实 RCC 任务
+  `scheduled-task-35fe371ff3cfe09b8ab4` 回执 `ok=true`，1280x720 与
+  390x844 所有滚动位置角落重叠 0；`drawer-browser-checks.json`
+  88/88 全部 pass；`verify-worker-1/partb-dom-receipt.json`（04:36:21Z）
+  断言全 true，`orchestration.contextState=data-not-collected`、
+  `orchestrator.decision.invalid-schema` 只读提示到位。工作树已有
+  `service.ts:1326` 的 `data-not-collected`、`ui.test.ts:915`
+  `stripJsComments` 注释剥离、`ui.test.ts:2267` `renderDirectAnswer`
+  桩。但候选 worktree 仍为 HEAD `7c8cb154c`、5 个文件未提交，
+  `result.md` 仍是 19:21 的旧 FAIL 回执，无正式交付与 board handoff。
+  Alice pane 仍显示 GCM running，并声明等 task-503 完成后向 Jenny
+  汇报；master 不抢 writer，待其提交并交回后再独立跑 focused tests、
+  drawer、真实 RCC、双视口与 DOM 全 gate。
+
+- 2026-11-03 05:41 UTC：P0 `mvp-remaining-p0-followups-20261102` 已完成
+  正式收口。Alice 执行 `collab task deliver`（候选
+  `9e7dda63cc9467d8aa7d677a3a74d44118d0272b`，证据
+  `.worker-runs/mvp-remaining-p0-followups-20261102/result.md`）；Emma
+  按独立 review 回执 accept，并明确 10086 生产入口仍为 INCOMPLETE；
+  master `collab task integrated --commit 9e7dda63c`，随后 Alice 清理
+  worktree/分支并执行 close。board 现为 closed、integrated、
+  completion_missing=[]、cleanup verified；共享证据目录保留。P1
+  `p1-ui-copy-corner-verify-20261102` 仍由 Emma 作为 reviewer 保持
+  blocked；master 已启动独立 GCM 实现 worker `rework-2`，在既有
+  worktree `/Volumes/Intel/playground/humanagent/p1-ui-copy-corner-20261102`
+  组合最新 main，修复 UI 测试、live-step 超时与真实步骤展示，禁止
+  push/merge/生产操作。LayerFS 新任务仍受 Store 缺失阻断，本续接沿用
+  原 owner 的既有工作树。生产 10086 未动。
