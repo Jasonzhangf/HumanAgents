@@ -177,6 +177,7 @@ function observationProjection(withDrawer, taskId, selectedNodeId) {
       projectionSeq: 'seq-12',
       breadcrumbs: [{ ref: `task://${taskId}/observation`, title: '任务处理流水' }],
       canReturn: false,
+      purpose: 'pipeline-registry',
       nodes: scopeNodes,
     },
     nodes: [
@@ -678,6 +679,9 @@ try {
     const pageErrors = []
     page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`))
     await page.goto(`${server.url}/observation.html?task=${TASK_ID}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('details[data-observation-catalogue="true"] > summary, .flow-node', { timeout: 10000 })
+    const closedCatalogueSummary = await page.$('details[data-observation-catalogue="true"]:not([open]) > summary')
+    if (closedCatalogueSummary) await closedCatalogueSummary.click()
     await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 10000 })
 
     const defaultObservation = await readDefaultObservation(page)
@@ -799,6 +803,7 @@ try {
     const drawer = await readDrawer(page)
     observe(`${run.label} drawer`, drawer)
     observe(`${run.label} page errors`, pageErrors)
+    await page.waitForSelector('.semantic-observation[data-state="completed"]', { timeout: 5000 }).catch(() => {})
     const semanticPanel = await page.evaluate(() => ({
       mounted: Boolean(document.querySelector('.semantic-observation')),
       contract: document.querySelector('.semantic-observation')?.dataset.contractVersion ?? '',
@@ -945,6 +950,9 @@ try {
     const pageErrors = []
     page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`))
     await page.goto(`${server.url}/observation.html?task=${MISSING_STATE_TASK_ID}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('details[data-observation-catalogue="true"] > summary, .flow-node', { timeout: 10000 })
+    const closedCatalogueSummaryMissing = await page.$('details[data-observation-catalogue="true"]:not([open]) > summary')
+    if (closedCatalogueSummaryMissing) await closedCatalogueSummaryMissing.click()
     await page.waitForSelector('.flow-node[data-node-id="settle"]', { timeout: 10000 })
     const missingState = await readDefaultObservation(page)
     const settle = missingState.nodes.find((node) => node.nodeId === 'settle')

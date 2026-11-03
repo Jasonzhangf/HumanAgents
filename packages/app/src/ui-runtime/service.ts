@@ -1319,18 +1319,18 @@ function buildObservationAgentDebugInput(
         completedAt: taskEndInstant,
         durationMs: Math.max(0, Date.parse(taskEndInstant) - Date.parse(taskStartInstant)),
       },
+      // The planner failed, so its debug context was not recorded. Report
+      // data-not-collected even when a prior plan revision exists; a failed
+      // planner must not be represented as a collected context.
       context: {
-        state: 'collected',
+        state: 'data-not-collected',
         contextRootId,
         inheritsOrchestratorContext: false,
-        messageCount: 1 + planRevisions.length,
-        charCount: (task.directive?.length ?? 0) + (task.input?.length ?? 0),
-        injectedRefs: [
-          ...(task.directive ? [`task://${task.taskId.value}/directive@${task.directiveRevision || 1}`] : []),
-          ...(admission ? [`task://${task.taskId.value}/admission/${admission.queue}`] : []),
-        ],
-        compacted: false,
-        omissionReason: null,
+        messageCount: null,
+        charCount: null,
+        injectedRefs: [],
+        compacted: null,
+        omissionReason: 'not-recorded-by-runtime',
       },
       model: {
         state: 'invoked-without-model',

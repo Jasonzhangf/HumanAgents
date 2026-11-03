@@ -841,6 +841,7 @@ test('W2-A & W3-B (7): UiRuntimeService wires orchestratorDecisionPort and proje
     assert.equal(orchDebug!.invocationStatus, 'failed');
     assert.equal(orchDebug!.error.state, 'present');
     assert.equal(orchDebug!.error.code, 'orchestrator.decision.invalid-schema');
+    assert.equal(orchDebug!.context.state, 'data-not-collected');
     assert.ok(orchDebug!.error.readonlyNextActionHint);
     assert.equal(obs.selectedNode?.debugInspection?.agentRole, 'orchestration');
   } finally {

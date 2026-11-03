@@ -57,6 +57,12 @@ export async function observationRead(transport, { taskId, scopeRef, selectedNod
 }
 
 function bootstrapObservation() {
+  if (typeof document !== 'undefined' && !document.querySelector('style[data-observation-corner-safe="true"]')) {
+    const style = document.createElement('style')
+    style.dataset.observationCornerSafe = 'true'
+    style.textContent = '@media (max-width: 780px) { .page { padding: 72px 72px 88px; } }'
+    document.head.append(style)
+  }
 // Node order, display row and agent ownership are read from the HTTP projection only. The page keeps
 // no second node-order table and no keyword-based attribution: `projection.nodes[].row` comes from
 // `PIPELINE_ROWS` in packages/contracts, and `projection.agentFrames` is the only ownership source.
@@ -129,6 +135,7 @@ let drawerCard
 let triggerNodeId
 let returnFocusPending = false
 let selectedNodeId
+let catalogueOpen = false
 // The scope the page is currently showing, so a node click reloads the same scope with the node
 // selected instead of re-deriving scope refs on the page.
 let currentScopeRef = observationScopeFromSearch(location.search)
@@ -979,18 +986,25 @@ function observationCollection(projection) {
 
 function hasActualExecutionFacts(projection) {
   const read = projection?.agentActivity
-  if (read?.ok === true && read.value) {
-    const value = read.value
-    const count = (value.selected?.length ?? 0)
-      + (value.current?.length ?? 0)
-      + (value.historical?.length ?? 0)
-      + (value.unknown?.length ?? 0)
-    if (count > 0) return true
-    if (value.actualExecutionGraph?.history?.status === 'recorded') return true
+  if (read !== undefined) {
+    if (read?.ok === true && read.value) {
+      const value = read.value
+      const count = (value.selected?.length ?? 0)
+        + (value.current?.length ?? 0)
+        + (value.historical?.length ?? 0)
+        + (value.unknown?.length ?? 0)
+      if (count > 0) return true
+      if (value.actualExecutionGraph?.history?.status === 'recorded') return true
+    }
+    return projection?.scope?.purpose === 'execution-events'
+      && Array.isArray(projection.nodes)
+      && projection.nodes.length > 0
   }
-  return projection?.scope?.purpose === 'execution-events'
-    && Array.isArray(projection.nodes)
-    && projection.nodes.length > 0
+  return Array.isArray(projection?.nodes)
+    && projection.nodes.some((node) =>
+      (Array.isArray(node?.activity) && node.activity.length > 0)
+      || (Array.isArray(node?.toolSteps) && node.toolSteps.length > 0),
+    )
 }
 
 function observationNextStep(projection) {
@@ -1028,6 +1042,8 @@ function renderNodeCollection(projection, collection) {
 function renderCatalogueDisclosure(projection, collection) {
   const disclosure = element('details', undefined, 'observation-catalogue')
   disclosure.dataset.observationCatalogue = 'true'
+  disclosure.open = catalogueOpen || Boolean(projection.selectedNode) || Boolean(selectedNodeId) || Boolean(triggerNodeId)
+  disclosure.addEventListener('toggle', () => { catalogueOpen = disclosure.open })
   const summary = element('summary', undefined, 'observation-catalogue-summary')
   summary.append(
     element('span', collection.title),
@@ -1145,7 +1161,7 @@ function renderSemanticObservationSection() {
     if (taskId) {
       semanticObservationPanel = mountSemanticObservationPanel(semanticObservationHost, {
         taskId,
-        scope: explicitScope,
+        scope: explicitScope ?? undefined,
         // The panel's own four buttons reuse the shell programmatic transition,
         // so a local click cannot write the follow-last preference. The corner
         // buttons keep the original manual controller path.

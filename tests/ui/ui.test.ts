@@ -31,6 +31,51 @@ import {
   type TaskOutput,
 } from '@humanagent/contracts';
 
+/**
+ * Remove JavaScript comments so the source-level token guards inspect
+ * executable UI code only. The UI files keep prose comments that name forbidden
+ * concepts for documentation, not for behavior.
+ */
+function stripJsComments(source: string): string {
+  let out = '';
+  let i = 0;
+  let quote: '"' | "'" | '`' | null = null;
+  while (i < source.length) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      out += ch;
+      if (ch === '\\') {
+        out += source[i + 1] ?? '';
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      while (i < source.length && source[i] !== '\n') i += 1;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i += 1;
+      i += 2;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 const organ = id('organ', 'organ-a');
 const taskId = id('task', 'task-a');
 const evidence = (name: string): EvidenceRef => ({
@@ -867,12 +912,13 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
     'docs/ui/entry.js',
   ];
   const source = (await Promise.all(files.map((file) => readFile(file, 'utf8')))).join('\n');
-  assert.equal(source.includes('Journal'), false);
-  assert.equal(source.includes('RCC raw'), false);
-  assert.equal(source.includes('DSH Session'), false);
-  assert.equal(source.includes('fake://output'), false);
-  assert.equal(source.includes('重试 operation'), false);
-  assert.equal(source.includes('steer'), false);
+  const codeOnly = stripJsComments(source);
+  assert.equal(codeOnly.includes('Journal'), false);
+  assert.equal(codeOnly.includes('RCC raw'), false);
+  assert.equal(codeOnly.includes('DSH Session'), false);
+  assert.equal(codeOnly.includes('fake://output'), false);
+  assert.equal(codeOnly.includes('重试 operation'), false);
+  assert.equal(codeOnly.includes('steer'), false);
   assert.equal(source.includes('/api/runtime/status'), true);
   assert.equal(source.includes('createRuntimeApi'), true);
   assert.equal(source.includes('implicitScheduling'), true);
@@ -2173,6 +2219,7 @@ type EntrySubmissionHarness = {
   }[];
   readonly draftedStates: readonly string[];
   readonly status: { readonly dataset: Record<string, string>; readonly textContent: string };
+  readonly directAnswers: readonly { readonly tone?: string; readonly text?: string; readonly retry?: boolean }[];
   readonly state: () => string;
 };
 
@@ -2204,6 +2251,7 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     'let api = apiRef.current;',
     'const cardStates = [];',
     'const draftedStates = [];',
+    'const directAnswers = [];',
     'const status = { dataset: {}, textContent: "" };',
     'const submitBanner = { text() {}, clear() {} };',
     'const window = { location: { assign() {} } };',
@@ -2216,6 +2264,7 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     '}',
     'function appendCardError() {}',
     'function renderDraft(snapshot) { draftedStates.push(snapshot.state); }',
+    'function renderDirectAnswer(result) { directAnswers.push(result); }',
     'async function waitForTask() { return "task-1"; }',
     'function observationHref(taskId) { return "./task.html?task=" + taskId; }',
     'async function refreshQueue() {}',
@@ -2235,10 +2284,12 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     '    latestState = "received";',
     '    cardStates.length = 0;',
     '    draftedStates.length = 0;',
+    '    directAnswers.length = 0;',
     '    return await executeSubmission(submission);',
     '  },',
     '  cardStates,',
     '  draftedStates,',
+    '  directAnswers,',
     '  status,',
     '  state: () => latestState,',
     '};',
@@ -2486,5 +2537,7 @@ test('entry page presents an answered snapshot as a success result instead of fa
   assert.equal(harness.state(), 'answered');
   assert.deepEqual(harness.draftedStates, ['answered']);
   assert.equal(harness.status.dataset.tone, 'success');
-  assert.equal(harness.status.textContent, '13 加 14 等于 27。');
+  assert.equal(harness.status.textContent, '本次请求已直接回答');
+  assert.equal(harness.directAnswers.length, 1);
+  assert.equal(harness.directAnswers[0]?.text, '13 加 14 等于 27。');
 });
