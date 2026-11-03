@@ -436,6 +436,12 @@ test('explicit interaction events stream dispatch, return, and acceptance in lif
       assert.ok(!/^[\[{]/.test(summary), `${kind} summary must not be raw JSON: ${summary}`);
       assert.ok(!/Model is (reasoning|streaming output)/.test(summary), `${kind} summary leaked an internal English label: ${summary}`);
     }
+    for (const kind of ['helper.dispatched', 'helper.request', 'helper.response', 'helper.accepted']) {
+      const summary = (liveStepSummaries.get(kind) ?? '').trim();
+      assert.ok(summary !== '', `${kind} must publish a readable step summary`);
+      assert.ok(!/^[\[{]/.test(summary), `${kind} summary must not be raw JSON: ${summary}`);
+      assert.ok(!/Dispatching helper|Helper .* (request started|returned|accepted)/.test(summary), `${kind} summary leaked an internal English label: ${summary}`);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

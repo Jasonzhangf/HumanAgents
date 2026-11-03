@@ -1406,12 +1406,12 @@ export function createProviderExplicitBrainInterpreter(input: {
               if (parsed.toolId === 'dispatch_helper') {
                 request.onStep?.({
                   kind: 'helper.dispatched',
-                  summary: `Dispatching helper ${parsed.selection.roleId}`,
+                  summary: '正在派发助手',
                   turnId: turn.turnId,
                 });
                 request.onStep?.({
                   kind: 'helper.request',
-                  summary: `Helper ${parsed.selection.roleId} request started`,
+                  summary: '助手请求已发出',
                   turnId: turn.turnId,
                 });
                 const dispatched = await helpers.dispatchHelper({
@@ -1438,7 +1438,7 @@ export function createProviderExplicitBrainInterpreter(input: {
                 });
                 request.onStep?.({
                   kind: 'helper.response',
-                  summary: `Helper ${dispatched.identity.helperCallId} returned`,
+                  summary: '助手已返回结果',
                   turnId: dispatched.identity.parentTurnId,
                   helperCallId: dispatched.identity.helperCallId,
                 });
@@ -1453,7 +1453,7 @@ export function createProviderExplicitBrainInterpreter(input: {
                   acceptedBy: 'humanagent.runtime.explicit-brain', evidenceRefs: parsed.evidenceRefs });
                 request.onStep?.({
                   kind: 'helper.accepted',
-                  summary: `Helper ${parsed.helperCallId} accepted`,
+                  summary: '助手结果已接受',
                   turnId: turn.turnId,
                   helperCallId: parsed.helperCallId,
                 });

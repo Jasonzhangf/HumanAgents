@@ -1427,7 +1427,7 @@ function subscribeExplicitStepStream(activeId) {
       const payload = JSON.parse(event.data || '{}')
       const step = payload?.step ?? payload
       if (step && typeof step.summary === 'string' && step.summary.trim() !== '') {
-        appendCardEvent('status', step.summary, 'progress', {
+        appendCardEvent('status', localizedStepSummary(step.summary), 'progress', {
           eventKey: step.kind || 'explicit.step',
           interactionId: activeId,
         })
