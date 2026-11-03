@@ -656,3 +656,11 @@ main a474cf109 上 `pnpm build:runtime` 的 ui-runtime tsc 步骤出现类型回
 - 外置卷权限仍未恢复：`/Volumes/Intel` 挂载（APFS `nodev,nosuid,noowners`，属主 fanzhang:staff），`stat`/`ls -d` 可取元组，但读取目录内容、进 worktree、读 `.worker-runs` receipts 全部 `Operation not permitted`。因此 W2-A worktree 与全部证据/截图当前不可访问，无法推进实现或补图；不绕路径、不换 worktree、不重启用户 daemon。
 - 主检出树 `/Volumes/extension/code/humanagent` 可读，HEAD `751580a17` == origin/main；`node scripts/dagpipe-validate-graphs.mjs` 输出 `validated 31 DAGpipe graph(s)`，全部有效。`appsdk 0.1.0015 (rust)`、`collab 0.2.0389`；AGENTS.md `## 符号探索`（50-58 行）已含 nn-code 使用与反馈要求。主检出树 docs 修改（checklist/goal/note + 16 个 docs 证据）已暂存，待提交。
 - 交付清单 `docs/goals/master-delivery-checklist-2026-10-31.md`：D1-D22 已关闭，D23-D43 为开放 P0/P1 缺陷（D23 原生 lane 绕过隐式编排、D24 公共结果为空、D31 Planner 非 JSON、D42 首页提交停 received 等），MVP 未达交付标准。用户三项前端验收：输入可执行未稳定（D42）、动画有但无当前 step/计时（D20 rework）、执行后派发编排未成立（D23），截图证据在不可读卷上，权限恢复后补图。
+
+## 2026-11-03 11:58 UTC（master 恢复、LayerFS 清理、两个 P1 派发）
+
+- 消费 master-idle `m1793705857048-1587` 与 goal deadline `m1793706938526-1635`（回执 `receive-23279-1793707051509105000-0`）。`collab context` 成功：Jenny role=master、endpoint_live=true；CEO=Alice、is_current=false；goal active=true/observed=subscribed 20m；project patrol armed 900000ms。
+- LayerFS 验证资源清理完成：`sandbox close 1/2`，3 个 workspace 卸载（Sandbox2 的 node_modules/dist 构建产物以 `--discard` 丢弃），`project list_sandboxes` 为空。worktree 6/10（main + mvp-real-path-dispatch + 4 locked provider PROTECTED_HOLD）。生产 10086 connection refused，未安装、未重启。
+- 两个 P1 根因确认：`1e9099b` = `packages/ui/projection/runtime.ts:389,588` 与 `packages/app/src/ui-runtime/service.ts:1943,5229` 在 succeeded 时把 nextStep 强改为空，而测试要求终态行保留「查看任务详情」；`c5d4671` = checkpoint identity mismatch，抛点 `packages/contracts/src/index.ts:817 assertCheckpointIdentity`，需 runtime owner 定位 operation/checkpoint scope 首次偏离。
+
+- 12:05 UTC：Emma 退回两张 P1 邀请，明确用户分工为「Emma 负责质检与验收、Jenny 安排实现修复」。已按 task policy 重新派发：`p1-ui-terminal-nextstep-20261103` → executor Alice / reviewer Emma；`p1-runtime-checkpoint-identity-20261103` → executor David / reviewer Emma；均 `invited`。goal 已重新武装 20m，CEO 报告 rev 17 已记录。

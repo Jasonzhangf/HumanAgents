@@ -1402,3 +1402,30 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `PROTECTED_HOLD`）。生产 10086 未动，未做安装/重启。剩余待推进：
   `c5d4671`（humanagent.runtime，LayerFS Store 缺失保留原错）、
   `1e9099b`（packages/ui，终态 nextStep 行为核对）。
+
+- 2026-11-03 11:58 UTC：master 恢复与 LayerFS 验证资源清理。消费
+  master-idle `m1793705857048-1587` 与 goal deadline
+  `m1793706938526-1635`（回执 `receive-23279-1793707051509105000-0`）。
+  `collab context` 成功：identity=Jenny role=master、endpoint_live=true；
+  `collab ceo status` CEO=Alice、is_current=false。`appsdk goal status`
+  active=true / observed=subscribed / 20m；project patrol armed 900000ms。
+  LayerFS 验证资源已清理：`sandbox close 1` 与 `2`，3 个 workspace 卸载
+  （Sandbox2 的 node_modules/dist 等构建产物以 `--discard` 丢弃），
+  `project list_sandboxes` 现为空。git worktree 6/10（main +
+  mvp-real-path-dispatch + 4 locked provider PROTECTED_HOLD）。生产
+  10086 connection refused，未安装、未重启。两个 P1 根因已确认：
+  (1) `1e9099b`：`packages/ui/projection/runtime.ts:389,588` 与
+  `packages/app/src/ui-runtime/service.ts:1943,5229` 在 `succeeded` 时把
+  `nextStep` 强改为空，测试要求终态行保留「查看任务详情」；
+  (2) `c5d4671`：`checkpoint identity mismatch`，抛点来自
+  `packages/contracts/src/index.ts:817 assertCheckpointIdentity`，需
+  `humanagent.runtime` owner 定位 operation/checkpoint scope 首次偏离。
+  下一步：发布并派发两个 P1 修复任务给 peer，不再等 reminder。
+
+- 2026-11-03 12:05 UTC：Emma 退回两张 P1 邀请，并明确用户分工：Emma
+  负责项目质检与验收，Jenny 安排实现修复，候选交回后由 Emma 复验。已按
+  task 级 policy 重新分派：`p1-ui-terminal-nextstep-20261103` executor
+  Alice（ux专家架构师）、reviewer Emma；`p1-runtime-checkpoint-identity-20261103`
+  executor David（测试工程师）、reviewer Emma。两任务均 `invited`（durable
+  msg `...-6`），等待实现者接受。goal 已重新武装（`appsdk goal subscribe
+  --interval 20m`，Active=true/subscribed）。CEO 报告 revision 17 已记录。
