@@ -1,0 +1,75 @@
+{
+  "results": [
+    {
+      "name": "nav-links-present",
+      "ok": true,
+      "detail": "5: HumanAgent->./dashboard.html, Dashboard->dashboard.html, Task List->tasks.html, 新建 Task->./index.html, Memory->memory.html"
+    },
+    {
+      "name": "nav-click HumanAgent",
+      "ok": true,
+      "detail": "-> /dashboard.html bodyLen=624"
+    },
+    {
+      "name": "nav-click Dashboard",
+      "ok": true,
+      "detail": "-> /dashboard.html bodyLen=624"
+    },
+    {
+      "name": "nav-click Task List",
+      "ok": true,
+      "detail": "-> /tasks.html bodyLen=238"
+    },
+    {
+      "name": "nav-click 新建 Task",
+      "ok": true,
+      "detail": "-> /index.html bodyLen=166"
+    },
+    {
+      "name": "nav-click Memory",
+      "ok": true,
+      "detail": "-> /memory.html bodyLen=426"
+    },
+    {
+      "name": "open-display-settings",
+      "ok": true,
+      "detail": "{\"tag\":\"DIALOG\",\"w\":500,\"h\":688,\"visible\":true,\"text\":\"主动配置\\n\\n显示设置：调整展开与排版方式\\n关闭\\n\\n展开方式：桌面在右侧展开，主内容保留在旁边；手机从底部抽屉展开。\\n\\n排版：窄屏时正文换行，展开层正文可以滚动，标题与关闭入口保持可用。\\n\\n调整显示只改变这一层怎么展开，不会停止、重试或改变任\"}"
+    },
+    {
+      "name": "close-display-settings-escape",
+      "ok": true,
+      "detail": "closed=true"
+    },
+    {
+      "name": "empty-submit-validation",
+      "ok": true,
+      "detail": "enabled=true feedback=true text=\"HumanAgent Dashboard Task List 新建 Task Memory 任务输入 运行正常 服务已连接。 技术详情 队列与任务状态 0 项 任务数量 0 尚未提交任务。 用户任务 一次提交即确认本次新任务 任务输入 执行类型 单次执行 定时执行 周期执行 提交任务 工作范围 查看方式 显示设置 输入\""
+    },
+    {
+      "name": "keyboard-focus-visible",
+      "ok": true,
+      "detail": "8/8 focused elements show visible ring"
+    },
+    {
+      "name": "dashboard-empty-buttons",
+      "ok": true,
+      "detail": "0 empty: []"
+    },
+    {
+      "name": "dashboard-no-failure-state",
+      "ok": false,
+      "detail": "failure texts: [\"读取失败\"]"
+    },
+    {
+      "name": "tasks-page-renders",
+      "ok": true,
+      "detail": "bodyLen=238 buttons=[\"技术详情\",\"刷新当前范围\",\"工作范围\",\"查看方式\",\"显示设置\",\"输入设置\",\"关闭\"] text=\"HumanAgent Dashboard Task List 新建 Task Memory 项目任务 这里列出这个项目本次读取返回的任务，并标明读取是否完整。 系统 项目 ha-ui-qa-20261102-190840-ws 运行正常 服务已连接。 技术详情 刷新当前范围 ha-ui-qa-20261102-190840-ws 本次读取返回 0 个任务 · 读取范围：当前项目 · 本次读取完整 \""
+    },
+    {
+      "name": "memory-page-renders",
+      "ok": true,
+      "detail": "bodyLen=426 controls=[\"技术详情\",\"session 来源详情\",\"整理技术详情\",\"工作范围\",\"查看方式\",\"显示设置\",\"输入设置\",\"关闭\"] text=\"HumanAgent Dashboard Task List 新建 Task Memory MEMORY AGENT 记忆与候选审核 查看记忆 agent session 与候选审核；接受、拒绝或延期都由你明确决定。 运行正常 服务已连接。 技术详情 记忆 agent session session 来源不可用 no declared memory-agent session reader exists; memory review candidates are not sessions 恢复：\""
+    }
+  ],
+  "consoleErrors": []
+}
