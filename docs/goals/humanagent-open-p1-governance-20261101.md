@@ -1586,3 +1586,20 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   Runtime：David 已 formal deliver rework（board 转 delivered），待 Emma 复核。
   main HEAD=22f773f2d；worktree 7/10；project patrol armed，
   `PATROL_CADENCE_RUNTIME_GAP` 未解除；生产 10086 未动。
+
+- 2026-11-03 14:46 UTC：UI 任务已由 owner 关闭。Alice 回执
+  m1793717157276-2053：自有长程 goal 已取消，worktree、分支
+  codex/p1-ui-terminal-nextstep-20261103 与 worker-run 目录已物理移除；
+  collab task close 完成，status=closed、disposition=integrated、
+  delivery_complete=true、cleanup receipt=verified。board 仅剩 runtime
+  一项。Runtime 第二次复审仍 rework（rev 15）：Emma 指出 David 的新 RCC
+  SUCCESS 是脚本删除 child lifecycle 断言后得到，四标志全 false，静态
+  reachability 字符串匹配不足以证明正式入口不可达；另登记 209de7c
+  （cold-resume 九项基线/候选同错，retired-delivery-text/outcome、HTTP
+  409 vs 202，属独立缺陷）。David 已自行纠正 reachability 结论为
+  childLifecycleReachableAtFormalEntry=false（serve fake/rcc/native run
+  三入口），并补 raw focused-test red/green 日志（4/4）。Jenny 已发
+  m1793717314823-2066 收口合同：A 真实 red-green 触发 child lifecycle 到
+  review.checkpointed，或 B 正式入口受影响行为 UNVERIFIED + 需求缺口交
+  Jenny 认领；不得改断言。main HEAD=3f513a43e；worktree 7/10；生产 10086
+  未动。
