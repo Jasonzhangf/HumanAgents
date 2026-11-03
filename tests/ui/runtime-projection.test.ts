@@ -369,6 +369,7 @@ test('runtime task rows retain existing terminal actions and result facts', () =
   assert.equal(row.error?.code, 'retained.failure');
   assert.equal(row.checkpoint?.checkpointId, 'cp-9');
   assert.equal(row.nextStep, '查看任务详情');
+  assert.equal(projectRuntimeTaskDashboard(completed, 'fake').nextStep, '查看任务详情');
 });
 
 test('task waiting copy describes settlement without guessing activity from raw nodes', () => {
