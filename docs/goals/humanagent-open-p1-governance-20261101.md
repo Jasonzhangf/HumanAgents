@@ -1517,3 +1517,22 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   worktree 7/10（main + mvp-real-path-dispatch + Alice UI + 4 locked
   provider PROTECTED_HOLD）；project patrol armed，
   `PATROL_CADENCE_RUNTIME_GAP` 未解除；生产 10086 未动。
+
+- 2026-11-03 14:03 UTC：goal deadline `m1793714533508-1974` 已消费
+  （receive-id `receive-89657-1793714558311517000-0`）并按 20m 重新武装。
+  board：runtime 任务仍 `rework`（rev 11，owner David，reviewer Emma，
+  missing review/integration/close）；UI 任务仍 `working`（rev 7，owner
+  Alice，reviewer Emma）。David 已按 rework 合同重建独立 worktree
+  `/Volumes/Intel/playground/humanagent/p1-runtime-checkpoint-identity-20261103`
+  （分支 `codex/p1-runtime-checkpoint-identity-20261103-rework`，base
+  277ce7ddb），新增未跟踪 `scripts/c5d4671-fake-receipt.mjs`（真实 CLI
+  `serve --mode fake` 同入口 child-assembly 路径脚本，能否算复验证据由
+  Emma 判定）。Alice 的 GCM worker（pid 40797，55m）正在
+  `p1-ui-terminal-nextstep-20261103` worktree 执行 Step B：临时浏览器验证
+  （index-succeeded-row/tasks-succeeded-row/task-dashboard-detail 截图与
+  browser-receipt.json），随后 Step C 移除临时文件并 commit 三个允许文件、
+  更新 result.md；worker 指令指向真实 `startUiRuntimeServer`/
+  `startUiRuntime` 入口。worktree 7/10（main + mvp-real-path-dispatch +
+  runtime rework + Alice UI + 4 locked provider PROTECTED_HOLD）；
+  project patrol armed，`PATROL_CADENCE_RUNTIME_GAP` 未解除；生产
+  10086 未动。
