@@ -1750,3 +1750,21 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   在其 worktree 重试 `handoff(c5d4671)` 提交（此前被 `timeout 90` 误杀）。
   goal 保持 `active=true`（`registered_at=2026-11-03T20:03:09Z`，下一 deadline
   约 20:23 UTC）。生产 10086 未动。
+
+- 2026-11-03 20:16 UTC：消费 master-idle:project-patrol
+  `m1793736970924-158`，已 read。四项巡检结果：
+  (1) P0/P1 未闭合项不变（P0 45f92c8/a9dc797/4c21e74；P1 c5d4671/209de7c 等）。
+  (2) 未完成/就绪工作：Alice 的正式入口任务 `working`
+  （`p1-checkpoint-formal-entry-child-lifecycle-20261103`，reviewer Emma）；
+  David 的 runtime rework 已由 owner 本人合法取消其 board patrol
+  （`cancelled_ms=1793736614123`，原因=阻塞于上游 Alice 任务，c5d4671 保持
+  rework 直到该任务返回且 Emma 复验，resume_condition 未设），按规则不重新
+  arm 已取消任务。inbox `unread=0`，无可派发新就绪授权工作。
+  (3) worktree 8/10（含 4 个 locked provider `PROTECTED_HOLD`），无需清理；
+  git 对象垃圾已于本轮早些时候清除，HEAD `aaca4cfcd` 与 `origin/main` 一致。
+  (4) worker 真实状态：Jenny、Emma `idle` 无任务；Alice `present`+`unknown`
+  持上述活动任务（唯一 eligible）；David `present`+`unknown` 持 rework 任务
+  但等待上游，patrol 已取消；Bob、Carol `cold`。空闲/等待原因合理，不盲唤醒。
+  CEO 未配置（`ceo: null`），继续本地 master 工作。goal 保持 `active=true`
+  （`registered_at=2026-11-03T20:03:09Z`，下一 deadline 约 20:23 UTC）。
+  生产 10086 未动，未执行任何 daemon/tmux 生命周期动作。
