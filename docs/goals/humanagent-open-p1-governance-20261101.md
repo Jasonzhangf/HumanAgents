@@ -1847,3 +1847,36 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - 2026-11-03 22:02 UTC：master 只读复现并澄清 GCM 根因。`gtimeout 25 codex exec --profile gcm -m gpt-5.5 -s read-only 'Reply EXACTLY: GCM_MODEL_EXPLICIT_OK'` 在 14.7 秒内返回 `GCM_MODEL_EXPLICIT_OK`，provider=gcm、model=gpt-5.5。结论：GCM 通道和 gpt-5.5 可用；Alice 的 `MODEL_PLACEHOLDER_M418` 来自未显式传 `-m gpt-5.5` 的派发层模型键解析缺陷。已向 Alice 发 `m1793743348223-475`，要求按该参数在原 worktree 继续，完成 focused red/green 与真实 RCC 4444 同入口回执后回交；不再把 GCM 整体判为不可用，也不替她执行工作区修改。
 - 2026-11-03 22:06 UTC：Alice pane 真源核实。`tmux list-panes` 显示 Alice 所在 pane `%15` 的 PID 64709 是 `-zsh`，无 Codex/AGY 子进程；`capture-pane -S -100000` 只有 7 次 `MODEL_PLACEHOLDER_M418` 错误（1091..1097）和 `Gemini 4 Argon · medium` 提示符，没有消息正文或处理动作。两条 durable 消息 `m1793743214234-472`、`m1793743348223-475` 仍 `state=pending`、`consumed_by_recv=false`，`pane_output_changed_after_enter=true`，说明 daemon 已向 pane 投递但该 pane 没有可消费的 agent 会话。Alice 的任务和 worktree 均保留，但她当前宿主不可用，不能靠消息唤醒。
 - 处理结论：不伪造 Alice 已完成或推进，也不替她改 worktree。下一步应由 Alice 的宿主会话恢复（用户重新打开/恢复 `%15` 的 AGY/Codex 会话，或明确授权接管）后，她用 `-m gpt-5.5` 继续；在此之前保持 board `working` 与工作树未提交改动，等待真实宿主恢复。
+
+### 2026-11-03 22:08 UTC：master 巡检回执与 CEO 报告
+
+- 消费 goal deadline `m1793742783876-462`（`collab recv` 回执
+  `receive-97767-1793743667456618000-0`）。`collab context` 成功：
+  Jenny role=master、endpoint_live=true、pane `%13`；goal
+  active=true/observed=subscribed，订阅 `sub-m1793742814101-463`
+  armed，下一次触发约 22:13 UTC。未重复武装相同目标。
+- Board 不变，仅两个 P1：Alice
+  `p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  （working，评审 Emma）和 David
+  `p1-runtime-checkpoint-identity-20261103`（rework，等 Alice 任务与
+  外部卷恢复）。无新增就绪授权工作，不重复派发。
+- Alice 宿主 pane `%15` 现由 AGY 占用
+  （`pane_current_command=agy`，PID 64709，提示符
+  `Gemini 4 Argon · medium`），但内容仍是 7 次
+  `MODEL_PLACEHOLDER_M418` 构造失败后的空提示符。durable 消息
+  `m1793743214234-472`、`m1793743348223-475` 均
+  `state=pending`、`consumed_by_recv=false`、`wake_attempts=1`，
+  说明 daemon 已投递文本但该会话未消费。未替她改工作树，未重复投递。
+- 派发层根因已复现：未显式传 `-m gpt-5.5` 时模型键被解析为未注册的
+  `MODEL_PLACEHOLDER_M418`；显式传入后 GCM/gpt-5.5 在 14.7 秒内正常
+  返回。该缺陷属工具/派发层，不是 HumanAgent 产品代码。
+- `/Volumes/extension` 与 `/Volumes/Intel` 的 `link(2)` 仍为断续故障。
+  当前主仓 `.git/objects` 无 `tmp_obj_*` 残留，两个卷均挂载；本轮未
+  执行批量清理或重复提交试探。
+- 资源：worktree 8/10（main + `mvp-real-path-dispatch-20261102` +
+  Alice/David 两个 P1 树 + 四个 locked provider `PROTECTED_HOLD`）。
+  生产 10086 未动，未执行任何 daemon/tmux 生命周期操作。
+- 开放 bug 39（P0 3、P1 11、P2 6、未分级 17）；
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除，不声称巡检节奏已对齐。
+- 已按用户授权完成 master 恢复，并通过 `collab ceo reply` 向当前
+  host-wide CEO 提交本轮巡检回执。
