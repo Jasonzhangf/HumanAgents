@@ -1958,3 +1958,17 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - 未修改 `assertCheckpointIdentity` 或 checkpoint scope 语义；生命周期
   事件只在真实 child mutation 提交后回调，不合成；未另建 journal/store。
   生产 10086 未动，未执行 daemon/tmux 生命周期动作。
+
+### 2026-11-03 23:05 UTC：候选 rebase 完成，交付仍等 Alice owner
+
+- 候选已 rebase 到最新 `origin/main a0537817d`，得 `4af025375`；
+  组合后 focused `live-step-feedback.test.js` 5/5 pass，
+  `git diff --check origin/main..HEAD` 干净。
+- `collab ceo reply` 已登记（`recorded: true`），每小时限流下
+  `notified: false`，未即时推送；阻塞事实与剩余工作已写入报告。
+- board 两项仍 `working`（formal-entry，Alice owner）与 `rework`（runtime
+  checkpoint，David owner）；Emma 为 reviewer。
+- `collab inbox` 无新消息；Alice 尚未执行 `task deliver`。候选与证据
+  `.worker-runs/c5d4671-rcc-receipt-final2.json` 保持就绪；master 不代
+  交代审，不虚构交付，不重复派发。下一动作：Alice 恢复并 deliver →
+  Emma review --accept → master 集成 + 更新父任务 + 关 c5d4671 + 清资源。
