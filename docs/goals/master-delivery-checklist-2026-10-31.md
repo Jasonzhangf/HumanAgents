@@ -317,3 +317,94 @@
   P1 `p1-ui-copy-corner-verify-20261102` 仍由 Emma reviewer 保持
   blocked；master 已按现有工作树启动 GCM `rework-2`，要求组合最新
   main、修复 UI 测试/live-step 超时/真实步骤展示，并交回可审查候选。
+
+- 2026-11-03 06:20 UTC：P0 清理与关闭回执已核对并落账。P0
+  `mvp-remaining-p0-followups-20261102` 候选 `9e7dda63c` 已合入并推送
+  `origin/main`，Emma 独立验收通过，board 为 `closed/integrated`、
+  `completion_missing=[]`，worktree 与分支已清理；当前 `main` 与
+  `origin/main` 同为 `450616c9d`、主树 clean。P1
+  `p1-ui-copy-corner-verify-20261102` rework-2 候选已交回：typecheck、
+  Contracts/Config/App 构建、UI/App TS 编译通过，UI 测试 `35/35`，
+  浏览器进度/步骤/双视口 `31/31`（显示真实步骤、`步骤 1/2`、总耗时与
+  本步计时，settle 后清理，1280x720 与 390x844 无水平溢出）。两个剩余
+  缺口：live-step `3/4` 的 `checkpoint identity mismatch` 在 clean
+  `origin/main` 基线同错，已登记 P1 `c5d4671`（owner
+  `humanagent.runtime`）；浏览器未注入真实 runtime error，错误态折叠仍
+  `UNVERIFIED`。`appsdk bug list` 现 37 项 open（P0 3、P1 11、P2 6、
+  未分级 17）。Collab daemon 本轮先报 ambiguous（`DAEMON_UNKNOWN`），
+  随后自行恢复；恢复后 `collab context`/`master status` 确认 Jenny 为
+  项目 master，`collab recv` 已消费 P0 回执 `m1793684414848-725`
+  （`state=read`、`consumed_by_recv=true`）。`appsdk goal status` 显示
+  deadline consumed，已重新订阅 20m one-shot。board 仍仅 P1
+  `p1-ui-copy-corner-verify-20261102` rev4 blocked、owner Emma；已发
+  `m1793688538761-822` 请 Emma 裁决。CEO 报告已记录 revision 14
+  （`recorded=true`、`notified=false`、`reported=false`）。未重启或
+  替换用户管理 daemon，未伪造消息消费、goal active 或 CEO 已读。
+  生产 `127.0.0.1:10086` 仍 connection refused，未安装、未重启。本轮
+  未改产品代码、未提交。
+
+- 2026-11-03 07:33 UTC：P1 rework-3 补证完成并已发 Emma 终审请求。
+  rework-3 回执 `.worker-runs/p1-ui-copy-corner-verify-20261102/rework-3/result.md`：
+  受控真实 runtime 错误态（dead-RCC `409` `provider-request-rejected`）
+  双视口 PASS；真实 RCC 4444 entry 提交→执行→收拢双视口 PASS，父任务
+  `ui-task-implicit-draft-2`、执行子任务
+  `scheduled-task-665227213af5adf02045`，observation
+  `running/tools=0..3→settling→succeeded`，真实工具
+  `file.list`/`file.read`/`humanagent_turn_end`，浏览器断言 `52/52`。
+  唯一 UNVERIFIED：运行时 step 帧无 `total`，真实浏览器只见“步骤
+  1/48/188”无分母；已发 Emma `m1793691327629-964` 请求裁决是否接受为
+  当前契约下明确缺失。P1 候选 HEAD 仍 `382f6ab4a`、ahead 7/behind 0、
+  blocked 未合并。`c5d4671` 仍待 runtime owner 处理；新建 runtime
+  worktree 受 LayerFS Store 缺失阻断。peer：Emma working（P1）、Alice
+  present/unknown、Bob/Carol cold、David present/unknown、%128 missing；
+  无额外 ready 可派工作。worktree 7（main + 2 活动候选 + 4 locked
+  provider `PROTECTED_HOLD`），未超 10。open bug 37（P0 3、P1 11、P2 6、
+  未分级 17）。生产 10086 未动。goal 已重新订阅 20m。
+
+- 2026-11-03 08:28 UTC：P1 rework-4 完成并已交 Emma 裁决。执行阶段
+  通用「执行进度」根因在 UI 侧：源端执行帧 summary 具体，但
+  `localizedStepSummary` 未映射，未命中即回退。修复只改允许路径：
+  `entry.js` 补执行阶段英文映射与 `<toolId> succeeded/failed/blocked`
+  中文规则、`runtime.css` 补 390px 摘要最小宽度。候选 `20f70c33f`
+  （相对 `450616c9d` ahead 8/behind 0）。复验：真实 RCC 双视口
+  `27/27`，执行「步骤 8|正在派发模型请求」、收尾「执行已完成（决策：
+  完成）」，无英文/JSON 泄漏、无残留、无遮挡、无页面错误；`ui.test.js`
+  `36/36`、浏览器 `31/31`、typecheck 通过。`pnpm test:ui` `70/71`，
+  唯一失败 `runtime-projection.test.ts` 的 `row.nextStep` 为候选预存，
+  已请 Emma 裁决。父/子状态为交互/业务任务/执行子任务三个身份，无同对象
+  矛盾。待裁决：预存测试是否接受不阻断；`c5d4671` runtime 修复受
+  LayerFS Store 缺失阻断。P1 仍 blocked，未合并；生产 10086 未动。
+
+- 2026-11-03 09:19 UTC：P1 rework-5 收口已完成并交 Emma 裁决。rework-5
+  未修改候选代码，候选 HEAD 保持 `20f70c33f`，相对 `450616c9d` ahead
+  8/behind 0，未 commit/merge/push，未动生产 10086、未全局安装、未新建
+  worktree。三项收口均已闭合或归因：(1) 390x844 详情层当前步骤完整可见
+  可读，`verify-detail.mjs` 14/14，证据 `detail-result.json`、
+  `mobile-detail-390x844.png`、`desktop-detail-1280x720.png`；(2)
+  `row.nextStep` 失败在 clean `origin/main` 基线同入口同测试也复现
+  （`expected '查看任务详情' actual ''`），属于基线已有问题，不弱化断言，
+  已请 Emma 按 canonical intake/去重或 owner 处理；(3) `c5d4671`
+  live-step `3/4` 失败保留原错 `runtime.execution.failure` /
+  `checkpoint identity mismatch` / `retryable: false`，owner
+  `humanagent.runtime`，候选未触碰 `packages/runtime`。回归：`pnpm
+  typecheck` 通过，`ui.test.js` 36/36 通过。已向 Emma 发 `collab msg
+  m1793698424349-1257`，要求裁决：接受基线 pre-existing 问题并登记/去重；
+  确认候选可否在运行时修复前并行整体 review；确认集成、merge、push、
+  board 更新与资源清理负责人和停止条件。`appsdk goal subscribe` 已重新
+  武装 20m one-shot；project patrol 仍 armed，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除。`appsdk bug list` 37 项 open
+  （P0 3、P1 11、P2 6、未分级 17）。worktree 7（main +
+  p1-ui-copy-corner + mvp-real-path-dispatch + 4 locked provider
+  `PROTECTED_HOLD`），未超上限。
+
+- 2026-11-03 09:35 UTC：Emma 对 rework-5 裁决已消费
+  `m1793698489132-1259`。已接受 row.nextStep 为 clean main 基线已存在的
+  测试失败，登记去重 `1e9099b`（P1，`packages/ui` owner 按当前需求核对
+  真实终态与详情入口）；接受 390px 详情层当前步骤可完整读取的范围证据；
+  允许并行安排完整 milestone 独立 review，不必等待 `c5d4671`，但不把
+  review 或本次补证视为 MVP 交付。`c5d4671` 仍待 runtime owner 按
+  LayerFS 正式路径修复，之后在组合候选复测受影响 live-step。主线集成、
+  merge、push 与作者资源清理由 Jenny 协调并按各自 owner 收口；Emma 负责
+  本验收 board 更新及复核。test:ui 基线问题、checkpoint 回归和受影响
+  真实入口证据在各自责任范围内未闭环时不得声明全部验收通过。候选仍
+  blocked，未合并；未改产品代码。

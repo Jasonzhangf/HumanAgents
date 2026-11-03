@@ -28,10 +28,10 @@ for new work.
      queue and must not be re-dispatched as W1-B.
 
 3. MVP end-to-end user path (the user's primary acceptance)
-   - Status: `未完全达成`. Four P0 remain open: `45f92c8` native lane bypasses
+   - Status: `未完全达成`. Three P0 remain open: `45f92c8` native lane bypasses
      implicit Brain orchestration, `a9dc797` completed native task public
-     output empty, `4c21e74` observation lacks per-agent facts, `47b26dd`
-     direct answer collapses main column.
+     output empty, `4c21e74` observation lacks per-agent facts. `47b26dd`
+     direct answer collapses main column is closed (2026-11-02).
    - P0 `mvp-real-lane-entry-task-row-20261102`: `已进入 origin/main`.
      The accepted fix is based on Alice candidate `53632c748`; main content
      commit `8ad88aacf` carries the provider/test changes and provenance merge
@@ -143,6 +143,12 @@ for new work.
   `9a214a20e`, and `3a90267b7`; owner is `humanagent.app.serve`. Formal
   install/restart is still a separate lifecycle action and is not authorized
   by this goal record.
+- D46 P1 `c5d4671` live-step-feedback fails on `checkpoint identity mismatch`.
+  Confirmed on clean `origin/main` baseline (same single failure), so this is
+  an existing runtime defect outside the P1 UI candidate scope. Owner:
+  `humanagent.runtime`. Registered 2026-11-03; P1 candidate
+  `p1-ui-copy-corner-verify-20261102` cannot be integrated until this
+  dependency is adjudicated.
 
 Dependency note: D17 (native RCC retry) has landed on main, so the previous
 single-writer restriction on `coordinator.ts`/`service.ts` is lifted. W1-A
@@ -162,7 +168,7 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 
 | M | 交付物 | 状态 | 证据 / 缺口 | 下一动作 | 验收与停止条件 |
 |---|---|---|---|---|---|
-| M1 | 常驻 longhorizon 目标与 open bug 真源维护 | `active`：goal `ad967f01…` 每 20m 显式重 arm；`appsdk bug list` 当前 32 项 open，其中 P0 4、P1 9、P2 6，另有 13 项未分级审计/UX/通信项 | `appsdk goal status` 返回 armed/subscribed；`appsdk bug list --json` 已核对四项 P0；`60d2e73` 已在真实 RCC 入口和截图证据后关闭 | 每轮刷新；未分级项补 owner；Alice 修复后同步 bug 状态 | 目标持续 active；所有 open 项有 owner、证据路径、下一动作；不能把旧队列冒称全部 |
+| M1 | 常驻 longhorizon 目标与 open bug 真源维护 | `active`：goal `ad967f01…` 每 20m 显式重 arm；`appsdk bug list` 当前 37 项 open，其中 P0 3、P1 11、P2 6，另有 17 项未分级审计/UX/通信项 | `appsdk goal status` 本轮因 Collab daemon ambiguous 返回 `GOAL_OWNER_CONTEXT_FAILED`、`active=false`；`appsdk bug list --json` 已核对三项 P0；`60d2e73`、`47b26dd` 已关闭；`c5d4671` 已登记 | 每轮刷新；未分级项补 owner；Collab daemon 恢复后核对 goal/board/notify 真源 | 目标持续 active；所有 open 项有 owner、证据路径、下一动作；不能把旧队列冒称全部 |
 | M2 | 项目巡检（四项） | `armed`：project-patrol `sub-m1793413132850-18`，interval 900000ms，目标 1500000ms；`collab notify status` 仍为 `PATROL_CADENCE_RUNTIME_GAP`；goal deadline `m1793651994627-1409` 已消费并按 20m 重新武装为 `sub-m1793652337880-1413` | `collab notify status`；`appsdk goal status --json`；worktree 7（main + W2-A/W2-B 集成树 + real-path-dispatch + 4 locked provider `PROTECTED_HOLD`）；W2-B 返工树有三处未提交修改，尚未验收 | 每轮核对 worker、未关闭 board、资源和权限真源；不声称节奏已对齐；继续推进 Alice 的 clarification 与 W2-B rework | 四项均核对并有回执；gap 未解除时如实报告；未提交的 W2-B diff 不得当作完成 |
 | M3 | W1-A/W1-B 结果转交 Alice，不再续派或合并 | `已进入 origin/main`：W1-A `3c0b49f89`/`626969fb3` 与 W1-B `37c38dd56` 均为 `origin/main` 祖先 | `git merge-base --is-ancestor` 实测三个提交均 `yes`；Alice 工作树已由她收走 | 保持不续派；后续 W1 相关 P0 由 Alice 按 W1-W3 计划验收 | W1 提交已入 main；剩余 P0 状态以 `appsdk bug list` 为准，不重复合并 |
 | M4 | W2/W3 证据接收与核对 | W2-A 实现已入 main（`7b51b8076` 与返工 `0e9696a9e` 均为 `origin/main` 祖先，集成 commit `351a17ca0` 也在 main）；board 任务 `mvp-w2a-implicit-orchestration-20261102` rev16 `merged`，但独立审查记录了两项后续：w2a-result.md 图描述回边需更正、Planner 决策端口未在 `packages/app` 接线；W2-B `879332f5a` 不是 main 祖先，board rev8 `rework`；当前返工 diff 已加入 `unknown` settle 状态、保留 latest typed receipt、无 settle 时读取既有 recovery fact，并补真实子进程 SIGKILL mutating-effect 测试 | `collab board show`；`git merge-base --is-ancestor`；`collab worker snapshot`；`git diff --stat` 与三文件 diff 只读核对（未运行测试、未提交） | W2-B 完成真实中断/效果恢复证据后由 Alice 交回；W2-A 两项后续和 W2-B 都不得因“已入集成分支”标完成 | W2-A 可交付面已入 main，但两项后续未闭环；W2-B 当前为 `working/UNVERIFIED`，未并入 main 前不得标完成 |
@@ -1240,3 +1246,142 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   组合最新 main，修复 UI 测试、live-step 超时与真实步骤展示，禁止
   push/merge/生产操作。LayerFS 新任务仍受 Store 缺失阻断，本续接沿用
   原 owner 的既有工作树。生产 10086 未动。
+
+- 2026-11-03 06:20 UTC：消费 P0 清理与关闭回执
+  `m1793684414848-725`。P0 `mvp-remaining-p0-followups-20261102` 已完整
+  关闭：候选 `9e7dda63c` 已合入并推送 `origin/main` `450616c9d`，Emma
+  独立验收通过，board `closed/integrated`，`completion_missing=[]`，
+  worktree 与分支已清理，未改 main、未触碰 10086 及他人资源。P1 候选
+  `p1-ui-copy-corner-verify-20261102` rework-2 已交回可审查候选：
+  `pnpm typecheck`、Contracts/Config/App 构建、UI/App TS 编译均通过；
+  UI 测试 `35/35`；浏览器进度/步骤/双视口检查 `31/31`（显示
+  `正在分派模型请求`、`已收到模型推理摘要`、`步骤 1/2`、总耗时与本步
+  计时，settle 后清理，1280x720 与 390x844 无水平溢出）。两个剩余缺口：
+  (a) live-step 测试 `3/4`，错误为 `checkpoint identity mismatch`，在
+  clean `origin/main` 基线同错，已登记 `c5d4671` 归 `humanagent.runtime`；
+  (b) 浏览器未注入真实 runtime error，错误态折叠仍 `UNVERIFIED`。Collab
+  daemon 本轮先报 ambiguous（`DAEMON_UNKNOWN`），随后自行恢复；恢复后
+  `collab context`/`collab master status` 确认 Jenny 为项目 master，`collab
+  recv` 已消费 P0 回执 `m1793684414848-725`（state=read、
+  consumed_by_recv=true）。`appsdk goal status` 显示 deadline consumed，
+  已重新订阅 20m one-shot。未重启或替换用户管理的 daemon，未伪造消息
+  消费或 goal active。board 仍仅 P1 `p1-ui-copy-corner-verify-20261102`
+  rev4 blocked、owner Emma；已发 `m1793688538761-822` 请 Emma 裁决；
+  CEO 报告已记录 revision 14（`recorded=true`、`notified=false`、
+  `reported=false`）。生产 `127.0.0.1:10086` 仍 connection refused，未
+  安装、未重启。`appsdk bug list` 当前 37 项 open，其中 P0 3、P1 11、
+  P2 6、未分级 17。本轮只改两份治理文档，未修改仓库产品代码，未提交。
+
+- 2026-11-03 06:50 UTC：Emma 对 P1 rework-2 的裁决已消费
+  `m1793688577118-823`。判定候选 `INCOMPLETE`、不解锁合并，但允许审查
+  准备与独立修复并行，不把 checkpoint 问题当作全部工作的前置。要点：
+  (1) `final-live-step-test.log` 与 `baseline-live-step-test.log` 同报
+  `checkpoint identity mismatch`，支持基线复现，但不足以证明根因；按
+  `c5d4671` 由 `humanagent.runtime` owner 定位修复，修后在组合候选上重跑
+  受影响 live-step 用例。(2) 浏览器 `31/31` 只是脚本化 EventSource 成功态，
+  不等于真实 RCC 用户入口；需补可重复的浏览器错误态行为证据（可受控触发
+  真实 runtime 错误、不伪造成功）与真实 RCC 双视口受影响路径；被环境阻断
+  时保留原错并标 `UNVERIFIED`，不得判为已验收。成功态摘要与计时证据可
+  复用。下一步派：(a) 续接既有 P1 候选工作树补浏览器错误态与真实 RCC
+  双视口证据；(b) 派 runtime owner 处理 `c5d4671` 根因。
+
+- 2026-11-03 07:33 UTC：P1 rework-3 补证完成
+  （`.worker-runs/p1-ui-copy-corner-verify-20261102/rework-3/result.md`）。
+  (1) 受控真实 runtime 错误态 PASS：dead-RCC 端口 `45998`，`POST
+  /api/explicit/interactions/.../interpret` 返回 `409`
+  `provider-request-rejected`；1280x720 与 390x844 均 danger tone、摘要
+  可见、技术详情含 `code/owner/message/nextAction`、无遗留
+  `.progress--live`、不遮挡四角、无水平溢出、无页面运行时错误。
+  (2) 真实 RCC 4444 entry 提交→执行→收拢 PASS：父任务
+  `ui-task-implicit-draft-2`、执行子任务
+  `scheduled-task-665227213af5adf02045`；observation
+  `running/tools=0..3 → settling → succeeded`；真实工具
+  `file.list`/`file.read`/`humanagent_turn_end`；双视口显示步骤 n、具体
+  摘要、总耗时与本步计时，收拢 `success` 不遮挡表单/任务行/四角；
+  浏览器断言 `52/52`。唯一 `UNVERIFIED`：运行时 step 帧
+  (`packages/runtime/src/intake/explicit-intake.ts:163-174`) 无 `total`，
+  真实浏览器只见“步骤 1/48/188”无分母；已发 Emma
+  `m1793691327629-964` 请求裁决是否接受为当前契约下明确缺失。观察项
+  不阻断：执行阶段摘要多处回退为“执行进度”（无英文/JSON 泄漏），父
+  任务行仍“已确认，等待调度”而子任务 observation 已 succeeded。
+  `c5d4671`（checkpoint identity mismatch）仍待 runtime owner 处理；
+  新建 runtime worktree 受 LayerFS Store 缺失阻断，不绕回 Git worktree。
+  P1 候选仍 blocked，未合并、未交付；生产 10086 未动。
+
+- 2026-11-03 08:28 UTC：P1 rework-4 完成，执行阶段通用「执行进度」
+  根因判定为 UI 侧并已最小修复
+  （`.worker-runs/p1-ui-copy-corner-verify-20261102/rework-4/result.md`）。
+  真实 RCC 同 entry 抓取原始执行帧，源端 summary 具体
+  （`provider provided model reasoning`、`provider completed tool request
+  details`、`file.read succeeded`、`执行完成，正在核对结果` 等），但
+  `docs/ui/entry.js` 的 `localizedStepSummary` 未映射这些英文短语，
+  未命中即回退通用「执行进度」，丢掉源端已有信息。修复只在允许路径：
+  `entry.js` 补齐执行阶段英文映射与 `<toolId> succeeded/failed/blocked`
+  中文规则（未识别英文/JSON 仍回退隐藏）、`runtime.css` 补 390px 下
+  `.progress-detail` 最小可读宽度。候选提交 `20f70c33f`，相对
+  `450616c9d` ahead 8/behind 0。复验：真实 RCC 4444 双视口 `27/27`，
+  执行阶段「步骤 8|正在派发模型请求」、收尾「执行已完成（决策：完成）」
+  tone=success，无英文/JSON 泄漏、无残留、无遮挡、无页面错误；
+  `ui.test.js` `36/36`、`entry-submit-progress-browser` `31/31`、
+  `pnpm typecheck` 通过。父/子状态只读核对为交互 dispatched / 父业务
+  任务 created / 执行子任务 succeeded 三个不同身份，同对象无矛盾。
+  两个待裁决项已发 Emma `m1793694681811-1114`：(1) `pnpm test:ui`
+  `70/71`，唯一失败 `runtime-projection.test.ts` 的 `row.nextStep`
+  为候选预存、与本改动无导入关系，是否接受不阻断；(2) `c5d4671`
+  live-step 未在修复后组合候选重验，其 runtime 修复受 LayerFS Store
+  缺失阻断。P1 候选仍 blocked，未合并、未交付；生产 10086 未动。
+
+- 2026-11-03 08:32 UTC：Emma 对 rework-4 的裁决已消费
+  `m1793694737064-1118`。已确认常见执行阶段显示具体中文、源端信息被
+  UI 回退吞掉有证据；`79e1029` 已补记候选进展。仍需三项：
+  (1) 390px 截图仍显示「正在派发模型...」，回执 `clientWidth 90` 小于
+  `scrollWidth 104`，需核对详情是否能提供完整当前步骤，必要时修复截断后
+  复验。(2) `test:ui` 的 `row.nextStep` 失败不能只凭「未改文件/无导入」
+  判定候选预存，需在可信 main 基线同入口同测试复现并检查断言与用户
+  行为，按结果登记去重和处理，不弱化测试。(3) `c5d4671` 由 runtime
+  owner 单独推进，LayerFS Store 缺失保留准确原错并走其 owner 修复，
+  不新建 worktree 绕过；runtime 修复后在组合候选复跑 live-step。
+  当前可并行整体 review，但验收和合并仍待上述证据。
+
+- 2026-11-03 09:19 UTC：P1 rework-5 完成，未修改候选代码，候选 HEAD
+  保持 `20f70c33f`，相对 `450616c9d` ahead 8/behind 0，未
+  commit/merge/push。收口结果：(1) 390x844 详情层当前步骤完整可见可读，
+  `verify-detail.mjs` 14/14，证据
+  `.worker-runs/p1-ui-copy-corner-verify-20261102/rework-5/evidence/detail-result.json`
+  与 390px/1280px 截图；(2) `row.nextStep` 失败在 clean `origin/main`
+  基线同入口同测试也复现，属于基线已有问题，不弱化断言，交 canonical
+  intake/去重与 `packages/ui` owner；(3) `c5d4671` live-step `3/4`
+  保留原错 `runtime.execution.failure` / `checkpoint identity mismatch`
+  / `retryable: false`，owner `humanagent.runtime`，候选未触碰
+  `packages/runtime`。已向 Emma 发 `m1793698424349-1257` 请求裁决；
+  `appsdk goal subscribe` 已重新武装 20m one-shot；project patrol 仍
+  armed，`PATROL_CADENCE_RUNTIME_GAP` 未解除。
+
+- 2026-11-03 09:35 UTC：Emma 对 rework-5 的裁决已消费
+  `m1793698489132-1259`。验收结论：row.nextStep 在 clean main 和候选
+  同样失败，接受为基线已存在的测试失败，去重登记 `1e9099b`，由
+  `packages/ui` owner 按真实终态和当前需求处理；390px 进度卡摘要虽截断，
+  但详情层真实步骤完整可读，接受该范围证据；完整 milestone 独立 review
+  可并行安排，不必等待 `c5d4671`，但 review/候选补证不等于 MVP 交付；
+  `c5d4671` 仍待 runtime owner 按 LayerFS 正式路径修复，之后在组合候选
+  复测受影响 live-step。主线集成、merge、push 与作者资源清理由 Jenny
+  协调并按各 owner 收口；Emma 负责本验收 board 更新与复核。test:ui
+  基线问题、checkpoint 回归和受影响真实入口证据在各自责任范围内未闭环
+  时不得声明全部验收通过。候选仍 blocked，未合并；生产 10086 未动。
+
+- 2026-11-03 10:04 UTC：P1 UI copy/corner 完整 milestone 独立 Review
+  已裁决 PASS。独立 Reviewer（`codex exec --profile oauth --model
+  codex-auto-review`，sandbox read-only）核对候选 `20f70c33f` 相对
+  `450616c9d` 的 5 个变更文件后返回 `findings: []`、`contract_version: 1`，
+  三组 module_boundary_evidence 全部非空。覆盖：`localizedStepSummary`
+  真实 RCC 执行阶段摘要、未识别英文/JSON 不泄漏、explicit-brain-runtime
+  六处中文替换、`subscribeExplicitStepStream` 继续消费真实事件、真实 RCC
+  4444 成功态、受控错误态、1280x720 与 390x844 双视口、移动四角安全区、
+  详情层可读。证据：`tests/ui/ui.test.ts` 36/36、rework-4 `27/27`、
+  rework-5 `14/14`、`pnpm typecheck` 通过。评审结果文件：
+  `.worker-runs/p1-ui-copy-corner-verify-20261102/review-milestone-1/review-result.json`。
+  基线缺陷 `1e9099b`（packages/ui row.nextStep）与 `c5d4671`
+  （humanagent.runtime checkpoint identity mismatch）未判为本候选 P1；
+  Reviewer 已确认候选未扩大或掩盖二者。已向 Emma 发
+  `m1793700330583-1307` 请求更新验收 board；Jenny 推进集成/merge/push
+  与资源清理。生产 10086 未动。
