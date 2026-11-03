@@ -1,0 +1,53 @@
+{
+  "proof": "c5d4671-rcc-same-entry",
+  "generatedAt": "2026-11-03T13:19:47.175Z",
+  "candidateCommit": "640652956599449914bcdd7ebb5815a1cbc2fdbd",
+  "model": "gpt-5.5",
+  "rccBaseUrl": "http://127.0.0.1:4444",
+  "state": "INCOMPLETE",
+  "serveUrl": "http://127.0.0.1:56108",
+  "task": {
+    "taskId": "ui-task-37fa8eaf-9e7e-4764-bb9a-b725e1e2f8bc-1",
+    "operationId": "ui-operation-1",
+    "grantState": "granted"
+  },
+  "provider": {
+    "rounds": 36,
+    "states": [
+      "dispatching",
+      "dispatched",
+      "model",
+      "waiting",
+      "settled",
+      "planner.aligning",
+      "planner.aligned"
+    ],
+    "firstDispatched": 1,
+    "firstSettled": 26,
+    "dispatchTurn": "turn-6eeb0d74-cfde-440b-ab58-2701f2add380",
+    "settleTurn": "turn-6eeb0d74-cfde-440b-ab58-2701f2add380",
+    "childPrepared": false,
+    "childReturned": false,
+    "childAdopted": false,
+    "reviewCheckpointed": false
+  },
+  "terminal": {
+    "state": "succeeded",
+    "output": "2+2 = 4.",
+    "error": null,
+    "checkpoint": {
+      "checkpointId": "turn-active-turn-ui-operation-1-1",
+      "seq": 1,
+      "outcome": "succeeded",
+      "summary": "goal: Answer 'what is 2+2?' with a short one-line answer. | actions: Determined the arithmetic result: 2+2=4\nDrafted a one-line answer: '2+2 = 4.' | result: 2+2 = 4. | next: No further action needed; the deliverable is complete.",
+      "committedAt": "2026-11-03T13:20:03.016Z",
+      "evidenceRefs": []
+    }
+  },
+  "missing": [
+    "missing child.prepared",
+    "missing child.returned",
+    "missing child.adopted",
+    "missing review.checkpointed"
+  ]
+}
