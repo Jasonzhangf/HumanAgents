@@ -6731,10 +6731,22 @@ export class RuntimeTaskCoordinator {
 
   private async commitBusinessCheckpoint(record: TaskRecord, executionScope: ScopeRef, outcome: string, extraEvidenceRefs: readonly EvidenceRef[] = []): Promise<void> {
     const checkpointOutcome = (['succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'unknown'] as const).find((candidate) => candidate === outcome) ?? 'unknown';
-    // Failure cleanup may commit a stop-control checkpoint before the business
-    // terminal checkpoint. A non-stopped checkpoint must keep the same operation
-    // identity as its predecessor, so inherit the operation id and align any
-    // business-scoped evidence that predates the inheritance.
+    // A checkpoint committed out of band (stop-control cleanup or a child
+    // assembly) can be the real predecessor even though this record has not
+    // observed it yet. Locate it first, then derive the business scope from the
+    // refreshed record: a non-stopped checkpoint must keep the same operation
+    // identity as its predecessor, so inheriting from the stale record would
+    // link to a predecessor carrying an operation id this scope dropped.
+    const store = this.options.checkpointStoreFor(record.taskId, executionScope.cycleId!);
+    const observedOperationId = record.checkpoint?.scope.operationId;
+    const observedScope: ScopeRef = observedOperationId === undefined
+      ? { organId: this.options.organId, taskId: record.taskId, cycleId: executionScope.cycleId }
+      : { organId: this.options.organId, taskId: record.taskId, cycleId: executionScope.cycleId, operationId: observedOperationId };
+    const latestInStore = await store.readLatest(observedScope) ?? await store.readLatest(executionScope);
+    if (latestInStore && latestInStore.checkpoint.seq > record.checkpointSeq) {
+      record.checkpoint = latestInStore.checkpoint;
+      record.checkpointSeq = latestInStore.checkpoint.seq;
+    }
     const inheritedOperationId = record.checkpoint?.scope.operationId;
     const businessScope: ScopeRef = inheritedOperationId === undefined
       ? { organId: this.options.organId, taskId: record.taskId, cycleId: executionScope.cycleId }
@@ -6768,12 +6780,6 @@ export class RuntimeTaskCoordinator {
         : checkpointOutcome === 'cancelled'
           ? { kind: 'stop', ref: `task://${record.taskId.value}/terminal` }
           : { kind: 'continue', ref: `task://${record.taskId.value}/next` };
-    const store = this.options.checkpointStoreFor(record.taskId, businessScope.cycleId!);
-    const latestInStore = await store.readLatest(businessScope) ?? await store.readLatest(executionScope);
-    if (latestInStore && latestInStore.checkpoint.seq > record.checkpointSeq) {
-      record.checkpoint = latestInStore.checkpoint;
-      record.checkpointSeq = latestInStore.checkpoint.seq;
-    }
     const checkpoint: Checkpoint = {
       // The checkpoint sequence is per task, but execution epochs reuse the
       // same task id. Include the epoch so a later execution cannot commit
