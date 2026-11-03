@@ -1940,7 +1940,7 @@ function observationProjection(
               ? 'waiting'
               : 'ready',
       label: runtimeTaskStateLabel(task.state),
-      detail: task.state === 'succeeded' ? '' : task.nextStep,
+      detail: task.nextStep,
       updatedAt: task.updatedAt,
     },
     scopes,
@@ -5226,7 +5226,7 @@ export class UiRuntimeService {
                     ? 'stale'
                     : 'ready',
           label: runtimeTaskStateLabel(task.state),
-          detail: task.state === 'succeeded' ? '' : task.nextStep,
+          detail: task.nextStep,
           updatedAt: task.updatedAt,
         },
         task: {
@@ -5251,8 +5251,8 @@ export class UiRuntimeService {
               .map((event) => event.summary)
               .filter((summary) => summary.trim() !== '')
               .slice(-5),
-        proposal: task.state === 'succeeded' ? '' : task.nextStep,
-        nextAction: task.state === 'succeeded' ? '' : task.nextStep,
+        proposal: task.nextStep,
+        nextAction: task.nextStep,
         requiredDecisions: task.state === 'waiting' && task.executionRelease === 'prepared'
           ? ['批准继续执行任务']
           : [],
