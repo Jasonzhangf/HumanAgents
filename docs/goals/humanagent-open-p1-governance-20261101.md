@@ -1610,3 +1610,22 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   dsh-wake-enqueued 已发，等 David 恢复执行或回应。Emma idle、无新任务；
   Alice/Bob/Carol 无 board 任务。main HEAD=fc75db758，已同步；goal 已 20m
   重新武装（registered 14:51:42 UTC）；worktree 7/10；生产 10086 未动。
+
+- 2026-11-03 15:31 UTC：正式入口接线缺口已纳入主线。已消费
+  m1793718792386-2120 与 m1793719445051-11；c5d4671 保持
+  `p1-runtime-checkpoint-identity-20261103` rev19 `rework`，David 的
+  focused 红绿和 RCC 基础成功证据保留，不再重复旧 worktree 静态补证；
+  209de7c 独立跟踪。新发布并邀请
+  `p1-checkpoint-formal-entry-child-lifecycle-20261103` rev2，owner=Alice，
+  reviewer=Emma，parent=c5d4671，P1。交付边界是正式 `serve`/`UiRuntimeService`
+  真实任务事件流包含 `child.prepared`、`child.returned`、`child.adopted`、
+  `review.checkpointed` 并到 terminal；必须先以代码证据判定是否与
+  45f92c8 同源，同源时沿既有 owner 边界处理，不另造并行修复。现有
+  `UiRuntimeService` 入口未绑定 activeTurnJournal/activeTurnJournalFor/
+  initialInputStore/recoveryReferencesFor/permissionSnapshot，是待本任务
+  证实并修复的入口缺口；不得改 `assertCheckpointIdentity`、checkpoint
+  scope 语义、增加第二份 journal/store 或伪造事件。board dispatch
+  `board-invite-p1-checkpoint-formal-entry-child-lifecycle-20261103-2`
+  durable=true，等待 Alice 接受。CEO 当前未配置，未宣称已向 CEO 报告；
+  worktree 7/10，project patrol 仍 armed 但
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除；生产 10086 未动。
