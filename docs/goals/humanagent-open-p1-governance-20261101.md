@@ -1702,3 +1702,22 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `PROJECT_PATROL_PROGRESS_NOT_RECORDED`（两任务在执行中，无可记进度的
   新交付）。goal 于 19:42:16Z 已重新武装，下一 goal deadline 约在 20:02。
   生产 10086 未动，未执行任何 daemon/tmux 生命周期动作。
+
+- 2026-11-03 20:02 UTC：消费 goal deadline `m1793736137902-125`
+  （`DEADLINE_REACHED`，已 read），`appsdk goal status --json` 一瞬返回
+  `active=false`、`observed=consumed`、`error=GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED`，
+  为预期的一次性订阅消费态。已于 20:03:09Z 显式重新武装 goal；
+  `appsdk goal status --json` 恢复正常：`active=true`、`desired=subscribed`、
+  `observed=subscribed`、`collab_subscribed=true`、`error=null`；
+  `appsdk longhorizon show --json` 核实 `registered=true`、`registered_at=2026-11-03T20:03:09Z`。
+  本轮无新交付：`pending_merges=[]`、`workers_needing_intervention=[]`。
+  两板上任务状态不变：
+  `p1-checkpoint-formal-entry-child-lifecycle-20261103` `working`（Alice）、
+  `p1-runtime-checkpoint-identity-20261103` `rework`（David），reviewer 均
+  Emma，无新就绪授权工作可派发，不手工唤醒。worker 真实状态：
+  Jenny、Emma `idle` 无任务；Alice、David `present`+`unknown` 各持上述
+  活动任务；Bob、Carol `cold`。worktree 8/10，含 4 个 locked provider
+  `PROTECTED_HOLD`，无需清理。CEO 未配置（`ceo: null`）。project patrol
+  仍 armed（`sub-m1793413132850-18`），但 `PATROL_CADENCE_RUNTIME_GAP` 未解除，
+  `eligibility.blocker` 仍为 `PROJECT_PATROL_PROGRESS_NOT_RECORDED`。生产
+  10086 未动，未执行任何 daemon/tmux 生命周期动作。
