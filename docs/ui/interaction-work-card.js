@@ -803,8 +803,75 @@ function renderTrace(projection, options, state, descriptorControls) {
     }
     scroller.append(list)
   }
+  if (state.mode === 'observation') {
+    scroller.append(renderObservationDebugInspection(projection.observation?.debugInspection))
+  }
   panel.append(scroller)
   return panel
+}
+
+function renderObservationDebugInspection(debugInspection) {
+  const section = create('section', 'iwc-debug-inspection')
+  section.dataset.agentDebugInspection = 'true'
+  section.append(create('h4', undefined, '五维调试视图（只读）'))
+  if (!debugInspection || typeof debugInspection !== 'object') {
+    const facts = create('dl', 'iwc-facts')
+    renderFactList(facts, [
+      ['轮次', 'data-not-collected'],
+      ['上下文', 'data-not-collected'],
+      ['模型请求', 'data-not-collected'],
+      ['工具调用', 'data-not-collected'],
+      ['错误与恢复提示', 'none'],
+    ])
+    section.append(facts)
+    return section
+  }
+  const roleId = debugInspection.agentRole || debugInspection.role || ''
+  section.dataset.agentRole = roleId
+  section.dataset.invocationStatus = debugInspection.invocationStatus || ''
+  const turn = debugInspection.turn || { state: 'data-not-collected' }
+  const context = debugInspection.context || { state: 'data-not-collected' }
+  const model = debugInspection.model || { state: 'data-not-collected' }
+  const tools = debugInspection.tools || { availableToolsState: 'data-not-collected', callsState: 'data-not-collected' }
+  const error = debugInspection.error || { state: 'none' }
+
+  const turnSummary = turn.state === 'collected'
+    ? `${turn.turnId || '—'} · ${turn.lifecycleState || '—'}${turn.round !== undefined && turn.round !== null ? ` · round=${turn.round}` : ''}${turn.durationMs !== undefined && turn.durationMs !== null ? ` · ${turn.durationMs}ms` : ''}`
+    : turn.state
+  const contextSummary = context.state === 'collected'
+    ? `root=${context.contextRootId || '—'} · 继承编排=${context.inheritsOrchestratorContext ? '是' : '否'} · 注入引用 ${context.injectedRefs?.length ?? 0} 项${context.omissionReason ? ` · 裁剪/拒绝：${context.omissionReason}` : ''}`
+    : context.state
+  const tokenSummary = model.tokenUsage
+    ? model.tokenUsage.state === 'collected'
+      ? `tokens=${model.tokenUsage.totalTokens}`
+      : `${model.tokenUsage.state}${model.tokenUsage.reason ? ` (${model.tokenUsage.reason})` : ''}`
+    : 'data-not-collected'
+  const providerName = model.provider || model.providerId || '—'
+  const requestedModelName = model.requestedModel || model.modelId || '—'
+  const actualModelName = model.actualModel || requestedModelName
+  const modelSummary = model.state === 'collected'
+    ? `${providerName}/${requestedModelName} (actual=${actualModelName}) · 重试 ${model.retryCount ?? 0} 次 · ${tokenSummary}`
+    : `${model.state}${model.provider ? ` (${model.provider}/${model.requestedModel || '—'})` : ''} · ${tokenSummary}`
+  const toolsSummary = `可用工具：${tools.availableToolsState === 'collected' ? (tools.availableTools?.join(', ') || '无') : tools.availableToolsState} · 调用：${tools.callsState === 'collected' ? `${tools.calls?.length ?? 0} 次` : tools.callsState}`
+  const errorOwner = error.owner || error.stage || '—'
+  const errorSummary = error.state === 'present'
+    ? `${errorOwner} · ${error.code || '—'}：${error.message || '—'}`
+    : error.state
+
+  renderFactList(section, [
+    ['角色状态', `${roleId} · ${debugInspection.invocationStatus}`],
+    ['轮次', turnSummary],
+    ['上下文', contextSummary],
+    ['模型请求', modelSummary],
+    ['工具调用', toolsSummary],
+    ['错误与恢复提示', errorSummary],
+  ])
+  if (error.state === 'present' && error.readonlyNextActionHint) {
+    const hint = create('p', 'debug-readonly-hint', error.readonlyNextActionHint)
+    hint.dataset.readonlyHint = 'true'
+    section.append(hint)
+  }
+  return section
 }
 
 function renderActions(projection, options, state) {
@@ -935,20 +1002,28 @@ export function projectObservationWorkCard(input = {}) {
     }))
   }
 
-  traceItems.push(traceEntry({
-    kind: 'model-request',
-    state: '未投影',
-    summary: '模型请求轨迹未投影',
-    unprojected: true,
-    details: [['reason', 'this node reported no model-request event with a turn id']],
-  }))
-  if (toolSteps.length === 0) {
+  const debugInspection = node.debugInspection || input.debugInspection
+  if (debugInspection?.model?.state === 'collected') {
+    const providerName = debugInspection.model.provider || debugInspection.model.providerId || '—'
+    const requestedModelName = debugInspection.model.requestedModel || debugInspection.model.modelId || '—'
+    const actualModelName = debugInspection.model.actualModel || requestedModelName
+    const tokenUsageText = debugInspection.model.tokenUsage?.state === 'collected'
+      ? `tokens=${debugInspection.model.tokenUsage.totalTokens}`
+      : `${debugInspection.model.tokenUsage?.state || 'data-not-collected'}${debugInspection.model.tokenUsage?.reason ? ` (${debugInspection.model.tokenUsage.reason})` : ''}`
     traceItems.push(traceEntry({
-      kind: 'tool-result',
-      state: '未投影',
-      summary: '工具调用与返回轨迹未投影',
-      unprojected: true,
-      details: [['reason', 'observation projection has no typed toolSteps for this node']],
+      kind: 'model-request',
+      occurredAt: debugInspection.turn?.startedAt || node.updatedAt,
+      state: debugInspection.invocationStatus === 'failed' ? '失败' : '已完成',
+      summary: `${providerName}/${requestedModelName} (actual=${actualModelName}) · 重试 ${debugInspection.model.retryCount ?? 0} 次 · ${tokenUsageText}`,
+      sourceRef: debugInspection.latestInvocation?.invocationId || debugInspection.turn?.turnId || node.nodeId,
+      turnId: debugInspection.turn?.turnId ?? node.turnId,
+      details: [
+        ['provider', providerName],
+        ['requestedModel', requestedModelName],
+        ['actualModel', actualModelName],
+        ['retryCount', String(debugInspection.model.retryCount ?? 0)],
+        ['tokenUsage', tokenUsageText],
+      ],
     }))
   }
 
@@ -1007,6 +1082,7 @@ export function projectObservationWorkCard(input = {}) {
     observation: {
       nodeId: node.nodeId,
       handoffs: Array.isArray(input.handoffs) ? input.handoffs : [],
+      ...(debugInspection ? { debugInspection } : {}),
     },
   }
 }

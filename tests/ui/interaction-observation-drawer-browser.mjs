@@ -177,6 +177,7 @@ function observationProjection(withDrawer, taskId, selectedNodeId) {
       projectionSeq: 'seq-12',
       breadcrumbs: [{ ref: `task://${taskId}/observation`, title: '任务处理流水' }],
       canReturn: false,
+      purpose: 'pipeline-registry',
       nodes: scopeNodes,
     },
     nodes: [
@@ -258,6 +259,127 @@ function observationProjection(withDrawer, taskId, selectedNodeId) {
       notCarried: '未授权内容',
       occurredAt: '2026-10-05T12:00:04Z',
     }],
+    agentDebugInspections: [
+      {
+        agentRole: 'interaction',
+        role: 'interaction',
+        invocationStatus: 'completed',
+        turn: {
+          state: 'collected',
+          turnId: `turn-interaction-${taskId}-r1`,
+          round: 1,
+          startedAt: TIME,
+          completedAt: TIME,
+          durationMs: 0,
+          lifecycleState: 'completed',
+        },
+        context: {
+          state: 'collected',
+          contextRootId: `ctx:interaction:${taskId}`,
+          inheritsOrchestratorContext: false,
+          injectedRefs: [`task://${taskId}/input`],
+        },
+        model: { state: 'invoked-without-model', tokenUsage: { state: 'not-applicable', reason: 'no-model-call' } },
+        tools: { availableToolsState: 'invoked-without-tools', callsState: 'invoked-without-tools' },
+        error: { state: 'none' },
+      },
+      {
+        agentRole: 'orchestration',
+        role: 'orchestration',
+        invocationStatus: 'completed',
+        turn: {
+          state: 'collected',
+          turnId: `turn-orchestration-${taskId}-r1`,
+          round: 1,
+          startedAt: TIME,
+          completedAt: TIME,
+          durationMs: 0,
+          lifecycleState: 'completed',
+        },
+        context: {
+          state: 'collected',
+          contextRootId: `ctx:orchestration:${taskId}`,
+          inheritsOrchestratorContext: false,
+          injectedRefs: [`task://${taskId}/plan@1`],
+        },
+        model: { state: 'invoked-without-model', tokenUsage: { state: 'not-applicable', reason: 'no-model-call' } },
+        tools: { availableToolsState: 'invoked-without-tools', callsState: 'invoked-without-tools' },
+        error: { state: 'none' },
+      },
+      {
+        agentRole: 'execution',
+        role: 'execution',
+        invocationStatus: 'active',
+        turn: {
+          state: 'collected',
+          turnId: REAL_TURN_ID,
+          round: 1,
+          startedAt: TIME,
+          lifecycleState: 'running',
+        },
+        context: {
+          state: 'collected',
+          contextRootId: `ctx:execution:${taskId}`,
+          inheritsOrchestratorContext: false,
+          injectedRefs: ['operation://operation-observation/input'],
+        },
+        model: {
+          state: 'collected',
+          provider: 'cc',
+          requestedModel: 'gpt-5',
+          actualModel: 'gpt-5',
+          retryCount: 0,
+          tokenUsage: { state: 'data-not-collected', reason: 'provider-protocol-omitted' },
+        },
+        tools: {
+          availableToolsState: 'collected',
+          availableTools: ['read.file', 'write.file'],
+          callsState: 'collected',
+          calls: [],
+        },
+        error: { state: 'none' },
+      },
+      {
+        agentRole: 'review',
+        role: 'review',
+        invocationStatus: 'not-invoked',
+        turn: { state: 'not-invoked' },
+        context: { state: 'not-invoked' },
+        model: { state: 'not-invoked', tokenUsage: { state: 'not-applicable', reason: 'no-model-call' } },
+        tools: { availableToolsState: 'not-invoked', callsState: 'not-invoked' },
+        error: { state: 'none' },
+      },
+      {
+        agentRole: 'memory',
+        role: 'memory',
+        invocationStatus: 'rejected',
+        turn: {
+          state: 'collected',
+          turnId: `turn-memory-${taskId}`,
+          round: 1,
+          startedAt: TIME,
+          completedAt: TIME,
+          durationMs: 0,
+          lifecycleState: 'rejected',
+        },
+        context: {
+          state: 'collected',
+          contextRootId: `ctx:memory:${taskId}`,
+          inheritsOrchestratorContext: false,
+          injectedRefs: ['memory-candidate://cand-1'],
+          omissionReason: 'rejected-by-memory-gate',
+        },
+        model: { state: 'invoked-without-model', tokenUsage: { state: 'not-applicable', reason: 'no-model-call' } },
+        tools: { availableToolsState: 'invoked-without-tools', callsState: 'invoked-without-tools' },
+        error: {
+          state: 'present',
+          owner: 'memory.curation',
+          code: 'memory.candidate.rejected',
+          message: '经验候选未通过准入',
+          readonlyNextActionHint: '只读核对被拒经验候选的证据引用与去重规则',
+        },
+      },
+    ],
     selectedNode: withDrawer ? detail : undefined,
     rules: {
       keyboardFocus: ['nodes are buttons', 'drawer focus moves to selected node', 'drawer close returns focus to trigger', 'breadcrumb return keeps the path visible'],
@@ -557,6 +679,9 @@ try {
     const pageErrors = []
     page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`))
     await page.goto(`${server.url}/observation.html?task=${TASK_ID}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('details[data-observation-catalogue="true"] > summary, .flow-node', { timeout: 10000 })
+    const closedCatalogueSummary = await page.$('details[data-observation-catalogue="true"]:not([open]) > summary')
+    if (closedCatalogueSummary) await closedCatalogueSummary.click()
     await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 10000 })
 
     const defaultObservation = await readDefaultObservation(page)
@@ -678,6 +803,7 @@ try {
     const drawer = await readDrawer(page)
     observe(`${run.label} drawer`, drawer)
     observe(`${run.label} page errors`, pageErrors)
+    await page.waitForSelector('.semantic-observation[data-state="completed"]', { timeout: 5000 }).catch(() => {})
     const semanticPanel = await page.evaluate(() => ({
       mounted: Boolean(document.querySelector('.semantic-observation')),
       contract: document.querySelector('.semantic-observation')?.dataset.contractVersion ?? '',
@@ -697,7 +823,7 @@ try {
         && realTurnGroups[0].chipTurnId === REAL_TURN_ID
         && realTurnGroups[0].chip === `轮次 ${REAL_TURN_ID}`
         && realTurnGroups[0].unprojected === false
-        && realTurnGroups[0].rows === 3,
+        && realTurnGroups[0].rows === 4,
       drawer.turnGroups,
     )
     record(
@@ -711,7 +837,7 @@ try {
         && unprojectedGroups[0].turnKey === '__no-turn-identity__'
         && unprojectedGroups[0].turnId === undefined
         && unprojectedGroups[0].unprojectedText.includes('轮次未投影')
-        && unprojectedGroups[0].rows === 3,
+        && unprojectedGroups[0].rows === 2,
       drawer.turnGroups,
     )
     record(
@@ -720,6 +846,30 @@ try {
       drawer.turnGroups.map((group) => group.chip),
     )
     record(`${run.label} trace has second-level time and categories`, /\d{2}:\d{2}:\d{2}/.test(drawer.traceText) && ['状态', '结论', '工具调用', '模型请求'].every((label) => drawer.traceText.includes(label)), drawer.traceText)
+    record(
+      `${run.label} trace never appends fake unprojected model or tool placeholders`,
+      !drawer.traceText.includes('模型请求轨迹未投影') && !drawer.traceText.includes('工具调用与返回轨迹未投影'),
+      drawer.traceText,
+    )
+    const debugDom = await page.evaluate(() => {
+      const cards = [...document.querySelectorAll('.agent-debug-section .agent-debug-card')]
+      const hints = [...document.querySelectorAll('.agent-debug-section p.debug-readonly-hint')]
+      const controls = document.querySelectorAll('.agent-debug-section button, .agent-debug-section form, .agent-debug-section input')
+      return {
+        roles: cards.map((card) => card.dataset.agentDebugRole),
+        hintCount: hints.length,
+        hintText: hints.map((node) => node.textContent).join('|'),
+        controlCount: controls.length,
+      }
+    })
+    record(
+      `${run.label} five-role debug inspection renders all 5 roles and readonly hint without controls`,
+      JSON.stringify(debugDom.roles) === JSON.stringify(['interaction', 'orchestration', 'execution', 'review', 'memory'])
+        && debugDom.hintCount === 1
+        && debugDom.hintText.includes('只读核对被拒经验候选')
+        && debugDom.controlCount === 0,
+      debugDom,
+    )
     record(`${run.label} paired call and result render in one item`, drawer.pairedRowState === 'true' && drawer.pairedRowText.includes('调用与返回已配对'), drawer.pairedRowText)
     record(`${run.label} unpaired call is explicitly not returned`, drawer.unpairedRowState === 'false' && drawer.unpairedRowText.includes('调用未返回'), drawer.unpairedRowText)
     record(`${run.label} human status and conversation keep technical ids out`, technicalTokens(`${drawer.statusText}\n${drawer.conversationText}`).length === 0, technicalTokens(`${drawer.statusText}\n${drawer.conversationText}`))
@@ -800,6 +950,9 @@ try {
     const pageErrors = []
     page.on('pageerror', (error) => pageErrors.push(`pageerror: ${error.message}`))
     await page.goto(`${server.url}/observation.html?task=${MISSING_STATE_TASK_ID}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('details[data-observation-catalogue="true"] > summary, .flow-node', { timeout: 10000 })
+    const closedCatalogueSummaryMissing = await page.$('details[data-observation-catalogue="true"]:not([open]) > summary')
+    if (closedCatalogueSummaryMissing) await closedCatalogueSummaryMissing.click()
     await page.waitForSelector('.flow-node[data-node-id="settle"]', { timeout: 10000 })
     const missingState = await readDefaultObservation(page)
     const settle = missingState.nodes.find((node) => node.nodeId === 'settle')

@@ -1,5 +1,7 @@
 import {
   PIPELINE_ROWS,
+  type AgentDebugInspection,
+  type AgentRoleId,
   type EvidenceRef,
   type LifecycleState,
   type PipelineNodeRow,
@@ -7,6 +9,11 @@ import {
   type TaskId,
   type TaskOutput,
 } from '@humanagent/contracts';
+import {
+  projectAgentDebugInspections,
+  type AgentDebugRole,
+  type ObservationAgentDebugInput,
+} from './agent-debug-inspection.js';
 import {
   fromTaskOutput,
   UiProjectionError,
@@ -426,7 +433,18 @@ export interface PipelineObservationProjectionInput {
   readonly scopes: Readonly<Record<string, ObservationScopeSource>>;
   readonly scopeStack: readonly string[];
   readonly selectedNodeId?: string;
+  readonly taskId?: string;
+  readonly agentDebug?: ObservationAgentDebugInput;
 }
+
+export type ObservationNodeDetailWithDebugProjection = ObservationNodeDetailProjection & {
+  readonly debugInspection?: AgentDebugInspection;
+};
+
+export type PipelineObservationWithDebugProjection = Omit<PipelineObservationProjection, 'selectedNode'> & {
+  readonly selectedNode?: ObservationNodeDetailWithDebugProjection;
+  readonly agentDebugInspections: readonly AgentDebugInspection[];
+};
 
 export interface MemoryEntrySource {
   readonly id: string;
@@ -808,9 +826,11 @@ function toObservationDetail(
   source: ObservationNodeSource,
   frameByAgentId: ReadonlyMap<string, ObservationAgentFrameSource>,
   purpose: ObservationScopePurpose | undefined,
-): ObservationNodeDetailProjection {
+  debugByRole?: ReadonlyMap<AgentDebugRole, AgentDebugInspection>,
+): ObservationNodeDetailWithDebugProjection {
   const { frame, role } = requireNodeFrame(source, frameByAgentId);
   const display = observationNodeDisplay(source, purpose);
+  const debugInspection = debugByRole?.get(role);
   return {
     nodeId: source.nodeId,
     title: display.title,
@@ -838,6 +858,7 @@ function toObservationDetail(
     assignment: source.assignment ? toAssignment(source.assignment) : undefined,
     feedback: (source.feedback ?? []).map(toAgentFeedback),
     reconcile: toReconcile(source.reconcile),
+    ...(debugInspection === undefined ? {} : { debugInspection }),
   };
 }
 
@@ -992,7 +1013,9 @@ function toHandoffs(
   });
 }
 
-export function projectPipelineObservation(input: PipelineObservationProjectionInput): PipelineObservationProjection {
+export function projectPipelineObservation(
+  input: PipelineObservationProjectionInput,
+): PipelineObservationWithDebugProjection {
   const currentRef = input.scopeStack[input.scopeStack.length - 1];
   if (!currentRef) throw new UiProjectionError('observation scope stack may not be empty');
   const scope = input.scopes[currentRef];
@@ -1002,6 +1025,10 @@ export function projectPipelineObservation(input: PipelineObservationProjectionI
   const frameByAgentId = new Map((scope.agents ?? []).map((frame) => [frame.agentId, frame]));
   const nodes = scope.nodes.map((node) => toPipelineNode(node, frameByAgentId, scope.purpose));
   const handoffs = toHandoffs(scope.handoffs ?? [], scope.nodes, frames);
+  const agentDebugInspections = projectAgentDebugInspections(input.agentDebug);
+  const debugByRole = new Map<AgentRoleId, AgentDebugInspection>(
+    agentDebugInspections.map((entry) => [entry.agentRole, entry]),
+  );
 
   let currentNode: PipelineNodeProjection | undefined;
   if (scope.currentNodeId !== undefined) {
@@ -1009,11 +1036,11 @@ export function projectPipelineObservation(input: PipelineObservationProjectionI
     if (!currentNode) throw new UiProjectionError(`unknown current observation node ${scope.currentNodeId}`);
   }
 
-  let selectedNode: ObservationNodeDetailProjection | undefined;
+  let selectedNode: ObservationNodeDetailWithDebugProjection | undefined;
   if (input.selectedNodeId) {
     const node = scope.nodes.find((candidate) => candidate.nodeId === input.selectedNodeId);
     if (!node) throw new UiProjectionError(`unknown observation node ${input.selectedNodeId}`);
-    selectedNode = toObservationDetail(node, frameByAgentId, scope.purpose);
+    selectedNode = toObservationDetail(node, frameByAgentId, scope.purpose, debugByRole);
   }
 
   return {
@@ -1038,6 +1065,7 @@ export function projectPipelineObservation(input: PipelineObservationProjectionI
       canReturn: input.scopeStack.length > 1,
     },
     selectedNode,
+    agentDebugInspections,
     rules: {
       keyboardFocus: OBSERVATION_KEYBOARD_RULES,
       narrowWidth: OBSERVATION_NARROW_RULES,
@@ -1138,3 +1166,4 @@ export function projectMemoryInteraction(input: MemoryInteractionSurfaceInput): 
 export * from './runtime.js';
 export * from './interaction-work-card.js';
 export * from './agent-activity.js';
+export * from './agent-debug-inspection.js';

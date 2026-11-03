@@ -140,6 +140,7 @@ import {
   projectDurableTaskInventory,
   producedArtifactBody,
   producedArtifactPaths,
+  selectProductionOrchestratorStep,
   type RuntimeCheckpointBoundaryPort,
   type DurableTaskInventoryEntry,
   type RuntimeExecutionDriver,
@@ -266,18 +267,23 @@ import {
   projectMemoryInteraction,
   projectPipelineObservation,
   projectTaskDetail,
+  type AgentDebugRole,
+  type ObservationAgentDebugInput,
+  type ObservationAgentDebugRoleInput,
   type ObservationAgentFrameSource,
   type ObservationHandoffSource,
   type ObservationNodeSource,
   type ObservationNodeToolStepSource,
   type ObservationScopeSource,
+  type PipelineObservationWithDebugProjection as PipelineObservationProjection,
 } from '../../../ui/projection/index.js';
-import { UiProjectionError, type PipelineObservationProjection } from '../../../ui/contracts/models.js';
+import { UiProjectionError } from '../../../ui/contracts/models.js';
 import type { RuntimeTaskSnapshotInput } from '../../../ui/projection/runtime.js';
 import type { RuntimeSemanticObservationEnvelope } from '../../../ui/contracts/runtime.js';
 import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/nodes/node-registry.js';
 import type {
   AgentRoleDisplay,
+  AgentRoleId,
   LifecycleState,
   ProductBoardIndex,
   ProductPendingDecision,
@@ -455,7 +461,7 @@ export interface UiRuntimeMemoryComposition {
 type ServiceExecutionPorts = Pick<
   RuntimeTaskCoordinatorOptions,
   'admitExecution' | 'createDriver' | 'coldExecution' | 'currentStatePort' | 'currentStateFacts' | 'preparedExecutionStop'
-  | 'inspectionStop' | 'executionPlanRevisionPort' | 'roleModelBindings'
+  | 'inspectionStop' | 'executionPlanRevisionPort' | 'roleModelBindings' | 'orchestratorDecisionPort'
 > & {
   /**
    * The one canonical cold-resume selector. The launch execution composition
@@ -645,6 +651,7 @@ export interface UiRuntimeServiceOptions {
     readonly admitExecution?: RuntimeTaskCoordinatorOptions['admitExecution'];
     readonly executionPlanRevisionPort?: RuntimeTaskCoordinatorOptions['executionPlanRevisionPort'];
     readonly roleModelBindings?: RuntimeTaskCoordinatorOptions['roleModelBindings'];
+    readonly orchestratorDecisionPort?: RuntimeTaskCoordinatorOptions['orchestratorDecisionPort'];
     /**
      * Launch assembly of the full native execution ports. It is called exactly
      * once, before the coordinator is constructed; the supplied callbacks only
@@ -1145,12 +1152,716 @@ function observationToolSteps(task: RuntimeTaskSnapshot): ObservationNodeToolSte
   return steps;
 }
 
+interface ObservationAgentDebugRuntimeContext {
+  readonly binding?: ProviderBinding;
+  readonly availableToolNames?: readonly string[];
+  readonly memoryContext?: MemoryContextReceipt;
+  readonly memoryCandidates?: readonly {
+    readonly candidateId: string;
+    readonly state: string;
+    readonly taskId?: string;
+    readonly summary: string;
+    readonly sourceRefs: readonly string[];
+  }[];
+  readonly interactionTraces?: readonly import('../../../contracts/src/index.js').DecisionTraceRecord[];
+  readonly roleOverrides?: Partial<Record<AgentRoleId, ObservationAgentDebugRoleInput>>;
+}
+
+function buildObservationAgentDebugInput(
+  task: RuntimeTaskSnapshot,
+  toolSteps: readonly ObservationNodeToolStepSource[],
+  admission: RequirementAdmissionObservation | undefined,
+  publicOutput: PublicOutputPublicationProjection | undefined,
+  debugContext?: ObservationAgentDebugRuntimeContext,
+): ObservationAgentDebugInput {
+  const byRole: Partial<Record<AgentRoleId, ObservationAgentDebugRoleInput>> = {};
+  const taskStartInstant = task.events[0]?.occurredAt ?? task.updatedAt;
+  const taskEndInstant = task.updatedAt;
+
+  // 1. interaction
+  const interactionTraces = debugContext?.interactionTraces ?? [];
+  if (task.input || task.directive || interactionTraces.length > 0) {
+    const traceCalls = interactionTraces
+      .filter((trace) => trace.tool !== undefined)
+      .map((trace, index) => {
+        const tool = trace.tool!;
+        const failed =
+          trace.execution?.settlement.state === 'failed'
+          || trace.execution?.admission === 'rejected'
+          || trace.execution?.admission === 'capability-denied'
+          || trace.execution?.admission === 'permission-denied';
+        return {
+          callId: tool.toolIntentId || `interaction-tool-${index + 1}`,
+          toolName: tool.toolRef,
+          state: failed ? ('failed' as const) : ('succeeded' as const),
+          durationMs: 0,
+          redactedInputSummary: tool.selectedBecause.slice(0, 256),
+          outputRef: trace.execution?.resultRef ?? null,
+          errorMessage: trace.execution?.failureRef ?? null,
+        };
+      });
+    const turnId = `turn:interaction:${task.taskId.value}:r${task.directiveRevision || 1}`;
+    const contextRootId = `ctx:interaction:${task.taskId.value}:r${task.directiveRevision || 1}`;
+    byRole.interaction = {
+      agentRole: 'interaction',
+      invocationStatus: 'completed',
+      latestInvocation: {
+        invocationId: `inv:interaction:${turnId}`,
+        agentRole: 'interaction',
+        sourceNodeId: 'explicit.normalize',
+        taskId: task.taskId.value,
+        operationId: task.operationId ?? null,
+        turnId,
+        executionEpoch: task.executionEpoch ?? 1,
+        boundPlanRevisionId: null,
+        boundPlanStepId: null,
+        parentInvocationId: null,
+        contextIsolation: {
+          contextRootId,
+          parentContextId: null,
+          inheritsOrchestratorContext: false,
+        },
+      },
+      invocationHistoryCount: Math.max(1, task.directiveRevision || 1),
+      turn: {
+        state: 'collected',
+        turnId,
+        round: task.directiveRevision || 1,
+        lifecycleState: 'completed',
+        startedAt: taskStartInstant,
+        completedAt: taskStartInstant,
+        durationMs: 0,
+      },
+      context: {
+        state: 'collected',
+        contextRootId,
+        inheritsOrchestratorContext: false,
+        messageCount: (task.input ? 1 : 0) + (task.directive ? 1 : 0),
+        charCount: (task.input?.length ?? 0) + (task.directive?.length ?? 0),
+        injectedRefs: [
+          ...(task.input ? [`task://${task.taskId.value}/input`] : []),
+          ...(task.directive ? [`task://${task.taskId.value}/directive@${task.directiveRevision || 1}`] : []),
+        ],
+        compacted: false,
+        omissionReason: null,
+      },
+      model: {
+        state: 'invoked-without-model',
+        provider: null,
+        requestedModel: null,
+        actualModel: null,
+        retryCount: 0,
+        tokenUsage: { state: 'not-applicable', reason: 'no-model-call' },
+      },
+      tools:
+        traceCalls.length > 0
+          ? {
+              availableToolsState: 'collected',
+              availableTools: Array.from(new Set(traceCalls.map((call) => call.toolName))),
+              callsState: 'collected',
+              calls: traceCalls,
+            }
+          : {
+              availableToolsState: 'invoked-without-tools',
+              availableTools: [],
+              callsState: 'invoked-without-tools',
+              calls: [],
+            },
+      error: { state: 'none' },
+    };
+  }
+
+  // 2. orchestration
+  const orchestratorFailed =
+    task.error !== undefined
+    && (task.error.ownerId === 'humanagent.runtime.implicit-orchestrator'
+      || task.error.code.startsWith('orchestrator.')
+      || task.error.code.startsWith('orchestration.'));
+  const planRevisions = task.planRevisions ?? (task.planRevision ? [task.planRevision] : []);
+  const latestPlanRev = planRevisions[planRevisions.length - 1];
+  const latestPlanStep = latestPlanRev?.steps[0];
+  const orchestrationInvoked =
+    orchestratorFailed
+    || admission !== undefined
+    || task.orchestrated === true
+    || planRevisions.length > 0
+    || task.state !== 'created';
+  if (orchestratorFailed && task.error) {
+    const turnId = `turn:orchestration:${task.taskId.value}:e${task.executionEpoch ?? 1}`;
+    const contextRootId = `ctx:orchestration:${task.taskId.value}:e${task.executionEpoch ?? 1}`;
+    byRole.orchestration = {
+      agentRole: 'orchestration',
+      invocationStatus: 'failed',
+      latestInvocation: {
+        invocationId: `inv:orchestration:${turnId}`,
+        agentRole: 'orchestration',
+        sourceNodeId: 'task.correlate-or-create',
+        taskId: task.taskId.value,
+        operationId: task.operationId ?? null,
+        turnId,
+        executionEpoch: task.executionEpoch ?? 1,
+        boundPlanRevisionId: latestPlanRev?.planRevisionId ?? null,
+        boundPlanStepId: latestPlanStep?.stepId ?? null,
+        parentInvocationId: null,
+        contextIsolation: {
+          contextRootId,
+          parentContextId: null,
+          inheritsOrchestratorContext: false,
+        },
+      },
+      invocationHistoryCount: Math.max(1, planRevisions.length),
+      turn: {
+        state: 'collected',
+        turnId,
+        round: Math.max(1, planRevisions.length),
+        lifecycleState: 'failed',
+        startedAt: taskStartInstant,
+        completedAt: taskEndInstant,
+        durationMs: Math.max(0, Date.parse(taskEndInstant) - Date.parse(taskStartInstant)),
+      },
+      // The planner failed, so its debug context was not recorded. Report
+      // data-not-collected even when a prior plan revision exists; a failed
+      // planner must not be represented as a collected context.
+      context: {
+        state: 'data-not-collected',
+        contextRootId,
+        inheritsOrchestratorContext: false,
+        messageCount: null,
+        charCount: null,
+        injectedRefs: [],
+        compacted: null,
+        omissionReason: 'not-recorded-by-runtime',
+      },
+      model: {
+        state: 'invoked-without-model',
+        provider: null,
+        requestedModel: null,
+        actualModel: null,
+        retryCount: 0,
+        tokenUsage: { state: 'not-applicable', reason: 'no-model-call' },
+      },
+      tools: {
+        availableToolsState: 'invoked-without-tools',
+        availableTools: [],
+        callsState: 'invoked-without-tools',
+        calls: [],
+      },
+      error: {
+        state: 'present',
+        code: task.error.code,
+        message: task.error.message,
+        owner: task.error.ownerId,
+        retryable: task.error.retryable,
+        readonlyNextActionHint: task.error.nextAction || '只读核对 Planner 决策 JSON 结构并在新轮次重新提交',
+      },
+    };
+  } else if (orchestrationInvoked) {
+    const orchRunning = task.state === 'running' && task.currentNode === 'orchestration.plan';
+    const turnId = `turn:orchestration:${task.taskId.value}:r${planRevisions.length || 1}`;
+    const contextRootId =
+      latestPlanStep?.contextIsolation.contextRootId
+      ?? `ctx:orchestration:${task.taskId.value}:r${planRevisions.length || 1}`;
+    byRole.orchestration = {
+      agentRole: 'orchestration',
+      invocationStatus: orchRunning ? 'active' : 'completed',
+      latestInvocation: {
+        invocationId: `inv:orchestration:${turnId}`,
+        agentRole: 'orchestration',
+        sourceNodeId: 'task.correlate-or-create',
+        taskId: task.taskId.value,
+        operationId: task.operationId ?? null,
+        turnId,
+        executionEpoch: task.executionEpoch ?? 1,
+        boundPlanRevisionId: latestPlanRev?.planRevisionId ?? null,
+        boundPlanStepId: latestPlanStep?.stepId ?? null,
+        parentInvocationId: null,
+        contextIsolation: {
+          contextRootId,
+          parentContextId: null,
+          inheritsOrchestratorContext: false,
+        },
+      },
+      invocationHistoryCount: Math.max(1, planRevisions.length),
+      turn: {
+        state: 'collected',
+        turnId,
+        round: Math.max(1, planRevisions.length),
+        lifecycleState: orchRunning ? 'running' : 'completed',
+        startedAt: taskStartInstant,
+        completedAt: orchRunning ? null : taskEndInstant,
+        durationMs: orchRunning ? null : Math.max(0, Date.parse(taskEndInstant) - Date.parse(taskStartInstant)),
+      },
+      context: {
+        state: 'collected',
+        contextRootId,
+        inheritsOrchestratorContext: false,
+        messageCount: 1 + planRevisions.length,
+        charCount:
+          (task.directive?.length ?? 0) +
+          planRevisions.reduce((acc, rev) => acc + (rev.steps[0]?.objective.length ?? 0), 0),
+        injectedRefs: [
+          ...(admission ? [`task://${task.taskId.value}/admission/${admission.queue}`] : []),
+          ...planRevisions.map((rev) => `task://${task.taskId.value}/plan/${rev.planRevisionId}`),
+          ...(admission === undefined && planRevisions.length === 0 && task.directive
+            ? [`task://${task.taskId.value}/directive@${task.directiveRevision || 1}`]
+            : []),
+        ],
+        compacted: false,
+        omissionReason: null,
+      },
+      model: {
+        state: 'invoked-without-model',
+        provider: null,
+        requestedModel: null,
+        actualModel: null,
+        retryCount: 0,
+        tokenUsage: { state: 'not-applicable', reason: 'no-model-call' },
+      },
+      tools: {
+        availableToolsState: 'invoked-without-tools',
+        availableTools: [],
+        callsState: 'invoked-without-tools',
+        calls: [],
+      },
+      error: { state: 'none' },
+    };
+  }
+
+  // 3. execution
+  const nonOrchEvents = task.events.filter(
+    (event) => event.ownerId !== 'humanagent.runtime.implicit-orchestrator',
+  );
+  const executionInvoked =
+    !orchestratorFailed && (task.operationId !== undefined || nonOrchEvents.length > 0);
+  if (executionInvoked) {
+    const execRunning = task.state === 'running' || task.state === 'settling';
+    const execFailed =
+      (task.state === 'failed' || task.state === 'blocked')
+      && !orchestratorFailed
+      && task.error !== undefined;
+    const startedAt = nonOrchEvents[0]?.occurredAt ?? taskStartInstant;
+    const completedAt = execRunning
+      ? null
+      : (nonOrchEvents[nonOrchEvents.length - 1]?.occurredAt ?? taskEndInstant);
+    const modelEvents = nonOrchEvents.filter(
+      (event) => event.kind === 'provider.model' || event.kind === 'provider.output',
+    );
+    const retryEventsCount = nonOrchEvents.filter((event) => event.kind === 'execution.retry').length;
+    const hasModelCall = modelEvents.length > 0 || task.requestIdentity !== undefined;
+    const binding = debugContext?.binding;
+    const memoryReceipt = debugContext?.memoryContext;
+    const hasContextFacts = Boolean(task.directive || task.input || memoryReceipt);
+    const rawToolCalls = new Map<string, RuntimeTaskEvent>();
+    for (const event of nonOrchEvents.filter((item) => item.kind === 'provider.tool')) {
+      const key = event.callId ?? event.eventId;
+      if (!rawToolCalls.has(key)) rawToolCalls.set(key, event);
+    }
+    const rawToolResults = new Map<string, RuntimeTaskEvent>();
+    for (const event of nonOrchEvents.filter((item) => item.kind === 'provider.tool-result')) {
+      const key = event.callId ?? event.eventId;
+      if (!rawToolResults.has(key)) rawToolResults.set(key, event);
+    }
+    const availableToolNames = Array.from(
+      new Set([...(debugContext?.availableToolNames ?? []), ...toolSteps.map((step) => step.name)]),
+    );
+    const turnId = latestTurnId(task) ?? `turn:execution:${task.operationId ?? task.taskId.value}`;
+    const contextRootId =
+      latestPlanStep?.contextIsolation.contextRootId
+      ?? `ctx:execution:${task.operationId ?? task.taskId.value}:${task.executionEpoch ?? 1}`;
+    const boundPlanRevisionId = task.boundPlanRevisionId ?? latestPlanRev?.planRevisionId ?? null;
+    const boundPlanStepId = task.boundPlanStepId ?? latestPlanStep?.stepId ?? null;
+    byRole.execution = {
+      agentRole: 'execution',
+      invocationStatus: execRunning ? 'active' : execFailed ? 'failed' : 'completed',
+      latestInvocation: {
+        invocationId: `inv:execution:${turnId}`,
+        agentRole: 'execution',
+        sourceNodeId: 'pipeline.execute',
+        taskId: task.taskId.value,
+        operationId: task.operationId ?? null,
+        turnId,
+        executionEpoch: task.executionEpoch ?? 1,
+        boundPlanRevisionId: boundPlanRevisionId && boundPlanStepId ? boundPlanRevisionId : null,
+        boundPlanStepId: boundPlanRevisionId && boundPlanStepId ? boundPlanStepId : null,
+        parentInvocationId: null,
+        contextIsolation: {
+          contextRootId,
+          parentContextId: null,
+          inheritsOrchestratorContext: false,
+        },
+      },
+      invocationHistoryCount: Math.max(1, retryEventsCount + 1),
+      turn: {
+        state: 'collected',
+        turnId,
+        round: Math.max(1, retryEventsCount + 1),
+        lifecycleState: execRunning ? 'running' : execFailed ? 'failed' : 'completed',
+        startedAt,
+        completedAt,
+        durationMs: completedAt ? Math.max(0, Date.parse(completedAt) - Date.parse(startedAt)) : null,
+      },
+      context: hasContextFacts
+        ? {
+            state: 'collected',
+            contextRootId,
+            inheritsOrchestratorContext: false,
+            messageCount: (task.directive || task.input ? 1 : 0) + (memoryReceipt?.entries.length ?? 0),
+            charCount: (task.directive?.length ?? task.input?.length ?? 0),
+            injectedRefs: [
+              ...(task.directive || task.input
+                ? [`operation://${task.operationId ?? task.taskId.value}/input`]
+                : []),
+              ...(memoryReceipt?.entries ?? []).map((entry) => entry.sourceRef),
+            ],
+            compacted: (memoryReceipt?.omitted.length ?? 0) > 0,
+            omissionReason:
+              memoryReceipt && memoryReceipt.omitted.length > 0
+                ? memoryReceipt.omitted.map((item) => item.reason).join('; ')
+                : null,
+          }
+        : { state: 'data-not-collected', contextRootId },
+      model: hasModelCall
+        ? binding
+          ? {
+              state: 'collected',
+              provider: binding.providerId,
+              requestedModel: binding.modelRef,
+              actualModel: nonOrchEvents.find((ev) => ev.responseModel)?.responseModel ?? binding.modelRef,
+              retryCount: retryEventsCount,
+              tokenUsage: {
+                state: 'data-not-collected',
+                reason: 'provider-protocol-omitted',
+              },
+            }
+          : {
+              state: 'data-not-collected',
+              provider: null,
+              requestedModel: null,
+              actualModel: null,
+              retryCount: retryEventsCount,
+              tokenUsage: {
+                state: 'data-not-collected',
+                reason: 'provider-protocol-omitted',
+              },
+            }
+        : {
+            state: 'invoked-without-model',
+            provider: null,
+            requestedModel: null,
+            actualModel: null,
+            retryCount: 0,
+            tokenUsage: { state: 'not-applicable', reason: 'no-model-call' },
+          },
+      tools:
+        toolSteps.length > 0
+          ? {
+              availableToolsState: 'collected',
+              availableTools: availableToolNames,
+              callsState: 'collected',
+              calls: toolSteps.map((step) => {
+                const rawCall = rawToolCalls.get(step.stepId);
+                const rawResult = rawToolResults.get(step.stepId);
+                const callStartedAt = rawCall?.occurredAt ?? step.occurredAt ?? startedAt;
+                const callEndedAt = rawResult?.occurredAt ?? step.occurredAt;
+                const rawArgsText =
+                  rawCall?.arguments !== undefined ? JSON.stringify(rawCall.arguments) : step.name;
+                return {
+                  callId: step.stepId,
+                  toolName: step.name,
+                  state:
+                    step.status === 'failed'
+                      ? ('failed' as const)
+                      : ('succeeded' as const),
+                  durationMs: callEndedAt
+                    ? Math.max(0, Date.parse(callEndedAt) - Date.parse(callStartedAt))
+                    : null,
+                  redactedInputSummary: rawArgsText.slice(0, 256),
+                  outputRef: rawResult?.outputRef ?? null,
+                  errorMessage: rawResult?.error
+                    ? `${rawResult.error.code}: ${rawResult.error.message}`
+                    : null,
+                };
+              }),
+            }
+          : availableToolNames.length > 0
+            ? {
+                availableToolsState: 'collected',
+                availableTools: availableToolNames,
+                callsState: 'invoked-without-tools',
+                calls: [],
+              }
+            : {
+                availableToolsState: 'invoked-without-tools',
+                availableTools: [],
+                callsState: 'invoked-without-tools',
+                calls: [],
+              },
+      error:
+        execFailed && task.error
+          ? {
+              state: 'present',
+              code: task.error.code,
+              message: task.error.message,
+              owner: task.error.ownerId,
+              retryable: task.error.retryable,
+              readonlyNextActionHint:
+                task.error.nextAction || '只读查看 Provider 或工具错误证据后在新操作中重试',
+            }
+          : { state: 'none' },
+    };
+  }
+
+  // 4. review
+  const reviewStep = planRevisions
+    .flatMap((rev) => rev.steps)
+    .find((step) => step.targetAgentRole === 'review' && step.state !== 'pending');
+  const reviewInvoked =
+    task.checkpoint !== undefined
+    || (publicOutput?.state === 'committed' && publicOutput.commits.length > 0)
+    || reviewStep !== undefined;
+  if (reviewInvoked) {
+    const reviewFailed = reviewStep?.state === 'failed';
+    const turnId = task.checkpoint
+      ? `turn:review:${task.checkpoint.checkpointId}`
+      : `turn:review:${task.taskId.value}`;
+    const contextRootId =
+      reviewStep?.contextIsolation.contextRootId ?? `ctx:review:${task.taskId.value}`;
+    byRole.review = {
+      agentRole: 'review',
+      invocationStatus: task.state === 'settling' ? 'active' : reviewFailed ? 'failed' : 'completed',
+      latestInvocation: {
+        invocationId: `inv:review:${turnId}`,
+        agentRole: 'review',
+        sourceNodeId: 'settle',
+        taskId: task.taskId.value,
+        operationId: task.operationId ?? null,
+        turnId,
+        executionEpoch: task.executionEpoch ?? 1,
+        boundPlanRevisionId: null,
+        boundPlanStepId: null,
+        parentInvocationId: null,
+        contextIsolation: {
+          contextRootId,
+          parentContextId: null,
+          inheritsOrchestratorContext: false,
+        },
+      },
+      invocationHistoryCount: 1,
+      turn: {
+        state: 'collected',
+        turnId,
+        round: 1,
+        lifecycleState: task.state === 'settling' ? 'running' : reviewFailed ? 'failed' : 'completed',
+        startedAt: taskEndInstant,
+        completedAt: task.state === 'settling' ? null : taskEndInstant,
+        durationMs: task.state === 'settling' ? null : 0,
+      },
+      context: {
+        state: 'collected',
+        contextRootId,
+        inheritsOrchestratorContext: false,
+        messageCount: (task.checkpoint ? 1 : 0) + (publicOutput?.commits.length ?? 0),
+        charCount: (task.checkpoint?.summary.length ?? 0),
+        injectedRefs: [
+          ...(task.checkpoint ? [`checkpoint://${task.checkpoint.checkpointId}`] : []),
+          ...(publicOutput && publicOutput.commits.length > 0
+            ? [`task://${task.taskId.value}/output`]
+            : []),
+          ...(reviewStep ? [`task://${task.taskId.value}/review/${reviewStep.stepId}`] : []),
+        ],
+        compacted: false,
+        omissionReason: null,
+      },
+      model: {
+        state: 'invoked-without-model',
+        provider: null,
+        requestedModel: null,
+        actualModel: null,
+        retryCount: 0,
+        tokenUsage: { state: 'not-applicable', reason: 'no-model-call' },
+      },
+      tools: {
+        availableToolsState: 'invoked-without-tools',
+        availableTools: [],
+        callsState: 'invoked-without-tools',
+        calls: [],
+      },
+      error: reviewFailed
+        ? {
+            state: 'present',
+            code: 'review.step.failed',
+            message: reviewStep?.objective || '审核未通过',
+            owner: 'humanagent.runtime.review',
+            retryable: false,
+            readonlyNextActionHint: '只读核对审核结论与 checkpoint 证据，无需在观测面触发重试',
+          }
+        : { state: 'none' },
+    };
+  }
+
+  // 5. memory
+  const memoryCandidates = (debugContext?.memoryCandidates ?? []).filter(
+    (candidate) => candidate.taskId === task.taskId.value,
+  );
+  const rejectedCandidate = memoryCandidates.find((candidate) => candidate.state === 'rejected');
+  const memoryRejected = rejectedCandidate !== undefined;
+  const memoryInvoked = memoryRejected || memoryCandidates.length > 0;
+  if (memoryRejected && rejectedCandidate) {
+    const turnId = `turn:memory:${rejectedCandidate.candidateId}`;
+    const contextRootId = `ctx:memory:${task.taskId.value}`;
+    byRole.memory = {
+      agentRole: 'memory',
+      invocationStatus: 'rejected',
+      latestInvocation: {
+        invocationId: `inv:memory:${turnId}`,
+        agentRole: 'memory',
+        sourceNodeId: 'memory.agent',
+        taskId: task.taskId.value,
+        operationId: task.operationId ?? null,
+        turnId,
+        executionEpoch: task.executionEpoch ?? 1,
+        boundPlanRevisionId: null,
+        boundPlanStepId: null,
+        parentInvocationId: null,
+        contextIsolation: {
+          contextRootId,
+          parentContextId: null,
+          inheritsOrchestratorContext: false,
+        },
+      },
+      invocationHistoryCount: memoryCandidates.length,
+      turn: {
+        state: 'collected',
+        turnId,
+        round: 1,
+        lifecycleState: 'rejected',
+        startedAt: taskEndInstant,
+        completedAt: taskEndInstant,
+        durationMs: 0,
+      },
+      context: {
+        state: 'collected',
+        contextRootId,
+        inheritsOrchestratorContext: false,
+        messageCount: memoryCandidates.length,
+        charCount: rejectedCandidate.summary.length,
+        injectedRefs: [
+          `memory-candidate://${rejectedCandidate.candidateId}`,
+          ...rejectedCandidate.sourceRefs,
+        ],
+        compacted: false,
+        omissionReason: 'rejected-by-memory-gate',
+      },
+      model: {
+        state: 'invoked-without-model',
+        provider: null,
+        requestedModel: null,
+        actualModel: null,
+        retryCount: 0,
+        tokenUsage: { state: 'not-applicable', reason: 'no-model-call' },
+      },
+      tools: {
+        availableToolsState: 'invoked-without-tools',
+        availableTools: [],
+        callsState: 'invoked-without-tools',
+        calls: [],
+      },
+      error: {
+        state: 'present',
+        code: 'memory.candidate.rejected',
+        message: rejectedCandidate.summary || '经验候选未通过准入或被拒绝',
+        owner: 'humanagent.runtime.memory',
+        retryable: false,
+        readonlyNextActionHint: '只读核对被拒经验候选的证据引用与去重规则，无需在观测面触发写操作',
+      },
+    };
+  } else if (memoryInvoked) {
+    const turnId = `turn:memory:${task.taskId.value}`;
+    const contextRootId = `ctx:memory:${task.taskId.value}`;
+    byRole.memory = {
+      agentRole: 'memory',
+      invocationStatus: 'completed',
+      latestInvocation: {
+        invocationId: `inv:memory:${turnId}`,
+        agentRole: 'memory',
+        sourceNodeId: 'memory.agent',
+        taskId: task.taskId.value,
+        operationId: task.operationId ?? null,
+        turnId,
+        executionEpoch: task.executionEpoch ?? 1,
+        boundPlanRevisionId: null,
+        boundPlanStepId: null,
+        parentInvocationId: null,
+        contextIsolation: {
+          contextRootId,
+          parentContextId: null,
+          inheritsOrchestratorContext: false,
+        },
+      },
+      invocationHistoryCount: memoryCandidates.length,
+      turn: {
+        state: 'collected',
+        turnId,
+        round: 1,
+        lifecycleState: 'completed',
+        startedAt: taskEndInstant,
+        completedAt: taskEndInstant,
+        durationMs: 0,
+      },
+      context: {
+        state: 'collected',
+        contextRootId,
+        inheritsOrchestratorContext: false,
+        messageCount: memoryCandidates.length,
+        charCount: memoryCandidates.reduce((acc, candidate) => acc + candidate.summary.length, 0),
+        injectedRefs: memoryCandidates.flatMap((candidate) => [
+          `memory-candidate://${candidate.candidateId}`,
+          ...candidate.sourceRefs,
+        ]),
+        compacted: false,
+        omissionReason: null,
+      },
+      model: {
+        state: 'invoked-without-model',
+        provider: null,
+        requestedModel: null,
+        actualModel: null,
+        retryCount: 0,
+        tokenUsage: { state: 'not-applicable', reason: 'no-model-call' },
+      },
+      tools: {
+        availableToolsState: 'invoked-without-tools',
+        availableTools: [],
+        callsState: 'invoked-without-tools',
+        calls: [],
+      },
+      error: { state: 'none' },
+    };
+  }
+
+  if (debugContext?.roleOverrides) {
+    for (const [role, override] of Object.entries(debugContext.roleOverrides) as [
+      AgentRoleId,
+      ObservationAgentDebugRoleInput | undefined,
+    ][]) {
+      if (override) {
+        byRole[role] = override;
+      }
+    }
+  }
+
+  return {
+    byRole,
+  };
+}
+
 function observationProjection(
   task: RuntimeTaskSnapshot,
   selectedNodeId?: string,
   scopeRef?: string,
   admission?: RequirementAdmissionObservation,
   publicOutput?: PublicOutputPublicationProjection,
+  debugContext?: ObservationAgentDebugRuntimeContext,
 ): PipelineObservationProjection {
   const rootScopeRef = `task://${task.taskId.value}/observation`;
   const providerScopeRef = `${rootScopeRef}/pipeline.execute`;
@@ -1210,6 +1921,13 @@ function observationProjection(
       nodes: providerNodes,
     },
   };
+  const agentDebug = buildObservationAgentDebugInput(
+    task,
+    toolSteps,
+    admission,
+    publicOutput,
+    debugContext,
+  );
   return projectPipelineObservation({
     source: {
       state: task.state === 'failed' || task.state === 'blocked'
@@ -1228,6 +1946,8 @@ function observationProjection(
     scopes,
     scopeStack: inProviderScope ? [rootScopeRef, providerScopeRef] : [rootScopeRef],
     selectedNodeId,
+    taskId: task.taskId.value,
+    agentDebug,
   });
 }
 
@@ -1237,9 +1957,10 @@ function projectObservationBoundary(
   scopeRef?: string,
   admission?: RequirementAdmissionObservation,
   publicOutput?: PublicOutputPublicationProjection,
+  debugContext?: ObservationAgentDebugRuntimeContext,
 ): PipelineObservationProjection {
   try {
-    return observationProjection(task, selectedNodeId, scopeRef, admission, publicOutput);
+    return observationProjection(task, selectedNodeId, scopeRef, admission, publicOutput, debugContext);
   } catch (error) {
     if (error instanceof UiProjectionError) {
       const unknownScope = error.message.startsWith('unknown observation scope');
@@ -2456,6 +3177,11 @@ export class UiRuntimeService {
       ...(options.runtimeComposition?.roleModelBindings === undefined ? {} : {
         roleModelBindings: options.runtimeComposition.roleModelBindings,
       }),
+      orchestratorDecisionPort: this.wrapOrchestratorDecisionPort(
+        options.runtimeComposition?.orchestratorDecisionPort
+          ?? executionPorts?.orchestratorDecisionPort
+          ?? this.createDefaultOrchestratorDecisionPort(),
+      ),
       ...(options.workspaceRoot === undefined ? {} : {
         producedArtifacts: {
           read: (request) => readProducedArtifacts(options.workspaceRoot!, request.paths),
@@ -2642,6 +3368,173 @@ export class UiRuntimeService {
     return { kind: 'durable', source, mode, entry, admissions: inventory.admissions };
   }
 
+  private createDefaultOrchestratorDecisionPort(): NonNullable<RuntimeTaskCoordinatorOptions['orchestratorDecisionPort']> {
+    return {
+      decide: (decisionInput) => {
+        if (decisionInput.dynamicStepSequence && decisionInput.dynamicStepSequence.length > 0) {
+          const latestCompleted = decisionInput.completedSteps.at(-1);
+          if (latestCompleted && latestCompleted.status !== 'succeeded') {
+            return { decision: 'blocked' };
+          }
+          const nextIndex = decisionInput.completedSteps.length;
+          if (nextIndex < decisionInput.dynamicStepSequence.length) {
+            return {
+              decision: 'continue',
+              step: decisionInput.dynamicStepSequence[nextIndex]!,
+            };
+          }
+          return { decision: 'complete' };
+        }
+        if (decisionInput.phase === 'initial') {
+          return {
+            decision: 'continue',
+            step: selectProductionOrchestratorStep(decisionInput),
+          };
+        }
+        const latestCompleted = decisionInput.completedSteps.at(-1);
+        if (!latestCompleted || latestCompleted.status !== 'succeeded') {
+          return { decision: 'blocked' };
+        }
+        return { decision: 'complete' };
+      },
+    };
+  }
+
+  private wrapOrchestratorDecisionPort(
+    port: NonNullable<RuntimeTaskCoordinatorOptions['orchestratorDecisionPort']>,
+  ): NonNullable<RuntimeTaskCoordinatorOptions['orchestratorDecisionPort']> {
+    return {
+      decide: async (decisionInput) => {
+        let output: Awaited<ReturnType<typeof port.decide>>;
+        try {
+          output = await port.decide(decisionInput);
+        } catch (error) {
+          if (error instanceof RuntimeTaskControlError) throw error;
+          throw new RuntimeTaskControlError(
+            'orchestrator.decision.invalid-schema',
+            'humanagent.runtime.implicit-orchestrator',
+            error instanceof Error ? error.message : String(error),
+            'inspect the orchestrator decision output and retry the turn',
+          );
+        }
+        const validDecisions = new Set(['continue', 'replan', 'complete', 'blocked']);
+        const raw = output as unknown as Record<string, unknown> | null | undefined;
+        if (!raw || typeof raw !== 'object' || typeof raw.decision !== 'string' || !validDecisions.has(raw.decision)) {
+          throw new RuntimeTaskControlError(
+            'orchestrator.decision.invalid-schema',
+            'humanagent.runtime.implicit-orchestrator',
+            'orchestrator decision output is missing a valid decision field',
+            'return a structured OrchestratorDecisionOutput matching the PlanRevisionRecord schema',
+          );
+        }
+        if (raw.decision === 'continue' || raw.decision === 'replan') {
+          const step = raw.step as Record<string, unknown> | undefined;
+          const validKinds = new Set(['explore', 'plan', 'execute', 'review']);
+          const validRoles = new Set(['interaction', 'orchestration', 'execution', 'review', 'memory']);
+          const validEffects = new Set(['readonly', 'mutating']);
+          if (
+            !step
+            || typeof step !== 'object'
+            || typeof step.kind !== 'string'
+            || !validKinds.has(step.kind)
+            || typeof step.targetAgentRole !== 'string'
+            || !validRoles.has(step.targetAgentRole)
+            || typeof step.effectPolicy !== 'string'
+            || !validEffects.has(step.effectPolicy)
+            || typeof step.objective !== 'string'
+            || step.objective.trim().length === 0
+          ) {
+            throw new RuntimeTaskControlError(
+              'orchestrator.decision.invalid-schema',
+              'humanagent.runtime.implicit-orchestrator',
+              `orchestrator decision '${raw.decision}' did not include a valid step candidate`,
+              'return a valid step candidate with kind, targetAgentRole, effectPolicy, and non-empty objective',
+            );
+          }
+        }
+        return output;
+      },
+    };
+  }
+
+  private async buildObservationDebugContextForTask(
+    task: RuntimeTaskSnapshot,
+  ): Promise<ObservationAgentDebugRuntimeContext> {
+    let memoryCandidates: ObservationAgentDebugRuntimeContext['memoryCandidates'] | undefined;
+    if (this.memory.reviewState !== undefined) {
+      try {
+        const review = await this.memory.reviewState();
+        memoryCandidates = review.candidates.map((candidate) => ({
+          candidateId: candidate.candidateId,
+          state: candidate.state,
+          ...(candidate.taskId === undefined ? {} : { taskId: candidate.taskId }),
+          summary: candidate.summary,
+          sourceRefs: candidate.sourceRefs,
+        }));
+      } catch {
+        memoryCandidates = undefined;
+      }
+    }
+    const memoryContext = task.operationId
+      ? this.memoryContexts.get(task.operationId)?.receipt
+      : undefined;
+    const interactionTraces = this.explicitBrainTraceRecords.filter(
+      (trace) =>
+        trace.semantic.taskRef === task.taskId.value
+        || trace.semantic.taskRef === `task:${task.taskId.value}`
+        || trace.semantic.scopeRef.includes(task.taskId.value),
+    );
+    return {
+      binding: this.options.binding,
+      availableToolNames: (this.options.providerTools ?? []).map((tool) => tool.toolId),
+      ...(memoryContext === undefined ? {} : { memoryContext }),
+      ...(memoryCandidates === undefined ? {} : { memoryCandidates }),
+      ...(interactionTraces.length === 0 ? {} : { interactionTraces }),
+    };
+  }
+
+  private normalizeScopedObservationAgentActivity(
+    task: RuntimeTaskSnapshot,
+    activity: Awaited<ReturnType<UiRuntimeService['taskAgentActivityFor']>>,
+  ): Awaited<ReturnType<UiRuntimeService['taskAgentActivityFor']>> {
+    if (!activity.ok) return activity;
+    const isTerminal =
+      task.state === 'succeeded'
+      || task.state === 'failed'
+      || task.state === 'stopped'
+      || task.state === 'cancelled';
+    const hasPoolAssembly = this.coordinator.inspectTaskRuntimePool(task.taskId) !== undefined;
+    const filteredUnavailable = hasPoolAssembly
+      ? activity.value.unavailableSources
+      : activity.value.unavailableSources.filter((source) => source.sourceId !== 'runtime-pool');
+    if (!isTerminal || activity.value.unknown.length === 0) {
+      if (filteredUnavailable.length === activity.value.unavailableSources.length) {
+        return activity;
+      }
+      return {
+        ok: true,
+        value: {
+          ...activity.value,
+          unavailableSources: filteredUnavailable,
+        },
+      };
+    }
+    const settledFromUnknown = activity.value.unknown.map((entry) => ({
+      ...entry,
+      currency: 'historical' as const,
+      currencyLabel: '历史记录',
+    }));
+    return {
+      ok: true,
+      value: {
+        ...activity.value,
+        historical: [...activity.value.historical, ...settledFromUnknown],
+        unknown: [],
+        unavailableSources: filteredUnavailable,
+      },
+    };
+  }
+
   async scopedObservation(
     taskId: TaskId,
     selectedNodeId?: string,
@@ -2653,25 +3546,34 @@ export class UiRuntimeService {
     const resolved = await this.resolveTaskReadScope(taskId, rawProjectKey, mode);
     if (resolved.kind === 'bound') {
       const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+      const debugContext = await this.buildObservationDebugContextForTask(task);
       const projection = projectObservationBoundary(
         task,
         selectedNodeId,
         scopeRef,
         this.requirementAdmissions.get(taskId.value),
         await this.authoritativePublicOutputForTask(taskId),
+        debugContext,
       );
-      return { ...projection, agentActivity: await this.taskAgentActivityFor(resolved.source, resolved.mode, taskId, agentSelection) };
+      const rawActivity = await this.taskAgentActivityFor(resolved.source, resolved.mode, taskId, agentSelection);
+      return {
+        ...projection,
+        agentActivity: this.normalizeScopedObservationAgentActivity(task, rawActivity),
+      };
     }
+    const debugContext = await this.buildObservationDebugContextForTask(resolved.entry.snapshot);
     const projection = projectObservationBoundary(
       resolved.entry.snapshot,
       selectedNodeId,
       scopeRef,
       resolved.admissions.get(taskId.value),
       toPublicOutputProjection(resolved.entry.snapshot.publicOutput),
+      debugContext,
     );
+    const rawActivity = await this.taskAgentActivityFor(resolved.source, resolved.mode, taskId, agentSelection);
     return {
       ...projection,
-      agentActivity: await this.taskAgentActivityFor(resolved.source, resolved.mode, taskId, agentSelection),
+      agentActivity: this.normalizeScopedObservationAgentActivity(resolved.entry.snapshot, rawActivity),
     };
   }
 
@@ -4377,11 +5279,27 @@ export class UiRuntimeService {
   observation(taskId: TaskId, selectedNodeId?: string, scopeRef?: string): PipelineObservationProjection {
     try {
       const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+      const memoryContext = task.operationId
+        ? this.memoryContexts.get(task.operationId)?.receipt
+        : undefined;
+      const interactionTraces = this.explicitBrainTraceRecords.filter(
+        (trace) =>
+          trace.semantic.taskRef === task.taskId.value
+          || trace.semantic.taskRef === `task:${task.taskId.value}`
+          || trace.semantic.scopeRef.includes(task.taskId.value),
+      );
       return projectObservationBoundary(
         task,
         selectedNodeId,
         scopeRef,
         this.requirementAdmissions.get(task.taskId.value),
+        toPublicOutputProjection(task.publicOutput),
+        {
+          binding: this.options.binding,
+          availableToolNames: (this.options.providerTools ?? []).map((tool) => tool.toolId),
+          ...(memoryContext === undefined ? {} : { memoryContext }),
+          ...(interactionTraces.length === 0 ? {} : { interactionTraces }),
+        },
       );
     } catch (error) {
       throw apiError(error);

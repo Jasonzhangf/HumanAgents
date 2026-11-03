@@ -1,0 +1,176 @@
+{
+  "desktop": [
+    {
+      "page": "index.html",
+      "title": "HumanAgent · Task Input",
+      "bodyLen": 166,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "dashboard.html",
+      "title": "HumanAgent · 五个工作板块",
+      "bodyLen": 624,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "tasks.html",
+      "title": "HumanAgent · 任务列表",
+      "bodyLen": 238,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "task-dashboard.html",
+      "title": "HumanAgent · 任务执行看板",
+      "bodyLen": 148,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "interaction.html",
+      "title": "HumanAgent · Interaction",
+      "bodyLen": 1122,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "observation.html",
+      "title": "HumanAgent · 任务后台观测",
+      "bodyLen": 0,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": [
+        "pageerror: URL 缺少 task 参数",
+        "near-empty body (0 chars)",
+        "page errors: 1"
+      ]
+    },
+    {
+      "page": "memory.html",
+      "title": "HumanAgent · Memory",
+      "bodyLen": 426,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "login.html",
+      "title": "HumanAgent · 五个工作板块",
+      "bodyLen": 624,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "semantic-observation-tour.html",
+      "title": "HumanAgent · 静态语义观测 Tour",
+      "bodyLen": 795,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    }
+  ],
+  "mobile": [
+    {
+      "page": "index.html",
+      "title": "HumanAgent · Task Input",
+      "bodyLen": 166,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "dashboard.html",
+      "title": "HumanAgent · 五个工作板块",
+      "bodyLen": 581,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "tasks.html",
+      "title": "HumanAgent · 任务列表",
+      "bodyLen": 238,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "task-dashboard.html",
+      "title": "HumanAgent · 任务执行看板",
+      "bodyLen": 146,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "interaction.html",
+      "title": "HumanAgent · Interaction",
+      "bodyLen": 1157,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "observation.html",
+      "title": "HumanAgent · 任务后台观测",
+      "bodyLen": 0,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": [
+        "pageerror: URL 缺少 task 参数",
+        "near-empty body (0 chars)",
+        "page errors: 1"
+      ]
+    },
+    {
+      "page": "memory.html",
+      "title": "HumanAgent · Memory",
+      "bodyLen": 426,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "login.html",
+      "title": "HumanAgent · 五个工作板块",
+      "bodyLen": 581,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    },
+    {
+      "page": "semantic-observation-tour.html",
+      "title": "HumanAgent · 静态语义观测 Tour",
+      "bodyLen": 757,
+      "overflowX": false,
+      "consoleErrors": [],
+      "failedRequests": [],
+      "issues": []
+    }
+  ]
+}
