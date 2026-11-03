@@ -1999,3 +1999,29 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - 阻塞与处置不变：Alice 宿主不可用是真正的 owner 交付阻塞；master 已
   核实并保留原错，未代审、未改派、未虚构交付；等 Alice 恢复或用户
   明确授权改派后继续。
+
+### 2026-11-03 23:36 UTC：goal deadline 巡检回执
+
+- 消费 goal deadline `m1793748999891-627`（`LAST_REMINDER=true`），重新
+  `appsdk goal subscribe --goal
+  docs/goals/humanagent-open-p1-governance-20261101.md --interval 20m`；
+  `appsdk goal status --json` 返回 `active: true`、subscription
+  `sub-m1793749030840-629`（trigger 约 23:57 UTC）。
+- 四项核对：
+  1. 未关闭 P0/P1：P0 `45f92c8`、`a9dc797`、`4c21e74` 与 P1 队列保持
+     open；本轮无新证据，不重列。
+  2. 未完成/ready：board 两项不变——formal-entry `working`
+     (Alice owner, rev3) 与 runtime checkpoint `rework` (David owner,
+     rev19)；formal-entry 候选 `4af025375` 已就绪，真实 RCC `final2`
+     四标志回执可复用。
+  3. 自有 worktree/资源：main 干净（与 origin/main 同 HEAD
+     `633ad9806`），worktree 8/10；候选树 5 个诊断日志 untracked；
+     生产 10086、RCC 配置、daemon/tmux 生命周期未动。
+  4. peer/worker：`collab who` 显示 Jenny idle、Emma idle、Alice
+     `unknown`、Bob/Carol `unknown`、David dsh transport 可达但
+     `unknown`；发送给 Alice 的 deliver 请求 `m1793746536714-542`
+     仍 `state=pending`、未消费。任务显式执行者仍是 Alice；未获用户
+     授权前不自行改派 David 或他人。
+- 处置：保持候选与证据就绪；Alice 恢复并执行 `task deliver`，Emma
+  `task review --accept`，master 再集成并收口。本轮无实质进展，不重复
+  CEO 汇报，仅记录巡检。
