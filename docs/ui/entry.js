@@ -271,6 +271,9 @@ export function localizedStepSummary(summary) {
     if (text.startsWith(`${prefix}:`)) return `${label}${text.slice(prefix.length)}`
     if (text.startsWith(`${prefix} `)) return `${label} ${text.slice(prefix.length + 1)}`
   }
+  // Unmapped text: keep a runtime-rendered Chinese step so real steps stay
+  // distinguishable, but never surface raw provider English or JSON payloads.
+  if (/[\u4e00-\u9fff]/.test(text)) return text
   return '执行进度'
 }
 

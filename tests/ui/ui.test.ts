@@ -2500,5 +2500,7 @@ test('localizedStepSummary hides unknown provider copy and raw JSON', async () =
 
   assert.equal(localizedStepSummary('Volatile internal detail'), '执行进度', '未识别英文内部文案必须返回固定中文占位');
   assert.equal(localizedStepSummary('{"kind":"decision","payload":{"x":1}}'), '执行进度', '原始 JSON 决策负载必须返回固定中文占位');
+  assert.equal(localizedStepSummary('正在分派模型请求'), '正在分派模型请求', 'runtime 已给出的可读中文步骤必须原样保留');
+  assert.equal(localizedStepSummary('已收到模型推理摘要'), '已收到模型推理摘要', 'runtime 已给出的可读中文步骤必须原样保留');
   assert.equal(localizedStepSummary('Model request dispatched'), '模型请求已派发', '已知精确映射保持不变');
 });
