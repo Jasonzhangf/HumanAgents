@@ -1972,3 +1972,30 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `.worker-runs/c5d4671-rcc-receipt-final2.json` 保持就绪；master 不代
   交代审，不虚构交付，不重复派发。下一动作：Alice 恢复并 deliver →
   Emma review --accept → master 集成 + 更新父任务 + 关 c5d4671 + 清资源。
+
+### 2026-11-03 23:16 UTC：goal deadline 巡检回执
+
+- 消费 goal deadline `m1793747785921-587`（`LAST_REMINDER=true`），重新
+  `appsdk goal subscribe --goal
+  docs/goals/humanagent-open-p1-governance-20261101.md --interval 20m`；
+  `appsdk goal status --json` 返回 `active: true`、subscription
+  `sub-m1793747799784-588`（trigger 约 23:36 UTC）。
+- 四项核对：
+  1. 未关闭 P0/P1：P0 `45f92c8`、`a9dc797`、`4c21e74` 与 P1 队列保持
+     open，归属 Alice 的 W1-W3 范围；本轮无新注入证据，不重列。
+  2. 未完成/ready 工作：board 两项不变——formal-entry
+     `p1-checkpoint-formal-entry-child-lifecycle-20261103` `working`
+     (Alice owner, rev3) 与 runtime checkpoint
+     `p1-runtime-checkpoint-identity-20261103` `rework` (David owner,
+     rev19)；formal-entry 候选 `4af025375` 已就绪。
+  3. 自有 worktree/资源：main 干净（`git status` 无输出），worktree 8/10，
+     候选树 5 个诊断日志 untracked 未提交；生产 10086、RCC 配置、
+     daemon/tmux 生命周期未动。
+  4. peer/worker busy/idle：Alice 宿主 pane `%15` 仍停在
+     `MODEL_PLACEHOLDER_M418` 空提示符，发送给她的 deliver 请求
+     `m1793746536714-542` 仍 `state=pending`、
+     `consumed_by_recv=false`，无法消费；David 为 dsh transport
+     `running`，保持父任务 `rework`；Emma 为 reviewer 待命。
+- 阻塞与处置不变：Alice 宿主不可用是真正的 owner 交付阻塞；master 已
+  核实并保留原错，未代审、未改派、未虚构交付；等 Alice 恢复或用户
+  明确授权改派后继续。
