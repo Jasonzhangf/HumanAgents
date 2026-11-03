@@ -126,7 +126,8 @@ for new work.
   written only after turn close.
 - D36 P2 `69d70a0` checkpoint stores free-text summary, not structured
   plan/step state.
-- D37 P0 `47b26dd` direct answer collapses the entry main column.
+- D37 P0 `47b26dd` direct answer collapses the entry main column
+  (closed 2026-11-02; current main real RCC PASS at 1280x720 and 390x844).
 - D38 P1 `111efcc` task dashboard chip disagrees with API while running.
 - D39 P1 `a7f56b9` direct answer leaves entry queue saying no task submitted.
 - D40 P1 `486ddd4` execution step copy leaks internal English phrase.
@@ -159,14 +160,16 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 | M3 | W1-A/W1-B 结果转交 Alice，不再续派或合并 | `已进入 origin/main`：W1-A `3c0b49f89`/`626969fb3` 与 W1-B `37c38dd56` 均为 `origin/main` 祖先 | `git merge-base --is-ancestor` 实测三个提交均 `yes`；Alice 工作树已由她收走 | 保持不续派；后续 W1 相关 P0 由 Alice 按 W1-W3 计划验收 | W1 提交已入 main；剩余 P0 状态以 `appsdk bug list` 为准，不重复合并 |
 | M4 | W2/W3 证据接收与核对 | W2-A 实现已入 main（`7b51b8076` 与返工 `0e9696a9e` 均为 `origin/main` 祖先，集成 commit `351a17ca0` 也在 main）；board 任务 `mvp-w2a-implicit-orchestration-20261102` rev16 `merged`，但独立审查记录了两项后续：w2a-result.md 图描述回边需更正、Planner 决策端口未在 `packages/app` 接线；W2-B `879332f5a` 不是 main 祖先，board rev8 `rework`；当前返工 diff 已加入 `unknown` settle 状态、保留 latest typed receipt、无 settle 时读取既有 recovery fact，并补真实子进程 SIGKILL mutating-effect 测试 | `collab board show`；`git merge-base --is-ancestor`；`collab worker snapshot`；`git diff --stat` 与三文件 diff 只读核对（未运行测试、未提交） | W2-B 完成真实中断/效果恢复证据后由 Alice 交回；W2-A 两项后续和 W2-B 都不得因“已入集成分支”标完成 | W2-A 可交付面已入 main，但两项后续未闭环；W2-B 当前为 `working/UNVERIFIED`，未并入 main 前不得标完成 |
 | M5 | 自有 worktree 与资源收口 | `open`：main、`mvp-real-path-dispatch-20261102`、`mvp-w2a-orch-20261102` 与 4 个 locked provider 树 `PROTECTED_HOLD`，共 7/10；`mvp-w2a-orch` 还有未提交 W2-B 返工改动 | `git worktree list` 实测 7 个，未超 10；不能把 dirty owner 树当作可回收资源 | 每轮核对；W2-B 收口并清空/提交所有者改动后移除 `mvp-w2a-orch`；`mvp-real-path-dispatch` 由 Alice 完成后关闭 | 每个候选合入后 remove+prune；不触他人树；dirty/active 资源保留并报告 |
-| M6 | 用户最近问题的清单映射 | `已映射且有截图`：动画 step/计时截图实际位于 `/Volumes/Intel/playground/humanagent/.worker-runs/entry-progress-step-timers-20261101/worker-1/evidence/step-progress-1280x720.png` 与 `.../step-progress-390x844.png`，已目视确认显示步骤、总耗时、本步耗时；无二次确认（D20 `f3b63887f` 已入 main，真实 RCC 80/80）、容错循环（D17 `ede3189ba` 已入 main，真实 RCC 4444 once-503 receipt SUCCESS、`execution.retry` seq=4）、nn-code（AGENTS.md `## 符号探索` 第 50 行已存在；类方法解析缺口报告已 durable enqueue 到 `NNAnything.Bob`，msg_id `m1793575205675-2`）、Carol 无 snapshot（`22a689b` 已按「直接问 Carol」关闭） | 均已映射；后续发现新问题即 `appsdk bug intake` 登记 | 每项有 bug id 或证据路径；不把未验证结果当完成；截图阶段不等于 W2/W3 全链路验收 |
+| M6 | 用户最近问题的清单映射 | `部分达成，真实 RCC 仍缺失`：旧截图 `/Volumes/Intel/playground/humanagent/.worker-runs/entry-progress-step-timers-20261101/worker-1/evidence/step-progress-1280x720.png` 与 `.../step-progress-390x844.png` 仅显示脚本化路径的步骤/总耗时/本步耗时；真实 RCC 提交后仍停在 `已确认，等待调度`，总/本步计时冻在 `00:00`，无 `步骤 <seq>`，无任务行，见 2026-11-02 14:02 UTC 回执与用户最新截图。无二次确认（D20 `f3b63887f` 已入 main，真实 RCC 80/80；但确认界面只有自由文本缺可选确认项，`db7f3ba` open，用户要求改为直接确认选项）、容错循环（D17 `ede3189ba` 已入 main，真实 RCC 4444 once-503 receipt SUCCESS、`execution.retry` seq=4）、nn-code（AGENTS.md `## 符号探索` 已存在；类方法解析缺口报告已 durable enqueue 到 `NNAnything.Bob`，msg_id `m1793575205675-2`）、Carol 无 snapshot（`22a689b` 已按「直接问 Carol」关闭） | 真实 RCC 路径需 Alice 修复 `45f92c8`/`a9dc797`/`4c21e74` 后同入口复验；`db7f3ba` 需改为直接可选项 | 每项有 bug id 或证据路径；不把脚本化截图冒称真实 RCC 全链路；截图阶段不等于 W2/W3 全链路验收 |
 
 ### P 列：当前未关闭问题（按优先级，全部在 `appsdk bug list` 为 open）
 
 - P0 `45f92c8` native RCC lane 绕过隐式 Brain 编排（Alice W2-A 范围）。
 - P0 `a9dc797` 完成态公开输出为空（Alice W1-A 范围）。
 - P0 `4c21e74` observation 缺 per-agent turn/context/tool/model（Alice W3-B 范围）。
-- P0 `47b26dd` 直接回答后主区域塌陷（Alice W1-B 范围）。
+- P0 `47b26dd` 直接回答后主区域塌陷（已于 2026-11-02 用 current main
+  真实 RCC 双视口证据关闭；证据
+  `.worker-runs/p0-d37-47b26dd-verify-20261102/result.md`）。
 - P1 `6a11c8d`、`5f80361`、`28d01ec`、`1da2e49`、`180f971`、`111efcc`、`a7f56b9`、`486ddd4`、`28c9738`。
 - P2 `ee0a4e0`、`f2cda64`、`e7f8815`、`69d70a0`、`8000805`、`db32833`。
 - 未分级 open：`69f2101`、`a807545`、`f5cf73b`、`28469ed`、`353b2f1`、`b4f9f4f`、`0016675`、`5dcc763`、`5be453f`、`8a4ab78`、`d442481`；不得因未带 P 标签从巡检中漏掉。
@@ -182,6 +185,32 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - **Bob / Carol / David**：可用 peer。Carol 无 tmux snapshot 能力时按「直接问 Carol」方式发 durable message（上次 `m1793534323235-241`），不把 snapshot 缺失当阻塞；无 ready 长程目标时不空邀请。
 
 ## Update Log
+
+- 2026-11-02 22:45 UTC: 消费 goal deadline `m1793659542681-1533` 后，显式
+  `appsdk goal subscribe` 重新武装一次性 deadline（20m，100 次，TTL 604800s）；
+  `appsdk goal status --json` 返回 active/armed。project-patrol
+  `sub-m1793413132850-18` 仍 armed，900000ms（目标 1500000ms，gap 未解除）。
+  board 仍 `mvp-remaining-p0-followups-20261102`（Alice working rev3）。Alice
+  snapshot 显示已进入编辑（`index.ts`，累计 102 动作/1 edit），不是只读分析；
+  worktree `mvp-remaining-p0-followups` 仍基于 `9e57a0a5d`。worktree 共 7
+  （main + real-path-dispatch + remaining-p0-followups + 4 locked provider
+  PROTECTED_HOLD），未超 10，未触碰其他 owner 资源。Carol 进度请求
+  `m1793659062726-1525` 尚未回执，不据此判定阻塞。下一动作：等 Alice 交付
+  W3-B/W2-A 后独立 review + integration，不抢其 writer。
+
+- 2026-11-02 22:34 UTC: project-patrol `m1793658767157-1511`。RCC
+  `127.0.0.1:4444/health` 现返回 200（此前 22:16 记录未监听），真实入口可继续
+  验收。`appsdk bug list` 的 git-bug 锁已由遗留 pid 30117 释放，现可读取；open
+  仍为 32（P0 4、P1 11、P2 6，另有未分级审计/通信项）。board 现仅
+  `mvp-remaining-p0-followups-20261102`（Alice，working rev3，范围 W3-B
+  observation 五维投影 + W2-A Planner 决策端口接线），其 worktree 在
+  `/Volumes/Intel/playground/humanagent/mvp-remaining-p0-followups-20261102`
+  clean。`appsdk goal status --json` 目标仍 active/armed，deadline
+  `sub-m1793658341736-1500`（20m）已武装；project-patrol 运行 900000ms、目标
+  1500000ms，仍 `PATROL_CADENCE_RUNTIME_GAP`。appsdk `0.1.0015`、collab
+  `0.2.0415`，均已是本地最新。Carol 为 DSH peer 无 tmux snapshot，已按
+  「直接问 Carol」发 durable 进度请求 `m1793659062726-1525`。已向 CEO 记录巡检
+  回执。下一动作：等 Alice 交付后走独立 review + integration，不抢其 writer。
 
 - 2026-11-02 20:50 UTC: 消费 goal deadline `m1793651994627-1409` 后，
   `appsdk goal status --json` 显示目标仍 active，已重新武装后续一次性 deadline
@@ -1005,3 +1034,74 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   五类 Agent 矩阵、Playwright 双视口 observation.html 断言和清理条件。Alice 已接受
   invite 并进入 working；`a9dc797`/`47b26dd` 修复已在 main，待 app/RCC 恢复后同入口
   验收再关闭 bug。本轮未合并、未安装、未删 worktree、未杀进程。
+
+- 2026-11-02 22:50 UTC: goal deadline `m1793659542681-1533` 回执复核已消费
+  （`consumed_by_recv=true`、state=`read`）；下一次一次性 deadline
+  `sub-m1793659570318-1534` 已 armed（20m）。尝试把 project patrol 从 900000ms
+  对齐到目标 1500000ms：`collab notify subscribe --event master-idle --subject
+  project-patrol --every-ms 1500000 --repeat-count 100 --ttl-seconds 604800`
+  返回 `deduplicated=true, changed=false`，仍复用
+  `sub-m1793413132850-18`（interval_ms=900000），`collab notify status` 仍为
+  `PATROL_CADENCE_RUNTIME_GAP`；不声称已对齐。board 仅 Alice 持有
+  `mvp-remaining-p0-followups-20261102`（rev3 `working`，completion_missing
+  `review`）；snapshot 显示她在当前 turn 编辑
+  `packages/app/src/ui-runtime/service.ts` 与 `packages/ui/projection/index.ts`，
+  并新增 `packages/ui/projection/agent-debug-inspection.ts`；工作树
+  `mvp-remaining-p0-followups-20261102` 分支 behind origin/main 2，未提交、
+  未交付，不抢 writer。Carol 的 DSH 状态为 running/can-accept-direct-input，
+  无 snapshot；此前进度请求 `m1793659062726-1525` 仍未收到回执
+  （answered=false，unacked=0，无 open task），未重复催发。RCC
+  `127.0.0.1:4444/health` HTTP 200；生产 `127.0.0.1:10086` 仍 `000`。
+  本轮未合并、未安装、未删 worktree、未杀进程。
+
+- 2026-11-02 23:07 UTC: `47b26dd` 已在 current main
+  `d3775c31f` 通过真实隔离 RCC 双视口验收并关闭。桌面
+  `1280x720` 使用 `interaction-3`：回答
+  `13 加 14 等于 27。`，`.page-heading-copy` 宽 `834px`，
+  `#entry-direct-answer` 可见且包含回答，无横向溢出；手机
+  `390x844` 使用 `interaction-4`：标题宽 `362px`，直接回答可见
+  且包含回答，无横向溢出。两个视口均无 Chromium page error，
+  截图可读。隔离 serve 端口 `49216` 已停止，产品源码无
+  tracked diff。证据：
+  `/Volumes/Intel/playground/humanagent/.worker-runs/p0-d37-47b26dd-verify-20261102/result.md`。
+  本轮前一个 goal deadline `m1793660770633-1555` 已消费，并已显式
+  `appsdk goal subscribe --goal docs/goals/humanagent-open-p1-governance-20261101.md
+  --interval 20m` 重新武装；project patrol 仍 armed。
+
+- 2026-11-02 23:18 UTC: 用户新反馈（动画无当前 turn step、无计时、无
+  per-step 计时器；输入后界面不可用；质疑二次确认）已逐条映射到 open bug，
+  未新建重复单：`4c21e74`(P0)、`a9dc797`(P0)、`45f92c8`(P0) 覆盖 step/计时/
+  派发缺失，`a7f56b9`(P1)、`6a11c8d`(P1) 覆盖输入后 entry queue 说无任务提交，
+  `db7f3ba`(P2) 覆盖“确认只有自由文本缺可选确认项”。已纠正 M6 行，删除
+  “旧截图证明 step/计时可用”的错误断言，注明旧截图仅覆盖脚本化路径，真实
+  RCC 仍停在 `已确认，等待调度`、计时冻 `00:00`。用户提出“无特别确认就直接
+  发隐式大脑”，对应 `45f92c8` 原生 lane 绕过隐式 Brain 编排，须修后真实
+  RCC 同入口复验，不由 master 抢 Alice writer。`monid` 与上述缺陷无关，不并入
+  此清单。同轮按用户 `appsdk升级到最新版` 指令，从干净 origin/main `6fd56653`
+  构建并安装 appsdk `0.1.0015`、collab `0.2.0416`（build 计数器 415→416）、
+  collab-mcp 与三套 Skill bundle；未重启运行中的 collab 守护进程（PID 98548
+  仍为旧 inode），临时构建 worktree 已 remove+prune。本轮未合并、未删他人
+  worktree、未杀进程。
+
+- 2026-11-02 23:27 UTC: goal deadline `m1793661991635-1568` 已消费
+  （receive `receive-11280-1793662006583789000-0`）并显式重订阅 20m
+  （one-shot armed，project patrol `sub-m1793413132850-18` armed）。巡检：
+  worktree 7 个（main + `mvp-real-path-dispatch-20261102` +
+  `mvp-remaining-p0-followups-20261102` + 4 locked provider `PROTECTED_HOLD`），
+  未超 10；open bug 31，P0 仍 3（`45f92c8`、`a9dc797`、`4c21e74`），
+  `47b26dd` 已关闭。board 仅 Alice `mvp-remaining-p0-followups-20261102`
+  (rev3 working, completion_missing review)；Alice snapshot 显示她在
+  `mvp-remaining-p0-followups-20261102` 有 7 处未提交改动（observation 五维
+  投影、service.ts、agent-debug-inspection.ts 与对应测试），behind main 4，
+  未交付，不抢 writer。`mvp-real-path-dispatch-20261102` 仅剩证据截图
+  提交 `35b9c043e`（docs evidence refresh d20 live-card proofs）未合并，
+  `f5f13f05d` 已在 main，树 clean、ahead 1/behind 38、约 16.5h 未动，未到
+  48h 不清理，保持待 owner 收口。RCC `127.0.0.1:4444/health` 200；生产
+  `127.0.0.1:10086` 000。已核对 W1-A `626969fb3`（步骤中文化，`486ddd4`）
+  与 W1-B `37c38dd56`（corner safe-area，`28c9738`）均已在 main，但两 bug
+  仍 open，缺真实入口双视口验收。已落盘观察合同
+  `/Volumes/Intel/playground/humanagent/p1-ui-verify-20261102/contract.md`
+  并派一次性 GCM 观察者做隔离 `serve --mode rcc`（真实 RCC 4444、
+  独立端口、双视口 Playwright）验收 `486ddd4`/`28c9738`；观察者只读产品源码，
+  结束后停止本次独立 serve 并证明端口关闭。本轮未合并、未删他人 worktree、
+  未杀进程。
