@@ -1683,3 +1683,22 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `collab_subscribed=true`、`error=null`；上一轮的
   `GOAL_OWNER_CONTEXT_FAILED` 判定为暂态，不再作为未对齐缺口。生产 10086
   未动，未执行任何 daemon/tmux 生命周期动作。
+
+- 2026-11-03 19:46 UTC：消费 master-idle:project-patrol
+  `m1793735169192-74`，已 read。四项巡检结果无新变化：
+  (1) 未闭合 P0/P1 保持原样（45f92c8/a9dc797/4c21e74 P0，c5d4671/209de7c 等 P1）；
+  (2) 两板上任务均在执行，`p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  `working`（Alice），`p1-runtime-checkpoint-identity-20261103` `rework`（David），
+  reviewer 均 Emma，无新就绪授权工作可派发；不手工唤醒，由板上调度器
+  按新鲜板面事实决定；无已取消任务需重新武装。
+  (3) worktree 8/10（main + 2 活动任务 + 4 locked provider `PROTECTED_HOLD`），
+  自有资源无需释放。
+  (4) worker 真实状态：Jenny、Emma `idle` 且无活动任务；Alice、David
+  `present`+`unknown` 且各持上述活动任务；Bob、Carol `cold`。空闲原因合理，
+  不主动闭站。CEO 未配置（`ceo: null`，`CEO_NOT_CONFIGURED`），继续本地
+  master 工作，不虚构接收者。project patrol 仍 armed
+  （`sub-m1793413132850-18`，`notify status` 实测 `armed=true`），但
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除，`eligibility.blocker` 仍为
+  `PROJECT_PATROL_PROGRESS_NOT_RECORDED`（两任务在执行中，无可记进度的
+  新交付）。goal 于 19:42:16Z 已重新武装，下一 goal deadline 约在 20:02。
+  生产 10086 未动，未执行任何 daemon/tmux 生命周期动作。
