@@ -1385,3 +1385,20 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   Reviewer 已确认候选未扩大或掩盖二者。已向 Emma 发
   `m1793700330583-1307` 请求更新验收 board；Jenny 推进集成/merge/push
   与资源清理。生产 10086 未动。
+
+- 2026-11-03 10:32 UTC：P1 UI copy/corner 集成与资源收口完成。Emma 只读
+  验收交回（`m1793700405669-1312`），board 任务
+  `p1-ui-copy-corner-verify-20261102` 经 `collab task review --accept` 后为
+  `read_only`（无需 merge 记录），已 force close（receipt
+  `cleanup-manual-p1-ui-copy-corner-verify-20261102-1793701715324`）。
+  `git merge --ff-only` 将 `450616c9d -> 20f70c33f` 合入 main 并 push
+  `origin/main`；交付记录 commit `63ec1dc93` 随后 push，远端 HEAD
+  `63ec1dc93`。main 验证：`pnpm typecheck` PASS、`pnpm build:app` PASS、
+  `test:ui` 70/71（唯一失败 `1e9099b` row.nextStep 基线）、
+  `live-step-feedback` 3/4（唯一失败 `c5d4671` checkpoint identity
+  mismatch 基线）。候选 worktree
+  `/Volumes/Intel/playground/humanagent/p1-ui-copy-corner-20261102` 与分支
+  `codex/p1-ui-copy-corner-20261102` 已移除，worktree 6/10（含 4 个
+  `PROTECTED_HOLD`）。生产 10086 未动，未做安装/重启。剩余待推进：
+  `c5d4671`（humanagent.runtime，LayerFS Store 缺失保留原错）、
+  `1e9099b`（packages/ui，终态 nextStep 行为核对）。
