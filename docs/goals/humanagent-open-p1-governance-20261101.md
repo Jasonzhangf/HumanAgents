@@ -1917,3 +1917,44 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   解析/取证口径），不由本巡检直接改 product 语义。
 - 资源：worktree 仍 8/10；Alice 树保留全部未提交改动与证据，未提交、
   未合并、未 push。生产 10086 未动，未执行 daemon/tmux 生命周期动作。
+
+### 2026-11-03 22:58 UTC：正式入口四标志成功回执 final2，交付受 Alice 宿主阻塞
+
+- 消费 goal deadline `m1793746485935-540`（`LAST_REMINDER=true`），重新
+  `appsdk goal subscribe --goal
+  docs/goals/humanagent-open-p1-governance-20261101.md --interval 20m`，
+  goal 已 active/armed（subscription `sub-m1793746585049-545`）。
+- 一次性 GCM worker（显式 `-m gpt-5.5`）在 Alice worktree 继续，补齐
+  review child 交付协议：
+  `appChildDeliverTool()` 按 child kind 约束 schema；review child 排除
+  `inspectionOutcome`，finding 要求
+  `detail/severity/locationRef/evidenceRefs`；execution 仅在 inspection
+  child 放行 `inspectionOutcome`。review prompt 改为真实 `file.write` +
+  `humanagent_child_deliver` + `humanagent_turn_end` 两步交付，evidence id
+  从工具结果 footer 读取，不再猜测。
+- 候选提交 `b56d12463`，随后 rebase 到 `origin/main 7481f6aab` 得
+  `4f5a84180`；8 文件 changed。
+- 验证：
+  - `pnpm typecheck` exit 0。
+  - focused `dist/tests/tests/app/live-step-feedback.test.js` 5/5 pass，
+    含新增 `formal startUiRuntime entry streams four child lifecycle steps
+    through terminal succeeded` 与原有用例。
+  - `git diff --check` 干净。
+  - 真实 RCC 4444 正式入口回执
+    `.worker-runs/c5d4671-rcc-receipt-final2.json`：`state SUCCESS`、
+    `missing []`、`serve --mode rcc` endpoint
+    `rcc-v3:127.0.0.1:4444`；事件流四标志 `child.prepared`(seq10)、
+    `child.returned`(seq11)、`child.adopted`(seq61)、
+    `review.checkpointed`(seq75)；terminal `succeeded`、输出 `"4"`；
+    dispatchTurn==settleTurn
+    `turn-c25f5cca-1804-4df9-a518-950e068be82f`。
+- 交付阻塞：board `p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  owner 是 Alice（rev3 working）。`collab task deliver` 返回
+  `must be owned`（master 不是 owner，不能代交代审）。Alice 宿主 pane
+  `%15` 仍停在 `MODEL_PLACEHOLDER_M418` 空提示符，durable 消息未消费。
+  已向 Alice 发 `m1793746536714-542`，请求其按 owner 身份执行
+  `collab task deliver`，之后由 Emma 执行
+  `collab task review --accept`。
+- 未修改 `assertCheckpointIdentity` 或 checkpoint scope 语义；生命周期
+  事件只在真实 child mutation 提交后回调，不合成；未另建 journal/store。
+  生产 10086 未动，未执行 daemon/tmux 生命周期动作。
