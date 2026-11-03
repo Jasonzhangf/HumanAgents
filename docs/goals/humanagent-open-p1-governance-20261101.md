@@ -1574,3 +1574,15 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   reviewer Emma（review_message_id m1793716449819-2020），board 转
   `delivered`（rev 1）；后台 idle GCM worker 已由 Alice 显式终止、临时资源已清。
   下一步：Emma 对 UI 候选做独立 review；David runtime rework 待正式 deliver。
+
+- 2026-11-03 14:38 UTC：UI 任务已集成交付。Emma 范围验收 accept
+  （m1793716882322-2043，明确只证明受影响 UI/公开接口、不宣称真实 RCC/生产），
+  MERGE_PENDING 触发。Jenny 按正式流程核对最新 main、no-ff 合并候选 9b77d7209
+  到 main（merge 22f773f2d，origin/main 2813b80bb..22f773f2d 已 push），合并后
+  pnpm test:ui 71/71 pass 0 fail；`collab task integrated --commit 22f773f2d`
+  已记录，board 转 merged（next_action=owner clean+close）。已发 durable 消息
+  m1793717074750-2052 请 Alice close 并移除 worktree
+  /Volumes/Intel/playground/humanagent/p1-ui-terminal-nextstep-20261103 与分支。
+  Runtime：David 已 formal deliver rework（board 转 delivered），待 Emma 复核。
+  main HEAD=22f773f2d；worktree 7/10；project patrol armed，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除；生产 10086 未动。
