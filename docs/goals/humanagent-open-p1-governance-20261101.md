@@ -1644,3 +1644,24 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   无法经 daemon 验证订阅真源，不声称已对齐。该故障只影响本轮状态
   查询，不重试同命令、不重启 daemon、不触碰 tmux；daemon 由用户管理。
   生产 10086 未动。
+
+- 2026-11-03 19:22 UTC：本轮巡检无新交付，两个开放任务均在执行中。
+  `p1-checkpoint-formal-entry-child-lifecycle-20261103` rev3 `working`，
+  owner=Alice，reviewer=Emma；`p1-runtime-checkpoint-identity-20261103`
+  rev19 `rework`，owner=David，reviewer=Emma。worker 真实状态：Alice、David
+  为 `unknown` 但 `presence=present` 且各持有上述活动任务，Emma `idle`
+  present 无任务，Bob/Carol `cold`，Jenny `idle`；不对 unknown 盲发唤醒，
+  board dispatcher 已标记 Alice/David 各有 eligible 任务。worktree 8/10
+  （main + 2 活动任务 + 4 个 locked provider `PROTECTED_HOLD`），无需清理。
+  CEO 未配置（`ceo: null`，`CEO_NOT_CONFIGURED`），未虚构接收者。project
+  patrol 仍 armed（`sub-m1793413132850-18`），但
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除，`project_patrol.eligibility` 报
+  `PROJECT_PATROL_PROGRESS_NOT_RECORDED`（两个任务 working/rework）。本轮
+  已重新武装 goal 并经 `appsdk longhorizon show --json` 核实：
+  `registered=true`、`registered_at=2026-11-03T19:19:18Z`、`active=true`、
+  `patrol_status=armed`、`patrol_source=reused`；`appsdk goal status --json`
+  仍返回 `GOAL_OWNER_CONTEXT_FAILED:exit=1`（`active=false`、`observed=unknown`），
+  疑与 open bug `d442481`（collab context 拒绝 invocation_cwd）同源，故
+  不声称 goal status 查询已对齐，底层注册真源以 longhorizon 投影为准。
+  P0 45f92c8/a9dc797/4c21e74 与 P1 c5d4671/209de7c 等保持 open。生产
+  10086 未动，未执行任何 daemon/tmux 生命周期动作。
