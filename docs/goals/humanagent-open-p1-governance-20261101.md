@@ -2585,3 +2585,24 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   对照完成后 Alice 交回 Emma；Emma accept 后本 master 再安排集成并解除
   David checkpoint-identity 依赖。Bob 两项邀请仍为另一真实外部等待，
   David C/D 仍等 `fde1bf0` 落 origin/main。
+
+### 2026-11-04 11:05 UTC：66972f9 基线工作线已准备并交付
+
+- 消费 Alice 协调请求 `m1793790072085-1922`：完整 consumer 同命令对照需要
+  独占、干净、与候选 origin/main 同基线且可构建的既有工作线。核实结果：
+  `mvp-real-path-dispatch-20261102` 不含 `9c77ddafa`，是另一文档提交线；
+  `p1-runtime-checkpoint-identity-20261103` 也不含该基线；4 个 provider 树
+  仍为 `PROTECTED_HOLD`。没有符合条件的既有 Git worktree。
+- 已按用户约束准备非 worktree 的独占只读基线副本：
+  `/Volumes/Intel/playground/humanagent/.worker-runs/p1-checkpoint-formal-entry-child-lifecycle-20261103/baseline-9c77ddafa`。
+  来源为 `git archive --format=tar 9c77ddafa`，无 `.git`，不覆盖任何 dirty
+  状态；`pnpm install --frozen-lockfile` 已成功。目录内
+  `BASELINE_MANIFEST.md` 记录来源、路径、owner 和对比命令。
+- 已发送 durable 消息给 Alice `m1793790724270-1948` 与 David
+  `m1793790724234-1947`，交付路径、构建/测试命令与边界。David 先在基线
+  独占构建并运行 full native-delivery consumer，记录退出码、原始日志与
+  逐项失败归属；候选侧待 focused 修复完成后用完全相同命令对照。
+- 未新建 worktree、未覆盖 dirty 状态、未改产品代码、main、RCC 配置、
+  生产 10086、daemon 或 tmux。主树 clean。下一动作：Alice 完成 focused
+  修复；David 基线对照并复验；Emma 复审；Bob 两项 invitation 仍等待
+  respond；David C/D 仍等 `fde1bf0` 落 origin/main。
