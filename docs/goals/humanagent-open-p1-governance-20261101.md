@@ -2768,3 +2768,15 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - 资源与边界：main clean，HEAD `02ce1a978`；8 个 Git worktree（含 4 个 locked provider
   `PROTECTED_HOLD`），未超 10；旧 E2E serve 仍按 unknown resource 保留，未 kill。本轮未改产品代码、
   RCC 配置、生产 10086、daemon/tmux。goal 已重新武装 20m，project patrol 保持 armed。
+
+### 2026-11-04 17:05 UTC：David 已接受 fde1bf0 独立复验
+
+- 消费 Alice worker-idle 提醒。Alice 的 `p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  仍为 rev22 `blocked`，等待同入口定位或等价证据解决基线 #6/#18；该任务的 board 巡检仍取消，不重复
+  唤醒或伪造进展。
+- `fde1bf0-e2e-journal-read-verify-20261104` 已被 David 接受，board rev3 `working`，owner David。
+  他将在 LayerFS workspace `1:/workspaces/1` 独立复验候选 diff 范围、focused 契约测试、受影响
+  build/typecheck、真实 650MB `readJournalStrict`，并探测 RCC 4444 后决定正式 existing-task-change
+  状态。
+- 下一动作：等待 David 结果回执；通过后交 Alice 技术裁决，再由本 master 安排 publish、Git 集成和
+  origin/main push。若 David 复验发现新增失败或 external provider 不可达，则保留原错并按证据退回。
