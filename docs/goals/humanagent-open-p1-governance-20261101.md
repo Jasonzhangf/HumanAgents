@@ -2345,3 +2345,39 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - CEO 进度已记录 revision 9（不含 --in-reply-to，on_completion 尚未达成）。
 - 下一步：David 接受并执行最终验收；Emma 复核 formal-entry 补证；Bob 接受 P0；
   Jenny 持续巡检与目标更新。
+
+### 2026-11-04 07:45 UTC：a95003f 真实二次执行红绿完成，等待 Alice 交付
+
+- 消费 board-idle `m1793778154928-1442`、worker-idle 与 goal deadline 通知；
+  已显式重新武装一次性 20m goal deadline `sub-m1793778351772-1450`。
+- Alice 启动的有界 GCM 返工已完成。根因是 `prepareExecution` 为同一 task
+  新 operation 分配 epoch 2 时仍保留 `record.assignment`，随后
+  `buildWorkAssignment` 返回 epoch 1 的 assignment，被
+  `produceAdmittedTurn` 正确拒绝。最小修改是在新 operation 初始化段
+  `delete record.assignment`，只涉及
+  `packages/runtime/src/ui-runtime/coordinator.ts` 一行；同 operation 精确重试、
+  remediation、release 和 recovery 的缓存语义保留。
+- 真实 `startUiRuntime(mode: fake)` 验证：修前 S4 以原错
+  `assignment execution epoch does not match the runtime binding snapshot`
+  退出 1；修后 operation 1/epoch 1 对应 grant revision 1，operation 2/epoch 2
+  对应 grant revision 2，第二次 assignment 的 ID、objective、output 均属于第二
+  operation，退出 0。`execution-corrective-retry` 7/7、prepared admission
+  1/1、`pnpm typecheck` 通过。证据位于候选 worktree
+  `.worker-runs/assignment-rework-result.md`、`assignment-worker-output.md` 与
+  `receipts/david-subsequent-*`。
+- `cold-execution-resume-public-consumer` 的既有失败仍归独立缺陷 `209de7c`，
+  不与本轮修复混合；本轮未提交、未推送、未合并。
+- 已向 Alice 发送 `m1793778394636-1456`：保留原红证据，将一行产品修复 rebase
+  到当前 `origin/main 4a4aa9417` 后提交，交 David 用同一正式入口独立复跑；
+  David 通过后由 Alice 以 board owner 交付 Emma。候选现有 5 个既有 untracked
+  证据文件必须保留。
+- P0 `p0-45f92c8-rcc-orchestration-acceptance-20261104` 仍为 invited rev3；
+  Bob 的精确 runtime observation 为 running、present、agent_state unknown，
+  可接受直接输入但尚未 respond。已发送定向接受/拒绝请求
+  `m1793778394594-1455`，未替换指定执行者。
+- main 文档提交 `20e2e500c..4a4aa9417` 已推送 origin/main，main tree clean；
+  8/10 worktree，4 个 locked provider 树继续 `PROTECTED_HOLD`。生产 10086、
+  RCC 配置、daemon/tmux 生命周期未动。project-patrol 仍为 900000ms，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除。
+- 下一步：Alice 提交并交 David 独立验证；David 继续最终交付场景 A-D；Bob
+  接受或明确拒绝 P0；Emma 在收到完整候选后复审。
