@@ -2742,3 +2742,29 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   仍 rev20 `rework`，不自替换推进。Bob 两项 invitation 仍未 respond。
 - 本轮未改产品代码；main 仅追加本目标文档记录；未杀进程、未动旧 E2E
   serve 与 stale worktree。
+
+### 2026-11-04 17:00 UTC：fde1bf0 候选已交付并派独立测试验证
+
+- Bob 正式拒绝 fde1bf0 实现邀请（DSH 会话无 shell/文件编辑工具）。该父任务已按既有约束改为独立
+  `codex exec --profile gcm` 实现通道执行，实现 worker 和临时 workspace 已收尾。
+- 实现候选落在 LayerFS 分支 `fde1bf0-e2e-journal-read-20261104`，候选 commit
+  `123f92c4bc38420c49de5ddcaf7bf805609f7f7cabdd638671f1fe0fd1b984cad5`，tracked 改动仅
+  `tests/app/dashboard-e2e/lib/journal.mjs`。`readJournalStrict` 分类路径改为
+  `createReadStream` + `readline`，不整串读入；保留 malformed JSONL 显式失败、行序和
+  `__position` 语义；容错 `readJournalEvents` 未改；产品代码未改。
+- 实现 worker 自报证据：oversize fixture 红测先抛 `Invalid string length`；真实 650,032,250 字节
+  `explicit-brain.jsonl` 返回 `ok:true`、1,492 records、无 `Invalid string length`；focused
+  runner-contract 65/65 pass；build/typecheck 通过。真实 `existing-task-change` 在 provider
+  probe 阶段因 RCC `127.0.0.1:4444` fetch failed 标记 blocked/partial，未改写为 PASS。证据目录
+  `/Volumes/Intel/playground/humanagent/.worker-runs/fde1bf0-e2e-journal-read-20261104/gcm-worker-1/`。
+- 用户分工要求下已发布独立验证子任务 `fde1bf0-e2e-journal-read-verify-20261104`（rev2 invited），
+  显式 executor David、reviewer Alice，并已邀请 David。合同：
+  `/Volumes/Intel/playground/humanagent/.worker-runs/fde1bf0-e2e-journal-read-20261104/david-verification/contract.md`。
+  David 须独立复现候选 diff 范围、focused 契约测试、受影响 build/typecheck、真实 650MB
+  `readJournalStrict`，探测 RCC 4444 后决定是否跑正式 existing-task-change；外部失败须标
+  `INCOMPLETE/UNVERIFIED`，不得改成 PASS。
+- David 复验签名后，fde1bf0 交 Alice 裁决；通过后本 master 安排 Alice review、LayerFS publish、
+  Git 集成和 origin/main push。David 的最终前端 C/D 仍等待 fde1bf0 落地。
+- 资源与边界：main clean，HEAD `02ce1a978`；8 个 Git worktree（含 4 个 locked provider
+  `PROTECTED_HOLD`），未超 10；旧 E2E serve 仍按 unknown resource 保留，未 kill。本轮未改产品代码、
+  RCC 配置、生产 10086、daemon/tmux。goal 已重新武装 20m，project patrol 保持 armed。
