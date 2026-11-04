@@ -976,6 +976,29 @@ function explicitHelperText(text: string): readonly Record<string, unknown>[] {
   ];
 }
 
+function responsesPromptText(wire: ResponsesWireBody): string {
+  return (wire.input ?? [])
+    .filter((item) => item.type === 'message' && item.role === 'user')
+    .flatMap((item) => item.content ?? [])
+    .filter((part) => part.type === 'input_text' && typeof part.text === 'string')
+    .map((part) => part.text as string)
+    .join('\n');
+}
+
+async function workspaceSnapshot(root: string): Promise<readonly string[]> {
+  const entries: string[] = [];
+  const visit = async (directory: string, prefix: string) => {
+    const children = await readdir(directory, { withFileTypes: true });
+    for (const child of children) {
+      const relative = prefix === '' ? child.name : `${prefix}/${child.name}`;
+      if (child.isDirectory()) await visit(join(directory, child.name), relative);
+      else entries.push(relative);
+    }
+  };
+  await visit(root, '');
+  return entries.sort();
+}
+
 /**
  * Controlled local Responses upstream. It answers the real RCC readiness
  * probes, then serves one generation: the advertised `humanagent_turn_end`
@@ -3180,6 +3203,15 @@ if (!coldConsumerMode) test('native public CLI review findings contract permits 
   for (const current of cases) {
     const fixture = await textOnlyFixture(false, true, false, 2, undefined, undefined, undefined,
       false, undefined, true, false, undefined, false, current.mode);
+    const reviewAgent = fixture.configuration.agentRoster.find((agent) => agent.roleId === 'review');
+    if (reviewAgent === undefined) {
+      throw new Error(`${String(current.mode)} review fixture has no explicit read-only agent`);
+    }
+    assert.deepEqual(reviewAgent.tools, [],
+      `${String(current.mode)} review fixture grants no workspace mutation tools`);
+    assert.deepEqual(reviewAgent.permissions, [],
+      `${String(current.mode)} review fixture grants no workspace mutation permissions`);
+    const workspaceBefore = await workspaceSnapshot(fixture.workspace);
     let passed = false;
     try {
       const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 2);
@@ -3217,6 +3249,26 @@ if (!coldConsumerMode) test('native public CLI review findings contract permits 
           .map((entry) => [entry.entry.invocationId, entry])).values()];
         assert.equal(reviewInvocations.length, 2, `${String(current.mode)} reviews per cycle are retained`);
         assert.equal(reviewDeliveries.length, 2, `${String(current.mode)} review deliveries per cycle are retained`);
+        const reviewWires = fixture.upstream.wires.filter((wire) => wire.method === 'POST'
+          && parseResponsesWire(wire.body)?.model === 'review.only.model');
+        assert.ok(reviewWires.length >= 2,
+          `${String(current.mode)} review requests reach the real child Provider entry`);
+        for (const wire of reviewWires) {
+          const reviewRequest = parseResponsesWire(wire.body);
+          if (reviewRequest === undefined) throw new Error(`review request body is not Responses JSON: ${wire.body}`);
+          const prompt = responsesPromptText(reviewRequest);
+          assert.ok(prompt.length > 0, `${String(current.mode)} review request carries its prompt`);
+          assert.ok(!prompt.includes('workspace'),
+            `${String(current.mode)} review prompt still names the user workspace: ${prompt}`);
+          assert.ok(!prompt.includes('Persist the complete review text'),
+            `${String(current.mode)} review prompt still requires a workspace file write: ${prompt}`);
+          assert.ok(!prompt.includes('workspace with file.write'),
+            `${String(current.mode)} review prompt still requires a workspace file write: ${prompt}`);
+          assert.ok(!prompt.includes('successful file.write result'),
+            `${String(current.mode)} review prompt still requires a workspace file write: ${prompt}`);
+        }
+        assert.deepEqual(await workspaceSnapshot(fixture.workspace), workspaceBefore,
+          `${String(current.mode)} read-only review mutates the project workspace`);
         for (const invocation of reviewInvocations) {
           assert.ok(invocation.record.postReviewCheckpointRef,
             `${String(current.mode)} review retains its post-review checkpoint`);
@@ -3224,6 +3276,9 @@ if (!coldConsumerMode) test('native public CLI review findings contract permits 
             === invocation.record.postReviewCheckpointRef),
           `${String(current.mode)} post-review checkpoint is durable`);
         }
+        const reviewStore = createChildBodyAssetPort({
+          store: new ImmutableAssetStore(join(fixture.paths.artifactsRoot, 'ui-provider-evidence')),
+        });
         for (const delivery of reviewDeliveries) {
           assert.equal(delivery.entry.result.status, 'passed');
           if (current.mode === 'empty') {
@@ -3236,6 +3291,14 @@ if (!coldConsumerMode) test('native public CLI review findings contract permits 
             assert.ok(finding.locationRef.length > 0);
             assert.ok(finding.evidenceRefs.length > 0);
           }
+          const reviewBodyAsset = delivery.entry.result.evidenceRefs
+            .find((ref) => ref.evidenceId.value.startsWith('child-body-review-'));
+          assert.ok(reviewBodyAsset,
+            `${String(current.mode)} review delivery retains its immutable body asset`);
+          const reviewBody = new TextDecoder('utf-8', { fatal: true })
+            .decode(await reviewStore.read({ ref: reviewBodyAsset!, view: { kind: 'utf8-text' } }));
+          assert.match(reviewBody, /^Cycle [12] independent quality review$/,
+            `${String(current.mode)} review body is independently readable from the existing asset store`);
         }
       } else {
         assert.equal(receipt.state, 'blocked', `${String(current.mode)}: ${JSON.stringify(receipt)}`);
