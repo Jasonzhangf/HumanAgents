@@ -665,12 +665,6 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           recoveryResponsibilityRef: binding.admittedTurn.recoveryStateRef,
         },
       }),
-      permissionSnapshot: {
-        runtimeId: 'ui-runtime',
-        executionEpoch: 1,
-        ownerRef: principalOwner,
-        permissionRevision: '1',
-      },
       refinedDeliveryStore: createFilesystemRefinedDeliveryStore(new ImmutableAssetStore(options.evidenceRoot)),
     } : {}),
     binding: options.binding,

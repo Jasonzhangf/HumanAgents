@@ -722,12 +722,28 @@ export interface RuntimeTaskCoordinatorOptions {
   };
   readonly recoveryReferencesFor?: (binding: import('../../../contracts/src/index.js').ActiveTurnBinding) => Promise<Pick<RecoveryCaptureReferences, 'completionLookups' | 'recovery'>>;
   /**
+   * The verified runtime principal used to derive the task-scoped grant
+   * authority. It is a wiring fact, not a control source; it is only supplied
+   * to `permissionSnapshotFor` and is never persisted here.
+   */
+  readonly principalOwner?: string;
+  /**
    * Runtime permission/binding snapshot used to open the active turn. It must
    * come from real assembled Runtime inputs. It is required whenever an
    * orchestrated execution is admitted; a missing snapshot stops the active
    * turn open instead of fabricating a permission revision.
    */
   readonly permissionSnapshot?: RuntimeBindingSnapshot;
+  /**
+   * Derives the real owner and permission revision from the task-scoped grant
+   * instead of a static snapshot. When bound, `permissionSnapshot` supplies no
+   * authority; the Runtime derives `runtimeId`/`executionEpoch` from the
+   * operation and the returned owner/revision from the committed grant.
+   */
+  readonly permissionSnapshotFor?: (input: {
+    readonly taskId: TaskId;
+    readonly principalOwner: string;
+  }) => Promise<Pick<RuntimeBindingSnapshot, 'ownerRef' | 'permissionRevision'>>;
   /**
    * Stores the refined child delivery asset so a cold read can resolve it. The
    * App assembles the durable store; the Runtime only references it.
@@ -4568,7 +4584,31 @@ export class RuntimeTaskCoordinator {
   ): Promise<ActiveTurnContext | undefined> {
     if (!this.options.activeTurnJournal && !this.options.activeTurnJournalFor) return undefined;
     if (record.activeTurn?.admittedTurn.turnId === newActiveTurnId(operation.operationId.value)) return record.activeTurn;
-    const snapshot = this.options.permissionSnapshot;
+    let snapshot = this.options.permissionSnapshot;
+    if (this.options.permissionSnapshotFor) {
+      const derived = await this.options.permissionSnapshotFor({
+        taskId: record.taskId,
+        principalOwner: this.options.principalOwner ?? '',
+      });
+      if (
+        derived === undefined
+        || derived.ownerRef.trim() === ''
+        || derived.permissionRevision.trim() === ''
+      ) {
+        throw new RuntimeTaskControlError(
+          'active-turn.permission-snapshot.invalid',
+          RUNTIME_OWNER,
+          'the derived permission snapshot is missing its owner or grant revision',
+          'read the committed task grant before admitting an orchestrated execution',
+        );
+      }
+      snapshot = {
+        runtimeId: this.runtimeId(operation.operationId),
+        executionEpoch: operation.executionEpoch,
+        ownerRef: derived.ownerRef,
+        permissionRevision: derived.permissionRevision,
+      };
+    }
     if (!snapshot) {
       throw new RuntimeTaskControlError(
         'active-turn.permission-snapshot.missing',

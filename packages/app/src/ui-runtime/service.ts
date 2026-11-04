@@ -131,7 +131,10 @@ import {
   type AdmissionQueueKind,
   type RequirementAdmissionReceipt,
 } from '../../../runtime/src/admission/index.js';
-import type { TaskGrantPort } from '../../../runtime/src/admission/task-grant.js';
+import {
+  projectTaskGrantAuthority,
+  type TaskGrantPort,
+} from '../../../runtime/src/admission/task-grant.js';
 import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
@@ -3129,6 +3132,7 @@ export class UiRuntimeService {
     this.nativeDriverBound = nativeDriverBound;
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
+      ...(options.principalOwner === undefined ? {} : { principalOwner: options.principalOwner }),
       checkpointStoreFor: options.checkpointStoreFor,
       publicOutputStoreFor: options.checkpointStoreFor,
       ...(options.effectLedgerFor === undefined ? {} : { effectLedgerFor: options.effectLedgerFor }),
@@ -3194,6 +3198,13 @@ export class UiRuntimeService {
       ...(options.initialInputStore === undefined ? {} : { initialInputStore: options.initialInputStore }),
       ...(options.recoveryReferencesFor === undefined ? {} : { recoveryReferencesFor: options.recoveryReferencesFor }),
       ...(options.permissionSnapshot === undefined ? {} : { permissionSnapshot: options.permissionSnapshot }),
+      ...(options.taskGrantPort === undefined || options.principalOwner === undefined ? {} : {
+        permissionSnapshotFor: async ({ taskId }) => {
+          const readback = await options.taskGrantPort!.readTaskGrant(taskId);
+          const authority = projectTaskGrantAuthority({ readback, principalOwner: options.principalOwner! });
+          return { ownerRef: authority.owner, permissionRevision: authority.permissionRevision };
+        },
+      }),
       ...(options.refinedDeliveryStore === undefined ? {} : { refinedDeliveryStore: options.refinedDeliveryStore }),
     });
     this.implicitBrain = new ImplicitBrainFifo({
