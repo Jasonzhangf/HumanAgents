@@ -2073,3 +2073,54 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   CEO 当前 grant 不在本项目会话（`is_current: false`），本项目无法直接
   调 `collab ceo progress`；阻塞事实已记入本目标文档，等 Alice 恢复
   或用户明确授权改派后继续。
+
+### 2026-11-04 00:18 UTC：goal deadline 巡检回执与 master 独立核对
+
+- 消费 goal deadline `m1793751469892-727`（`LAST_REMINDER=true`，
+  `state=read`、`consumed_by_recv=true`）后，显式
+  `appsdk goal subscribe --goal
+  docs/goals/humanagent-open-p1-governance-20261101.md --interval 20m`
+  重新武装一次性 deadline；`appsdk goal status --json` 返回 `active: true`、
+  subscription `sub-m1793751581513-733`（trigger 约 00:40 UTC）。
+- 四项核对：
+  1. 未关闭 P0/P1：`appsdk bug list --json` 仍 39 项 open（P0 3、P1 17、
+     P2 6、未分级 13），P0 三项
+     `45f92c8`、`a9dc797`、`4c21e74` 与 P1 `c5d4671`、`209de7c`、
+     `1e9099b`、`79e1029`、`1a6fee2`、`3577e65` 等保持 open；本轮无新
+     注入证据，不重列。
+  2. 未完成/ready：board 两项不变——formal-entry
+     `p1-checkpoint-formal-entry-child-lifecycle-20261103` `working`
+     (Alice owner, rev3, Emma reviewer) 与 runtime checkpoint
+     `p1-runtime-checkpoint-identity-20261103` `rework` (David owner,
+     rev19, Emma reviewer)。
+  3. 自有 worktree/资源：主树 `ff10aefef`，`git status --short` 无输出，
+     worktree 8/10；候选树
+     `/Volumes/Intel/playground/humanagent/p1-checkpoint-formal-entry-child-lifecycle-20261103`
+     HEAD `4af025375`、ahead 1/behind 4，含 5 个诊断日志 untracked 保留为
+     证据；生产 10086、RCC 配置、daemon/tmux 生命周期未动。
+  4. peer/worker：`tmux capture-pane -t %15` 显示 Alice 宿主 pane 仍停在
+     AGY 空提示符并保留 `MODEL_PLACEHOLDER_M418` 原错
+     (`failed to construct executor: unknown model key`)，`collab who`/`directory`
+     中 `humanagent.Alice` 仍 `unknown`；发给她的交付请求
+     `m1793746536714-542` 与 `m1793750901201-699` 均 `state=pending`、
+     `consumed_by_recv=false`。Emma、David 分别为 reviewer/上游 owner 待命。
+- master 独立核对候选 `4af025375`（只读，不代交付）：读
+  `.worker-runs/c5d4671-rcc-receipt-final2.json`，`state=SUCCESS`、
+  `missing=[]`、`terminal.state=succeeded`、`terminal.output="4"`、
+  terminal checkpoint seq 4 outcome succeeded；结构化 `events[].state`
+  计数 `child.prepared=2`、`child.returned=2`、`child.adopted=2`、
+  `review.checkpointed=1`，7 项全部携带 task
+  `ui-task-291dc017-b3e2-43dc-bfbb-a455c999133d-1` 与 operation
+  `ui-operation-1`；候选相对 `origin/main` 改动 8 个代码/测试文件。核对
+  结论：候选满足本任务的正式入口交付条件，可直接进入 owner 交付边界。
+- CEO 报告：host-wide CEO 现为 Alice（`collab ceo status`：name=Alice、
+  workspace=/Users/fanzhang、granted_by 会话 `…3966…`、`is_current:false`）。
+  本轮以项目 master 身份执行 `collab ceo reply`，返回
+  `recorded:true`/`revision:4`、`notified:false`（小时限流，未即时推送），
+  正文含目标、已核对候选、剩余工作、Alice 宿主阻塞与下一动作；不使用
+  `--urgent`。
+- 阻塞与处置不变：`collab task deliver` 的 owner 权限只属 Alice，master
+  不代交付、不虚构交付、不静默改派（board 无 `reassign` 子命令，
+  候选 `needs_reassignment=false`）。候选与证据保持就绪；Alice 恢复后
+  以 owner 执行 `collab task deliver` → Emma `task review --accept` →
+  master 集成并收口。如需改派他人在用户明确授权后执行。
