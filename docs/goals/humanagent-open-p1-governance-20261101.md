@@ -2213,3 +2213,22 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   invited 未接受（dsh wake 已入队，agent_state unknown）。
 - 阻塞：GCM 传输层间歇故障影响 Alice 修复执行；这是基础设施故障，非产品
   代码或计划问题。
+
+### 2026-11-04 02:30 UTC：master-idle 巡检 + Bob 唤醒
+
+- 消费 master-idle project-patrol 与若干 worker-idle/board-idle 通知；
+  `appsdk goal subscribe --interval 20m` 重新武装。
+- 四项核对：
+  1. P0/P1：P0 `45f92c8`、`a9dc797`、`4c21e74` 与 P1 `d9d9fb7`、`c5d4671`、
+     `209de7c` 等保持 open；本轮无新注入证据。
+  2. 未完成/ready：board 3 项——P0 `45f92c8` 验收 invited（Bob）、
+     formal-entry rework rev8（Alice）、runtime checkpoint rework rev19
+     （David，被正式入口任务阻塞）。
+  3. 自有 worktree/资源：8/10，未新增/删除；生产 10086、RCC 配置、
+     daemon/tmux 生命周期未动。
+  4. peer/worker：Alice 已按通知用同 GCM 模型与合同重试 `d9d9fb7`
+     （PID 55020 运行中，输出停在 worktree 检查）；Emma idle reviewer 待命；
+     Bob agent_state unknown、P0 invite 未接受；David unknown、被阻塞；
+     Carol cold。
+- 处置：`humanagent.Bob` 名字解析报 `ADDRESS_AMBIGUOUS`，改用 worker id
+  发 `m1793764961075-1026` 催 Bob 接受 P0 邀请，回到 board respond 流程。
