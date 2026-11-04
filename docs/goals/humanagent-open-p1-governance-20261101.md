@@ -2728,3 +2728,17 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   serve 与 stale worktree。goal deadline 保持 armed，未消费新 deadline。
 - 下一动作：等 David 复验回执；David 签名通过后 Alice deliver 给 Emma；
   Bob 两项 invitation 仍外部等待；David 最终前端任务仍等 `fde1bf0` 落地。
+
+### 2026-11-04 12:32 UTC：goal deadline 再次到达并重订，David 回执仍未到
+
+- 消费 goal deadline `m1793795555912-2119`（LAST_REMINDER=true），并显式
+  `appsdk goal subscribe --interval 20m` 重订成功（one-shot，下一次约
+  12:52 UTC）。project patrol `sub-m1793413132850-18` 保持 armed。
+- David 独立复验尚未回执：`david-66972f9-verification/` 目录存在但为空，
+  inbox 空，无新消息；已派发消息 `m1793795183611-2110` 进入其运行中的
+  DSH runtime（endpoint_live、presence=present、网关运行），等其处理，
+  不重复派发或盲唤醒。
+- Alice 处于提交后等待 David 复验，board `p1-checkpoint-formal-entry`
+  仍 rev20 `rework`，不自替换推进。Bob 两项 invitation 仍未 respond。
+- 本轮未改产品代码；main 仅追加本目标文档记录；未杀进程、未动旧 E2E
+  serve 与 stale worktree。
