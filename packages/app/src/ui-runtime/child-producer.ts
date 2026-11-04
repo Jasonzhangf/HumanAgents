@@ -259,7 +259,6 @@ export function appChildDeliverTool(input: {
         judgment: base.judgment,
         findings: {
           type: 'array',
-          minItems: 1,
           maxItems: MAX_CRITERIA_ITEMS,
           items: {
             ...findingItem,
@@ -850,8 +849,8 @@ function reviewPrompt(assignment: ReviewAssignment, material: ReviewMaterial): s
     '1. Read each subject body and the acceptance criteria above.',
     '2. Persist the complete review text in the workspace with file.write so it becomes accepted evidence.',
     '3. Read the exact evidenceId= value from the successful file.write result footer.',
-    '4. Prepare at least one concrete finding. Every finding is required to contain detail, severity, locationRef and a non-empty evidenceRefs array. severity must be exactly one of P0, P1, blocker, important or advisory, and evidenceRefs must cite the exact evidenceId returned by the successful file.write; never invent evidence.',
-    '5. Call humanagent_child_deliver once. body is the complete review text, judgment is exactly "passed", "failed" or "inconclusive", findings contains at least one concrete finding with the required fields above, and evidenceRefs cites that exact file.write evidenceId. Do not pass inspectionOutcome; it belongs only to inspection execution children.',
+    '4. For a passed review, the findings array may be empty only when no concrete defect exists. For a failed or inconclusive review, prepare at least one concrete finding. Every finding is required to contain detail, severity, locationRef and a non-empty evidenceRefs array. severity must be exactly one of P0, P1, blocker, important or advisory, and evidenceRefs must cite the exact evidenceId returned by the successful file.write; never invent evidence.',
+    '5. Call humanagent_child_deliver once. body is the complete review text, judgment is exactly "passed", "failed" or "inconclusive", the findings array is empty only when passed and defect-free; otherwise it contains at least one concrete finding with the required fields above, and evidenceRefs cites that exact file.write evidenceId. Do not pass inspectionOutcome; it belongs only to inspection execution children.',
     '6. Read the exact evidenceId= value from the successful humanagent_child_deliver result footer.',
     '7. Call humanagent_turn_end once with outcome "completed". Pass summary as a JSON object, never as a JSON-encoded string: summary must have goal (string), actions (array of strings), result ({status, text}), and nextStep (string). Pass deliveryRefs containing the exact child delivery evidenceId printed by humanagent_child_deliver, not a guessed or reformatted value.',
     'A plain-text reply without humanagent_child_deliver is not a valid child review result; this child review is delivered only by these calls.',
@@ -1019,7 +1018,7 @@ function parseReviewFindingSelectors(value: unknown): readonly ReviewFindingSele
   if (value === undefined || value === null) {
     throw new Error('a review delivery must state its concrete findings');
   }
-  if (!Array.isArray(value) || value.length === 0) {
+  if (!Array.isArray(value)) {
     throw new Error('a review delivery must state its concrete findings');
   }
   return value.map((entry, index) => {
@@ -1032,11 +1031,11 @@ function parseReviewFindingSelectors(value: unknown): readonly ReviewFindingSele
     if (!REVIEW_SEVERITY_WHITELIST.includes(severityRaw as ReviewSeverity)) {
       throw new Error(`finding ${index} severity must be a registered review severity`);
     }
-    const locationRef = readBoundedString(candidate.locationRef, `finding ${index} locationRef`, MAX_TARGET_REF, false);
+    const locationRef = readBoundedString(candidate.locationRef, `finding ${index} locationRef`, MAX_TARGET_REF, true);
     return {
       detail,
       severity: severityRaw as ReviewSeverity,
-      locationRef: locationRef === '' ? `finding:${index}` : locationRef,
+      locationRef,
       evidenceRefs: readBoundedStringArray(
         candidate.evidenceRefs, `finding ${index} evidenceRefs`, MAX_CRITERIA_ITEMS, MAX_TARGET_REF, true,
       ),
