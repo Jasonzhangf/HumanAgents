@@ -2504,3 +2504,84 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - Alice 仍持有 formal-entry rework 且有 board active_task，background
   unknown，未唤醒、未补派。inbox 空，无新 CEO 请求。无新的可派 ready
   工作；本轮不变更 P0/P1 owner，不强制关闭未完成任务。
+
+### 2026-11-04 10:45 UTC：deadline 消费、现有分工保持
+
+- 消费 goal deadline `m1793788805936-1856`（LAST_REMINDER=true），并显式
+  `appsdk goal subscribe --goal <humanagent-open-p1-governance-20261101.md>
+  --interval 20m` 重订；`appsdk goal status` 返回 Active=true、
+  Desired=subscribed、Observed=subscribed。project patrol
+  `sub-m1793413132850-18` 仍 armed 900000ms，target 1500000ms，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除。
+- Board 与 owner 未变：`fde1bf0-e2e-journal-read-20261104` 与
+  `p0-45f92c8-rcc-orchestration-acceptance-20261104` 仍为 Bob invited
+  rev3；`p1-checkpoint-formal-entry-child-lifecycle-20261103` Alice
+  rework rev16；`p1-final-delivery-real-frontend-complex-tasks-20261104`
+  David working；`p1-runtime-checkpoint-identity-20261103` David rework
+  rev19。
+- Bob 的定向请求 `m1793787053472-1790` 已显示 `consumed_by_recv=true`，
+  但两项邀请仍未 accept/decline；精确 host observation 为
+  endpoint_live=true、presence=present、thread_state=running、
+  can_accept_direct_input=true、agent_state=unknown。任务保存的是显式
+  executor Bob，本 master 不自行换人，也不重复催派；按现有分工等待其
+  respond。Carol 虽 endpoint live，但同为 status=unknown，不能据此改派。
+- Alice 的 rev16 返工仍在其名下；`collab worker read` 显示
+  active_status=rework、active_task=`p1-checkpoint-formal-entry-
+  child-lifecycle-20261103`、agent_state=idle。本 master 已发送一次定向
+  返工提醒 `m1793788512196-1846`，本轮不再重复唤醒。David 的 C/D 仍等待
+  `fde1bf0` 进入 origin/main，未解锁。
+- 本轮未改产品代码、main、RCC 配置、生产 10086、daemon 或 tmux；主树
+  clean。无可安全回收的他人资源。下一动作仍是 Bob 对两项 invitation
+  给出 accept/decline；Alice 完成 rev16 后交 Emma，随后通知 David 复跑。
+
+### 2026-11-04 10:48 UTC：501f5be 已交付，Emma 复审中
+
+- 消费 Alice 回执 `m1793789268713-1878`：501f5be 的作者与 David 独立公开入口
+  红绿均完成，候选 `ba87293ad` 已 rebase 当前 origin/main；Alice 已执行
+  task deliver，board `p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  为 rev18 `delivered`，`next_step=await review by Emma`。
+- 核对 David 原始回执
+  `/Volumes/Intel/playground/humanagent/.worker-runs/p1-checkpoint-formal-entry-child-lifecycle-20261103/rework-501f5be/david-verification.md`：
+  `passed+[]` 经真实公开入口 succeeded 并保留 post-review checkpoint；真实
+  finding 保留单条；non-passed 空 findings 仍在 runtime
+  `review/index.ts:219` 拒绝；missing-location/illegal-severity/
+  empty-evidence/unaccepted-ref 分别拒绝；typecheck exit 0 与受影响回归
+  2 pass 均有原始日志。David 明确未背书 501f5be 合同之外的
+  `9f043f8f6`/`698bfc06d` 候选提交，也未独立复跑作者声称的全量 12 pass/
+  7 fail 既有漂移归因，该限制已由 Alice 如实写入 board delivery evidence。
+- Emma 已开始审查：`collab worker read` 返回 agent_state=working、
+  thread_state=active、latest_turn_status=inProgress；board 该任务的
+  `eligible_task_ids` 仍含 formal-entry，说明 Emma review 正常推进，本轮
+  不重复唤醒。Alice 交付后 idle 是正常归属变化，不重复派单。
+- 下一动作：Emma 对候选 `ba87293ad` 完成 accept 或 rework 裁决；若 accept，
+  本 master 再安排集成并解除 David `p1-runtime-checkpoint-identity-20261103`
+  的依赖；`fde1bf0` 仍未落 origin/main，David C/D 复跑继续等待。
+
+### 2026-11-04 10:51 UTC：Emma 退回，登记 66972f9 并派 Alice 返工
+
+- 消费 Emma 复审消息 `m1793789443017-1892`：501f5be 的公开 CLI 红绿
+  （passed+[]、真实 finding、非法 finding 边界）可复用；但整批候选
+  `reviewPrompt()` 仍强制每次将完整审查文本用 `file.write` 持久写入
+  project workspace 并引用写入证据，与 workspace 只作执行上下文、
+  artifact 归 `~/.humanagent`、只读任务不写用户项目的项目硬约束冲突。
+  Emma 已执行 board review rework：任务现为 rev20 `rework`，
+  `actual_reviewer_name=Emma`，`next_step=address review evidence`。
+- 核对 canonical issue 真源：`appsdk bug show 66972f9` 返回 P1 open，
+  title 为「子审查候选强制向项目 workspace 写入审查产物」，记录候选
+  `ba87293ad`、`child-producer.ts` reviewPrompt 第 2 至 5 步的静态发现与
+  项目持久化边界。源码位置在
+  `packages/app/src/ui-runtime/child-producer.ts:850-853`。
+- 已为返工落盘合同：
+  `/Volumes/Intel/playground/humanagent/.worker-runs/p1-checkpoint-formal-entry-child-lifecycle-20261103/rework-66972f9/contract.md`。
+  合同要求最小修复只读合法 review 不写 workspace，真实 finding 保留、
+  非 passed 空与非法 finding 仍拒绝，并对 full native-delivery consumer
+  七项失败做同入口、同基线原始对照（候选改公共 fixture，不能仅凭未改
+  source 判旧漂移）；Alice 修复，David 独立公开入口复验与基线对照，
+  Emma 复审。
+- 已定向发送返工指令给 `humanagent.Alice`，durable 消息
+  `m1793789673352-1906`；未使用匿名单发，未代替 Alice 实现，未改
+  RCC/10086/daemon/tmux。候选仍 `ba87293ad`，无合并/推送/board 关闭。
+- 下一动作：Alice 完成只读审查修复并交 David 复验；David 复验与基线
+  对照完成后 Alice 交回 Emma；Emma accept 后本 master 再安排集成并解除
+  David checkpoint-identity 依赖。Bob 两项邀请仍为另一真实外部等待，
+  David C/D 仍等 `fde1bf0` 落 origin/main。
