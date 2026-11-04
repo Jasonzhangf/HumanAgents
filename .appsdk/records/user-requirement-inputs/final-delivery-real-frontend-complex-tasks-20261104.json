@@ -1,0 +1,13 @@
+{
+  "project_id": "humanagent",
+  "request_id": "final-delivery-real-frontend-complex-tasks-20261104",
+  "requirement_id": "humanagent-final-delivery-real-frontend-complex-tasks",
+  "base_version": 0,
+  "operation": "create",
+  "text": "最终交付验收：由测试工程师从真实前端输入不同的复杂任务，最终实际完成任务并验收结果；设计有代表性的不同复杂任务与可核验终态；测试工程师独立按真实前端操作，记录输入、执行与结果证据；不能以单测、模型响应或任务启动代替最终完成。",
+  "authorization": {
+    "role": "user",
+    "source": "用户经 CEO Alice 转达（通知 m1793773896613-1323）：用户明确最终交付条件。",
+    "original_text": "用户明确最终交付条件：由测试工程师从真实前端输入不同的复杂任务，最终实际完成任务并验收结果。请写入项目权威需求与交付验收计划，设计有代表性的不同复杂任务和可核验终态，由测试工程师独立按真实前端操作，记录输入、执行与结果证据；不能以单测、模型响应或任务启动代替最终完成。既有范围内继续实现、修复与集成，发现缺口继续推进；将计划、任务分派、真实验收结果和剩余缺口交回。"
+  }
+}

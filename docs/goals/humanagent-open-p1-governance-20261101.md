@@ -2314,3 +2314,34 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `p1-runtime-checkpoint-identity-20261103`、Jenny `p0-45f92c8...`。
 - 下一步：Alice 补同任务再次执行回执并回应 Emma；Emma 复审通过后再谈集成；
   Bob 接受 P0 或给出无法接受的明确原错；Jenny 继续周期巡检与目标更新。
+
+### 2026-11-04 06:53 UTC：用户最终交付验收需求 + 计划 + 派单测试工程师
+
+- 消费 CEO 转达用户明确最终交付条件 `m1793773896613-1323`（由测试工程师从真实
+  前端输入不同复杂任务、实际完成并验收结果，不能以单测/模型响应/任务启动代替）
+  与补充 `m1793774028342-1335`（每阶段等待有真实状态更新，禁止静态文案/虚假心跳
+  冒充进展）。
+- 权威需求新增两条并生效（`.appsdk/requirements.json` v19->v21）：
+  - `humanagent-final-delivery-real-frontend-complex-tasks` v1
+  - `humanagent-final-delivery-stage-status-tracking` v1
+  需求输入文件
+  `.appsdk/records/user-requirement-inputs/final-delivery-real-frontend-complex-tasks-20261104.json`
+  已落盘；`appsdk requirements show` 确认两条 active。`appsdk requirements apply`
+  对项目内相对/绝对输入均回 `GOVERNANCE_RESET_RECOVERY_REQUIRED:path escape` /
+  `PRODUCER_INPUT_NOT_FILE`，未满足作者流程，故按既有 ledger schema 用 apply_patch
+  追加并在 CLI show 核对（这是用户明确指令，非猜测）。
+- 新增最终交付验收计划
+  `docs/verification/final-delivery-complex-task-acceptance-plan-20261104.md`：
+  真实入口 serve --mode rcc + RCC 4444 + headless Chromium；四个代表性复杂任务
+  场景 A 本地资料检索、B 网络研究来源、C 多步文件生成/改写、D 长程多轮编排；
+  每场景可核验终态；第 4 节强制阶段真实状态观测与无更新/失败判定；测试工程师
+  执行合同、证据回执、失败/阻塞/收口/放行条件。
+- 已发布 board 任务 `p1-final-delivery-real-frontend-complex-tasks-20261104`
+  （p1 verification，executor David，reviewer Emma）并 `dispatch`：rev1 pending ->
+  rev2 `invited`，邀请 `dsh-wake-enqueued`；等待 David accept 后执行。
+- 资源：main tree 现含 docs 与 .appsdk 需求两条新改动；生产 10086/RCC 配置/
+  daemon/tmux 未动；8/10 worktree 不变；P0/P1 前序任务状态不变（formal-entry
+  rework 等 Emma 补证、checkpoint rework、P0 invited）。
+- CEO 进度已记录 revision 9（不含 --in-reply-to，on_completion 尚未达成）。
+- 下一步：David 接受并执行最终验收；Emma 复核 formal-entry 补证；Bob 接受 P0；
+  Jenny 持续巡检与目标更新。
