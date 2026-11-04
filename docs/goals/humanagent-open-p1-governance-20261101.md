@@ -2381,3 +2381,36 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `PATROL_CADENCE_RUNTIME_GAP` 未解除。
 - 下一步：Alice 提交并交 David 独立验证；David 继续最终交付场景 A-D；Bob
   接受或明确拒绝 P0；Emma 在收到完整候选后复审。
+
+### 2026-11-04 08:24 UTC：恢复 master，登记 501f5be，重新分派 formal-entry rework
+
+- `collab context` 已恢复并核对：Jenny 是 `/Volumes/extension/code/humanagent`
+  当前 master，transport live，daemon live；CEO 授权属于 Alice，
+  `is_current=false`。goal `ad967f01...` 仍有 20m deadline
+  `sub-m1793779600816-1526`；project-patrol
+  `sub-m1793413132850-18` armed，但 runtime 仍是 900000ms，target 是
+  1500000ms，`PATROL_CADENCE_RUNTIME_GAP` 未解除，不能声称节奏已对齐。
+- 复核 board：`p1-checkpoint-formal-entry-child-lifecycle-20261103` 为
+  rev16 rework，owner Alice、reviewer Emma；`p0-45f92c8-rcc-orchestration-acceptance-20261104`
+  为 invited rev3，指定执行者 Bob；`p1-final-delivery-real-frontend-complex-tasks-20261104`
+  为 working，David；`p1-runtime-checkpoint-identity-20261103` 为 rework，
+  David，仍受 formal-entry 路径依赖。
+- 新 P1 `501f5be`：候选 `packages/app/src/ui-runtime/child-producer.ts` 的
+  review delivery schema、prompt 与 parser 强制至少一个 finding，导致合法
+  `passed` review 不能以零 findings 交付。权威语义已由
+  `packages/contracts/src/review-data.ts` 和非 passed review 的 runtime 断言
+  支持零 findings。
+- 已在
+  `/Volumes/Intel/playground/humanagent/.worker-runs/p1-checkpoint-formal-entry-child-lifecycle-20261103/rework-501f5be/contract.md`
+  落盘返工合同；Alice 保持技术裁决和实现 owner，先由独立 Planner 规划，再由
+  有界 GCM worker 实现；范围只允许 `child-producer.ts` 与直接相关测试，
+  保留真实 findings、拒绝 malformed findings，保持 checkpoint identity、
+  assignment/epoch/grant、授权断言和五个既有无跟踪证据文件。David 负责独立
+  公开入口红绿复验，Emma 复审。
+- 已向 `humanagent.Alice` 发送 durable 派单
+  `m1793780484603-1566`；发送回执 `durable=true`、`consumed=false`，暂不把
+  入队当作接收或完成。未替换 Bob，未实现 peer-owned 代码，未合并或关闭任务。
+- 资源：主树 clean，当前 8/10 worktree；4 个 locked provider 树继续
+  `PROTECTED_HOLD`。生产 10086、RCC 配置、daemon/tmux 生命周期均未动。
+  下一次动作：Alice 接收并返回公开入口红绿与 David 复验路径，Emma 通过后才
+  进入 master review/集成。
