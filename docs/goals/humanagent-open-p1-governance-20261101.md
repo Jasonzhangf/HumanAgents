@@ -2710,3 +2710,21 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   unknown/PROTECTED_HOLD 保留。goal deadline 仍 armed，未消费新 deadline。
 - 下一动作：等待 Alice 回复提交后 HEAD；立即派 David 独立复验；Bob 两项
   invitation 仍是外部等待；David 最终前端任务继续等 `fde1bf0` 落地。
+
+### 2026-11-04 12:26 UTC：候选已提交，David 独立复验已派发
+
+- 消费 Alice 回执 `m1793795151771-2108`：她在候选 worktree 提交两文件改动，
+  候选 HEAD `79b4f48d8`（`ba87293ad -> 79b4f48d8`），五个既有未跟踪证据
+  文件保留；候选尚未 rebase/deliver/merge/push。实测 worktree HEAD 与
+  `git status` 一致，merge-base `origin/main`=`9c77ddafa`。
+- 已派 David 独立复验 `m1793795183611-2110`（dsh-wake-enqueued）：在候选树
+  独立运行 focused 公开入口命令并确证无 workspace 写入、body 可读回；对
+  基线 `baseline-9c77ddafa` 与候选各跑 fresh 构建同一 full suite 命令做同基线
+  对照，必须证明 7 项失败既有或候选引入，基线再超时则如实标 INCOMPLETE；
+  签名回执写
+  `.../david-66972f9-verification/` 并回报 Jenny。边界：候选树只读、不 push/
+  merge/close、不碰 RCC/10086/daemon/tmux/生产数据。
+- 本轮未改产品代码；main 仅追加本目标文档记录；未 kill 进程、未动旧 E2E
+  serve 与 stale worktree。goal deadline 保持 armed，未消费新 deadline。
+- 下一动作：等 David 复验回执；David 签名通过后 Alice deliver 给 Emma；
+  Bob 两项 invitation 仍外部等待；David 最终前端任务仍等 `fde1bf0` 落地。
