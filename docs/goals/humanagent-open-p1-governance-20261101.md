@@ -2659,3 +2659,26 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - 下一动作：等待 Alice worker 完成 66972f9 focused 修复并交 David 同入口
   复验；Bob 对两个 invitation 的接受/拒绝仍是 P0/P1 外部等待；David
   最终前端任务继续等 `fde1bf0` 落地。
+
+### 2026-11-04 12:13 UTC：patrol 复核，无实质变化，不发送 CEO 心跳
+
+- 消费 `m1793794417931-2082`（master-idle:project-patrol）。上一个 goal
+  deadline 已消费，本轮显式 `appsdk goal subscribe --interval 20m` 重新武装
+  （one-shot `sub-m1793794355580-2078`）；project patrol
+  `sub-m1793413132850-18` 继续 armed，`PATROL_CADENCE_RUNTIME_GAP`
+  （900000ms 实际 / 1500000ms 目标）仍未解除，不声称节奏对齐。
+- Board 无实质变化：`fde1bf0` rev9 与 P0 `45f92c8` 仍为 Bob `invited`；
+  Alice `p1-checkpoint-formal-entry` rev20 `rework`；David
+  `p1-final-delivery` rev4 `working`、`p1-runtime-checkpoint-identity`
+  rev19 `rework`。David 两项 board 巡检取消原因仍有效，不 rearm。
+- Alice 的 66972f9 GCM worker PID 25867 仍运行（约 1h14m），rework worktree
+  仍有 `child-producer.ts`、`native-delivery-public-consumer.test.ts` 未提交
+  修改及未跟踪证据文件，未 formal deliver。不重复唤醒、不误报完成。
+- 资源复核：`git worktree list` 仍为 8（main + 3 活动任务树 + 4 locked
+  provider `PROTECTED_HOLD`）；主树 clean，HEAD `c85d3e894`。旧 E2E serve
+  PID 40791（约 4h48m）与 65253（约 5h0m）仍 LISTEN，owner 未确认，按
+  unknown resource 保留，不 kill。
+- 无新 ready 工作或路由变化；自 11:50 的 CEO 进度与对照更正后无实质新事实，
+  本轮不发送 CEO 心跳。下一动作不变：等待 Alice worker 完成 focused 修复并
+  交 David 同入口复验；跟踪 Bob 对两个 invitation 的 respond；David 最终
+  前端任务继续等 `fde1bf0` 落地。
