@@ -2941,6 +2941,7 @@ export class RuntimeTaskCoordinator {
     record.composition = undefined;
     record.checkpointBoundary = undefined;
     record.taskAssembly = undefined;
+    delete record.assignment;
     record.implicitRequirement = input.implicitRequirement;
     record.nextStep = '完成执行注册与覆盖后释放';
     record.allowedActions = ['stop'];
