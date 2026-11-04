@@ -2484,3 +2484,23 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - 下一步：Bob 接受两项 board invitation 并推进 fde1bf0/P0 验收；Alice
   完成 501f5be 与 formal-entry rework；David 在 fde1bf0 修复后复跑 C/D；
   Emma 复审候选。当前没有新的可派实现工作，保留上述真实阻塞与等待条件。
+
+### 2026-11-04 09:55 UTC：goal deadline 消费并重新武装，Bob 定向提醒
+
+- 消费 goal deadline `m1793786119911-1758`（LAST_REMINDER=true），随即
+  `appsdk goal subscribe --goal <humanagent-open-p1-governance-20261101.md>
+  --interval 20m` 重新武装成功：one-shot deadline 20m armed，project
+  patrol `sub-m1793413132850-18` 继续 armed。
+- Board 无实质变化：`fde1bf0-e2e-journal-read-20261104` 与
+  `p0-45f92c8-rcc-orchestration-acceptance-20261104` 仍 invited rev3
+  （Bob 均未 respond）；`p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  Alice rework；`p1-final-delivery-real-frontend-complex-tasks-20261104`
+  David working；`p1-runtime-checkpoint-identity-20261103` David rework。
+- Bob 精确 host observation：endpoint_live=true、presence=present、
+  DSH thread_state=running、can_accept_direct_input=true、无 active task。
+  已按 worker_id `dsh-thread-...5f77b47e...` 定向发送 durable 提醒
+  `m1793786190540-1760`（dsh-wake-enqueued），请其 respond 接受或拒绝两项
+  invitation；未绕过地址、未改用匿名通道。
+- Alice 仍持有 formal-entry rework 且有 board active_task，background
+  unknown，未唤醒、未补派。inbox 空，无新 CEO 请求。无新的可派 ready
+  工作；本轮不变更 P0/P1 owner，不强制关闭未完成任务。
