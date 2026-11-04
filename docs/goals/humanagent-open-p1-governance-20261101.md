@@ -2617,8 +2617,8 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - 用户路由决定已执行：关键 review 与技术决策由 Alice 裁决；任务可由 Bob
   分担；真实前端验收由测试人员 David 完成。
 - `fde1bf0-e2e-journal-read-20261104` 原邀请已撤回，reviewer 改为 Alice，
-  已重新 dispatch Bob，board rev6 `invited`。任务描述仍保留历史 Emma 文案，
-  以 board `reviewer_name=Alice` 及本次用户指令为准。
+  任务描述同步改为 Alice review，已重新 dispatch Bob，board rev9
+  `invited`。
 - `p0-45f92c8-rcc-orchestration-acceptance-20261104` 保持 Bob 执行、
   Alice 审裁，board rev3 `invited`。已向 Bob 发送任务分担提醒
   `m1793791392768-1985`，等待其接受或拒绝。
