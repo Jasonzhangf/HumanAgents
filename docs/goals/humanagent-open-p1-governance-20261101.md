@@ -2159,3 +2159,40 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   DAG`、`## 资源清理` 与本目标文档 `## Standing Patrol` 均已改为“新任务使用
   LayerFS task branch/Workspace，不新建 worktree；存量树合并后自然关闭”。
 - 未做：生产 10086、RCC 配置、daemon/tmux 生命周期、任何 worktree 删除。
+
+### 2026-11-04 01:28 UTC：用户分工指令落实 + 正式入口返工分派
+
+- 消费 goal deadline `m1793755323034-874`（重 arm 后触发）与若干 worker-idle/
+  board-idle 通知；`appsdk goal subscribe --interval 20m` 重新武装一次性
+  deadline。
+- 用户三项指令已落实：
+  1. 关键 review 与技术决策由 Alice 裁决。
+  2. 任务可由 Bob 分担。
+  3. 测试工作由测试人员完成。
+- 事态进展：Alice 以新会话（session `01a1a41f-cb3f-7051-908b-f39944f58988`）
+  恢复，fetch/rebase 到当前 `origin/main` 后交付正式入口候选 `15a8bcc08`
+  （原 `4af025375`）。Emma review 退回为 rework rev8，登记 P1 `d9d9fb7`：
+  `packages/app/src/ui-runtime/index.ts:668-673` 把 `permissionSnapshot`
+  写死为 `runtimeId='ui-runtime'`、`executionEpoch=1`、`permissionRevision='1'`，
+  未从真实 typed grant/epoch 派生；`execution-composition.ts` 用实际 grant
+  revision。
+- 分派：
+  1. Alice（owner+裁决）：修复 `d9d9fb7`，从真实 typed grant/epoch 派生，
+     不写死、不新增第二真源、不弱化授权断言；修复后交 David 测试，再本人
+     `collab task deliver` 交 Emma review。已发 `m1793755521683-880`。
+  2. David（测试）：候选就绪后执行 focused red/green 与真实 RCC 4444 入口
+     验证。已发 `m1793755527440-881`。
+  3. Bob（分担）：发布并 dispatch P0 任务
+     `p0-45f92c8-rcc-orchestration-acceptance-20261104`（真实 RCC 入口确认
+     `operation.prepared orchestrated=true` 且 plan-revision 先于 provider
+     执行），executor Bob、reviewer Alice；当前 invited rev2，待 Bob 接受。
+- 清理：误发布的 `p1-collab-context-d442481` 已 force close（collab 0.2.0417
+  context 已验证 ok，该 bug 由版本升级解决，不需要 HumanAgent 任务）。
+- board 现 3 项 open：P0 `45f92c8` 验收 invited（Bob）、
+  `p1-checkpoint-formal-entry-child-lifecycle-20261103` rework（Alice）、
+  `p1-runtime-checkpoint-identity-20261103` rework（David，仍被正式入口
+  任务阻塞）。
+- worktree 8/10，未新增/删除；生产 10086、RCC 配置、daemon/tmux 生命周期
+  未动。
+- 阻塞与下一动作：无新增外部阻塞。Alice 修 `d9d9fb7` → David 测试 → Emma
+  review → master 集成；Bob 接受并完成 P0 验收。
