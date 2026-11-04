@@ -2232,3 +2232,18 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
      Carol cold。
 - 处置：`humanagent.Bob` 名字解析报 `ADDRESS_AMBIGUOUS`，改用 worker id
   发 `m1793764961075-1026` 催 Bob 接受 P0 邀请，回到 board respond 流程。
+
+### 2026-11-04 02:35 UTC：GCM 二次失败与 master 通道探针
+
+- Alice 的第二次 GCM 修复重试（PID 55020）同样传输失败退出：连续
+  Reconnecting 1/5..5/5 后 `stream disconnected before completion:
+  Transport error: network error: error decoding response body`，tokens used
+  53,406；仍无 `permission-rework-result.md`、无 tracked 代码改动。
+- 已发 `m1793766432226-1044` 让 Alice 保留原错、暂不启动第三次同参数重试。
+- master 在同一项目做一次有界 GCM 探针
+  `codex exec --profile gcm -m gpt-5.5 -s read-only 'Reply EXACTLY: GCM_PROBE_OK_1134'`
+  （`gtimeout 90`），约 35 秒内返回 `GCM_PROBE_OK_1134`、tokens used 30,685：
+  GCM 通道对 master 的短任务可用，但 Alice 的长修复任务连续两次中途断流。
+- 结论：这是 GCM 传输层间歇故障，短任务可用、长任务不稳定；不是产品代码
+  或 Alice 计划的问题。按规则保留原错、不静默切换模型；两次失败尚未达到
+  “三次实质攻关”升级 Astra 的门槛。
