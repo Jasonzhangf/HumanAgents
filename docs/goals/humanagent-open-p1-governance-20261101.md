@@ -2247,3 +2247,70 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - 结论：这是 GCM 传输层间歇故障，短任务可用、长任务不稳定；不是产品代码
   或 Alice 计划的问题。按规则保留原错、不静默切换模型；两次失败尚未达到
   “三次实质攻关”升级 Astra 的门槛。
+
+### 2026-11-04 06:12 UTC：deadline consumed，Alice 局部复核完成，正式入口转交 David
+
+- 消费 durable deadline `m1793770324942-1212` 与 worker-idle 消息；当前
+  `appsdk goal status --json` 已显示 `GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:consumed`。
+- Alice owner 复核：UiRuntimeService 实际装配的 grant revision 红绿、revoked
+  grant 和错误 owner 覆盖可作为局部证据；这不覆盖 `startUiRuntime` 正式入口。
+  Alice 已把正式入口的 grant revision、operation identity 和失败边界验证交给
+  David（消息 `m1793771966823-1251`），并在 David 返回实际入口回执前不提前
+  deliver，避免把局部证据冒称完整 gate。授权错误 code 的剩余问题保留为
+  未解决事实。
+- P1 `p1-checkpoint-formal-entry-child-lifecycle-20261103` 仍为 rev8 `rework`；
+  P1 `p1-runtime-checkpoint-identity-20261103` 仍为 rev19 `rework`，由 David
+  保持。P0 `p0-45f92c8-rcc-orchestration-acceptance-20261104` 仍为 rev3
+  `invited`，Bob 在线但未接受；本轮只做一次定向接受/执行推进，不替换 Bob。
+  名字地址 `humanagent.Bob` 折叠为多个 holder，已改用精确 worker id 与 session
+  投递 `m1793772987616-1283`（`durable=true`、`dsh-wake-enqueued`）。
+- 候选 worktree
+  `/Volumes/Intel/playground/humanagent/p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  保留 `15a8bcc08` 基础提交上的 4 个 tracked 修改与 5 个既有 untracked 证据/日志文件；
+  分支相对当前 origin/main `ahead 1, behind 4`，Alice 作为 owner 继续收口。
+  main tree clean，8/10 worktree，4 个 locked provider 树继续 `PROTECTED_HOLD`；
+  生产 10086、RCC 配置、daemon/tmux 生命周期未动。
+- 巡检：`project-patrol` 仍 armed 但 runtime interval `900000ms`，目标
+  `1500000ms`，`PATROL_CADENCE_RUNTIME_GAP` 未解除；如实报告，不声称已对齐。
+- 已向 CEO 通过规范入口回报，`collab ceo reply` 回执为 revision 8：
+  `recorded=true`、`reported=false`、`notified=false`；不改写为 CEO 已向用户报告。
+- 已显式重 arm 一次性 20m goal deadline：`sub-m1793772904571-1282`；
+  `appsdk goal status --json` 返回 `active=true`、`observed=subscribed`。
+- 下一步：David 返回正式入口证据；Alice 复核并 deliver 给 Emma；Bob 接受并完成
+  P0 真实 RCC 验收；Jenny 继续处理到期通知与 board 收口。
+
+### 2026-11-04 06:29 UTC：David 正式入口验证落地，Alice deliver，Emma rework 补证
+
+- 消费 David 正式入口验证回执 `m1793773465917-1296`：经 `startUiRuntime`
+  （非 UiRuntimeService、mode fake）A durable grant revision=2 且执行 succeeded，
+  A3 permissionRevision 从真实 grant 派生=2、A4 硬编码 1 消失，B1
+  runtimeId=ui-runtime-ui-operation-1、executionEpoch=1 来自真实 operation；
+  C/D revoked 与 wrong-owner 均显式 reject（`task grant denied: revoked/wrong-owner`）
+  且无 binding、未 running；9/9 PASS，红证 `got 1` 精确抓回退。源码/候选未动。
+  回执与原始 journal/binding 均在候选 worktree `.worker-runs/` 与
+  `.worker-runs/receipts/`。
+- Alice owner 自核后提交返工并 rebase 最新 origin/main：候选 `3ae8421c6`
+  （前序生命周期提交 `f1558a102`），4 个 tracked 文件；执行 board `task deliver`
+  `status=delivered`，Emma review 消息 `m1793773665216-1304`，
+  `delivery_complete=false`；保留既有 5 个 untracked 证据文件。
+- Emma review finding `m1793773751436-1310`：正式 fake 入口 grant revision 派生、
+  revoked/wrong-owner 拒绝与红绿可复用；但仅有首次 operation/epoch=1，需补
+  **同一任务再次执行及权限变化后** operation/epoch/grant 真源一致回执，已 rework。
+  授权拒绝被包装为 `ui-runtime.unexpected` 已登记 `f9218df`，按另立任务处理、
+  不夹带本轮；RCC 子生命周期旧回执仅证明受明确命令驱动路径。
+- 已把 review finding 交回 Alice（`m1793773773180-1313`），要求补同任务再次
+  执行正式入口回执；若超出授权范围则回具体缺口与解除条件，不替换 Emma 结论。
+- board：`p1-checkpoint-formal-entry-child-lifecycle-20261103` rev8 rework
+  （Alice owner/executor，Emma reviewer）；`p1-runtime-checkpoint-identity-20261103`
+  rev19 rework（David，被正式入口任务阻塞）；`p0-45f92c8-rcc-orchestration-acceptance-20261104`
+  rev3 invited（Bob online 但未接受，durable `m1793772987616-1283` 已 read/consumed、
+  wake_attempts=1，仍无 respond）。
+- 资源：候选 worktree `3ae8421c6` 相对 origin/main `behind 2`、5 个既有 untracked；
+  main tree clean，8/10 worktree，4 个 locked provider 树 `PROTECTED_HOLD`；生产
+  10086、RCC 配置、daemon/tmux 生命周期未动。
+- 巡检：`project-patrol` armed，runtime interval `900000ms`、target `1500000ms`，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除；`project_board_patrol` eligible 为 Alice
+  `p1-checkpoint-formal-entry-child-lifecycle-20261103`、David
+  `p1-runtime-checkpoint-identity-20261103`、Jenny `p0-45f92c8...`。
+- 下一步：Alice 补同任务再次执行回执并回应 Emma；Emma 复审通过后再谈集成；
+  Bob 接受 P0 或给出无法接受的明确原错；Jenny 继续周期巡检与目标更新。
