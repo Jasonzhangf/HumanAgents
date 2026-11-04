@@ -93,9 +93,14 @@ for new work.
   Current runtime reports `interval_ms=900000` and
   `cadence_runtime_gap=PATROL_CADENCE_RUNTIME_GAP`; rearm to
   `1500000` using the existing subscription, do not create a second one.
-- Worktree SESE: keep at most one active worktree per task domain; the retry
-  candidate worktree above is the only remaining open candidate. Four locked
-  provider worktrees are `PROTECTED_HOLD` and must not be removed.
+- User policy (2026-11-04): the project has migrated to LayerFS
+  (`layerfs --project humanagent`). New tasks MUST use a dedicated LayerFS
+  task branch/Workspace — never create a new Git worktree. Existing worktrees
+  finish their original task and close naturally after merge. Close a
+  worktree only when it is fully merged into `main`, has no undelivered
+  content, no active process, and no `dirty` state; never force-remove a
+  `dirty`/`unmerged`/active tree. Four locked provider worktrees are
+  `PROTECTED_HOLD` and must not be removed.
 - Production boundary: `127.0.0.1:10086` and `~/.humanagent` are read-only for
   this master. No source edit in the main tree for candidate fixes.
 
@@ -2124,3 +2129,33 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   候选 `needs_reassignment=false`）。候选与证据保持就绪；Alice 恢复后
   以 owner 执行 `collab task deliver` → Emma `task review --accept` →
   master 集成并收口。如需改派他人在用户明确授权后执行。
+
+### 2026-11-04 00:40 UTC：goal deadline 巡检 + worktree 清理政策落实
+
+- 消费 goal deadline `m1793752781933-784`（`state=read`、
+  `consumed_by_recv=true`），重新 `appsdk goal subscribe --interval 20m`；
+  新 subscription `sub-m1793752846371-789`（trigger 约 01:00 UTC）。
+- 消费用户政策 `m1793752897675-801`（“已合并 worktree 关闭，LayerFS 后不再
+  新建 worktree”）。逐项核对 8 个 worktree：
+  - main `/Volumes/extension/code/humanagent` HEAD `335141e96` = `origin/main`。
+  - `mvp-real-path-dispatch-20261102` HEAD `35b9c043e`，`merge-base
+    --is-ancestor` = NO，唯一未合并提交 `35b9c043e` 为 3 张 d20 live-card
+    PNG 证据刷新，无未提交内容，无活动进程。不关闭：未合入 main。
+  - `p1-checkpoint-formal-entry-child-lifecycle-20261103` HEAD `4af025375`，
+    未合并（候选修复提交）+ 5 个诊断日志 untracked，无活动进程。不关闭：
+    未合入且为在办任务的唯一候选与证据。
+  - `p1-runtime-checkpoint-identity-20261103` HEAD `aebfce1d7`，未合并、
+    dirty（`MM docs/evidence/c5d4671-formal-entry-wiring-handoff.md` 及 2
+    untracked），David 在办 rework。不关闭：未合入、dirty、有未交付内容。
+  - 4 个 provider worktree 均 `locked`/`PROTECTED_HOLD`，Root 拥有生命周期，
+    不清理。
+  结论：当前没有满足“已合入 main 且无未交付内容、无活动进程、非 dirty”的
+  worktree 可关闭；未强删任何树。`git worktree prune --dry-run` 无 stale
+  记录，`.git/worktrees` 7 项与 `git worktree list` 一致。
+- LayerFS：`layerfs --project humanagent project list_branches` 已返回
+  `main` 与 `git-sync` 两分支，项目已初始化；`main.head=null` 说明尚未有
+  published Layer（迁移进行中，不做 init/publish 动作）。新任务派发规则已
+  更新：AGENTS.md `## 工作边界`、`## Git 交付流程`、`## 长程任务与 peer
+  DAG`、`## 资源清理` 与本目标文档 `## Standing Patrol` 均已改为“新任务使用
+  LayerFS task branch/Workspace，不新建 worktree；存量树合并后自然关闭”。
+- 未做：生产 10086、RCC 配置、daemon/tmux 生命周期、任何 worktree 删除。

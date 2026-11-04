@@ -45,7 +45,11 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 已批准 MVP 实现代码在 `packages/`、`tests/`；当前阶段已经进入 runtime 实现。
 - 未获批准的 DSH adapter、SQLite、vector/RAG、daemon 和生产部署能力不得作为 MVP 放行结果声称。
 - DSH 源码只作为外部依赖证据读取；不得把本项目代码写入 `/Volumes/extension/code/dsh`。
-- 后续实现必须在 `/Volumes/Intel/playground/humanagent/<task>` 下的独立 clean worktree 中进行，并遵守全局 AGENTS L2 的 **Worktree SESE 先关后开生命周期与存量治理规则**（严禁在仓库内新建 `<repo>/playground/<task>`）。
+- 本项目已迁移到 LayerFS（`layerfs --project humanagent`）。新任务一律使用独占
+  LayerFS task branch/Workspace，不再新建 Git worktree；存量 worktree 由原 owner
+  完成原任务，合并后自然关闭，`dirty`、未合并、活动或有未交付内容的不强删。存量
+  worktree 生命周期仍遵守全局 AGENTS L2 的 **Worktree SESE 存量治理规则**（严禁在
+  仓库内新建 `<repo>/playground/<task>`）。
 
 ## 符号探索
 
@@ -62,8 +66,8 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 
 - 默认流程是标准交付，视为已授权，不需要逐项申请：候选提交 -> merge 到 main ->
   重建产物并重启本地运行实例 -> 验证修复 -> push `origin/main`。
-- 进入该流程的前提不变：改动在独立 clean worktree 完成，适用 focused tests 与独立
-  review 通过，merge 后 main 保持可验证状态。
+- 进入该流程的前提不变：改动在独占 LayerFS task branch/Workspace（存量任务在其原
+  worktree）完成，适用 focused tests 与独立 review 通过，merge 后 main 保持可验证状态。
 - 需要单独授权的是超出该流程的操作：删除、回滚、迁移、清权限、生产变更、force push、
   改写他人已推送历史、清理他人 worktree。
 
@@ -72,8 +76,8 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 具体 feature/debug/重构/迁移/清理任务必须拆分给 peer 执行；master 只做目标拆解、
   依赖判定、派发、证据验收、集成裁决和最终验收，不亲自实现 peer-owned concrete task。
 - 全局规则提供原则，本项目规则提供 HumanAgent 的执行细节；不得把项目细节反向当作全局规则。
-- peer 写入必须在 `/Volumes/Intel/playground/humanagent/<task>` 独立 clean worktree 完成；docs-only 快速路径除外，
-  但仍保留已有 dirty 状态。
+- peer 写入必须在独占 LayerFS task branch/Workspace 完成；存量任务仍在原 worktree
+  完成并在合并后自然关闭。docs-only 快速路径除外，但仍保留已有 dirty 状态。
 - 每个 peer 任务必须写明入口、唯一 owner、allowed/forbidden paths、交付物、测试命令、
   E2E/manual 验证、review 条件和资源清理条件。
 - peer 回传必须包含自然 Git 提交标识（若有提交）、changed files、受影响测试结果、
@@ -82,7 +86,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
   Review，仅在完整且重大的可交付 milestone 完成作者自检与适用黑盒验收后、正式集成前执行一次整体独立 Review。
 - master 合并前必须 fetch 最新 `origin/main`，确认候选已组合到最新 main 并重跑受影响验证；
   若当前 main 有大量 dirty 或未归属候选，先派 audit/classification 任务，不得直接提交。
-- 资源清理是终点生命周期：遵循全局 [`worktree-lifecycle.graph.json`](/Users/fanzhang/.agents/skills/codex-orchestrator/references/worktree-lifecycle.graph.json) 与 [交付合同：Worktree SESE 生命周期](/Users/fanzhang/.agents/skills/codex-orchestrator/references/delivery-contract.md#worktree-sese-生命周期与资源单源单汇)（先关旧树再开新树、唯一集成分支合流、存量四分类核销）；清理失败必须报告原因并标记 `INCOMPLETE`，不得静默跳过或清理他人资源。
+- 资源清理是终点生命周期：新任务不再新建 worktree；存量 worktree 按全局 [`worktree-lifecycle.graph.json`](/Users/fanzhang/.agents/skills/codex-orchestrator/references/worktree-lifecycle.graph.json) 与 [交付合同：Worktree SESE 生命周期](/Users/fanzhang/.agents/skills/codex-orchestrator/references/delivery-contract.md#worktree-sese-生命周期与资源单源单汇) 做四分类核销，已合入 main 且无未交付内容与活动进程的当轮关闭并清理临时目录。清理失败必须报告原因并标记 `INCOMPLETE`，不得静默跳过、强删 dirty/未合并/活动树或清理他人资源。
 
 ## 已批准 MVP 交付门禁
 
