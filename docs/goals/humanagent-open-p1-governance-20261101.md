@@ -2196,3 +2196,20 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   未动。
 - 阻塞与下一动作：无新增外部阻塞。Alice 修 `d9d9fb7` → David 测试 → Emma
   review → master 集成；Bob 接受并完成 P0 验收。
+
+### 2026-11-04 02:08 UTC：Alice GCM 修复进程传输失败
+
+- Alice 已按计划启动 `codex exec --profile gcm -m gpt-5.5` 修复 `d9d9fb7`
+  （PID 69742）。计划正确：从已提交 task grant 经 `projectTaskGrantAuthority`
+  派生 owner/revision，operation 派生 runtimeId/epoch，缺 grant 显式失败，
+  不新增控制真源。
+- GCM 进程运行约 37 分钟后传输失败退出：`stream disconnected before
+  completion: Transport error: network error: error decoding response body`
+  （Reconnecting 1/5..5/5，tokens used 5147），未产出
+  `permission-rework-result.md`，无代码改动。
+- 处置：保留原错，不切换模型；已发 `m1793761131952-985` 通知 Alice 用同
+  worktree 同参数重试，继续按合同执行，完成后交 David 验证。
+- Bob 的 P0 任务 `p0-45f92c8-rcc-orchestration-acceptance-20261104` 仍
+  invited 未接受（dsh wake 已入队，agent_state unknown）。
+- 阻塞：GCM 传输层间歇故障影响 Alice 修复执行；这是基础设施故障，非产品
+  代码或计划问题。
