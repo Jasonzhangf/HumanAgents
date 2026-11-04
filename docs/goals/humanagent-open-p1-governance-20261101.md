@@ -2682,3 +2682,31 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   本轮不发送 CEO 心跳。下一动作不变：等待 Alice worker 完成 focused 修复并
   交 David 同入口复验；跟踪 Bob 对两个 invitation 的 respond；David 最终
   前端任务继续等 `fde1bf0` 落地。
+
+### 2026-11-04 12:23 UTC：Alice focused 修复完成并已验收，安排提交与 David 复验
+
+- 消费 `m1793794678911-2097`（worker-idle）。Alice 的 GCM worker PID 25867
+  已退出（运行约 1h14m）。核对
+  `.worker-runs/p1-checkpoint-formal-entry-child-lifecycle-20261103/rework-66972f9/result.md`
+  与原始日志：focused red 先失败（empty prompt 仍要求 workspace 写入），
+  focused green 1 pass 0 fail；`pnpm build:app`、tests 编译、`pnpm typecheck`、
+  `git diff --check` 均通过；review prompt 不再强制 `file.write`，review body
+  经 `ImmutableAssetStore` 持久化并可读回，passed+[] 与非 passed/非法边界
+  均保留。
+- 完整套件对照仍为 `INCOMPLETE`：基线 5 pass / 1 cancelled（120s 超时，
+  未跑到候选同批失败），候选 12 pass / 7 fail；两边测试条数不一致，不能
+  归因旧 fixture，`origin/main` 相对基线源码仅有 docs 差异。未把候选视为通过。
+- Alice peer 现为 idle，`active_task=p1-checkpoint-formal-entry-child-lifecycle-20261103`
+  仍 rev20 `rework`。已发送 durable 指令 `m1793795013038-2104`：在候选
+  worktree 提交本次改动（不 push/merge/close），回复新 HEAD；随后由本 master
+  派 David 独立复验 focused 公开入口与同基线对照，David 签名后 Alice deliver
+  给 Emma。
+- 复查 Bob 身份目录：`humanagent.Bob` 有 tmux 与 dsh 两个地址；tmux 条目
+  `collab worker read` 返回 `missing`（陈旧目录项），真实可投递身份仍是
+  dsh-thread Bob（present、status unknown、无 active task）。两项 invitation
+  仍未 respond，按既有判断不重复盲唤醒。
+- 本轮未改产品代码、main（除本目标文档记录）、RCC 配置、生产 10086、daemon
+  或 tmux；未 kill 任何进程；两个旧 E2E serve 与 stale worktree 继续按
+  unknown/PROTECTED_HOLD 保留。goal deadline 仍 armed，未消费新 deadline。
+- 下一动作：等待 Alice 回复提交后 HEAD；立即派 David 独立复验；Bob 两项
+  invitation 仍是外部等待；David 最终前端任务继续等 `fde1bf0` 落地。
