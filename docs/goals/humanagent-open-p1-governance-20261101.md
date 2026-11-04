@@ -2629,3 +2629,33 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
 - 下一动作：等待 Bob 对两个 invitation 的接受/拒绝；继续跟踪 Alice 的
   66972f9 focused 修复与 David 的基线对照/真实前端验收。长程 goal 已重新
   武装 20m deadline，现有 project patrol 保持 armed。
+
+### 2026-11-04 11:50 UTC：patrol 复核与 66972f9 对照事实
+
+- 消费 `m1793792616943-2028`（master-idle:project-patrol）与
+  `m1793792960920-2037`（goal deadline）。goal 再次显式 subscribe 20m，
+  project patrol 保持 armed。当前 CEO 为 Alice；已发送巡检进展并在发现
+  120 秒完整对照结果后准备更正。
+- board 无新增交付：`fde1bf0` rev9 与 P0 `45f92c8` 仍为 Bob `invited`；
+  Alice `p1-checkpoint-formal-entry` rev20 `rework`；David
+  `p1-final-delivery` rev4 `working`；David `p1-runtime-checkpoint-identity`
+  rev19 `rework`。Bob 的 DSH thread 为 running、可接受 direct input、无
+  active task；board invitation 已 enqueue，不重复盲唤醒。
+- Alice 的 `66972f9` rework 仍在运行：GCM worker PID 25867 已运行约
+  52 分钟；rework 目录有基线/候选对照日志，工作树仅有
+  `child-producer.ts`、`native-delivery-public-consumer.test.ts` 修改及
+  未跟踪证据，尚未 deliver。
+- 准确对照：基线 `baseline-full-native-consumer-timeout60.log` 为 6 个
+  测试、5 pass、0 fail、1 cancelled/timeout；候选
+  `candidate-full-native-consumer-timeout120.log` 为 19 个测试、12 pass、
+  7 fail、0 timeout（EXIT=1）。这 7 项包含已知 full consumer 失败，但
+  基线与候选测试条数不一致，不能据此归因为旧 fixture 漂移；归属仍待
+  Alice/David 的同一基线对照结论。未把候选视为通过。
+- 资源审计：`git worktree list` 为 8 个（main + 3 个活动任务树 + 4 个
+  locked provider `PROTECTED_HOLD`）；主树 clean。另见两个自 2026-11-03
+  23:14/23:27 起持续 LISTEN 的旧 E2E serve：PID 40791/65253，控制根为
+  `/Users/fanzhang/.humanagent`，临时 workspace 仍存在。未确认 owner 或
+  活动归属，按 unknown resource 保留，不执行 kill。
+- 下一动作：等待 Alice worker 完成 66972f9 focused 修复并交 David 同入口
+  复验；Bob 对两个 invitation 的接受/拒绝仍是 P0/P1 外部等待；David
+  最终前端任务继续等 `fde1bf0` 落地。
