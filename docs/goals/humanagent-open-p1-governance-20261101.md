@@ -2414,3 +2414,38 @@ busy/idle 及原因」四项核对，并把变化写回本文件或 `master-deli
   `PROTECTED_HOLD`。生产 10086、RCC 配置、daemon/tmux 生命周期均未动。
   下一次动作：Alice 接收并返回公开入口红绿与 David 复验路径，Emma 通过后才
   进入 master review/集成。
+
+### 2026-11-04 08:50 UTC：David final-delivery 阻塞核实与 fde1bf0 派单
+
+- 消费 David board-idle `m1793782162380-1624`：A local-file-search
+  VERIFIED SUCCESS；B web-search 外部 wallet INSUFFICIENT_BALANCE；C
+  existing-task-change 被 E2E harness `readJournalStrict`
+  （`tests/app/dashboard-e2e/lib/journal.mjs:200` readFile(utf8)）读取共享
+  `/Users/fanzhang/.humanagent/main/sessions/explicit-brain.jsonl`
+  （650032250 bytes，1492 lines，max line 1.58MB）抛 `Invalid string length`
+  阻断，另有 SocketError und_err_socket retryable=false provider-adapter；
+  D multi-round 未跑。David 请求 Jenny 安排 checkpoint-identity 正式入口
+  接通/验收。
+- 独立核实证据：evidence.json 含两处 `Invalid string length` 与
+  `retryable=false`；`2c8cb44` 是生产 10086 startup 读同一 journal 的
+  `readFileSync` 问题，与 E2E harness 严格读取是不同缺陷。已走 canonical
+  intake 创建 `fde1bf0`（execution_bound=true，new_confirmed），并发布
+  board 任务 `fde1bf0-e2e-journal-read-20261104`：p1/bug，parent
+  `p1-final-delivery-real-frontend-complex-tasks-20261104`，executor Bob，
+  reviewer Emma（durable invite `board-invite-...-2`，dsh-wake-enqueued，
+  consumed=false）。等 Bob 接受后实现；交 David 用同一正式入口复跑 C/D；
+  Emma review；Jenny 验收。
+- 已回 David durable `m1793783595885-1675`：final-delivery 保持 working 不
+  deliver，B 外部阻塞记录上报，fde1bf0 归 Bob 并请 David 复跑；checkpoint
+  identity 的正式入口接通已由 formal-entry 任务（Alice/501f5be）承接，不
+  新建第二个任务。未改 main、未 merge/push 候选。
+- P0 `p0-45f92c8-rcc-orchestration-acceptance-20261104` 仍 invited rev3
+  executor Bob；Bob 的 `humanagent` 地址因两个当前 holder 折叠歧义，daemon
+  `ADDRESS_AMBIGUOUS`，不强行绕过；board invite/dsh-wake 是 canonical
+  通道，已再次确认未改派，等 Bob 接受或拒绝。
+- 本轮 `m1793782352922-1631`、`m1793783622945-1676` 两个 goal deadline 均已
+  消费并显式重新武装 20m（Active=true/subscribed）。project patrol
+  `sub-m1793413132850-18` 仍 armed 900000ms，target 1500000ms，
+  `PATROL_CADENCE_RUNTIME_GAP` 未解除。主树仍 clean；worktree 8/10（4 个
+  locked provider 为 PROTECTED_HOLD）；生产 10086、RCC 配置、daemon/tmux
+  生命周期未动。
