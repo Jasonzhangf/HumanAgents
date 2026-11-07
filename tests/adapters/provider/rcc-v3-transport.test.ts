@@ -210,6 +210,83 @@ test('RCC v3 Responses tool-arguments tail accepts one exact completed suffix wi
   });
 });
 
+test('RCC v3 Responses accepts a single redundant closing brace on final tool arguments', async () => {
+  const argumentsJson = '{"outcome": "completed", "summary": {"goal": "deliver 4", "result": {"status": "completed", "text": "4"}}, "deliveryRefs": ["answer.txt"]}}';
+  assert.equal(argumentsJson.length, 139);
+  assert.throws(() => JSON.parse(argumentsJson), /Unexpected non-whitespace character after JSON/);
+  assert.deepEqual(JSON.parse(argumentsJson.slice(0, -1)), {
+    outcome: 'completed',
+    summary: {
+      goal: 'deliver 4',
+      result: { status: 'completed', text: '4' },
+    },
+    deliveryRefs: ['answer.txt'],
+  });
+
+  const built = adapter(async () => response(chunks([
+    frame('response.created', { response: { id: 'response-extra-closing-brace' } }),
+    frame('response.output_item.added', {
+      output_index: 0,
+      item: { type: 'function_call', call_id: 'call-extra-closing-brace', name: 'humanagent_turn_end', arguments: '' },
+    }),
+    frame('response.function_call_arguments.delta', {
+      call_id: 'call-extra-closing-brace',
+      delta: argumentsJson,
+    }),
+    frame('response.function_call_arguments.done', {
+      call_id: 'call-extra-closing-brace',
+      arguments: argumentsJson,
+    }),
+    frame('response.output_item.done', {
+      output_index: 0,
+      item: { type: 'function_call', call_id: 'call-extra-closing-brace', name: 'humanagent_turn_end', arguments: argumentsJson },
+    }),
+    frame('response.completed', { response: { id: 'response-extra-closing-brace' } }),
+  ])), binding, new ResponsesProviderCodec(), 'rcc');
+  await built.adapter.start(startInput());
+  const observed = [];
+  for await (const event of built.adapter.observe(execution)) observed.push(event);
+
+  const toolCall = observed.find((event) => event.kind === 'tool')?.toolCall;
+  assert.equal(toolCall?.toolId, 'humanagent_turn_end');
+  assert.deepEqual(toolCall?.arguments, {
+    outcome: 'completed',
+    summary: {
+      goal: 'deliver 4',
+      result: { status: 'completed', text: '4' },
+    },
+    deliveryRefs: ['answer.txt'],
+  });
+  assert.equal(observed.at(-1)?.terminalState, 'waiting');
+});
+
+test('RCC v3 Responses still rejects final tool arguments with other trailing data', async () => {
+  const built = adapter(async () => response(chunks([
+    frame('response.created', { response: { id: 'response-other-trailing-data' } }),
+    frame('response.output_item.done', {
+      output_index: 0,
+      item: {
+        type: 'function_call',
+        call_id: 'call-other-trailing-data',
+        name: 'humanagent_turn_end',
+        arguments: '{"outcome":"completed"}]',
+      },
+    }),
+    frame('response.completed', { response: { id: 'response-other-trailing-data' } }),
+  ])), binding, new ResponsesProviderCodec(), 'rcc');
+  await built.adapter.start(startInput());
+  await assert.rejects(
+    async () => {
+      for await (const event of built.adapter.observe(execution)) void event;
+    },
+    (error: unknown) => {
+      assert.equal(error instanceof ProviderAdapterError, true);
+      assert.equal((error as ProviderAdapterError).providerError.code, 'tool.arguments.invalid-json');
+      return true;
+    },
+  );
+});
+
 test('RCC v3 Responses tool-arguments tail rejects unidentified deltas and preserves their raw frames', async () => {
   const cases: Array<{
     readonly name: string;
