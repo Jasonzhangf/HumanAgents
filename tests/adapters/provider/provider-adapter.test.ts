@@ -1793,6 +1793,28 @@ test('responses codec accepts the live provider function_call item shape without
   });
 });
 
+test('responses codec keeps structurally invalid tool arguments fatal', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  await codec.decodeEvent({ protocol: 'responses', type: 'response.created', response: { id: 'response-invalid-shape' } }, context);
+
+  await assert.rejects(
+    () => codec.decodeEvent({
+      protocol: 'responses',
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: {
+        type: 'function_call',
+        call_id: 'call-invalid-shape',
+        name: 'file_read',
+        arguments: '[]',
+      },
+    }, context),
+    (error: unknown) => error instanceof ProviderAdapterError
+      && error.providerError.code === 'tool.arguments.invalid-shape',
+  );
+});
+
 test('responses codec accepts the live function_call_arguments.done shape without an item_id', async () => {
   const codec = new ResponsesProviderCodec();
   const context = codecContext();

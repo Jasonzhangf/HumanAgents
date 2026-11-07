@@ -68,6 +68,7 @@ import { randomUUID } from 'node:crypto';
 import type { ProviderObserveInputWithRawFacts, ProviderRawFactReceiver } from './adapter.js';
 import type { ProviderEvidenceSink } from './evidence.js';
 import { ProviderAdapterError } from './errors.js';
+import { invalidToolArguments, type InvalidToolArguments } from './tool-arguments.js';
 
 interface ToolBarrier {
   readonly promise: Promise<void>;
@@ -390,6 +391,8 @@ export class ProviderAgentDriver<
   private productionClosed = false;
   private producerFailure?: unknown;
   private unconsumedToolFailure?: unknown;
+  /** Evidence captured by the codec for a malformed tool-call event; consumed once per failed result. */
+  private readonly malformedToolCallEvidence = new Map<string, readonly EvidenceRef[]>();
   private executionSettled = false;
   private continuationInFlight = false;
   private readonly now: () => Date;
@@ -607,7 +610,12 @@ export class ProviderAgentDriver<
           if (step.done === true) break;
           const providerEvent = step.value;
           this.assertProviderIdentity(providerEvent, 'provider event', 'observe');
-          if (providerEvent.toolCall !== undefined) toolCalls.push(providerEvent.toolCall);
+          if (providerEvent.toolCall !== undefined) {
+            toolCalls.push(providerEvent.toolCall);
+            if (invalidToolArguments(providerEvent.toolCall.arguments) !== undefined) {
+              this.malformedToolCallEvidence.set(providerEvent.toolCall.callId, providerEvent.evidenceRefs);
+            }
+          }
           if (providerEvent.terminalState !== undefined) terminal = providerEvent;
           await this.publishObservedLifecycle(providerEvent);
           if (isToolWaiting(providerEvent, toolCalls)) continue;
@@ -981,15 +989,36 @@ export class ProviderAgentDriver<
       // Track execution and durable persistence as one producer so draining
       // cannot finish in the microtask gap between those phases.
       const { outcomes, toolResults, persistenceFailure } = await this.track((async () => {
-        const outcomes = await Promise.allSettled(calls.map(async (call, index) => port.execute({
+        const invalidResults = new Map<string, ProviderToolExecutionResult>();
+        const executableCalls: Array<{ readonly call: ProviderToolCall; readonly controllerIndex: number }> = [];
+        for (const [index, call] of calls.entries()) {
+          const invalid = invalidToolArguments(call.arguments);
+          if (invalid === undefined) {
+            executableCalls.push({ call, controllerIndex: index });
+          } else {
+            invalidResults.set(call.callId, this.invalidToolArgumentsResult(call, invalid));
+          }
+        }
+        const settled = await Promise.allSettled(executableCalls.map(async ({ call, controllerIndex }) => port.execute({
           execution: this.execution,
           scope: this.options.scope,
           ...(this.activeRequest === undefined ? {} : { requestId: this.activeRequest.requestId }),
           call,
-          signal: controllers[index]!.signal,
-        }))).then((settled) => settled.map((entry, index): ProviderToolExecutionOutcome => entry.status === 'fulfilled'
-          ? { call: calls[index]!, result: entry.value }
-          : { call: calls[index]!, cause: entry.reason }));
+          signal: controllers[controllerIndex]!.signal,
+        })));
+        const settledByCallId = new Map<string, ProviderToolExecutionOutcome>();
+        executableCalls.forEach(({ call }, index) => {
+          const entry = settled[index]!;
+          settledByCallId.set(call.callId, entry.status === 'fulfilled'
+            ? { call, result: entry.value }
+            : { call, cause: entry.reason });
+        });
+        const outcomes: ProviderToolExecutionOutcome[] = calls.map((call) => {
+          const invalid = invalidResults.get(call.callId);
+          return invalid === undefined
+            ? settledByCallId.get(call.callId)!
+            : { call, result: invalid };
+        });
 
         const toolResults = new Map<string, { readonly status: ProviderToolStatus; readonly result: ProviderToolResult<TIdentity> }>();
         let persistenceFailure: unknown;
@@ -1484,6 +1513,47 @@ export class ProviderAgentDriver<
       evidenceRefs: [],
       status: 'failed',
       error: this.error('tool.not.owned', message, 'observe', 'capability').providerError,
+    };
+  }
+
+  /**
+   * A malformed final provider tool call never reaches the executor. It stays a
+   * paired failed result with the model-correctable validation shape, so the
+   * next provider round can show the model its exact attempt and accept a fix.
+   */
+  private invalidToolArgumentsResult(
+    call: ProviderToolCall,
+    invalid: InvalidToolArguments,
+  ): ProviderToolExecutionResult {
+    const evidenceRefs = this.malformedToolCallEvidence.get(call.callId) ?? [this.evidenceRef];
+    this.malformedToolCallEvidence.delete(call.callId);
+    const error: ProviderError = {
+      errorId: `provider.tool.arguments.invalid-json-${call.callId}`,
+      code: invalid.code,
+      category: 'validation',
+      phase: 'tool',
+      message: invalid.message,
+      ownerId: 'humanagent.provider-adapter',
+      retryable: 'retryable',
+      attention: 'foreground',
+      evidenceRefs,
+      nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+    };
+    return {
+      output: JSON.stringify({
+        status: 'failed',
+        code: invalid.code,
+        executed: false,
+        toolId: call.toolId,
+        callId: call.callId,
+        rawArguments: invalid.rawArguments,
+        message: invalid.message,
+        recoverable: true,
+      }),
+      outputRefs: [],
+      evidenceRefs,
+      status: 'failed',
+      error,
     };
   }
 
