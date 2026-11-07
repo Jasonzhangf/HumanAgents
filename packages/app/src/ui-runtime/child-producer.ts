@@ -185,7 +185,6 @@ export const APP_CHILD_TOOLS: readonly ProviderToolDefinition[] = [
   APP_CHILD_NOT_SELECT_TOOL,
 ];
 
-export const APP_CHILD_CALL_TOOL_ID = APP_CHILD_CALL_TOOL.toolId;
 
 export type AppChildRosterEntry = { readonly agentId: string; readonly roleId: AgentRole };
 
