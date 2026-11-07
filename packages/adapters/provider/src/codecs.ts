@@ -813,33 +813,6 @@ function parseToolArguments(json: string, execution: AnyProviderExecutionIdentit
   return parsed as BusinessPayload;
 }
 
-/**
- * RCC can append one redundant closing brace to the final Responses
- * function-call arguments object. Remove only that exact provider boundary
- * defect: the original payload must fail as invalid JSON, the suffix must be
- * one `}`, and the remaining payload must still parse as this tool's JSON
- * object. Any other malformed payload keeps the original error.
- */
-function parseResponsesToolArguments(
-  json: string,
-  execution: AnyProviderExecutionIdentityRef,
-): BusinessPayload {
-  try {
-    return parseToolArguments(json, execution);
-  } catch (cause) {
-    if (!(cause instanceof ProviderAdapterError)
-      || cause.providerError.code !== 'tool.arguments.invalid-json'
-      || !json.endsWith('}')) {
-      throw cause;
-    }
-    try {
-      return parseToolArguments(json.slice(0, -1), execution);
-    } catch {
-      throw cause;
-    }
-  }
-}
-
 /** One provider execution's request-local state key; shared by codec maps. */
 function executionKey(execution: AnyProviderExecutionIdentityRef): string {
   if ('helper' in execution && execution.helper !== undefined) {
@@ -1545,7 +1518,27 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
           const name = responsesToolId(wireName);
           const argumentsJson = requireStringValue(item, 'arguments', context.execution, raw.type);
           this.closeToolArguments(context, callId);
-          const args = parseResponsesToolArguments(argumentsJson, context.execution);
+          let args: unknown;
+          try {
+            args = JSON.parse(argumentsJson || '{}');
+          } catch (cause) {
+            throw new ProviderAdapterError({
+              code: 'tool.arguments.invalid-json',
+              category: 'protocol',
+              phase: 'tool',
+              message: cause instanceof Error ? cause.message : 'provider tool arguments are invalid JSON',
+              scope: context.execution,
+            });
+          }
+          if (!args || typeof args !== 'object' || Array.isArray(args)) {
+            throw new ProviderAdapterError({
+              code: 'tool.arguments.invalid-shape',
+              category: 'protocol',
+              phase: 'tool',
+              message: 'provider tool arguments must be a JSON object',
+              scope: context.execution,
+            });
+          }
           const continuationRef = context.responsesCurrentResponseId?.get('current');
           if (!continuationRef) {
             throw new ProviderAdapterError({
