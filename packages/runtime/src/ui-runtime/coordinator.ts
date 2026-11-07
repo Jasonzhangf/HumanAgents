@@ -6342,8 +6342,23 @@ export class RuntimeTaskCoordinator {
         } catch (cleanupError) {
           attachCleanupError(cleanupError);
         }
+        // The canonical tail commits this turn's checkpoint before align(). If
+        // that durable fact exists, the failure is post-commit: keep the exact
+        // transport cause, but mark committed-recovery instead of reporting the
+        // transport close as if the turn's committed result was lost.
+        const committedCheckpoint = record.checkpoint;
+        if (committedCheckpoint !== undefined) {
+          this.markCommittedCheckpointRecovery(record, effectiveError.nextAction);
+        }
         await this.tryPersistCurrentState(record,
           `turn-pending:${record.taskId.value}:${operation.operationId.value}:${effectiveError.code}`, scope);
+        if (committedCheckpoint !== undefined) {
+          this.pushEvent(record, operation, 'execution.terminal', 'blocked',
+            'checkpoint committed; post-commit lifecycle requires recovery',
+            [...closedProviderEvidenceRefs, ...committedCheckpoint.evidenceRefs],
+            effectiveError.ownerId, true, effectiveError.nextAction, { error: effectiveError }, 'final');
+          return;
+        }
         this.pushEvent(record, operation, 'execution.terminal', 'blocked', effectiveError.message,
           closedProviderEvidenceRefs, effectiveError.ownerId, effectiveError.retryable, effectiveError.nextAction, { error: effectiveError }, 'final');
         return;

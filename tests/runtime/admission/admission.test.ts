@@ -97,7 +97,7 @@ test('runtime classification separates new execution from correlated task input 
   assert.equal(classifyConfirmedRequirement(envelope({ intent: 'append', taskRef: task })), 'interactive');
   assert.deepEqual(defaultAdmissionQueueConfig('execution'), {
     kind: 'execution',
-    concurrencyLimit: 1,
+    concurrencyLimit: 8,
     maxBacklog: 32,
   });
 });
@@ -118,7 +118,7 @@ test('defaultAdmissionQueueConfig binds an execution budget into existing admiss
 
   assert.deepEqual(defaultAdmissionQueueConfig('execution'), {
     kind: 'execution',
-    concurrencyLimit: 1,
+    concurrencyLimit: 8,
     maxBacklog: 32,
   });
   assert.deepEqual(defaultAdmissionQueueConfig('interactive'), {
@@ -297,10 +297,20 @@ test('pure orchestration pool reuses, spawns, waits or blocks without fallback',
   assert.equal(wait.action, 'wait');
   assert.equal(wait.condition, 'orchestration.runtime.max');
 
-  const blocked = decideOrchestrationRuntimePool({
+  const recycle = decideOrchestrationRuntimePool({
     pool: {
       maxRuntimes: 1,
       runtimes: [{ runtimeId: 'idle-a', state: 'idle', capabilities: ['review'], currentBindings: 0, maxBindings: 1 }],
+    },
+    requiredCapabilities: ['plan'],
+  });
+  assert.equal(recycle.action, 'recycle');
+  assert.equal(recycle.runtimeId, 'idle-a');
+
+  const blocked = decideOrchestrationRuntimePool({
+    pool: {
+      maxRuntimes: 1,
+      runtimes: [{ runtimeId: 'running-a', state: 'running', capabilities: ['review'], currentBindings: 1, maxBindings: 1 }],
     },
     requiredCapabilities: ['plan'],
   });

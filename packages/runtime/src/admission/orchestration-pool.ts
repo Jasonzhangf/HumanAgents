@@ -85,6 +85,27 @@ export function decideOrchestrationRuntimePool(input: {
     };
   }
 
+  // An idle runtime that cannot satisfy the requested capabilities still
+  // occupies a slot. Recycling it frees that slot so the factory can start a
+  // runtime with the capabilities this lease actually needs. Busy or capable
+  // runtimes keep their existing reuse/wait/blocked outcomes.
+  const recyclable = input.pool.runtimes.find(
+    (runtime) =>
+      runtime.state === 'idle'
+      && runtime.currentBindings < runtime.maxBindings
+      && !hasCapabilities(runtime, input.requiredCapabilities),
+  );
+  if (recyclable) {
+    return {
+      action: 'recycle',
+      runtimeId: recyclable.runtimeId,
+      ownerId,
+      condition: 'orchestration.runtime.recycle',
+      nextAction: { kind: 'continue', ref: recyclable.runtimeId },
+      reason: 'idle runtime lacks the required capability and is recycled for a new runtime',
+    };
+  }
+
   const capabilityExists = input.pool.runtimes.some((runtime) => hasCapabilities(runtime, input.requiredCapabilities));
   if (!capabilityExists) {
     const missing = input.requiredCapabilities.find(
