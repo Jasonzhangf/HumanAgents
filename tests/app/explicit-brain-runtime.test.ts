@@ -9,6 +9,7 @@ import test from 'node:test';
 import {
   createExplicitBrainRuntime,
   createProviderExplicitBrainInterpreter,
+  parseInterpreterOutput,
 } from '../../packages/app/src/explicit-brain-runtime.js';
 import {
   publishInteractionProviderSettlement,
@@ -6866,6 +6867,63 @@ test('provider explicit brain reads the unique decision when the output echoes i
   // nothing was invented: the scope holds no parse failure.
   const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
   assert.deepEqual(await deps.parentJournal.readScopeParseFailures(scope), []);
+});
+
+// Failure basis: real isolated-provider run interaction-218 (input "在当前工作区
+// 创建文件 mia-complex-20261107.txt，写入内容 complex test 20261107，然后读回
+// 确认并报告文件路径与内容。"). The model answered with exactly one complete,
+// contract-valid requirement decision, but wrapped it in `{"decision": {...}}`.
+// The reader only looked for top-level `kind`, so it refused the single
+// unambiguous decision and the public interpret raised a 500 instead of reaching
+// draft/confirm. The raw evidence is
+// provider-66c0463ebaf708af-response.output_text.done-text-item_d9ad3671def281bd5d827e80
+// in ui-provider-evidence. Impact: an ordinary complex submission needs a manual
+// retry. Cost: one recorded output, no provider re-request.
+test('provider explicit brain reads the unique decision when the model wraps it in a decision envelope', async () => {
+  const request = {
+    interactionId: 'interaction-218', inputRevision: 1, sourceRef: 'ui:entry',
+    rawInput: '在当前工作区创建文件 mia-complex-20261107.txt，写入内容 complex test 20261107，然后读回确认并报告文件路径与内容。',
+    clarifications: [], taskCandidates: [],
+  };
+  // Verbatim terminal text of the failed turn (see evidence above).
+  const wrapped = JSON.stringify({
+    decision: {
+      kind: 'requirement',
+      normalizedInput: '在当前工作区创建文件 mia-complex-20261107.txt，写入内容「complex test 20261107」，然后读回确认，并报告文件路径与内容。',
+      knownFacts: [
+        '用户请求在当前工作区新建文件 mia-complex-20261107.txt',
+        '需写入的内容为「complex test 20261107」',
+        '写入后需读回确认内容正确',
+        '需报告文件路径与读回的内容',
+        '该请求涉及文件创建、写入与读取，属于需执行的新工作而非纯问答',
+        'taskCandidates 中没有与该文件名或内容匹配的现有任务',
+      ],
+      decisionRefs: ['interaction-218', 'ui:entry'],
+      proposal: {
+        revision: 1,
+        intent: 'create',
+        title: '在当前工作区创建 mia-complex-20261107.txt 并回报路径与内容',
+        objective: '在当前工作区创建文件 mia-complex-20261107.txt，写入内容「complex test 20261107」，随后读回该文件以确认内容正确，并报告最终结果。',
+        deliverable: '当前工作区下的文件 mia-complex-20261107.txt（内容为「complex test 20261107」），以及包含文件路径与读回内容的报告。',
+        deliveryConditions: [
+          '文件 mia-complex-20261107.txt 在当前工作区创建成功',
+          '文件内容为「complex test 20261107」',
+          '写入后已实际读回该文件',
+          '报告包含文件路径与读回的内容',
+        ],
+        evidenceRefs: ['interaction-218', 'ui:entry'],
+        blockingGaps: [],
+      },
+      taskFlowKind: 'one-shot',
+    },
+  });
+  const interpreted = parseInterpreterOutput(wrapped, request as Parameters<typeof parseInterpreterOutput>[1]);
+  assert.equal(interpreted.kind, 'requirement');
+  if (interpreted.kind !== 'requirement') throw new Error('expected a requirement');
+  assert.equal(interpreted.intent, 'create');
+  assert.equal(interpreted.structuredProposal.title, '在当前工作区创建 mia-complex-20261107.txt 并回报路径与内容');
+  assert.equal(interpreted.taskFlow?.kind, 'one-shot');
+  assert.deepEqual(interpreted.decisionRefs, ['interaction-218', 'ui:entry']);
 });
 
 // Failure basis: the pending-input selection compared the committed input and
