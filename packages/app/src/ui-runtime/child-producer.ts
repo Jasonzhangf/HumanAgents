@@ -104,6 +104,7 @@ export const APP_CHILD_CALL_TOOL: ProviderToolDefinition = {
     'Dispatch one genuine independent child call in this same task.',
     'Select exactly one configured roster agent by agentId.',
     'Use kind "execution" for bounded work that produces one refined result, or kind "review" to review one previously returned execution result by its invocationId and a registered reviewKind.',
+    'An execution call requires instructions, successCriteria and target; a review call requires reviewKind and subjectInvocationId and takes no target.',
     'An execution may name one committed inspection checkId; the App owner resolves its binding and the model cannot supply that binding.',
     'The parent chooses every role; no fixed order is imposed and repeated choices are allowed.',
   ].join(' '),
@@ -137,6 +138,16 @@ export const APP_CHILD_CALL_TOOL: ProviderToolDefinition = {
       subjectInvocationId: { type: 'string', minLength: 1, maxLength: MAX_INVOCATION_REF },
       checkId: { type: 'string', minLength: 1, maxLength: MAX_INVOCATION_REF },
     },
+    oneOf: [
+      {
+        properties: { kind: { enum: ['execution'] } },
+        required: ['instructions', 'successCriteria', 'target'],
+      },
+      {
+        properties: { kind: { enum: ['review'] } },
+        required: ['reviewKind', 'subjectInvocationId'],
+      },
+    ],
   },
 };
 

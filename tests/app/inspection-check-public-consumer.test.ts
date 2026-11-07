@@ -471,6 +471,33 @@ test('advertised child tools expose inspection selection and its independent out
   assert.equal(deliverProperties?.inspectionOutcome?.type, 'object');
 });
 
+test('advertised child.call requires target for execution and keeps review target-free', () => {
+  // Fifth real-frontend run: the model omitted target because the advertised
+  // schema marked it optional, then the runtime rejected it. The schema must
+  // describe the same execution contract the runtime parses.
+  const call = APP_CHILD_TOOLS.find((tool) => tool.toolId === 'child.call');
+  const schema = call?.inputSchema as {
+    readonly oneOf?: readonly {
+      readonly properties?: { readonly kind?: { readonly const?: string; readonly enum?: readonly string[] } };
+      readonly required?: readonly string[];
+    }[];
+  } | undefined;
+  const branches = schema?.oneOf ?? [];
+  const kindOf = (branch: (typeof branches)[number]) =>
+    branch.properties?.kind?.const ?? branch.properties?.kind?.enum?.[0];
+  const execution = branches.find((branch) => kindOf(branch) === 'execution');
+  assert.ok(execution, 'child.call must describe the execution branch');
+  for (const field of ['instructions', 'successCriteria', 'target']) {
+    assert.ok(execution!.required?.includes(field), `execution branch must require ${field}`);
+  }
+  const review = branches.find((branch) => kindOf(branch) === 'review');
+  assert.ok(review, 'child.call must describe the review branch');
+  assert.ok(!review!.required?.includes('target'), 'review branch must not require target');
+  for (const field of ['reviewKind', 'subjectInvocationId']) {
+    assert.ok(review!.required?.includes(field), `review branch must require ${field}`);
+  }
+});
+
 test('App child producer settles the same typed inspection delivery on new and replay without rerun', async () => {
   // Failure basis: a new inspection call can lose its typed outcome, and replay can
   // run the child again or skip required settlement. Impact: a measurement is lost
