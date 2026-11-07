@@ -104,18 +104,18 @@ export const APP_CHILD_CALL_TOOL: ProviderToolDefinition = {
     'Dispatch one genuine independent child call in this same task.',
     'Select exactly one configured roster agent by agentId.',
     'Use kind "execution" for bounded work that produces one refined result, or kind "review" to review one previously returned execution result by its invocationId and a registered reviewKind.',
-    'An execution call requires instructions, successCriteria and target; a review call requires reviewKind and subjectInvocationId and takes no target.',
+    'The default kind is execution; an execution call requires instructions, successCriteria and target, and a review call requires reviewKind and subjectInvocationId and takes no target.',
     'An execution may name one committed inspection checkId; the App owner resolves its binding and the model cannot supply that binding.',
     'The parent chooses every role; no fixed order is imposed and repeated choices are allowed.',
   ].join(' '),
   inputSchema: {
     type: 'object',
     additionalProperties: false,
-    required: ['purpose', 'agentId', 'kind'],
+    required: ['purpose', 'agentId'],
     properties: {
       purpose: { type: 'string', minLength: 1, maxLength: MAX_PURPOSE },
       agentId: { type: 'string', minLength: 1, maxLength: 128 },
-      kind: { type: 'string', enum: ['execution', 'review'] },
+      kind: { type: 'string', enum: ['execution', 'review'], default: 'execution' },
       instructions: { type: 'string', minLength: 1, maxLength: MAX_INSTRUCTIONS },
       successCriteria: {
         type: 'array',
@@ -145,7 +145,7 @@ export const APP_CHILD_CALL_TOOL: ProviderToolDefinition = {
       },
       {
         properties: { kind: { enum: ['review'] } },
-        required: ['reviewKind', 'subjectInvocationId'],
+        required: ['kind', 'reviewKind', 'subjectInvocationId'],
       },
     ],
   },
@@ -580,9 +580,10 @@ function readBoundedStringArray(
 function parseChildCallRequest(args: BusinessPayload): ChildCallRequest {
   const purpose = readBoundedString(args.purpose, 'purpose', MAX_PURPOSE, true);
   const agentId = readBoundedString(args.agentId, 'agentId', 128, true);
-  if (args.kind === 'execution') {
+  const kind = args.kind ?? 'execution';
+  if (kind === 'execution') {
     return {
-      kind: 'execution',
+      kind,
       purpose,
       agentId,
       instructions: readBoundedString(args.instructions, 'instructions', MAX_INSTRUCTIONS, true),
@@ -595,7 +596,7 @@ function parseChildCallRequest(args: BusinessPayload): ChildCallRequest {
         : { checkId: readBoundedString(args.checkId, 'checkId', MAX_INVOCATION_REF, true) }),
     };
   }
-  if (args.kind === 'review') {
+  if (kind === 'review') {
     if (args.checkId !== undefined) {
       throw new Error('a review child call cannot select an inspection check');
     }
@@ -604,7 +605,7 @@ function parseChildCallRequest(args: BusinessPayload): ChildCallRequest {
       throw new Error('child call reviewKind must be a registered review kind');
     }
     return {
-      kind: 'review',
+      kind,
       purpose,
       agentId,
       reviewKind: reviewKind as ReviewKind,
