@@ -1,0 +1,50 @@
+schemaVersion = 1
+
+[provider]
+provider = "rcc"
+binding = "rcc-entry"
+protocol = "responses"
+model = "MiniMax-M3"
+route = "default"
+baseUrl = "http://127.0.0.1:4444"
+
+[[agents]]
+agentId = "interaction-default"
+roleId = "interaction"
+templateRef = "builtin/interaction@1.0.0"
+driverRef = "fake"
+skills = ["input-normalization", "task-matching", "confirmation"]
+tools = ["input.receive", "task.query", "proposal.render"]
+permissions = ["task.read", "task.propose"]
+memoryScopes = ["task", "organ", "approved-global"]
+resourceClass = "foreground"
+
+[[agents]]
+agentId = "orchestration-default"
+roleId = "orchestration"
+templateRef = "builtin/orchestration@1.0.0"
+driverRef = "fake"
+skills = ["stage-planning", "resource-planning", "result-checking"]
+tools = ["task.query", "queue.query", "assignment.create", "result.submit"]
+permissions = ["task.read", "assignment.create", "review.schedule"]
+memoryScopes = ["task", "organ", "approved-global"]
+resourceClass = "background"
+
+[[agents]]
+agentId = "executor"
+roleId = "execution"
+templateRef = "builtin/execution@1.0.0"
+driverRef = "fake"
+skills = ["single-capability-worker"]
+tools = ["search"]
+permissions = ["task.read", "workspace.read"]
+memoryScopes = ["task"]
+resourceClass = "foreground"
+
+[project]
+defaultAgent = "interaction-default"
+reviewRequired = true
+
+[execution]
+maxConcurrentTasks = 2
+stopTimeoutMs = 30000

@@ -26,52 +26,10 @@ const TERMINAL_TIMEOUT_MS = 600_000;
 const TEMPLATE_ROOT = process.env.HUMANAGENT_TEMPLATE_ROOT
   ?? resolve('packages/agent-templates/templates');
 
-// The default serve template allows one orchestration runtime. The receipt turn
-// runs an execution child and a review child, and those bind two different
-// orchestration capabilities, so the isolated control root gets a real
-// config.toml with room for both. Everything else matches the shipped default.
-const RECEIPT_CONFIG_TOML = [
-  'schemaVersion = 1',
-  '',
-  '[provider]',
-  'provider = "rcc"',
-  'binding = "rcc-entry"',
-  'protocol = "responses"',
-  'model = "MiniMax-M3"',
-  'route = "default"',
-  'baseUrl = "http://127.0.0.1:4444"',
-  '',
-  '[[agents]]',
-  'agentId = "interaction-default"',
-  'roleId = "interaction"',
-  'templateRef = "builtin/interaction@1.0.0"',
-  'driverRef = "fake"',
-  'skills = ["input-normalization", "task-matching", "confirmation"]',
-  'tools = ["input.receive", "task.query", "proposal.render"]',
-  'permissions = ["task.read", "task.propose"]',
-  'memoryScopes = ["task", "organ", "approved-global"]',
-  'resourceClass = "foreground"',
-  '',
-  '[[agents]]',
-  'agentId = "orchestration-default"',
-  'roleId = "orchestration"',
-  'templateRef = "builtin/orchestration@1.0.0"',
-  'driverRef = "fake"',
-  'skills = ["stage-planning", "resource-planning", "result-checking"]',
-  'tools = ["task.query", "queue.query", "assignment.create", "result.submit"]',
-  'permissions = ["task.read", "assignment.create", "review.schedule"]',
-  'memoryScopes = ["task", "organ", "approved-global"]',
-  'resourceClass = "background"',
-  '',
-  '[project]',
-  'defaultAgent = "interaction-default"',
-  'reviewRequired = true',
-  '',
-  '[execution]',
-  'maxConcurrentTasks = 2',
-  'stopTimeoutMs = 30000',
-  '',
-].join('\n');
+// The isolated control root gets a real config.toml with room for both child
+// roles. The TOML fixture is the single source of truth for this receipt and is
+// validated by tests/app/c5d4671-receipt-config-public-consumer.test.ts.
+const RECEIPT_CONFIG_PATH = new URL('./c5d4671-receipt-config.toml', import.meta.url);
 
 const sleep = (ms) => new Promise((settle) => setTimeout(settle, ms));
 
@@ -241,7 +199,7 @@ async function main() {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-c5d4671-rcc-'));
   await mkdir(join(root, 'workspace'), { recursive: true });
   await mkdir(join(root, 'control'), { recursive: true });
-  await writeFile(join(root, 'control', 'config.toml'), RECEIPT_CONFIG_TOML, 'utf8');
+  await writeFile(join(root, 'control', 'config.toml'), await readFile(RECEIPT_CONFIG_PATH, 'utf8'), 'utf8');
   const serve = startServe(root);
   const receipt = {
     proof: 'c5d4671-rcc-same-entry',
