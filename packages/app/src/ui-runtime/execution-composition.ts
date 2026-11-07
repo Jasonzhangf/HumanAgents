@@ -31,7 +31,7 @@ import { createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJ
   createJsonlSemanticHistoryJournal, readCommittedNativeSegmentSource } from '../checkpoint-journal.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
 import { createNativeExecution } from './native-execution.js';
-import { APP_CHILD_CALL_TOOL, APP_CHILD_TOOLS, createAppChildProducer } from './child-producer.js';
+import { APP_CHILD_CALL_TOOL, APP_CHILD_TOOLS, appChildTools, createAppChildProducer } from './child-producer.js';
 import { createInspectionTurnResourceReader } from './inspection-resources.js';
 import { createInspectionStopResourceReader } from '../inspection-stop-resources.js';
 import {
@@ -1667,7 +1667,7 @@ export function createDefaultExecutionComposition(input: {
             inspectionSelection: inspection.helpers.selectionReader,
             admitChildOperation: createAppChildOperationAdmission({ admission: admitted, binding,
               parent: active, registration: childCallRegistration }), now: input.now });
-          providerToolExecution.tools.push(...APP_CHILD_TOOLS);
+          providerToolExecution.tools.push(...appChildTools(input.agentRoster));
         },
         kind: liveNative.driver.kind, capabilities: () => liveNative.driver.capabilities(),
         start: (value) => liveNative.driver.start(value), resume: (value) => liveNative.driver.resume(value),

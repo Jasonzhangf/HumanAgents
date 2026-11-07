@@ -565,6 +565,34 @@ test('child.call execution without kind defaults to execution through the public
   assert.deepEqual(admitted, [{ kind: 'execution', agentId: 'executor' }]);
 });
 
+test('advertised child.call enumerates the configured roster agentIds', async () => {
+  // Seventh real-frontend run: the model advertised itself the agentId
+  // "default", which is not in the configured roster. The advertised contract
+  // must derive agentId from the roster single source and name each configured
+  // id, so the unconfigured "default" is never advertised.
+  const childProducer = await import('../../packages/app/src/ui-runtime/child-producer.js') as unknown as {
+    readonly appChildCallTool?: (
+      roster: readonly { readonly agentId: string; readonly roleId: string }[],
+    ) => {
+      readonly description: string;
+      readonly inputSchema: {
+        readonly properties?: { readonly agentId?: { readonly enum?: readonly string[] } };
+      };
+    };
+  };
+  const roster = [
+    { agentId: 'orchestration-default', roleId: 'execution' },
+    { agentId: 'interaction-default', roleId: 'interaction' },
+  ];
+  const callTool = childProducer.appChildCallTool?.(roster);
+  assert.ok(callTool, 'child-producer must export appChildCallTool for the roster-derived advertisement');
+  const agentIdSchema = callTool!.inputSchema.properties?.agentId;
+  assert.deepEqual(agentIdSchema?.enum, ['orchestration-default', 'interaction-default']);
+  assert.ok(!agentIdSchema?.enum?.includes('default'), 'the unconfigured id "default" must not be advertised');
+  assert.match(callTool!.description, /orchestration-default/);
+  assert.match(callTool!.description, /interaction-default/);
+});
+
 test('App child producer settles the same typed inspection delivery on new and replay without rerun', async () => {
   // Failure basis: a new inspection call can lose its typed outcome, and replay can
   // run the child again or skip required settlement. Impact: a measurement is lost

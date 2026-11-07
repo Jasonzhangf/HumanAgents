@@ -185,6 +185,49 @@ export const APP_CHILD_TOOLS: readonly ProviderToolDefinition[] = [
   APP_CHILD_NOT_SELECT_TOOL,
 ];
 
+export const APP_CHILD_CALL_TOOL_ID = APP_CHILD_CALL_TOOL.toolId;
+
+export type AppChildRosterEntry = { readonly agentId: string; readonly roleId: AgentRole };
+
+function rosterAgentIds(roster: readonly AppChildRosterEntry[]): string[] {
+  return [...new Set(roster.map((entry) => entry.agentId))];
+}
+
+function rosterAgentSummary(roster: readonly AppChildRosterEntry[]): string {
+  return rosterAgentIds(roster).map((agentId) => {
+    const roleId = roster.find((entry) => entry.agentId === agentId)?.roleId;
+    return roleId === undefined ? agentId : `${agentId} (${roleId})`;
+  }).join(', ');
+}
+
+/**
+ * The advertised child.call contract is roster-derived: the schema enumerates
+ * the configured agentIds and the description names them, so a non-configured
+ * id such as "default" is not advertised. selectRosterEntry keeps the typed
+ * dispatch-time rejection.
+ */
+export function appChildCallTool(roster: readonly AppChildRosterEntry[]): ProviderToolDefinition {
+  const baseSchema = APP_CHILD_CALL_TOOL.inputSchema as {
+    readonly [key: string]: unknown;
+    readonly properties?: { readonly [key: string]: unknown };
+  };
+  return {
+    ...APP_CHILD_CALL_TOOL,
+    description: `${APP_CHILD_CALL_TOOL.description} Configured roster agentIds: ${rosterAgentSummary(roster)}. Use one of these configured agentIds; any other value is rejected before dispatch.`,
+    inputSchema: {
+      ...baseSchema,
+      properties: {
+        ...(baseSchema.properties ?? {}),
+        agentId: { type: 'string', enum: rosterAgentIds(roster), minLength: 1, maxLength: 128 },
+      },
+    } as BusinessPayload,
+  };
+}
+
+export function appChildTools(roster: readonly AppChildRosterEntry[]): readonly ProviderToolDefinition[] {
+  return [appChildCallTool(roster), APP_CHILD_ADOPT_TOOL, APP_CHILD_NOT_SELECT_TOOL];
+}
+
 /**
  * The real semantic delivery action of one independent child. It writes the
  * complete business body as an immutable asset and reads the exact bytes back.
