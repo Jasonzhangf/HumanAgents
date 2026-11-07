@@ -6467,6 +6467,98 @@ test('explicit brain status query never creates a task or FIFO entry', async () 
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'status-only');
 });
 
+test('explicit brain status query snapshot does not retain a requirement draft', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-status-draft-'));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret() {
+        return {
+          kind: 'status-query',
+          normalizedInput: '当前任务进度',
+          knownFacts: [],
+          answer: '当前没有待执行任务。',
+          decisionRefs: ['decision:status-draft-regression'],
+        };
+      },
+    },
+  );
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:status',
+    rawInput: '当前任务进度？',
+    channel: 'business',
+  });
+  const snapshot = await service.interpretExplicitInput({ interactionId });
+
+  assert.equal(snapshot.state, 'status-only');
+  assert.equal(snapshot.reply, '当前没有待执行任务。');
+  assert.equal(snapshot.draft, undefined, 'status-only must not project a stale requirement draft');
+  assert.equal(service.listTasks().counts.total, 0);
+});
+
+test('status-query HTTP interpretation does not project a stale requirement draft', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-status-http-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: 'project-ui-explicit-status-http',
+    workspaceRoot: root,
+    explicitBrainInterpreter: {
+      async interpret() {
+        return {
+          kind: 'status-query',
+          normalizedInput: '当前任务进度',
+          knownFacts: [],
+          answer: '当前没有待执行任务。',
+          decisionRefs: ['decision:http-status-draft'],
+        };
+      },
+    },
+    memory: testMemory('project-ui-explicit-status-http'),
+  });
+  try {
+    const inputResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:http-status',
+        rawInput: '当前任务进度？',
+        channel: 'business',
+      }),
+    });
+    assert.equal(inputResponse.status, 201);
+    const input = await inputResponse.json() as { readonly interactionId: string };
+    const interpretationResponse = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/interpret`,
+      { method: 'POST' },
+    );
+    assert.equal(interpretationResponse.status, 200);
+    const interpretation = await interpretationResponse.json() as {
+      readonly state: string;
+      readonly reply?: string;
+      readonly draft?: unknown;
+    };
+    assert.equal(interpretation.state, 'status-only');
+    assert.equal(interpretation.reply, '当前没有待执行任务。');
+    assert.equal(interpretation.draft, undefined, 'HTTP status-only must not project a stale requirement draft');
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('explicit brain confirmation retry is idempotent after a submission failure', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-retry-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));

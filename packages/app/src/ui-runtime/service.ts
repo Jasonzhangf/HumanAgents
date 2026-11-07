@@ -7160,12 +7160,11 @@ export class UiRuntimeService {
       };
       if (interpreted.kind === 'status-query') {
         // The status-only success fact, its request number and the counter
-        // advance belong to the same explicit-brain.state save. The match and
-        // status-check transitions are part of that save too, so a failed
-        // append restores the interaction to its prior durable state instead of
-        // leaking a half-applied success.
+        // advance belong to the same explicit-brain.state save. A status query
+        // has no requirement draft, so begin the status-check directly from
+        // matching. The failed-append rollback then cannot leave stale task
+        // material in the public snapshot.
         this.commitExplicitIntakeSuccess(() => {
-          this.explicitIntake.recordMatch(snapshot.interactionId, matchResult);
           this.explicitIntake.beginStatusCheck(snapshot.interactionId);
           return this.explicitIntake.completeStatusOnly(snapshot.interactionId, interpreted.answer);
         });
