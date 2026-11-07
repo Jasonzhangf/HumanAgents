@@ -1017,7 +1017,8 @@ async function textOnlyResponsesUpstream(input: {
   readonly reviewPerCycle?: boolean;
   readonly badReviewSelector?: boolean;
   readonly reviewFindingsMode?: 'empty' | 'failed-empty' | 'missing-location'
-    | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref';
+    | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref'
+    | 'subject-child-body' | 'foreign-subject-child-body';
   readonly inspection?: boolean;
   readonly turnCount?: 2 | 3;
   readonly scenario?: TextOnlyFixtureScenario;
@@ -1421,11 +1422,36 @@ async function textOnlyResponsesUpstream(input: {
           assert.equal(wire.model, review ? 'review.only.model' : 'child.only.model');
           assert.equal(body.includes('text-only delivery probe'), false, 'child context excludes parent transcript');
           if (review) assert.ok(body.includes(executionBody), 'review receives complete execution subject');
+          const subjectChildBodyRef = review
+            ? /Subject 1 \(([^)]+)\):/.exec(body)?.[1]
+            : undefined;
+          const subjectChildBodyMode = review && (input.reviewFindingsMode === 'subject-child-body'
+            || input.reviewFindingsMode === 'foreign-subject-child-body');
+          if (subjectChildBodyMode) {
+            assert.ok(subjectChildBodyRef?.startsWith('child-body:execution:invocation:child:'),
+              `review prompt exposes the executor child-body reference: ${body}`);
+          }
+          const delivered = resultFor(`cycle-${cycle}-child-delivery`);
+          if (!delivered && subjectChildBodyMode) {
+            const evidenceRef = input.reviewFindingsMode === 'subject-child-body'
+              ? subjectChildBodyRef!
+              : 'child-body:execution:invocation:child:not-in-this-attempt';
+            invoke(`cycle-${cycle}-child-delivery`, 'humanagent_child_deliver', {
+              body: `Cycle ${cycle} independent quality review`,
+              judgment: 'passed',
+              findings: [{
+                detail: `Cycle ${cycle} reviewed the executor child body`,
+                severity: 'advisory',
+                locationRef: `Cycle ${cycle} execution subject`,
+                evidenceRefs: [evidenceRef],
+              }],
+            });
+            return;
+          }
           if (review && !resultFor(`cycle-${cycle}-review-read`)) {
             invoke(`cycle-${cycle}-review-read`, 'file_read', { path: 'review-evidence.txt' });
             return;
           }
-          const delivered = resultFor(`cycle-${cycle}-child-delivery`);
           if (!delivered) {
             const ref = /evidenceId=([^\s]+)/.exec(resultFor(`cycle-${cycle}-review-read`)?.output ?? '')?.[1];
             const locationRef = `Cycle ${cycle} execution subject`;
@@ -1769,7 +1795,8 @@ async function textOnlyFixture(
   scenario?: TextOnlyFixtureScenario,
   failTurnEndDrain = false,
   reviewFindingsMode: 'empty' | 'failed-empty' | 'missing-location' | 'illegal-severity'
-    | 'empty-evidence' | 'unaccepted-ref' | undefined = undefined,
+    | 'empty-evidence' | 'unaccepted-ref' | 'subject-child-body'
+    | 'foreign-subject-child-body' | undefined = undefined,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -3188,17 +3215,20 @@ if (!coldConsumerMode) test('native review child failure preserves primary reaso
 if (!coldConsumerMode) test('native public CLI review findings contract permits passed empty findings and rejects malformed review findings', async () => {
   const cases: ReadonlyArray<{
     readonly mode: 'empty' | 'failed-empty' | 'missing-location' | 'illegal-severity' | 'empty-evidence'
-      | 'unaccepted-ref' | undefined;
+      | 'unaccepted-ref' | 'subject-child-body' | 'foreign-subject-child-body' | undefined;
     readonly expected: 'succeeded' | 'blocked';
     readonly error?: RegExp;
   }> = [
     { mode: 'empty', expected: 'succeeded' },
+    { mode: 'subject-child-body', expected: 'succeeded' },
     { mode: undefined, expected: 'succeeded' },
     { mode: 'failed-empty', expected: 'blocked', error: /non-passed review result requires findings/ },
     { mode: 'missing-location', expected: 'blocked', error: /locationRef/ },
     { mode: 'illegal-severity', expected: 'blocked', error: /severity/ },
     { mode: 'empty-evidence', expected: 'blocked', error: /evidenceRefs/ },
     { mode: 'unaccepted-ref', expected: 'blocked', error: /evidence/ },
+    { mode: 'foreign-subject-child-body', expected: 'blocked',
+      error: /does not resolve to evidence scoped to this child turn/ },
   ];
   for (const current of cases) {
     const fixture = await textOnlyFixture(false, true, false, 2, undefined, undefined, undefined,
@@ -3290,6 +3320,10 @@ if (!coldConsumerMode) test('native public CLI review findings contract permits 
             assert.equal(finding.severity, 'advisory');
             assert.ok(finding.locationRef.length > 0);
             assert.ok(finding.evidenceRefs.length > 0);
+            if (current.mode === 'subject-child-body') {
+              assert.ok(finding.evidenceRefs.some((ref) => ref.evidenceId.value.startsWith('child-body-execution-')),
+                'the review finding cites the reviewed executor child body asset');
+            }
           }
           const reviewBodyAsset = delivery.entry.result.evidenceRefs
             .find((ref) => ref.evidenceId.value.startsWith('child-body-review-'));
