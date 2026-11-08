@@ -128,6 +128,33 @@ test('typed executor returns a failed tool result when a delivery reference is u
   assert.equal(routed, 0);
 });
 
+test('typed executor refuses malformed arguments for a long child turn id', async () => {
+  const longIdentity: AdmittedTurnIdentity = {
+    ...identity,
+    turnId: `active-turn-child-${'a'.repeat(64)}`,
+  };
+  let routed = 0;
+  const executor = createStandardTurnEndExecutor({
+    owner: fakeOwner({ async resolveBoundTurn() { return longIdentity; } }),
+    route: () => { routed += 1; },
+  });
+  const result = await executor.execute({
+    execution,
+    scope,
+    call: call({ outcome: 'completed', summary: JSON.stringify(summary), deliveryRefs: [KNOWN_REF] }),
+    signal,
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.code, 'standard-turn-end.arguments');
+  const output = JSON.parse(result.output) as Record<string, unknown>;
+  assert.equal(output.accepted, false);
+  assert.equal(output.turnId, longIdentity.turnId);
+  assert.equal(result.evidenceRefs.length, 1);
+  assert.match(result.evidenceRefs[0].evidenceId.value, /^standard-turn-end-refusal-/);
+  assert.ok(result.evidenceRefs[0].evidenceId.value.length <= 128);
+  assert.equal(routed, 0);
+});
+
 test('typed executor propagates owner delivery ContractError unchanged', async () => {
   const failure = new ContractError('journal write failed');
   const executor = createStandardTurnEndExecutor({

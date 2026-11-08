@@ -1,6 +1,7 @@
 import { canonicalJsonStringify, type AcceptedRawFact, type BusinessPayload,
   id, type EvidenceRef, type ProviderExecutionIdentityRef, type ProviderToolCall,
   type ProviderToolDefinition, type RuntimeRequestRecord } from '../../../contracts/src/index.js';
+import { createHash } from 'node:crypto';
 import type { AdmittedTurnIdentity } from '../../../contracts/src/native-reasoning.js';
 import { validateNativeSegmentSaveSourceV2, type NativeSegmentSaveSourceV2 } from '../../../contracts/src/active-turn-segments.js';
 import { projectAdmittedTurnIdentityV1 } from '../../../runtime/src/context/semantic-history.js';
@@ -172,8 +173,9 @@ export function createRefusedStandardTurnEndResult(
   identity: AdmittedTurnIdentity,
   error: { readonly code: string; readonly message: string },
 ): ProviderToolExecutionResult {
+  const refusalKey = `standard-turn-end-refusal-${identity.turnId}-${error.code}`;
   const evidence: EvidenceRef = {
-    evidenceId: id('evidence', `standard-turn-end-refusal-${identity.turnId}-${error.code}`),
+    evidenceId: id('evidence', `standard-turn-end-refusal-${createHash('sha256').update(refusalKey).digest('hex')}`),
     kind: 'operation',
     source: OWNER,
     locator: `standard-turn-end://${identity.turnId}/${error.code}`,
