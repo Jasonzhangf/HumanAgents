@@ -28,7 +28,7 @@
       "ownerPath": "packages/runtime/src/explicit-brain/index.ts",
       "ownerRel": "packages/runtime/src/explicit-brain/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "接纳父原始事实并区分派发返回与显式采纳：dispatch_helper 只产生物理 dispatch-accepted 与 returned；只有 accept_helper 才产生物理 owner-accepted 并追加 latestTurn；返回结论不自动采纳。Requirement 结果把独立 title、完整 normalizedInput 与可选 taskFlow 交给既有 revision/envelope 保存；answer、clarification、status-query 不带任务分类。"
+      "designNote": "显式产品解释器不广告也不执行 dispatch_helper/accept_helper，不启动新 helper；旧 helper 的 dispatch-accepted/returned/owner-accepted 事实仍由既有 Journal 精确读取与恢复，返回结论不自动采纳。Requirement 结果把独立 title、完整 normalizedInput 与可选 taskFlow 交给既有 revision/envelope 保存；answer、clarification、status-query 不带任务分类。"
     },
     "history": {
       "ownerPath": "packages/runtime/src/context/interaction-semantic-context.ts",

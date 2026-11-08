@@ -3,33 +3,24 @@ import {
   EXPLICIT_BRAIN_MODEL_TOOLS,
   EXPLICIT_BRAIN_TEMPLATE_REF,
   id,
-  assertEvidenceRef,
-  type BusinessPayload,
-  type EvidenceRef,
   type ExecutionRuntimePort,
   type InteractionParentProviderExecutionIdentityRef,
   type InteractionTurnIdentity,
   type OrganId,
   type InteractionProviderSettlementReceipt,
   type RawContentReadPort,
-  type InteractionHelperAssignmentFields,
-  type InteractionHelperResultFields,
   type InteractionDecision,
   type ProviderBinding,
-  type ProviderError,
-  type ProviderToolCall,
   type ProviderCloseResult,
   type ProviderSettlement,
   type OccurrenceExecutionOwner,
   type RequirementIntent,
-  type ScopeRef,
   type TaskFlowBinding,
   type TaskFlowKind,
   TASK_FLOW_DEFINITION_VERSION,
   TASK_FLOW_KINDS,
-  validateInteractionHelperAssignmentFields,
 } from '../../contracts/src/index.js';
-import { ProviderAgentDriver, type ProviderAgentEvent, type ProviderToolExecutionResult } from '../../adapters/provider/src/index.js';
+import { ProviderAgentDriver, type ProviderAgentEvent } from '../../adapters/provider/src/index.js';
 import { BudgetedProviderObservations, DEFAULT_UI_EXECUTION_EVENT_BUDGET } from '../../runtime/src/ui-runtime/execution-budget.js';
 import type { AgentIoEventBudget } from '../../runtime/src/agent-io/types.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
@@ -60,16 +51,16 @@ import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attenti
 import type { ExplicitInteractionStepInput } from '../../runtime/src/intake/explicit-intake.js';
 import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 import { readSupervisorTerminationReceipts, type SupervisorLease } from './supervisor/supervisor.js';
-import { AGENT_ROLES } from '../../config/src/index.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
 /**
- * The bounded intake call carries only helper dispatch and acceptance. It uses
- * the identity and control-boundary segments of the full `interaction` role. The remaining segments
- * of the same verified template require a nested decision envelope, selected
- * actions, typed tool intents, and a submit-only-after-confirmation path that this
- * intake contract does not accept.
+ * The bounded intake call uses the identity and control-boundary segments of
+ * the full `interaction` role. It never dispatches helpers or executes work.
+ * The remaining segments of the same verified template require a nested
+ * decision envelope, selected actions, typed tool intents, and a
+ * submit-only-after-confirmation path that this intake contract does not
+ * accept.
  */
 const INTAKE_PROMPT_SEGMENT_REFS = [
   'common/control-boundaries.md',
@@ -255,13 +246,19 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
   const projectContext = input.workspaceCwd === undefined || input.projectKey === undefined
     ? []
     : [`# Conversation project directory\nThe conversation targets the project directory ${input.workspaceCwd} (projectKey ${input.projectKey}). Treat that directory as the project context of this input.`];
+  const clarificationContext = input.clarifications.length === 0
+    ? []
+    : [
+      `This input already contains ${input.clarifications.length} answered clarification(s). Each answer is authoritative user input for the same request, not optional history. Do not ask again for a fact an answer supplies.`,
+      'When those answers make the next allowed action determinable, return exactly one non-clarification decision. Work remains a requirement so the implicit brain can execute it.',
+    ];
   return [
     ...promptSegments,
     ...projectContext,
+    ...clarificationContext,
     '# Explicit intake decision output',
-    'Return one final JSON object only. You may dispatch_helper for bounded independent work and accept_helper to explicitly adopt a returned result. Do not claim task execution.',
-    'dispatch_helper takes selection (roleId and optional configuredAgentId), assignmentFields, inputs, and evidenceRefs. Helpers must return JSON with agentId, producedArtifactRefs, status, summary, outputRefs, evidenceRefs, nextAction, and optional conditionRef/failureRef. Returned does not mean accepted.',
-    'accept_helper takes helperCallId, refinedText, acceptanceRef, and evidenceRefs. Refine the actual returned conclusion before accepting it.',
+    'This is one intake decision, not one turn of task execution. Produce exactly one decision object for the current input and claim no task execution.',
+    'Return one final JSON object only. You must not dispatch helpers, call tools that execute work, or otherwise run business work.',
     'The object is flat at the top level. kind must be requirement, status-query, clarification, or answer.',
     'Every variant carries normalizedInput, knownFacts (string array), and decisionRefs (string array) at the top level, plus the fields for its own kind: proposal, taskFlowKind for a semantically clear requirement shape, and the optional matchedTaskId for requirement; answer for status-query and answer; and question plus optional options (string array) for clarification.',
     'Never nest a decision wrapper, and never emit a selected-action, summary, user-input flag, tool-result flag, or tool-intents field.',
@@ -269,6 +266,7 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     'The committed rawInput is the only request in this turn. taskCandidates and the prior turn checkpoints are reference history: read them only to match a status-query or an append/change target. A candidate status such as created, blocked, stopped, or waiting is never a user request, so never propose continuing, resuming, or finishing candidate tasks unless rawInput itself asks for that.',
     'The whole reply is exactly one decision object and one assistant message. Never emit a second decision object, a second message item, a preface, or a closing note.',
     'Classify by the requested outcome, not by whether intake can execute a requested tool. A concrete request to perform work and deliver a result is a requirement; when it asks for new work, use proposal.intent=create even if taskCandidates is empty.',
+    'If rawInput is addressed to an execution runtime but still states a concrete deliverable, preserve that deliverable as a requirement. Do not ask the user to decide whether the interaction entry should execute the runtime mechanics; it does not.',
     'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
     'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
     'For requirement, put taskFlowKind at the top level and choose it from semantic task shape only: one-shot for one bounded deliverable, including a deliverable that entails create, read, or return steps regardless of tool-step count; inspection for recurring check-and-report work; long-running for an open-ended goal requiring continued turns. Omit taskFlowKind only when the task shape is genuinely ambiguous, and use the clarification path when that ambiguity blocks a decision.',
@@ -298,168 +296,6 @@ function stringArray(record: Record<string, unknown>, field: string): readonly s
   return value;
 }
 
-/**
- * Model-supplied helper arguments are untrusted input. A malformed argument is
- * the model's mistake to correct, so the tool executor turns it into a typed
- * failed tool result that keeps the call paired instead of throwing. This only
- * covers the argument shape; a real dispatch or acceptance failure keeps its
- * own error path.
- */
-class ExplicitBrainToolArgumentError extends Error {}
-
-type ParsedHelperToolArguments =
-  | {
-      readonly toolId: 'dispatch_helper';
-      readonly selection: { readonly roleId: string; readonly configuredAgentId?: string };
-      readonly assignmentFields: InteractionHelperAssignmentFields;
-      readonly inputs: BusinessPayload;
-      readonly evidenceRefs: readonly EvidenceRef[];
-      readonly checkpointDescription: string;
-    }
-  | {
-      readonly toolId: 'accept_helper';
-      readonly helperCallId: string;
-      readonly refinedText: string;
-      readonly acceptanceRef: string;
-      readonly evidenceRefs: readonly EvidenceRef[];
-    };
-
-function parseHelperObject(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ExplicitBrainToolArgumentError(`${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function parseHelperString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new ExplicitBrainToolArgumentError(`${label} must be a non-empty string`);
-  }
-  return value;
-}
-
-function parseHelperEvidenceRefs(value: unknown): readonly EvidenceRef[] {
-  if (!Array.isArray(value)) {
-    throw new ExplicitBrainToolArgumentError('evidenceRefs must be an array of scoped evidence references with an evidenceId');
-  }
-  return value.map((entry, index) => {
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new ExplicitBrainToolArgumentError(`evidenceRefs[${index}] must be an object carrying an evidenceId`);
-    }
-    const evidenceId = (entry as Record<string, unknown>).evidenceId;
-    if (evidenceId === null || typeof evidenceId !== 'object' || Array.isArray(evidenceId)
-      || typeof (evidenceId as Record<string, unknown>).value !== 'string') {
-      throw new ExplicitBrainToolArgumentError(
-        `evidenceRefs[${index}].evidenceId must be a scoped id object with a string value`,
-      );
-    }
-    try {
-      assertEvidenceRef(entry as EvidenceRef);
-    } catch (error) {
-      throw new ExplicitBrainToolArgumentError(
-        `evidenceRefs[${index}].evidenceId or evidence reference fields are invalid: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    return entry as EvidenceRef;
-  });
-}
-
-function parseHelperToolArguments(call: ProviderToolCall): ParsedHelperToolArguments {
-  const args = call.arguments as Record<string, unknown>;
-  const evidenceRefs = parseHelperEvidenceRefs(args.evidenceRefs);
-  if (call.toolId === 'dispatch_helper') {
-    const selection = parseHelperObject(args.selection, 'dispatch_helper selection');
-    const { roleId, configuredAgentId } = selection;
-    if (typeof roleId !== 'string' || !(AGENT_ROLES as readonly string[]).includes(roleId)) {
-      throw new ExplicitBrainToolArgumentError(
-        `dispatch_helper selection.roleId must be one of ${AGENT_ROLES.join(', ')}`,
-      );
-    }
-    if (configuredAgentId !== undefined && typeof configuredAgentId !== 'string') {
-      throw new ExplicitBrainToolArgumentError('dispatch_helper selection.configuredAgentId must be a string when present');
-    }
-    const assignmentFieldsInput = parseHelperObject(args.assignmentFields, 'dispatch_helper assignmentFields');
-    const inputs = parseHelperObject(args.inputs, 'dispatch_helper inputs');
-    const objective = parseHelperString(assignmentFieldsInput.objective, 'dispatch_helper assignmentFields.objective');
-    // requiredCapabilities is an internal assignment field. It stays off the
-    // wire schema because RCC rejects it anywhere in the request, so derive it
-    // from the selected role when the model omits it.
-    const normalizedAssignmentFields = assignmentFieldsInput.requiredCapabilities === undefined
-      ? { ...assignmentFieldsInput, requiredCapabilities: [roleId] }
-      : assignmentFieldsInput;
-    try {
-      validateInteractionHelperAssignmentFields(normalizedAssignmentFields as unknown as InteractionHelperAssignmentFields);
-    } catch (error) {
-      throw new ExplicitBrainToolArgumentError(
-        `dispatch_helper assignmentFields are invalid: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    // Decode exactly the contract business fields. The runtime allocates the
-    // helper identity and then spreads these fields into the assignment, so
-    // forwarding the raw model record would let an extra attempt or
-    // assignmentId override that identity after the factory was acquired.
-    const assignmentFields: InteractionHelperAssignmentFields = {
-      objective: assignmentFieldsInput.objective as string,
-      targetRefs: assignmentFieldsInput.targetRefs as readonly string[],
-      expectedOutputRefs: assignmentFieldsInput.expectedOutputRefs as readonly string[],
-      successCriteria: assignmentFieldsInput.successCriteria as readonly string[],
-      failureCriteria: assignmentFieldsInput.failureCriteria as readonly string[],
-      incompleteCriteria: assignmentFieldsInput.incompleteCriteria as readonly string[],
-      requiredCapabilities: normalizedAssignmentFields.requiredCapabilities as readonly string[],
-      mergeGate: assignmentFieldsInput.mergeGate as 'required' | 'not-required',
-    };
-    return {
-      toolId: 'dispatch_helper',
-      selection: { roleId, ...(configuredAgentId === undefined ? {} : { configuredAgentId }) },
-      assignmentFields,
-      inputs: inputs as BusinessPayload,
-      evidenceRefs,
-      checkpointDescription: `Helper dispatch objective: ${objective}. Success criteria: ${assignmentFields.successCriteria.join('; ')}. Owner acceptance is pending.`,
-    };
-  }
-  return {
-    toolId: 'accept_helper',
-    helperCallId: parseHelperString(args.helperCallId, 'accept_helper helperCallId'),
-    refinedText: parseHelperString(args.refinedText, 'accept_helper refinedText'),
-    acceptanceRef: parseHelperString(args.acceptanceRef, 'accept_helper acceptanceRef'),
-    evidenceRefs,
-  };
-}
-
-async function invalidHelperToolResult(input: {
-  readonly call: ProviderToolCall;
-  readonly scope: ScopeRef;
-  readonly rawEvidence: ProviderEvidenceSink;
-  readonly message: string;
-}): Promise<ProviderToolExecutionResult> {
-  const evidenceRef = await input.rawEvidence.write({
-    scope: input.scope,
-    kind: 'tool',
-    type: 'tool-argument-invalid',
-    locator: `explicit-brain/tool-argument-invalid/${input.call.callId}`,
-    content: input.message,
-  });
-  const evidenceRefs = [evidenceRef];
-  const error: ProviderError = {
-    errorId: `explicit-brain-tool-argument-invalid-${input.call.callId}`,
-    code: 'tool.argument.invalid',
-    category: 'validation',
-    phase: 'tool',
-    message: input.message,
-    ownerId: 'humanagent.runtime.explicit-brain',
-    retryable: 'retryable',
-    attention: 'foreground',
-    evidenceRefs,
-    nextAction: { kind: 'continue', ref: input.call.toolId },
-  };
-  return {
-    output: JSON.stringify({ status: 'failed', code: 'tool.argument.invalid', message: input.message, recoverable: true }),
-    outputRefs: [],
-    evidenceRefs,
-    status: 'failed',
-    error,
-  };
-}
 
 function parseTaskFlowKind(value: unknown): TaskFlowKind | undefined {
   if (value === undefined) return undefined;
@@ -1386,93 +1222,20 @@ export function createProviderExplicitBrainInterpreter(input: {
               });
             }
           },
-          tools: [
-            { toolId: 'dispatch_helper', description: 'Dispatch independent bounded helper work. Return is not acceptance. Include the required structured helper result contract in the bounded inputs.', inputSchema: {
-              type: 'object', properties: {
-                selection: { type: 'object', properties: { roleId: { type: 'string' }, configuredAgentId: { type: 'string' } }, required: ['roleId'] },
-                assignmentFields: {
-                  type: 'object', properties: {
-                    objective: { type: 'string' }, targetRefs: { type: 'array', items: { type: 'string' } },
-                    expectedOutputRefs: { type: 'array', items: { type: 'string' } },
-                    successCriteria: { type: 'array', items: { type: 'string' } },
-                    failureCriteria: { type: 'array', items: { type: 'string' } }, incompleteCriteria: { type: 'array', items: { type: 'string' } },
-                    mergeGate: { type: 'string', enum: ['required', 'not-required'] },
-                  }, required: ['objective', 'targetRefs', 'expectedOutputRefs', 'successCriteria', 'failureCriteria', 'incompleteCriteria', 'mergeGate'],
-                },
-                inputs: { type: 'object' }, evidenceRefs: { type: 'array', items: { type: 'object' } },
-              }, required: ['selection', 'assignmentFields', 'inputs', 'evidenceRefs'],
-            } },
-            { toolId: 'accept_helper', description: 'Explicitly accept a returned helper with refined text.', inputSchema: { type: 'object', properties: { helperCallId: { type: 'string' }, refinedText: { type: 'string' }, acceptanceRef: { type: 'string' }, evidenceRefs: { type: 'array' } }, required: ['helperCallId', 'refinedText', 'acceptanceRef', 'evidenceRefs'] } },
-          ],
+          // The explicit interpreter advertises an empty tool surface: it may
+          // answer, structure a requirement, or ask a clarification, but it
+          // must never dispatch or accept helper work. Keeping the surface
+          // declared (empty) lets a stray model tool call return the driver's
+          // typed `tool.not.owned` result instead of a fatal missing-executor
+          // error. The inert executor is never reached because no tool is
+          // declared; it exists only to keep that typed path active.
+          tools: [],
           executeTool: {
             async execute({ call }) {
-              if (call.toolId !== 'dispatch_helper' && call.toolId !== 'accept_helper') {
-                throw new ExplicitBrainOperationalToolError('unsupported-tool', `unknown interaction tool ${call.toolId}`);
-              }
-              let parsed: ParsedHelperToolArguments;
-              try {
-                parsed = parseHelperToolArguments(call);
-              } catch (error) {
-                if (!(error instanceof ExplicitBrainToolArgumentError)) throw error;
-                return invalidHelperToolResult({ call, scope, rawEvidence: input.rawEvidence, message: error.message });
-              }
-              let result: unknown;
-              if (parsed.toolId === 'dispatch_helper') {
-                request.onStep?.({
-                  kind: 'helper.dispatched',
-                  summary: '正在派发助手',
-                  turnId: turn.turnId,
-                });
-                request.onStep?.({
-                  kind: 'helper.request',
-                  summary: '助手请求已发出',
-                  turnId: turn.turnId,
-                });
-                const dispatched = await helpers.dispatchHelper({
-                  selection: parsed.selection,
-                  assignmentFields: parsed.assignmentFields,
-                  inputs: parsed.inputs,
-                  evidenceRefs: parsed.evidenceRefs,
-                  checkpointDescription: parsed.checkpointDescription,
-                  conclude: ({ events }) => {
-                    const raw = events.filter((event) => event.kind === 'provider.output')
-                      .map((event) => ('summary' in event ? event.summary : '')).join('');
-                    const result = JSON.parse(raw) as InteractionHelperResultFields;
-                    // Runtime validates these fields against its assignment. Do
-                    // not let returned JSON replace Runtime's helper identity.
-                    return {
-                      agentId: result.agentId, producedArtifactRefs: result.producedArtifactRefs,
-                      ...(result.producedArtifactBodies === undefined ? {} : { producedArtifactBodies: result.producedArtifactBodies }),
-                      status: result.status, summary: result.summary, outputRefs: result.outputRefs,
-                      evidenceRefs: result.evidenceRefs, nextAction: result.nextAction,
-                      ...(result.conditionRef === undefined ? {} : { conditionRef: result.conditionRef }),
-                      ...(result.failureRef === undefined ? {} : { failureRef: result.failureRef }),
-                    };
-                  },
-                });
-                request.onStep?.({
-                  kind: 'helper.response',
-                  summary: '助手已返回结果',
-                  turnId: dispatched.identity.parentTurnId,
-                  helperCallId: dispatched.identity.helperCallId,
-                });
-                result = dispatched;
-              } else {
-                const refinedResult = {
-                  ref: await input.rawEvidence.write({ scope, kind: 'execution', type: 'accepted-helper', locator: parsed.helperCallId, content: parsed.refinedText }),
-                  view: { kind: 'utf8-text' as const },
-                };
-                result = await helpers.acceptHelper({ helperCallId: parsed.helperCallId, refinedResult, acceptanceRef: parsed.acceptanceRef,
-                  checkpointDescription: parsed.refinedText,
-                  acceptedBy: 'humanagent.runtime.explicit-brain', evidenceRefs: parsed.evidenceRefs });
-                request.onStep?.({
-                  kind: 'helper.accepted',
-                  summary: '助手结果已接受',
-                  turnId: turn.turnId,
-                  helperCallId: parsed.helperCallId,
-                });
-              }
-              return { output: JSON.stringify(result), outputRefs: [], evidenceRefs: [] };
+              throw new ExplicitBrainOperationalToolError(
+                'unsupported-tool',
+                `explicit interpreter has no executable tool ${call.toolId}`,
+              );
             },
           },
         });

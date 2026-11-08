@@ -316,19 +316,17 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
   }
 }
 
-test('explicit interaction wire tools omit runtime-only requiredCapabilities', async () => {
+test('explicit interaction wire exposes no helper dispatch or accept tools', async () => {
   const deps = parentDependencies();
   const binding: ProviderBinding = {
     bindingId: 'explicit-wire-capabilities', providerId: 'explicit-wire-capabilities', protocol: 'responses',
     endpointRef: 'http://recorded.test', modelRef: 'controlled',
     configDigest: 'sha256:wire-capabilities', capabilityDigest: 'sha256:wire-capabilities',
   };
-  let toolsJson = '';
   let requestBody = '';
   const port = new RecordedParentPort({
     binding, replay: [], stepDelayMs: 0,
     respond: async (wire) => {
-      toolsJson = JSON.stringify(wire.tools);
       requestBody = JSON.stringify(wire);
       return [{
         type: 'response.output_text.done',
@@ -352,22 +350,14 @@ test('explicit interaction wire tools omit runtime-only requiredCapabilities', a
     taskCandidates: [],
   });
   assert.equal(result.kind, 'answer');
-  assert.match(toolsJson, /dispatch_helper/);
+  // Failure basis: the explicit product interpreter still advertises
+  // dispatch_helper/accept_helper to the model, so the explicit brain can
+  // start bounded helper work that only the implicit brain may own. Impact:
+  // the user hard constraint "explicit brain does not execute" is violated.
+  // Cost: one real recorded-provider round trip, no new fixture.
+  assert.equal(requestBody.includes('dispatch_helper'), false);
+  assert.equal(requestBody.includes('accept_helper'), false);
   assert.equal(requestBody.includes('requiredCapabilities'), false);
-  const dispatchSchema = (JSON.parse(toolsJson) as Array<{
-    readonly name: string;
-    readonly parameters: {
-      readonly properties: {
-        readonly assignmentFields: {
-          readonly properties: Record<string, unknown>;
-          readonly required: readonly string[];
-        };
-      };
-    };
-  }>).find((tool) => tool.name === 'dispatch_helper');
-  assert.ok(dispatchSchema);
-  assert.equal('requiredCapabilities' in dispatchSchema!.parameters.properties.assignmentFields.properties, false);
-  assert.equal(dispatchSchema!.parameters.properties.assignmentFields.required.includes('requiredCapabilities'), false);
 });
 
 /**
@@ -4015,440 +4005,67 @@ test('provider explicit brain interpreter refuses to discharge a cancelled reque
   assert.deepEqual(await deps.parentJournal.readScopeAbandonedTurns(scope), []);
 });
 
-test('neutral parent loops over exact raw tool pairs, with returned helper separate from explicit acceptance', async () => {
-  // The old path could not dispatch helpers at all. One bounded local replay
-  // catches parent/child identity pollution, autoacceptance and summary parsing.
+test('explicit interpreter advertises no helper tools and a stray helper call fails without dispatching', async () => {
+  // New contract: the explicit product interpreter answers, structures a
+  // requirement, or asks a clarification, and never executes work. The wire
+  // therefore carries an empty tool surface. A model that reaches for
+  // dispatch_helper anyway receives the driver's typed unavailable result, the
+  // helper factory never runs, and the corrected turn still answers.
   const dependencies = parentDependencies();
   const binding: ProviderBinding = { bindingId: 'parent-loop', providerId: 'recorded', protocol: 'responses',
     modelRef: 'parent-model', endpointRef: 'http:recorded.test', configDigest: 'sha256:parent', capabilityDigest: 'sha256:parent' };
-  const childBinding = { ...binding, bindingId: 'child-loop', modelRef: 'independent-child-model' };
-  const refinedText = 'parent explicitly refined the partial result';
-  const dispatchObjective = 'verify exact helper checkpoint semantics';
-  const dispatchSuccessCriteria = ['report every required checkpoint field'];
-  const answer = `exact final ${'原始正文。'.repeat(120)}`;
-  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'parent-private', knownFacts: [], answer, decisionRefs: [] });
+  const finalAnswer = `explicit answer only ${'原始正文。'.repeat(120)}`;
+  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'parent-private', knownFacts: [], answer: finalAnswer, decisionRefs: [] });
   const wires: any[] = [];
-  let helperIdentity: Parameters<typeof dependencies.helperJournal.readExact>[0] | undefined;
-  let dispatchAcceptedCommitId: string | undefined;
-  let returnedCommitId: string | undefined;
-  let returnedCheckpointCommitId: string | undefined;
-  let dispatchStageSnapshot: Awaited<ReturnType<typeof dependencies.parentJournal.readTurnSnapshot>> | undefined;
-  let childClosed = 0;
-  let settlementPublished = 0;
+  let factoryCalls = 0;
   const parent = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire) => {
     wires.push(wire);
     const results = wire.input.filter((item: any) => item.type === 'function_call_output');
     if (results.length === 0) return [
-      { type: 'response.output_text.done', item_id: 'draft', text: '{"kind":"invalid-draft"}' },
-      { type: 'response.output_item.done', output_index: 1, item: { type: 'function_call', call_id: 'dispatch', name: 'dispatch_helper', arguments: JSON.stringify({
-        selection: { roleId: 'review', configuredAgentId: 'independent-child' },
-        assignmentFields: { objective: dispatchObjective, targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
-          acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: dispatchSuccessCriteria, failureCriteria: ['none'], incompleteCriteria: ['partial'], mergeGate: 'not-required' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'stray-dispatch', name: 'dispatch_helper', arguments: JSON.stringify({
+        selection: { roleId: 'review' },
+        assignmentFields: { objective: 'model-reached work', targetRefs: [], expectedOutputRefs: [], successCriteria: ['run'], failureCriteria: ['none'], incompleteCriteria: ['partial'], mergeGate: 'not-required' },
         inputs: { question: 'child-only-input' }, evidenceRefs: [],
       }) } },
     ];
-    if (results.length === 1) {
-      const dispatched = JSON.parse(results[0].output);
-      helperIdentity = dispatched.identity;
-      const handoff = await dependencies.helperJournal.readExact(dispatched.identity);
-      const returned = requirePresent(handoff.returned, 'returned helper fact');
-      assert.equal(handoff.ownerAccepted, null);
-      assert.equal(handoff.adoptedCheckpoint, null);
-      const returnedCheckpoint = requirePresent(handoff.returnedCheckpoint, 'returned helper checkpoint');
-      assert.equal(returnedCheckpoint.checkpoint.phase, 'returned');
-      assert.equal(returnedCheckpoint.checkpoint.recordedAt, returned.fact.returnedAt);
-      assert.equal(returnedCheckpoint.checkpoint.recovery.dispatchAcceptedCommitId, dispatched.dispatchAcceptedCommitId);
-      assert.equal(returnedCheckpoint.checkpoint.recovery.returnedCommitId, dispatched.returnedCommitId);
-      assert.equal(returnedCheckpoint.checkpoint.recovery.ownerAcceptedCommitId, undefined);
-      assert.equal(returnedCheckpoint.commit.commitId, dispatched.returnedCheckpointCommitId);
-      const returnedDescription = returnedCheckpoint.checkpoint.description;
-      assert.ok(returnedDescription.includes(dispatchObjective));
-      for (const criterion of dispatchSuccessCriteria) {
-        assert.ok(returnedDescription.includes(criterion));
-      }
-      assert.ok(returnedDescription.includes('owner acceptance is pending'));
-      assert.ok(returnedDescription.includes('incomplete'));
-      assert.ok(returnedDescription.includes('unrefined child summary'));
-      assert.ok(returnedDescription.includes('wait'));
-      assert.ok(returnedDescription.includes('condition:partial'));
-      dispatchAcceptedCommitId = dispatched.dispatchAcceptedCommitId;
-      returnedCommitId = dispatched.returnedCommitId;
-      returnedCheckpointCommitId = dispatched.returnedCheckpointCommitId;
-      const activeTurn = starts[0]!.interactionTurn;
-      const stageSnapshot = await dependencies.parentJournal.readTurnSnapshot(activeTurn);
-      dispatchStageSnapshot = stageSnapshot;
-      assert.ok(stageSnapshot.acceptedFacts.length > 0);
-      assert.equal(await dependencies.checkpointJournal.readSemanticCheckpointExact(activeTurn), null,
-        'returned call checkpoint must not close the active turn');
-      assert.equal(dispatched.result.status, 'incomplete');
-      return [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'accept', name: 'accept_helper',
-        arguments: JSON.stringify({ helperCallId: dispatched.identity.helperCallId, refinedText, acceptanceRef: 'acceptance:parent-loop', evidenceRefs: [] }) } }];
-    }
-    assert.deepEqual(results.map((item: any) => item.call_id), ['dispatch', 'accept']);
-    const identity = requirePresent(helperIdentity, 'helper identity');
-    const acceptedHandoff = await dependencies.helperJournal.readExact(identity);
-    const ownerAccepted = requirePresent(acceptedHandoff.ownerAccepted, 'owner-accepted helper fact');
-    assert.equal(ownerAccepted.fact.acceptanceRef, 'acceptance:parent-loop');
-    assert.equal(ownerAccepted.fact.result.status, 'incomplete');
-    const adoptedCheckpoint = requirePresent(acceptedHandoff.adoptedCheckpoint, 'adopted helper checkpoint');
-    assert.equal(adoptedCheckpoint.checkpoint.phase, 'adopted');
-    assert.equal(adoptedCheckpoint.checkpoint.description, refinedText);
-    assert.equal(adoptedCheckpoint.checkpoint.recordedAt, ownerAccepted.fact.acceptedAt);
-    assert.equal(adoptedCheckpoint.checkpoint.recovery.dispatchAcceptedCommitId, dispatchAcceptedCommitId);
-    assert.equal(adoptedCheckpoint.checkpoint.recovery.returnedCommitId, returnedCommitId);
-    assert.equal(adoptedCheckpoint.checkpoint.recovery.ownerAcceptedCommitId, ownerAccepted.commit.commitId);
-    assert.equal(acceptedHandoff.returnedCheckpoint?.commit.commitId, returnedCheckpointCommitId);
-    const activeTurn = starts[0]!.interactionTurn;
-    const acceptedStageSnapshot = await dependencies.parentJournal.readTurnSnapshot(activeTurn);
-    const stageSnapshot = requirePresent(dispatchStageSnapshot, 'dispatch stage snapshot');
-    assert.deepEqual(acceptedStageSnapshot.acceptedFacts.slice(0, stageSnapshot.acceptedFacts.length), stageSnapshot.acceptedFacts);
-    assert.ok(acceptedStageSnapshot.acceptedFacts.length > stageSnapshot.acceptedFacts.length);
-    assert.equal(await dependencies.checkpointJournal.readSemanticCheckpointExact(activeTurn), null,
-      'owner acceptance must not close the active turn');
-    const acceptance = JSON.parse(results[1].output);
-    const refined = acceptance.latestTurnEntry.refinedResult;
-    assert.equal(new TextDecoder().decode(await dependencies.rawContent.read({ scope: refined.ref.scope, content: refined })), refinedText);
-    assert.equal(acceptance.latestTurnEntry.result.status, 'incomplete');
-    return [
-      { type: 'response.output_text.delta', item_id: 'final', delta: '{"partial":"discard"}' },
-      { type: 'response.output_text.done', item_id: 'final', text: finalText },
-    ];
+    assert.equal(results.length, 1);
+    return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
   } });
   const starts: Parameters<typeof parent.start>[0][] = [];
   const start = parent.start.bind(parent);
-  parent.start = async (input) => {
-    const snapshot = await dependencies.parentJournal.readTurnSnapshot(input.interactionTurn);
-    assert.ok(snapshot.turnInput, 'input must commit before Provider start');
-    assert.equal(snapshot.requests[0].fact.phase, 'dispatching');
-    starts.push(input); return start(input);
-  };
+  parent.start = async (input) => { starts.push(input); return start(input); };
   const interpreter = createProviderExplicitBrainInterpreter({ ...dependencies, port: parent, binding,
     templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
-    helperFactory: async ({ selection, assignment, execution }) => {
-      assert.deepEqual(selection, { roleId: 'review', configuredAgentId: 'independent-child' });
-      assert.deepEqual(assignment.requiredCapabilities, ['review'],
-        'runtime must derive an omitted internal capability from the selected role');
-      const child = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], respond: async (wire) => {
-        assert.equal(wire.model, childBinding.modelRef);
-        assert.ok(JSON.stringify(wire).includes('child-only-input'));
-        assert.equal(JSON.stringify(wire).includes('parent-private'), false);
-        return [{ type: 'response.output_text.done', item_id: 'child', text: JSON.stringify({ agentId: 'independent-child', producedArtifactRefs: [], producedArtifactDigests: [],
-          status: 'incomplete', summary: 'unrefined child summary', outputRefs: [], evidenceRefs: [], nextAction: 'wait', conditionRef: 'condition:partial' }) }];
-      } });
-      const childStart = child.start.bind(child);
-      child.start = async (input) => { assert.equal('taskId' in input, false); assert.equal('interactionTurn' in input, false); assert.equal(input.helper.helperCallId, assignment.helperCallId); return childStart(input); };
-      return { binding: childBinding, driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({ port: child, binding: childBinding,
-        ...execution, organId: assignment.organId, helper: assignment, assignmentId: assignment.assignmentId,
-        scope: { organId: assignment.organId, operationId: execution.operationId }, inputRefs: [] }),
-      close: async () => { const receipt = await child.close(childBinding); assert.equal(receipt.state, 'closed'); childClosed += 1; } };
-    },
-    publishProviderSettlement: async (receipt) => {
-      const physicalRequest = Reflect.get(receipt, 'request') as
-        | { readonly turnId?: unknown; readonly requestId?: unknown }
-        | undefined;
-      assert.equal(typeof physicalRequest?.turnId, 'string');
-      assert.equal(typeof physicalRequest?.requestId, 'string');
-      assert.ok(physicalRequest?.turnId !== receipt.settlement.interactionTurn.turnId);
-      assert.equal('taskId' in receipt.settlement, false);
-      assert.equal(receipt.settlement.state, 'succeeded');
-      settlementPublished += 1;
-    },
+    helperFactory: async () => { factoryCalls += 1; throw new Error('the explicit interpreter must not dispatch helpers'); },
   });
   try {
     const result = await interpreter.interpret({ interactionId: 'loop', inputRevision: 1, sourceRef: 'test:loop', rawInput: 'parent-private', clarifications: [], taskCandidates: [] });
     assert.equal(result.kind, 'answer');
     if (result.kind !== 'answer') throw new Error('expected parent answer');
-    assert.equal(result.answer, answer);
-    assert.equal(starts.length, 1); assert.equal('taskId' in starts[0], false); assert.equal('helper' in starts[0], false);
-    assert.equal(childClosed, 1); assert.equal(settlementPublished, 1); assert.equal(wires.length, 3);
-    assert.ok(helperIdentity);
-    assert.ok((await dependencies.helperJournal.readExact(helperIdentity!)).ownerAccepted);
-    const finalCheckpoint = await dependencies.checkpointJournal.readSemanticCheckpointExact(starts[0]!.interactionTurn);
-    assert.ok(finalCheckpoint, 'the normal final close must still commit the semantic checkpoint');
-    const snapshot = await dependencies.parentJournal.readTurnSnapshot(starts[0].interactionTurn);
-    for (const { fact } of snapshot.acceptedFacts) {
-      if (fact.envelope.fact.kind !== 'tool-result') continue;
-      const tool = fact.envelope.fact;
-      const expected = wires[2].input.find((item: any) => item.type === 'function_call_output' && item.call_id === tool.callId);
-      assert.equal(new TextDecoder().decode(await dependencies.rawContent.read({ scope: fact.envelope.scope, content: tool.rawOutput })), expected.output);
-    }
-  } finally {
-    const receipt = await parent.close(binding); assert.equal(receipt.state, 'closed');
-  }
-});
-
-// Failure basis: the helper tool entry asserted EvidenceRef and roleId inside
-// tool execution, outside the model-correctable tool result shape. One invalid
-// model argument therefore threw a bare ContractError/TypeError: the interpret
-// call failed with a 500 and the turn kept a tool call without a committed
-// result. Impact: a single malformed helper argument bricks the interaction.
-// Cost: one recorded parent run with three rejected rounds and one valid retry.
-test('provider explicit brain returns invalid helper tool arguments to the model and completes after a valid retry', async () => {
-  const dependencies = parentDependencies();
-  const binding: ProviderBinding = {
-    bindingId: 'binding-helper-args', providerId: 'provider-helper-args', protocol: 'responses',
-    endpointRef: 'recorded://helper-args', modelRef: 'model-helper-args',
-    configDigest: 'sha256:helper-args-config', capabilityDigest: 'sha256:helper-args-capability',
-  };
-  const childBinding = { ...binding, bindingId: 'child-helper-args', modelRef: 'model-child-helper-args' };
-  const finalAnswer = `validated helper ${'answer body '.repeat(80)}`;
-  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'helper argument validation', knownFacts: [], answer: finalAnswer, decisionRefs: [] });
-  const assignmentFields = {
-    objective: 'verify helper argument validation', targetRefs: [], expectedOutputRefs: [],
-    successCriteria: ['return one bounded result'], failureCriteria: ['none'], incompleteCriteria: ['partial'],
-    requiredCapabilities: [], mergeGate: 'not-required',
-  };
-  const invalidCalls = ['invalid-evidence-id', 'missing-evidence-id', 'invalid-role'];
-  const dispatchCall = (callId: string, value: Readonly<Record<string, unknown>>) => ({
-    type: 'response.output_item.done', output_index: 1,
-    item: { type: 'function_call', call_id: callId, name: 'dispatch_helper', arguments: JSON.stringify(value) },
-  });
-  const wires: any[] = [];
-  const toolOutputs = new Map<string, any>();
-  const parent = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire) => {
-    wires.push(wire);
-    const results = wire.input.filter((item: any) => item.type === 'function_call_output');
-    for (const result of results) {
-      // The wire carries the accepted evidence footer after the JSON output;
-      // parse the tool result payload itself, not the footer decoration.
-      if (!toolOutputs.has(result.call_id)) toolOutputs.set(result.call_id, JSON.parse(String(result.output).split('\n[HumanAgent evidence refs]')[0]!));
-    }
-    if (results.length === 0) {
-      return [dispatchCall('invalid-evidence-id', {
-        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
-        inputs: { question: 'child-only-input' },
-        evidenceRefs: [{
-          evidenceId: { scope: 'evidence', value: '' }, kind: 'tool', source: 'parent',
-          locator: 'parent://invalid-evidence-id', scope: { organId: { scope: 'organ', value: 'explicit-test' } },
-        }],
-      })];
-    }
-    if (results.length === 1) {
-      return [dispatchCall('missing-evidence-id', {
-        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
-        inputs: { question: 'child-only-input' },
-        evidenceRefs: [{
-          kind: 'tool', source: 'parent', locator: 'parent://missing-evidence-id',
-          scope: { organId: { scope: 'organ', value: 'explicit-test' } },
-        }],
-      })];
-    }
-    if (results.length === 2) {
-      return [dispatchCall('invalid-role', {
-        selection: { roleId: 'reviewer' }, assignmentFields,
-        inputs: { question: 'child-only-input' }, evidenceRefs: [],
-      })];
-    }
-    if (results.length === 3) {
-      return [dispatchCall('valid-dispatch', {
-        selection: { roleId: 'review', configuredAgentId: 'independent-child' }, assignmentFields,
-        inputs: { question: 'child-only-input' }, evidenceRefs: [],
-      })];
-    }
-    if (results.length === 4) {
-      const dispatched = toolOutputs.get('valid-dispatch');
-      assert.ok(dispatched?.identity?.helperCallId, 'the valid dispatch must return a helper identity');
-      return [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'accept-valid', name: 'accept_helper',
-        arguments: JSON.stringify({ helperCallId: dispatched.identity.helperCallId, refinedText: 'validated helper result', acceptanceRef: 'acceptance:helper-args', evidenceRefs: [] }) } }];
-    }
-    assert.equal(results.length, 5);
-    return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
-  } });
-  const starts: Parameters<typeof parent.start>[0][] = [];
-  const start = parent.start.bind(parent);
-  parent.start = async (input) => { starts.push(input); return start(input); };
-  const interpreter = createProviderExplicitBrainInterpreter({ ...dependencies, port: parent, binding,
-    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
-    helperFactory: async ({ selection, assignment, execution }) => {
-      assert.deepEqual(selection, { roleId: 'review', configuredAgentId: 'independent-child' });
-      const child = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], respond: async () => [{
-        type: 'response.output_text.done', item_id: 'child',
-        text: JSON.stringify({ agentId: 'independent-child', producedArtifactRefs: [], producedArtifactDigests: [],
-          status: 'succeeded', summary: 'validated child summary', outputRefs: [], evidenceRefs: [], nextAction: 'wait', conditionRef: 'condition:validated' }),
-      }] });
-      return { binding: childBinding, driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({ port: child, binding: childBinding,
-        ...execution, organId: assignment.organId, helper: assignment, assignmentId: assignment.assignmentId,
-        scope: { organId: assignment.organId, operationId: execution.operationId }, inputRefs: [] }),
-      close: async () => { const receipt = await child.close(childBinding); assert.equal(receipt.state, 'closed'); } };
-    },
-  });
-  try {
-    const result = await interpreter.interpret({
-      interactionId: 'helper-args', inputRevision: 1, sourceRef: 'test:helper-args',
-      rawInput: 'helper argument validation', clarifications: [], taskCandidates: [],
-    });
-    assert.equal(result.kind, 'answer');
-    if (result.kind !== 'answer') throw new Error('expected the retried turn to answer');
     assert.equal(result.answer, finalAnswer);
-    for (const callId of invalidCalls) {
-      const output = toolOutputs.get(callId);
-      assert.equal(output.status, 'failed', `${callId} must return a failed tool result`);
-      assert.equal(output.code, 'tool.argument.invalid');
-      assert.equal(output.recoverable, true);
+    assert.equal(starts.length, 1);
+    assert.equal('helper' in starts[0], false);
+    assert.equal(factoryCalls, 0, 'a stray helper call must not acquire the helper factory');
+    // No request advertises the helper surface.
+    for (const wire of wires) {
+      const declared = (wire.tools ?? []).flatMap((tool: any) => tool?.function?.name ?? tool?.name ?? []);
+      assert.equal(declared.includes('dispatch_helper'), false);
+      assert.equal(declared.includes('accept_helper'), false);
     }
-    assert.ok(String(toolOutputs.get('invalid-evidence-id').message).includes('evidenceId'));
-    assert.ok(String(toolOutputs.get('missing-evidence-id').message).includes('evidenceId'));
-    assert.ok(String(toolOutputs.get('invalid-role').message).includes('roleId'));
+    const strayResult = wires[1]!.input.find((item: any) => item.type === 'function_call_output' && item.call_id === 'stray-dispatch');
+    assert.ok(strayResult, 'the stray call must receive a function_call_output');
+    assert.ok(String(strayResult!.output).includes('not available in this Harness'));
+    assert.ok(String(strayResult!.output).includes('only these function tools can be called'));
     const turn = starts[0]!.interactionTurn;
     const snapshot = await dependencies.parentJournal.readTurnSnapshot(turn);
     const facts = snapshot.acceptedFacts.map(({ fact }) => fact.envelope.fact);
-    const resultCallIds = facts.flatMap((fact) => fact.kind === 'tool-result' ? [fact.callId] : []);
-    for (const callId of [...invalidCalls, 'valid-dispatch', 'accept-valid']) {
-      assert.ok(resultCallIds.includes(callId), `${callId} must have a committed tool result so the turn stays paired`);
-    }
-    for (const fact of facts) {
-      if (fact.kind !== 'tool-result' || !invalidCalls.includes(fact.callId)) continue;
-      assert.equal(fact.result.status, 'failed');
-      assert.equal(fact.result.error?.category, 'validation');
-      assert.equal(fact.result.error?.retryable, 'retryable');
-      assert.equal(fact.result.error?.nextAction.kind, 'continue');
-    }
-    assert.ok(await dependencies.checkpointJournal.readSemanticCheckpointExact(turn), 'the completed turn must still commit its semantic checkpoint');
-    assert.equal(wires.length, 6);
-  } finally {
-    const receipt = await parent.close(binding); assert.equal(receipt.state, 'closed');
-  }
-});
-
-// Failure basis: the tool entry validated assignmentFields but then forwarded
-// the raw model record. The runtime allocates the helper identity and then
-// spreads those fields into the assignment, so a model-supplied attempt or
-// assignmentId overrode the runtime identity after the factory had acquired a
-// provider. The identity validator then failed with a bare ContractError and
-// the tool call stayed unpaired. Impact: one extra control key strands the
-// interaction and poisons the helper identity. Cost: one recorded parent run
-// with two rejected rounds and one extra-key dispatch that must keep the
-// runtime identity.
-test('provider explicit brain decodes only assignment business fields before dispatch', async () => {
-  const dependencies = parentDependencies();
-  const binding: ProviderBinding = {
-    bindingId: 'binding-assignment-fields', providerId: 'provider-assignment-fields', protocol: 'responses',
-    endpointRef: 'recorded://assignment-fields', modelRef: 'model-assignment-fields',
-    configDigest: 'sha256:assignment-fields-config', capabilityDigest: 'sha256:assignment-fields-capability',
-  };
-  const childBinding = { ...binding, bindingId: 'child-assignment-fields', modelRef: 'model-child-assignment-fields' };
-  const finalAnswer = `assignment fields ${'answer body '.repeat(80)}`;
-  const finalText = JSON.stringify({ kind: 'answer', normalizedInput: 'helper assignment fields', knownFacts: [], answer: finalAnswer, decisionRefs: [] });
-  const assignmentFields = {
-    objective: 'verify helper assignment fields', targetRefs: [], expectedOutputRefs: [],
-    successCriteria: ['return one bounded result'], failureCriteria: ['none'], incompleteCriteria: ['partial'],
-    requiredCapabilities: [], mergeGate: 'not-required',
-  };
-  const invalidCalls = ['empty-success-criteria', 'missing-merge-gate'];
-  const dispatchCall = (callId: string, value: Readonly<Record<string, unknown>>) => ({
-    type: 'response.output_item.done', output_index: 1,
-    item: { type: 'function_call', call_id: callId, name: 'dispatch_helper', arguments: JSON.stringify(value) },
-  });
-  const wires: any[] = [];
-  const toolOutputs = new Map<string, any>();
-  let factoryCalls = 0;
-  const parent = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire) => {
-    wires.push(wire);
-    const results = wire.input.filter((item: any) => item.type === 'function_call_output');
-    for (const result of results) {
-      if (!toolOutputs.has(result.call_id)) toolOutputs.set(result.call_id, JSON.parse(String(result.output).split('\n[HumanAgent evidence refs]')[0]!));
-    }
-    if (results.length === 0) {
-      return [dispatchCall('empty-success-criteria', {
-        selection: { roleId: 'review', configuredAgentId: 'independent-child' },
-        assignmentFields: { ...assignmentFields, successCriteria: [] },
-        inputs: { question: 'child-only-input' }, evidenceRefs: [],
-      })];
-    }
-    if (results.length === 1) {
-      assert.equal(factoryCalls, 0, 'an empty successCriteria must fail before the helper factory is acquired');
-      const withoutMergeGate: Record<string, unknown> = { ...assignmentFields };
-      delete withoutMergeGate.mergeGate;
-      return [dispatchCall('missing-merge-gate', {
-        selection: { roleId: 'review', configuredAgentId: 'independent-child' },
-        assignmentFields: withoutMergeGate,
-        inputs: { question: 'child-only-input' }, evidenceRefs: [],
-      })];
-    }
-    if (results.length === 2) {
-      assert.equal(factoryCalls, 0, 'a missing mergeGate must fail before the helper factory is acquired');
-      return [dispatchCall('extra-control-keys', {
-        selection: { roleId: 'review', configuredAgentId: 'independent-child' },
-        assignmentFields: {
-          ...assignmentFields,
-          attempt: 0,
-          assignmentId: 'model-supplied-assignment',
-          helperCallId: 'model-supplied-call',
-          parentTurnId: 'model-supplied-turn',
-        },
-        inputs: { question: 'child-only-input' }, evidenceRefs: [],
-      })];
-    }
-    if (results.length === 3) {
-      const dispatched = toolOutputs.get('extra-control-keys');
-      assert.ok(dispatched?.identity?.helperCallId, 'the valid dispatch must return a helper identity');
-      return [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'accept-valid', name: 'accept_helper',
-        arguments: JSON.stringify({ helperCallId: dispatched.identity.helperCallId, refinedText: 'validated assignment fields', acceptanceRef: 'acceptance:assignment-fields', evidenceRefs: [] }) } }];
-    }
-    assert.equal(results.length, 4);
-    return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
-  } });
-  const starts: Parameters<typeof parent.start>[0][] = [];
-  const start = parent.start.bind(parent);
-  parent.start = async (input) => { starts.push(input); return start(input); };
-  const interpreter = createProviderExplicitBrainInterpreter({ ...dependencies, port: parent, binding,
-    templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
-    helperFactory: async ({ selection, assignment, execution }) => {
-      factoryCalls += 1;
-      assert.deepEqual(selection, { roleId: 'review', configuredAgentId: 'independent-child' });
-      const child = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], respond: async () => [{
-        type: 'response.output_text.done', item_id: 'child',
-        text: JSON.stringify({ agentId: 'independent-child', producedArtifactRefs: [], producedArtifactDigests: [],
-          status: 'succeeded', summary: 'validated child summary', outputRefs: [], evidenceRefs: [], nextAction: 'wait', conditionRef: 'condition:validated' }),
-      }] });
-      return { binding: childBinding, driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({ port: child, binding: childBinding,
-        ...execution, organId: assignment.organId, helper: assignment, assignmentId: assignment.assignmentId,
-        scope: { organId: assignment.organId, operationId: execution.operationId }, inputRefs: [] }),
-      close: async () => { const receipt = await child.close(childBinding); assert.equal(receipt.state, 'closed'); } };
-    },
-  });
-  try {
-    const result = await interpreter.interpret({
-      interactionId: 'assignment-fields', inputRevision: 1, sourceRef: 'test:assignment-fields',
-      rawInput: 'helper assignment fields', clarifications: [], taskCandidates: [],
-    });
-    assert.equal(result.kind, 'answer');
-    if (result.kind !== 'answer') throw new Error('expected the retried turn to answer');
-    assert.equal(result.answer, finalAnswer);
-    assert.equal(factoryCalls, 1, 'only the valid dispatch may acquire a helper factory');
-    for (const callId of invalidCalls) {
-      const output = toolOutputs.get(callId);
-      assert.equal(output.status, 'failed', `${callId} must return a failed tool result`);
-      assert.equal(output.code, 'tool.argument.invalid');
-      assert.equal(output.recoverable, true);
-    }
-    // The runtime-allocated identity must survive the decoded business fields.
-    const extraKeys = toolOutputs.get('extra-control-keys');
-    assert.ok(extraKeys?.identity?.helperCallId, 'the decoded dispatch must still return a helper identity');
-    const turnPrefix = `${starts[0]!.interactionTurn.turnId}-helper-`;
-    assert.ok(String(extraKeys.identity.assignmentId).startsWith(turnPrefix), 'the assignment id must stay runtime-allocated');
-    assert.ok(String(extraKeys.identity.helperCallId).startsWith(turnPrefix), 'the helper call id must stay runtime-allocated');
-    assert.equal(extraKeys.identity.attempt, 1, 'the attempt must stay runtime-allocated');
-    assert.equal(extraKeys.identity.parentTurnId, starts[0]!.interactionTurn.turnId, 'the parent turn must stay runtime-allocated');
-    assert.equal(toolOutputs.get('extra-control-keys').result.status, 'succeeded', 'the decoded business fields must still dispatch a real helper');
-    assert.ok(String(toolOutputs.get('empty-success-criteria').message).includes('successCriteria'));
-    assert.ok(String(toolOutputs.get('missing-merge-gate').message).includes('mergeGate'));
-    const turn = starts[0]!.interactionTurn;
-    const snapshot = await dependencies.parentJournal.readTurnSnapshot(turn);
-    const facts = snapshot.acceptedFacts.map(({ fact }) => fact.envelope.fact);
-    const resultCallIds = facts.flatMap((fact) => fact.kind === 'tool-result' ? [fact.callId] : []);
-    for (const callId of [...invalidCalls, 'extra-control-keys', 'accept-valid']) {
-      assert.ok(resultCallIds.includes(callId), `${callId} must have a committed tool result so the turn stays paired`);
-    }
-    for (const fact of facts) {
-      if (fact.kind !== 'tool-result' || !invalidCalls.includes(fact.callId)) continue;
-      assert.equal(fact.result.status, 'failed');
-      assert.equal(fact.result.error?.category, 'validation');
-      assert.equal(fact.result.error?.retryable, 'retryable');
-      assert.equal(fact.result.error?.nextAction.kind, 'continue');
-    }
-    assert.ok(await dependencies.checkpointJournal.readSemanticCheckpointExact(turn), 'the completed turn must still commit its semantic checkpoint');
-    assert.equal(wires.length, 5);
+    const toolFact = facts.find((fact) => fact.kind === 'tool-result' && fact.callId === 'stray-dispatch');
+    assert.ok(toolFact, 'the stray call must be committed as a paired tool result');
+    if (toolFact === undefined || toolFact.kind !== 'tool-result') throw new Error('missing stray tool result');
+    assert.equal(toolFact.result.status, 'failed');
+    assert.equal(toolFact.result.error?.category, 'capability');
+    assert.ok(await dependencies.checkpointJournal.readSemanticCheckpointExact(turn), 'the answered turn still commits its semantic checkpoint');
+    assert.equal(wires.length, 2);
   } finally {
     const receipt = await parent.close(binding); assert.equal(receipt.state, 'closed');
   }
@@ -5625,86 +5242,12 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
   const finalText = JSON.stringify({
     kind: 'answer', normalizedInput: 'recover this closed turn', knownFacts: [], answer: finalAnswer, decisionRefs: [],
   });
-  const parentPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence: producerEvidence, respond: async (wire) => {
-    const results = wire.input.filter((item: any) => item.type === 'function_call_output');
-    if (results.length === 0) {
-      const dispatch = (callId: string, configuredAgentId: string) => ({
-        type: 'response.output_item.done',
-        output_index: callId === 'dispatch-accepted' ? 0 : 1,
-        item: { type: 'function_call', call_id: callId, name: 'dispatch_helper', arguments: JSON.stringify({
-          selection: { roleId: 'review', configuredAgentId },
-          assignmentFields: {
-            objective: 'bounded helper result', targetRefs: [], expectedOutputRefs: [], expectedArtifactDigests: [],
-            acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: ['complete'], failureCriteria: ['none'],
-            incompleteCriteria: ['partial'], requiredCapabilities: [], mergeGate: 'not-required',
-          },
-          inputs: { slot: configuredAgentId }, evidenceRefs: [],
-        }) },
-      });
-      return [dispatch('dispatch-accepted', acceptedChildAgentId), dispatch('dispatch-unaccepted', unacceptedChildAgentId)];
-    }
-    if (results.length === 2) {
-      const accepted = results.find((result: any) => result.call_id === 'dispatch-accepted');
-      assert.ok(accepted, 'the accepted helper dispatch must return');
-      const unaccepted = results.find((result: any) => result.call_id === 'dispatch-unaccepted');
-      assert.ok(unaccepted, 'the returned-only helper dispatch must return');
-      const dispatched = JSON.parse(accepted.output);
-      const returnedOnly = JSON.parse(unaccepted.output);
-      acceptedHelperIdentity = dispatched.identity;
-      unacceptedHelperIdentity = returnedOnly.identity;
-      const acceptedIdentity = requirePresent(acceptedHelperIdentity, 'accepted helper identity');
-      const unacceptedIdentity = requirePresent(unacceptedHelperIdentity, 'unaccepted helper identity');
-      const acceptedReadback = await producerHelper.readExact(acceptedIdentity);
-      const acceptedReturnedCheckpoint = requirePresent(acceptedReadback.returnedCheckpoint, 'accepted returned checkpoint');
-      assert.ok(acceptedReadback.returned);
-      assert.equal(acceptedReadback.adoptedCheckpoint, null);
-      assert.equal(acceptedReadback.ownerAccepted, null);
-      const acceptedReturnedDescription = acceptedReturnedCheckpoint.checkpoint.description;
-      assert.ok(acceptedReturnedDescription.includes('bounded helper result'));
-      assert.ok(acceptedReturnedDescription.includes('owner acceptance is pending'));
-      assert.ok(acceptedReturnedDescription.includes('succeeded'));
-      assert.ok(acceptedReturnedDescription.includes(`${acceptedChildAgentId} summary`));
-      assert.ok(acceptedReturnedDescription.includes('wait'));
-      assert.ok(acceptedReturnedDescription.includes(`condition:${acceptedChildAgentId}`));
-      const unacceptedReadback = await producerHelper.readExact(unacceptedIdentity);
-      assert.ok(unacceptedReadback.returned);
-      const unacceptedReturnedCheckpoint = requirePresent(
-        unacceptedReadback.returnedCheckpoint,
-        'unaccepted returned checkpoint',
-      );
-      assert.equal(unacceptedReadback.adoptedCheckpoint, null);
-      assert.equal(unacceptedReadback.ownerAccepted, null);
-      const unacceptedReturnedDescription = unacceptedReturnedCheckpoint.checkpoint.description;
-      assert.ok(unacceptedReturnedDescription.includes('bounded helper result'));
-      assert.ok(unacceptedReturnedDescription.includes('owner acceptance is pending'));
-      assert.ok(unacceptedReturnedDescription.includes('incomplete'));
-      assert.ok(unacceptedReturnedDescription.includes(`${unacceptedChildAgentId} summary`));
-      assert.ok(unacceptedReturnedDescription.includes('wait'));
-      assert.ok(unacceptedReturnedDescription.includes(`condition:${unacceptedChildAgentId}`));
-      assert.ok(unacceptedReturnedDescription !== acceptedReturnedDescription);
-      return [{
-        type: 'response.output_item.done',
-        output_index: 0,
-        item: { type: 'function_call', call_id: 'accept-accepted', name: 'accept_helper', arguments: JSON.stringify({
-          helperCallId: dispatched.identity.helperCallId,
-          refinedText,
-          acceptanceRef: 'acceptance:cold-recovery',
-          evidenceRefs: [],
-        }) },
-      }];
-    }
-    if (results.length === 3) {
-      const acceptedIdentity = requirePresent(acceptedHelperIdentity, 'accepted helper identity');
-      const acceptedReadback = await producerHelper.readExact(acceptedIdentity);
-      const ownerAccepted = requirePresent(acceptedReadback.ownerAccepted, 'owner-accepted helper fact');
-      assert.equal(ownerAccepted.fact.acceptanceRef, 'acceptance:cold-recovery');
-      assert.equal(ownerAccepted.fact.result.status, 'succeeded');
-      const adoptedCheckpoint = requirePresent(acceptedReadback.adoptedCheckpoint, 'adopted helper checkpoint');
-      assert.equal(adoptedCheckpoint.checkpoint.description, refinedText);
-      assert.equal(adoptedCheckpoint.checkpoint.recovery.ownerAcceptedCommitId, ownerAccepted.commit.commitId);
-      return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
-    }
-    throw new Error(`unexpected parent response round with ${results.length} tool results`);
+  const parentPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], evidence: producerEvidence, respond: async () => {
+    // The explicit interpreter never dispatches helpers now. The producer turn
+    // only produces the terminal answer; the durable helper collection is
+    // seeded below from records an earlier implicit-brain dispatch would have
+    // left behind.
+    return [{ type: 'response.output_text.done', item_id: 'final', text: finalText }];
   } });
   const producerInterpreter = createProviderExplicitBrainInterpreter({
     organId: scope.organId,
@@ -5714,40 +5257,7 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
     helperJournal: producerHelper,
     rawEvidence: producerEvidence,
     rawContent: providerRawContentReader(producerEvidence),
-    helperFactory: async ({ selection, assignment, execution }) => {
-      const configuredAgentId = selection.configuredAgentId;
-      assert.ok(configuredAgentId === acceptedChildAgentId || configuredAgentId === unacceptedChildAgentId);
-      const childBinding = { ...binding, bindingId: `child-${configuredAgentId}`, modelRef: `model-${configuredAgentId}` };
-      const childPort = new RecordedParentPort<TasklessProviderExecutionIdentityRef>({ binding: childBinding, stepDelayMs: 0, replay: [], evidence: producerEvidence, respond: async () => [{
-        type: 'response.output_text.done',
-        item_id: 'child',
-        text: JSON.stringify({
-          agentId: configuredAgentId,
-          producedArtifactRefs: [],
-          producedArtifactDigests: [],
-          status: configuredAgentId === acceptedChildAgentId ? 'succeeded' : 'incomplete',
-          summary: `${configuredAgentId} summary`,
-          outputRefs: [],
-          evidenceRefs: [],
-          nextAction: 'wait',
-          conditionRef: `condition:${configuredAgentId}`,
-        }),
-      }] });
-      return {
-        binding: childBinding,
-        driver: new ProviderAgentDriver<TasklessProviderExecutionIdentityRef>({
-          port: childPort,
-          binding: childBinding,
-          ...execution,
-          organId: assignment.organId,
-          helper: assignment,
-          assignmentId: assignment.assignmentId,
-          scope: { organId: assignment.organId, operationId: execution.operationId },
-          inputRefs: [],
-        }),
-        close: async () => { await childPort.close(childBinding); },
-      };
-    },
+    helperFactory: async () => { throw new Error('the explicit interpreter must not dispatch helpers'); },
     clock: { now: () => '2026-10-16T00:00:00.000Z' },
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
@@ -5778,6 +5288,56 @@ test('provider explicit brain interpreter recovers a physically closed parent tu
     assert.ok(beforeSnapshot.acceptedFacts.length > 0, 'the original raw facts must be durable');
     assert.ok(beforeSnapshot.resourceClose, 'the original physical close must be durable');
     assert.equal(await producerHelper.readSemanticCheckpointExact(turn), null, 'the fault leaves no semantic checkpoint');
+
+    // Seed the historical helper facts directly. The new explicit interpreter
+    // cannot create them, but recovery must still read durable old work.
+    const seedHistoricalHelper = async (agentId: 'helper-accepted' | 'helper-unaccepted') => {
+      const identity = {
+        organId: turn.organId, interactionScopeId: turn.interactionScopeId,
+        interactionId: turn.interactionId, inputRevision: turn.inputRevision,
+        parentTurnId: turn.turnId, assignmentId: `${turn.turnId}-${agentId}-assignment`,
+        helperCallId: `${turn.turnId}-${agentId}-call`, attempt: 1,
+      };
+      const assignment = {
+        ...identity,
+        objective: `recover durable ${agentId} helper`, targetRefs: [], expectedOutputRefs: [],
+        acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`, successCriteria: ['complete'],
+        failureCriteria: ['none'], incompleteCriteria: ['partial'], requiredCapabilities: [],
+        mergeGate: 'not-required' as const,
+      };
+      const result = {
+        ...identity, agentId, producedArtifactRefs: [], producedArtifactBodies: [],
+        status: agentId === 'helper-accepted' ? 'succeeded' as const : 'incomplete' as const,
+        summary: `${agentId} summary`, outputRefs: [], evidenceRefs: [], nextAction: 'wait' as const,
+        conditionRef: `condition:${agentId}`,
+      };
+      await producerHelper.appendDispatchAccepted({
+        kind: 'dispatch-accepted', assignment, dispatchAcceptedAt: '2026-10-16T00:00:00.000Z', evidenceRefs: [],
+      });
+      await producerHelper.appendReturned(
+        { kind: 'returned', result, returnedAt: '2026-10-16T00:00:00.000Z', evidenceRefs: [] },
+        {
+          description: `Helper ${agentId} returned ${result.status}; summary: ${result.summary}; `
+            + `next action ${result.nextAction}; condition:${agentId}`,
+        },
+      );
+      if (agentId !== 'helper-accepted') return identity;
+      const refinedResult = {
+        ref: await producerEvidence.write({
+          scope: { organId: turn.organId, operationId: id('operation', 'op-historical-helper') },
+          kind: 'execution', type: 'historical-helper-refinement', locator: agentId, content: refinedText,
+        }),
+        view: { kind: 'utf8-text' as const },
+      };
+      await producerHelper.appendOwnerAccepted({
+        kind: 'owner-accepted', result, refinedResult,
+        acceptedBy: 'humanagent.runtime.implicit-brain', acceptanceRef: 'acceptance:cold-recovery',
+        acceptedAt: '2026-10-16T00:00:00.000Z', evidenceRefs: [],
+      }, { description: refinedText });
+      return identity;
+    };
+    acceptedHelperIdentity = await seedHistoricalHelper(acceptedChildAgentId);
+    unacceptedHelperIdentity = await seedHistoricalHelper(unacceptedChildAgentId);
     const beforeReplay = await new JsonlOrganJournal(journalFile).replay();
 
     // Drop every producer interpreter/session reference above. The consumer
@@ -6771,10 +6331,10 @@ test('provider explicit brain asks for one intake decision, not one turn of task
     'one intake decision is not one turn of task execution');
   assert.equal(sentPrompt.includes('reply with your final answer as plain text'), false,
     'a decision turn never ends with a plain-text final answer');
-  // GREEN: the request still owns its tool surface, stated as what it really is.
+  // GREEN: the request is one intake decision with no executable helper surface.
   assert.ok(sentPrompt.includes('one intake decision, not one turn of task execution'));
-  assert.ok(sentPrompt.includes('Only these function tools can be called: dispatch_helper, accept_helper'));
-  assert.ok(sentPrompt.includes('never restate the request instructions as a requirement'));
+  assert.ok(sentPrompt.includes('You must not dispatch helpers, call tools that execute work, or otherwise run business work'));
+  assert.ok(sentPrompt.includes('The committed rawInput is the only request in this turn'));
   assert.ok(sentPrompt.includes('# Explicit intake decision output'));
 });
 
