@@ -240,6 +240,7 @@ type InteractionSnapshotPage = {
       readonly turns: readonly { readonly markdown?: string }[];
     };
     readonly cardMetadata: {
+      readonly requestNumber?: number;
       readonly source: {
         readonly interactionId?: string;
         readonly taskId?: { readonly scope: string; readonly value: string };
@@ -275,12 +276,11 @@ test('answered explicit snapshot projects as a succeeded interaction without inv
   assert.deepEqual(projection.cardMetadata.source, { interactionId: 'interaction-2' });
 });
 
-// Failure mode (basis: the new request-number rule): the card must show only
-// the authoritative number the runtime committed. Rendering a number while the
-// interaction is still processing, or counting messages in the UI, would show
-// the user a number that no success fact owns. Cost is one small projection
-// case in the existing public consumer.
-test('explicit snapshot projects the committed request number and invents none while processing', () => {
+// Failure mode (basis: the user ruling on the request-number rule): the main
+// answer card must not expose an internal ordinal. The committed request number
+// stays available on cardMetadata; an uncommitted number must not be invented.
+// Cost is one small projection case in the existing public consumer.
+test('explicit snapshot keeps the committed request number in metadata and out of the visible card', () => {
   const answered = interactionCardPage.projectInteractionCardFromSnapshot({
     interactionId: 'interaction-8',
     state: 'answered',
@@ -288,7 +288,9 @@ test('explicit snapshot projects the committed request number and invents none w
     reply: '已整理',
     requestNumber: 8,
   });
-  assert.equal(answered.conversation.turns[0]?.markdown, '第 8 次请求 · 整理周报证据');
+  assert.equal(answered.conversation.turns[0]?.markdown, '整理周报证据');
+  assert.equal(JSON.stringify(answered.conversation).includes('次请求'), false);
+  assert.equal(answered.cardMetadata.requestNumber, 8);
 
   const processing = interactionCardPage.projectInteractionCardFromSnapshot({
     interactionId: 'interaction-9',
@@ -297,4 +299,5 @@ test('explicit snapshot projects the committed request number and invents none w
   });
   assert.equal(processing.conversation.turns[0]?.markdown, '整理周报证据');
   assert.equal(JSON.stringify(processing.conversation).includes('次请求'), false);
+  assert.equal(processing.cardMetadata.requestNumber, undefined);
 });
