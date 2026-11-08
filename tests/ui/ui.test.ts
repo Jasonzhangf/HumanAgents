@@ -2206,6 +2206,26 @@ test('interaction card DOM shows a declared lifecycle label after the requiremen
   }
 });
 
+/*
+ * 执行轨迹是隐式执行流的技术明细层。失败模式：task-dashboard.js 直接
+ * 渲染 provider.model 事件的原始英文 summary（bug 486ddd4）。该层必须复用
+ * 与入口进度卡同一份本地化映射；provider.output 是模型输出内容，不属于
+ * 内部事件名，保持原文。
+ */
+test('task dashboard execution trace localizes provider model step copy', async () => {
+  const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
+  const stripped = stripJsComments(source);
+  assert.ok(
+    stripped.includes("event.kind === 'provider.model'") && stripped.includes('localizedStepSummary(event.summary)'),
+    '执行轨迹必须对 provider.model 事件使用共享本地化映射',
+  );
+  assert.equal(
+    stripped.includes("element('span', event.summary)"),
+    false,
+    '执行轨迹不得直接渲染原始 provider summary',
+  );
+});
+
 type EntrySubmissionHarness = {
   readonly run: (submission: unknown, api: unknown, receipt?: unknown) => Promise<unknown>;
   readonly cardStates: readonly {
@@ -2575,6 +2595,7 @@ test('localizedStepSummary maps real RCC execution stage summaries to concrete C
     ['provider request dispatched', '模型请求已派发'],
     ['provider request waiting', '等待模型请求返回'],
     ['provider prepared model output', '模型正在准备输出'],
+    ['Model is streaming output', '模型正在输出'],
     ['provider provided model reasoning', '模型正在推理'],
     ['provider completed tool request details', '模型已生成工具调用'],
     ['file.read succeeded', '工具 file.read 已完成'],
@@ -2586,4 +2607,59 @@ test('localizedStepSummary maps real RCC execution stage summaries to concrete C
     assert.equal(localizedStepSummary(summary), expected, `真实执行阶段摘要 ${summary} 必须显示具体中文步骤`);
   }
   assert.equal(localizedStepSummary('Volatile internal detail'), '执行进度', '未识别英文仍必须回退固定中文占位');
+});
+
+/*
+ * 隐式执行流会持续推送 provider.output token 增量和高频 provider.model 相位。
+ * 失败模式：入口进度条把每个 SSE 事件都当成一个新步骤，单轮从 2 步膨胀到
+ * 515 步（bug 486ddd4）。步骤列表必须只保留有语义的执行步骤，并保持有界；
+ * token 增量不得推进步骤号，也不得把原始英文 summary 带入用户可见历史。
+ */
+test('entry submit progress keeps a bounded readable step list under provider event flood', async () => {
+  const { createSubmitStatusBanner } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/entry.js')}`,
+  ).href) as { createSubmitStatusBanner: (status: unknown) => {
+    mount: () => void;
+    step: (event: { seq?: number; summary?: string; kind?: string; occurredAt?: string }) => void;
+    clear: () => void;
+    history: () => Array<{ ordinal: number; seq: number | null; summary: string; kind?: string }>;
+  } };
+
+  const scope = globalThis as unknown as { document?: unknown };
+  const previousDocument = scope.document;
+  scope.document = {
+    createElement: (tag: string) => new FakeNode(tag),
+    createTextNode: (text: string) => { const node = new FakeNode('#text'); node.textContent = text; return node; },
+  };
+  try {
+    const status = new FakeNode('div');
+    const banner = createSubmitStatusBanner(status);
+    banner.mount();
+    banner.step({ seq: 1, summary: 'execution started', kind: 'execution.started' });
+    for (let index = 0; index < 500; index += 1) {
+      banner.step({
+        seq: index + 2,
+        summary: index % 2 === 0 ? 'I' : '未投影',
+        kind: 'provider.output',
+      });
+    }
+    banner.step({ seq: 501, summary: 'provider request waiting', kind: 'provider.model' });
+    banner.step({ seq: 502, summary: 'Model is streaming output', kind: 'provider.model' });
+    banner.step({ seq: 503, summary: 'provider request settled', kind: 'provider.model' });
+    banner.step({ seq: 504, summary: 'execution succeeded', kind: 'execution.terminal' });
+
+    const history = banner.history();
+    banner.clear();
+    assert.ok(history.length <= 10, `token 增量不得推进步骤号；当前历史长度 ${history.length}`);
+    assert.equal(
+      history.some((entry) => /provider|Model is streaming/.test(entry.summary)),
+      false,
+      '用户可见步骤历史不得包含原始英文 provider 文案',
+    );
+    for (let index = 0; index < history.length; index += 1) {
+      assert.equal(history[index]!.ordinal, index + 1, '步骤号必须连续且有界');
+    }
+  } finally {
+    scope.document = previousDocument;
+  }
 });
