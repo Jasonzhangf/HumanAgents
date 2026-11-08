@@ -3200,6 +3200,161 @@ test('native child orphan tool call surfaces typed recover and retries delivery'
   }
 });
 
+// The shared recordReturn guard must not swallow a legitimate per-criterion
+// failure: a child that honestly fails a declared failure criterion still needs
+// a durable delivery so the parent can adopt the failure outcome. Impact: a
+// real criterion failure becomes an unselectable dead end. Probability:
+// unknown. Cost: one focused in-process producer with a real Journal and asset
+// store; no Provider or external model.
+test('app child producer keeps a legitimate per-criterion failure adoptable as a durable delivery', async () => {
+  await mkdir(PERSISTENCE_ROOT, { recursive: true });
+  const root = await mkdtemp(join(PERSISTENCE_ROOT, 'per-criterion-failure-'));
+  try {
+    const filePath = join(root, 'organ.jsonl');
+    const journal = new JsonlOrganJournal(filePath);
+    const taskScope = { organId: id('organ', 'per-criterion-organ'), taskId: id('task', 'per-criterion-task') };
+    const scope: ScopeRef = { ...taskScope, cycleId: id('cycle', 'per-criterion-cycle'),
+      operationId: id('operation', 'per-criterion-operation') };
+    const admission = await journal.append({ commitId: 'per-criterion-admission', kind: 'event', scope,
+      payload: { kind: 'per-criterion-admission' } });
+    const admissionCommitRef: JournalCommitRef = { commitId: admission.commitId!, journalSeq: admission.seq,
+      recordDigest: admission.recordDigest };
+    const recovery: EvidenceRef = { evidenceId: id('evidence', 'per-criterion-recovery'), kind: 'execution',
+      source: 'per-criterion-consumer', locator: 'observation://per-criterion/recovery', scope: taskScope };
+    const parentAssignment: WorkAssignment = { assignmentId: 'per-criterion-parent', taskId: taskScope.taskId,
+      pipelineNodeId: 'per-criterion-node', attempt: 1, executionEpoch: 1, inputRevision: 1,
+      objective: 'return the bounded result or fail the declared criterion', targetRefs: ['per-criterion-target'],
+      expectedOutputRefs: ['per-criterion-output'], successCriteria: ['return the bounded result'],
+      failureCriteria: ['the upstream source is unavailable'], incompleteCriteria: [],
+      requiredCapabilities: ['execute'], mergeGate: 'required' };
+    const admittedTurn: AdmittedTurn = { turnId: 'per-criterion-turn',
+      workAssignmentRef: parentAssignment.assignmentId, taskRef: taskScope.taskId, scopeRef: scope,
+      cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 1,
+      runtimeBindingRef: 'per-criterion-runtime', permissionRevision: 'per-criterion-permission',
+      admissionEvidenceRefs: [admission.commitId!], currentTurnRef: 'per-criterion-current',
+      recoveryStateRef: admission.commitId! };
+    const parent = await ActiveTurnContext.open({
+      journal: createJsonlActiveTurnJournal({ filePath, journal, turnId: admittedTurn.turnId }),
+      binding: { admittedTurn, assignment: parentAssignment, scope,
+        execution: { runtimeId: 'per-criterion-runtime', executionEpoch: 1 } },
+      currentTurnRef: admittedTurn.currentTurnRef,
+    });
+    const bodyAssets = createChildBodyAssetPort({ store: new ImmutableAssetStore(join(root, 'assets')) });
+    const failureRef = 'the upstream source is unavailable';
+    const failedResult: WorkResult = {
+      taskId: parentAssignment.taskId, pipelineNodeId: parentAssignment.pipelineNodeId,
+      agentId: 'configured-worker', assignmentId: parentAssignment.assignmentId,
+      attempt: parentAssignment.attempt, executionEpoch: parentAssignment.executionEpoch,
+      inputRevision: parentAssignment.inputRevision,
+      producedArtifactRefs: [], status: 'failed', summary: failureRef,
+      outputRefs: [], evidenceRefs: [], nextAction: 'attention', failureRef,
+    };
+    let refinedStores = 0;
+    let recordedInvocationId: string | undefined;
+    const producer = createAppChildProducer({
+      manager: {
+        async callChild(input) {
+          if (input.kind !== 'execution') throw new Error('the per-criterion fixture only dispatches execution');
+          const childInvocationId = input.call.invocationId;
+          recordedInvocationId = childInvocationId;
+          await input.childCallPort.prepare({
+            kind: 'execution', invocationId: childInvocationId, assignment: input.assignment,
+            agentId: 'configured-worker', attempt: input.assignment.attempt,
+            executionEpoch: input.assignment.executionEpoch, scope: input.scope,
+          });
+          await input.childCallPort.recordReturn({
+            kind: 'execution', invocationId: childInvocationId, assignment: input.assignment,
+            agentId: 'configured-worker', attempt: input.assignment.attempt,
+            executionEpoch: input.assignment.executionEpoch, scope: input.scope,
+            result: {
+              ...failedResult,
+              assignmentId: input.assignment.assignmentId,
+              pipelineNodeId: input.assignment.pipelineNodeId,
+              attempt: input.assignment.attempt,
+              executionEpoch: input.assignment.executionEpoch,
+              inputRevision: input.assignment.inputRevision,
+            },
+          });
+          return { state: 'returned', kind: 'execution', invocationId: childInvocationId,
+            incarnation: { runtimeId: 'per-criterion-runtime', generation: 1,
+              agentInstanceId: 'per-criterion-instance', roleId: 'execution', taskId: taskScope.taskId,
+              assignmentId: input.assignment.assignmentId, executionEpoch: 1 },
+            result: failedResult };
+        },
+      },
+      parent,
+      parentAssignment,
+      checkpoints: {
+        async pre(input) {
+          return {
+            checkpoint: {
+              id: id('checkpoint', 'per-criterion-pre'), scope: input.selected.scope,
+              cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1,
+              executionEpoch: 1, outcome: 'succeeded', summary: 'per-criterion child pre-call anchor',
+              recoveryStateRef: recovery, evidenceRefs: [recovery], next: { kind: 'continue' },
+            },
+            previous: null, commitRef: admissionCommitRef,
+          };
+        },
+        async post() { throw new Error('post checkpoint is outside this per-criterion consumer'); },
+      },
+      refinedDeliveryStore: {
+        async store() {
+          refinedStores += 1;
+          return { ref: { ...recovery, evidenceId: id('evidence', 'per-criterion-refined') },
+            view: { kind: 'utf8-text' } };
+        },
+        async read() { return new TextEncoder().encode(failureRef); },
+      },
+      bodyAssets,
+      bindChildRun: async () => { throw new Error('the per-criterion consumer replaces child execution'); },
+      prepareAgentProvider: async () => { throw new Error('the per-criterion consumer replaces Provider composition'); },
+      roster: [{ agentId: 'configured-worker', roleId: 'execution' }],
+      admitChildOperation: async () => ({
+        authority: {} as never, authorityCommitRef: admissionCommitRef,
+        businessRegistrationCommitRef: admissionCommitRef, coverageCommitRef: admissionCommitRef,
+        childAdmission: { authorityCommitRef: admissionCommitRef,
+          businessRegistrationCommitRef: admissionCommitRef, coverageCommitRef: admissionCommitRef },
+        intent: {} as never, registration: {} as never,
+      }),
+    });
+    const outcome = await producer.execute({
+      execution: { runtimeId: 'per-criterion-runtime', taskId: taskScope.taskId,
+        operationId: scope.operationId!, executionEpoch: 1 },
+      requestId: 'per-criterion-request',
+      call: { callId: 'per-criterion-call', toolId: APP_CHILD_CALL_TOOL.toolId,
+        continuationRef: 'per-criterion-continuation',
+        arguments: { purpose: 'return the bounded result', agentId: 'configured-worker', kind: 'execution',
+          instructions: 'return the complete result or fail the declared criterion',
+          successCriteria: ['return the bounded result'],
+          failureCriteria: ['the upstream source is unavailable'], target: 'per-criterion-target' } },
+      scope,
+      signal: new AbortController().signal,
+    });
+    assert.equal(outcome.status, 'succeeded', JSON.stringify(outcome));
+    const deliveries = parent.entries().filter(
+      (entry): entry is Exclude<typeof entry, { readonly envelope: unknown }> => !('envelope' in entry),
+    );
+    assert.equal(deliveries.length, 1,
+      'the legitimate per-criterion failure must be recorded as a durable delivery');
+    const delivery = deliveries[0];
+    assert.equal(delivery.kind, 'execution');
+    if (delivery.kind !== 'execution') throw new Error('expected an execution child delivery');
+    assert.equal(delivery.result.status, 'failed');
+    assert.equal(delivery.result.failureRef, failureRef);
+    assert.equal(refinedStores, 1, 'the refined delivery store must persist the failed result');
+    assert.equal(recordedInvocationId, delivery.invocationId);
+    const returned = JSON.parse(outcome.output!) as {
+      readonly state?: string; readonly status?: string; readonly invocationId?: string;
+    };
+    assert.equal(returned.state, 'returned');
+    assert.equal(returned.status, 'failed');
+    await parent.recordChildAdoption(delivery.invocationId, delivery);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // r353 exposed masked child failure reasons; probability is unknown. Impact:
 // wrong cause and recovery. Cost: one bounded local public CLI fixture. The
 // selector deliberately violates the declared 256-character tool schema.

@@ -1875,12 +1875,14 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         return { invocationId: prepareInput.invocationId, checkpointReceiptRef };
       },
       async recordReturn(returnInput: ChildCallReturnInput): Promise<void> {
-        // A non-succeeded execution never produced a deliverable, so it is not
-        // recorded as a durable child delivery. Recording one would create a
-        // selection obligation the parent can only discharge by adopting an
+        // A blocked or cancelled execution produced no deliverable, so it is
+        // not recorded as a durable child delivery. Recording one would create
+        // a selection obligation the parent can only discharge by adopting an
         // empty body; instead the blocked result stays a recoverable, retryable
-        // outcome that the parent handles with a fresh child.call.
-        if (returnInput.kind === 'execution' && returnInput.result.status !== 'succeeded') {
+        // outcome that the parent handles with a fresh child.call. A legitimate
+        // failed or incomplete result is terminal and must stay adoptable.
+        if (returnInput.kind === 'execution'
+          && (returnInput.result.status === 'blocked' || returnInput.result.status === 'cancelled')) {
           return;
         }
         if (findDelivery(parent, returnInput.invocationId) === undefined) {
