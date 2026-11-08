@@ -337,9 +337,16 @@ try {
   await writeFile(join(evidenceRoot, 'entry-answered-dom.html'), pageDom, 'utf8');
   receipt.domPath = join(evidenceRoot, 'entry-answered-dom.html');
   await page.screenshot({ path: join(evidenceRoot, 'entry-answered-page.png'), fullPage: true });
+  const answerCard = page.locator('#entry-direct-answer');
+  assertThat(await answerCard.count() === 1, 'direct-answer card element is present in DOM');
+  receipt.cardElementPath = join(evidenceRoot, 'entry-answered-card.png');
+  await answerCard.screenshot({ path: receipt.cardElementPath });
   assertThat(visible.tone === 'success', 'answer uses success tone', visible);
   assertThat(visible.statusText === '本次请求已直接回答', 'the status banner reports the direct-answer result', visible);
   assertThat(visible.visiblePageText.includes(snapshot.reply), 'reply is visible in page text', { visibleText: visible.visiblePageText, reply: snapshot.reply });
+  assertThat(!/第\s*\d+\s*次请求/.test(visible.visiblePageText), 'internal request ordinal is not visible', {
+    pageText: visible.visiblePageText,
+  });
   if (expectedAnswer) {
     assertThat(visible.visiblePageText.includes(expectedAnswer), 'expected answer is visible in page text', {
       visibleText: visible.visiblePageText,
@@ -364,10 +371,12 @@ try {
     { pageText: visible.visiblePageText },
   );
   receipt.pageErrors = pageErrors;
+  receipt.cardMetadata = { requestNumber: snapshot.requestNumber };
   receipt.checks.push(
     'state=answered',
     'reply is visible in the direct-answer card and page text',
     ...(expectedAnswer ? [`expected answer ${expectedAnswer} is visible`] : []),
+    'no internal request ordinal',
     'no unrelated task summary or stale task instruction',
     'success tone',
     'no retry action',
@@ -375,7 +384,6 @@ try {
     'zero pageerror',
     'no draft, no task, no queue entry',
   );
-  await page.screenshot({ path: join(evidenceRoot, 'entry-answered.png'), fullPage: true });
   await context.close();
 } catch (error) {
   failure = error;
