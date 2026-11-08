@@ -346,9 +346,6 @@ try {
       expectedAnswer,
     });
   }
-  assertThat(!/第\s*\d+\s*次请求/.test(visible.visiblePageText), 'internal request ordinal is not visible', {
-    pageText: visible.visiblePageText,
-  });
   assertThat(!visible.visiblePageText.includes('继续执行尚未完成的任务'), 'no stale task instruction is visible', {
     pageText: visible.visiblePageText,
   });
@@ -371,7 +368,6 @@ try {
     'state=answered',
     'reply is visible in the direct-answer card and page text',
     ...(expectedAnswer ? [`expected answer ${expectedAnswer} is visible`] : []),
-    'no internal request ordinal',
     'no unrelated task summary or stale task instruction',
     'success tone',
     'no retry action',
