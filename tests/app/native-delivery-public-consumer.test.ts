@@ -1028,10 +1028,12 @@ async function textOnlyResponsesUpstream(input: {
   readonly holdFirstExecutionOnce?: () => Promise<void>;
   readonly holdInspectionAfterAdoptOnce?: () => Promise<void>;
   readonly failTurnEndDrain?: boolean;
+  readonly orphanChildCallOnce?: boolean;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean;
   inspectionInvocations(): readonly { callId: string; invocationId: string }[];
   inspectionChildRequests(): readonly { body: string; parentCallId: string }[];
+  orphanChildStream(): readonly Record<string, unknown>[];
   explicitHelperPhase(): string | undefined;
   close(): Promise<void> }> {
   const wires: Wire[] = [];
@@ -1049,6 +1051,8 @@ async function textOnlyResponsesUpstream(input: {
   let firstExecutionHeld = false;
   let inspectionAdoptHeld = false;
   let explicitHelperPhase: string | undefined;
+  let orphanChildStreamed = false;
+  const orphanChildStreamEvents: Record<string, unknown>[] = [];
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
   const server = createServer((request, response) => {
     void (async () => {
@@ -1547,6 +1551,28 @@ async function textOnlyResponsesUpstream(input: {
         if (wire.tools?.some((tool) => tool.name === 'humanagent_child_deliver')) {
           assert.equal(wire.model, 'child.only.model', 'child selects its configured Provider model');
           assert.equal(body.includes('text-only delivery probe'), false, 'child does not inherit parent request history');
+          if (input.orphanChildCallOnce && !orphanChildStreamed) {
+            orphanChildStreamed = true;
+            const orphanResponseId = 'orphan-child-call';
+            orphanChildStreamEvents.push(
+              { type: 'response.created', response: { id: orphanResponseId } },
+              { type: 'response.in_progress', response: { id: orphanResponseId } },
+              {
+                type: 'response.output_item.added',
+                output_index: 0,
+                item: {
+                  type: 'function_call',
+                  call_id: 'call-orphan-child',
+                  name: 'humanagent_child_deliver',
+                  arguments: '',
+                  status: 'in_progress',
+                },
+              },
+            );
+            response.writeHead(200, { 'content-type': 'text/event-stream' });
+            response.end(frame(orphanChildStreamEvents));
+            return;
+          }
           const records = (await input.journal.verify()).records;
           assert.ok(records.some((record) => record.kind === 'checkpoint'), 'pre-call checkpoint is committed before child Provider request');
           const parallelIndex = input.parallelChild && body.includes('Independent child result b') ? 1 : 0;
@@ -1639,13 +1665,42 @@ async function textOnlyResponsesUpstream(input: {
               agentId: 'orchestration-default', kind: 'execution', successCriteria: ['Return the complete result'] });
             return;
           }
-          const refined = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
-            state?: string; invocationId?: string; summary?: string };
-          assert.equal(refined.state, 'returned', `real producer returns the child: ${called.output}`);
-          assert.equal(refined.summary, CHILD_BODY);
-          if (!resultFor('call-parent-adopt')) {
-            invoke('call-parent-adopt', 'child_adopt', { invocationId: refined.invocationId });
-            return;
+          const firstChildResult = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+            state?: string; status?: string; invocationId?: string; summary?: string; reason?: string;
+            nextAction?: { readonly kind?: string; readonly ref?: string };
+          };
+          if (input.orphanChildCallOnce && firstChildResult.status === 'blocked') {
+            assert.match(firstChildResult.reason ?? '', /^stream\/tool-call-not-closed:/);
+            assert.equal(firstChildResult.nextAction?.kind, 'recover');
+            assert.equal(firstChildResult.nextAction?.ref, 'stream/tool-call-not-closed');
+            const retryCallId = 'call-parent-child-retry';
+            const retried = resultFor(retryCallId);
+            if (!retried) {
+              invoke(retryCallId, 'child_call', { purpose: 'Produce an independent result',
+                instructions: 'Independently produce the complete child result, publish it with humanagent_child_deliver, and finish the child turn with evidence for the parent to adopt.',
+                target: 'Independent child result for the parent to adopt',
+                agentId: 'orchestration-default', kind: 'execution', successCriteria: ['Return the complete result'] });
+              return;
+            }
+            const retriedResult = JSON.parse(retried.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+              state?: string; invocationId?: string; status?: string; summary?: string;
+            };
+            assert.equal(retriedResult.state, 'returned', `child retry returns a result: ${retried.output}`);
+            assert.equal(retriedResult.status, 'succeeded', `child retry succeeds: ${retried.output}`);
+            assert.equal(retriedResult.summary, CHILD_BODY);
+            if (!resultFor('call-parent-adopt')) {
+              invoke('call-parent-adopt', 'child_adopt', { invocationId: retriedResult.invocationId });
+              return;
+            }
+          } else {
+            const refined = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+              state?: string; invocationId?: string; summary?: string };
+            assert.equal(refined.state, 'returned', `real producer returns the child: ${called.output}`);
+            assert.equal(refined.summary, CHILD_BODY);
+            if (!resultFor('call-parent-adopt')) {
+              invoke('call-parent-adopt', 'child_adopt', { invocationId: refined.invocationId });
+              return;
+            }
           }
         }
       }
@@ -1770,6 +1825,7 @@ async function textOnlyResponsesUpstream(input: {
       callId, invocationId,
     })),
     inspectionChildRequests: () => inspectionChildRequests.map((entry) => ({ ...entry })),
+    orphanChildStream: () => orphanChildStreamEvents.map((event) => structuredClone(event)),
     explicitHelperPhase: () => explicitHelperPhase,
     baseUrl: `http://127.0.0.1:${address.port}`,
     close: async () => {
@@ -1797,6 +1853,7 @@ async function textOnlyFixture(
   reviewFindingsMode: 'empty' | 'failed-empty' | 'missing-location' | 'illegal-severity'
     | 'empty-evidence' | 'unaccepted-ref' | 'subject-child-body'
     | 'foreign-subject-child-body' | undefined = undefined,
+  orphanChildCallOnce = false,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1815,6 +1872,7 @@ async function textOnlyFixture(
     interactionScopeId: `runtime:${paths.projectKey}`,
     ...(scenario === undefined ? {} : { scenario }),
     ...(failTurnEndDrain ? { failTurnEndDrain: true } : {}),
+    ...(orphanChildCallOnce ? { orphanChildCallOnce: true } : {}),
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
     ...(holdInspectionAfterAdoptOnce === undefined ? {} : { holdInspectionAfterAdoptOnce }),
@@ -3058,6 +3116,87 @@ if (!coldConsumerMode) test('native parallel child calls overlap and retain orde
   } finally {
     await fixture.upstream.close();
     await rm(fixture.root, { recursive: true });
+  }
+});
+
+test('native child orphan tool call surfaces typed recover and retries delivery', async () => {
+  const fixture = await textOnlyFixture(
+    false, true, false, 2, undefined, undefined, undefined, false, undefined, false, false,
+    undefined, false, undefined, true,
+  );
+  let passed = false;
+  try {
+    const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 2);
+    assert.equal(result.code, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout.slice(result.stdout.indexOf('{'), result.stdout.lastIndexOf('}') + 1)) as {
+      readonly taskId?: string;
+      readonly state?: string;
+      readonly output?: string;
+    };
+    assert.equal(receipt.taskId, taskId.value);
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
+    assert.equal(receipt.output, TURN_ONE_RESULT);
+
+    const stream = fixture.upstream.orphanChildStream();
+    assert.deepEqual(stream.map((event) => event.type), [
+      'response.created',
+      'response.in_progress',
+      'response.output_item.added',
+    ]);
+    const added = stream[2]?.item as {
+      readonly type?: string;
+      readonly call_id?: string;
+      readonly name?: string;
+      readonly arguments?: string;
+      readonly status?: string;
+    } | undefined;
+    assert.equal(added?.type, 'function_call');
+    assert.equal(added?.call_id, 'call-orphan-child');
+    assert.equal(added?.name, 'humanagent_child_deliver');
+    assert.equal(added?.arguments, '');
+    assert.equal(added?.status, 'in_progress');
+    assert.equal(stream.some((event) => event.type === 'response.function_call_arguments.delta'), false);
+    assert.equal(stream.some((event) => event.type === 'response.function_call_arguments.done'), false);
+    assert.equal(stream.some((event) => event.type === 'response.output_item.done'), false);
+    assert.equal(stream.some((event) => event.type === 'response.completed'), false);
+
+    const retryRequest = fixture.upstream.wires.find((wire) =>
+      (parseResponsesWire(wire.body)?.input ?? []).some((item) =>
+        item.type === 'function_call'
+        && item.name === 'child_call'
+        && item.call_id === 'call-parent-child-retry'));
+    assert.ok(retryRequest, 'the parent retries the child call after the typed recover result');
+    if (retryRequest === undefined) throw new Error('the child retry request is absent');
+    const firstOutput = (parseResponsesWire(retryRequest.body)?.input ?? []).find((item) =>
+      item.type === 'function_call_output' && item.call_id === 'call-parent-child');
+    assert.ok(firstOutput?.output, 'the retry request replays the first child result');
+    const firstResult = JSON.parse(firstOutput!.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+      readonly state?: string;
+      readonly status?: string;
+      readonly reason?: string;
+      readonly nextAction?: { readonly kind?: string; readonly ref?: string };
+    };
+    assert.equal(firstResult.state, 'returned');
+    assert.equal(firstResult.status, 'blocked');
+    assert.match(firstResult.reason ?? '', /^stream\/tool-call-not-closed:/);
+    assert.ok(firstResult.reason !== 'failed result did not match a failure criterion');
+    assert.equal(firstResult.nextAction?.kind, 'recover');
+    assert.equal(firstResult.nextAction?.ref, 'stream/tool-call-not-closed');
+
+    const childCalls = fixture.upstream.wires
+      .flatMap((wire) => parseResponsesWire(wire.body)?.model === 'child.only.model'
+        ? parseResponsesWire(wire.body)?.input ?? []
+        : [])
+      .filter((item) => item.type === 'function_call');
+    assert.ok(childCalls.some((item) => item.name === 'humanagent_child_deliver'),
+      'the retried child turn delivers a complete body');
+    assert.ok(childCalls.some((item) => item.name === 'humanagent_turn_end'),
+      'the retried child turn completes with a standard end');
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`orphan child fixture retained: ${fixture.root}`);
   }
 });
 
