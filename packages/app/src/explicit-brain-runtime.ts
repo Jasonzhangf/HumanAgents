@@ -592,7 +592,7 @@ export function parseInterpreterOutput(output: string, input: ExplicitBrainInter
   if (objects.length === 1) {
     // One top-level object is the decision candidate: whether it satisfies the
     // intake contract is the contract check, not a span count.
-    return parseDecisionRecord(objects[0]!, input);
+    return parseDecisionRecord(unwrapDecisionEnvelope(objects[0]!), input);
   }
   // A model may echo the request envelope it was handed (`interactionId`,
   // `rawInput`, `taskCandidates`, ...) in front of its decision. That echo
@@ -621,6 +621,20 @@ export function parseInterpreterOutput(output: string, input: ExplicitBrainInter
   }
   valid.sort((left, right) => intakeDecisionPriority(left.kind) - intakeDecisionPriority(right.kind));
   return valid[0]!;
+}
+
+/**
+ * A model can answer with the one complete decision it chose nested under a
+ * single `decision` key instead of flat at the top level. Read that decision
+ * when it is the whole answer; a nested object that only restates `kind` still
+ * fails the existing intake-contract check exactly as before, and an outer
+ * object that already states its own `kind` is returned unchanged.
+ */
+function unwrapDecisionEnvelope(record: Record<string, unknown>): Record<string, unknown> {
+  if (typeof record.kind === 'string') return record;
+  const wrapped = record.decision;
+  if (wrapped === null || typeof wrapped !== 'object' || Array.isArray(wrapped)) return record;
+  return wrapped as Record<string, unknown>;
 }
 
 /** Intake decision priority: a real task decision outranks a clarification or a report. */
