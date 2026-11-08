@@ -366,6 +366,60 @@ test('explicit interaction wire exposes no helper dispatch or accept tools', asy
 });
 
 /**
+ * An answered clarification is an authoritative user fact, not a pending
+ * question. The interpreter must render the question and its answer into the
+ * provider prompt and instruct the model not to ask either again.
+ */
+test('provider explicit brain sends answered clarifications to the model as authoritative facts', async () => {
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'explicit-answered-clarification', providerId: 'explicit-answered-clarification',
+    protocol: 'responses', endpointRef: 'http://recorded.test', modelRef: 'controlled',
+    configDigest: 'sha256:answered-clarification', capabilityDigest: 'sha256:answered-clarification',
+  };
+  let promptText = '';
+  const port = new RecordedParentPort({
+    binding, replay: [], stepDelayMs: 0,
+    respond: async (wire) => {
+      promptText = String(wire.instructions ?? wire.system ?? '');
+      return [{
+        type: 'response.output_text.done',
+        item_id: 'final',
+        text: JSON.stringify({
+          kind: 'answer',
+          normalizedInput: '按刚才的答案继续',
+          knownFacts: [],
+          answer: 'ok',
+          decisionRefs: [],
+        }),
+      }];
+    },
+  });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+  });
+
+  const result = await interpreter.interpret({
+    interactionId: 'interaction-answered-clarification',
+    inputRevision: 1,
+    sourceRef: 'ui:answered-clarification',
+    rawInput: '按刚才的答案继续',
+    clarifications: [
+      { question: '验收范围包含哪些页面？', options: ['A 页面', 'B 页面'], answer: '包含 A 页面和 B 页面' },
+    ],
+    taskCandidates: [],
+  });
+
+  assert.equal(result.kind, 'answer');
+  assert.match(promptText, /# Authoritative answered clarifications/);
+  assert.match(promptText, /验收范围包含哪些页面？/);
+  assert.match(promptText, /包含 A 页面和 B 页面/);
+  assert.match(promptText, /Do not ask these answered clarification questions again/);
+});
+
+/**
  * A real JSONL parent journal whose Nth durable raw acceptance is rejected.
  *
  * The rejection happens inside the very transaction the owner staged its plan

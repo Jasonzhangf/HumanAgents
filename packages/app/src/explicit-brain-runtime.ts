@@ -250,10 +250,15 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
   const projectContext = input.workspaceCwd === undefined || input.projectKey === undefined
     ? []
     : [`# Conversation project directory\nThe conversation targets the project directory ${input.workspaceCwd} (projectKey ${input.projectKey}). Treat that directory as the project context of this input.`];
-  const clarificationContext = input.clarifications.length === 0
+  const answeredClarifications = input.clarifications
+    .filter((clarification) => clarification.answer !== undefined)
+    .map((clarification, index) => `${index + 1}. Question: ${clarification.question}\n   Answer: ${clarification.answer}`);
+  const clarificationContext = answeredClarifications.length === 0
     ? []
     : [
-      `This input already contains ${input.clarifications.length} answered clarification(s). Each answer is authoritative user input for the same request, not optional history. Do not ask again for a fact an answer supplies.`,
+      '# Authoritative answered clarifications',
+      'The following clarification questions were already answered by the user. Treat each answer as an authoritative fact of this input. Do not ask these answered clarification questions again, and do not turn an answer into a new question.',
+      ...answeredClarifications,
       'When those answers make the next allowed action determinable, return exactly one non-clarification decision. Work remains a requirement so the implicit brain can execute it.',
     ];
   return [
@@ -279,6 +284,7 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
     'Use answer only for a general question you can answer directly from the current input and provided context, with no execution, exploration, external retrieval, or deliverable. Put the reply in answer; do not carry matchedTaskId, proposal, or intent. A request to perform work, explore, retrieve externally, or deliver a result is a requirement, never an answer.',
     'For clarification, ask one concrete question, include options (an array of 2 to 4 concrete selectable option strings) when candidate choices exist, and do not invent a task match.',
+    'A clarification must not repeat a question that already has an answer in Authoritative answered clarifications; use that answer as an authoritative fact instead.',
     `Requirement proposal must be exactly this object shape: ${structuredProposalContract(input.inputRevision)}`,
     'Requirement intent exists only at proposal.intent; do not add a top-level intent field. Do not select an owner. Status-query requires answer. Answer requires a non-empty answer. Clarification requires question and optional options.',
   ].join('\n\n');
