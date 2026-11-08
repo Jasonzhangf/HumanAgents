@@ -976,7 +976,9 @@ function createChildDeliveryExecutor(input: {
       if (input.kind === 'execution' && input.inspection === undefined && inspectionOutcome !== undefined) {
         throw new Error('a non-inspection execution cannot carry an inspection outcome');
       }
-      const candidateFindings = input.kind === 'review' ? parseReviewFindingSelectors(args.findings) : [];
+      const candidateFindings = judgment !== undefined
+        ? parseReviewFindingSelectors(args.findings, judgment)
+        : [];
       const identity = await input.standardEndOwner.resolveBoundTurn({
         execution: request.execution,
         ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
@@ -1086,8 +1088,12 @@ function readInspectionOutcome(value: unknown): InspectionExecutionOutcome {
   return outcome as InspectionExecutionOutcome;
 }
 
-function parseReviewFindingSelectors(value: unknown): readonly ReviewFindingSelectors[] {
+function parseReviewFindingSelectors(
+  value: unknown,
+  judgment: ReviewStatus,
+): readonly ReviewFindingSelectors[] {
   if (value === undefined || value === null) {
+    if (judgment === 'passed') return [];
     throw new Error('a review delivery must state its concrete findings');
   }
   if (!Array.isArray(value)) {

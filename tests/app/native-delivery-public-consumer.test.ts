@@ -1016,8 +1016,9 @@ async function textOnlyResponsesUpstream(input: {
   readonly parallelChild?: boolean;
   readonly reviewPerCycle?: boolean;
   readonly badReviewSelector?: boolean;
-  readonly reviewFindingsMode?: 'empty' | 'failed-empty' | 'missing-location'
-    | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref'
+  readonly reviewFindingsMode?: 'empty' | 'failed-empty' | 'missing-findings'
+    | 'failed-missing-findings' | 'missing-location' | 'illegal-severity'
+    | 'empty-evidence' | 'unaccepted-ref'
     | 'subject-child-body' | 'foreign-subject-child-body';
   readonly inspection?: boolean;
   readonly turnCount?: 2 | 3;
@@ -1460,6 +1461,9 @@ async function textOnlyResponsesUpstream(input: {
             const ref = /evidenceId=([^\s]+)/.exec(resultFor(`cycle-${cycle}-review-read`)?.output ?? '')?.[1];
             const locationRef = `Cycle ${cycle} execution subject`;
             const failedEmpty = input.reviewFindingsMode === 'failed-empty';
+            const missingFindings = input.reviewFindingsMode === 'missing-findings'
+              || input.reviewFindingsMode === 'failed-missing-findings';
+            const failedJudgment = failedEmpty || input.reviewFindingsMode === 'failed-missing-findings';
             const findings = !review ? undefined
               : input.reviewFindingsMode === 'empty' || failedEmpty ? []
               : input.reviewFindingsMode === 'missing-location' ? [{
@@ -1485,7 +1489,9 @@ async function textOnlyResponsesUpstream(input: {
                 }];
             invoke(`cycle-${cycle}-child-delivery`, 'humanagent_child_deliver', {
               body: review ? `Cycle ${cycle} independent quality review` : executionBody,
-              ...(review ? { judgment: failedEmpty ? 'failed' : 'passed', findings } : {}),
+              ...(review
+                ? { judgment: failedJudgment ? 'failed' : 'passed', ...(missingFindings ? {} : { findings }) }
+                : {}),
             });
           } else {
             const deliveryEvidence = delivered.output!.split('\n')
@@ -1850,8 +1856,8 @@ async function textOnlyFixture(
   badReviewSelector = false,
   scenario?: TextOnlyFixtureScenario,
   failTurnEndDrain = false,
-  reviewFindingsMode: 'empty' | 'failed-empty' | 'missing-location' | 'illegal-severity'
-    | 'empty-evidence' | 'unaccepted-ref' | 'subject-child-body'
+  reviewFindingsMode: 'empty' | 'failed-empty' | 'missing-findings' | 'failed-missing-findings'
+    | 'missing-location' | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref' | 'subject-child-body'
     | 'foreign-subject-child-body' | undefined = undefined,
   orphanChildCallOnce = false,
 ) {
@@ -3508,8 +3514,9 @@ if (!coldConsumerMode) test('native review child failure preserves primary reaso
 
 if (!coldConsumerMode) test('native public CLI review findings contract permits passed empty findings and rejects malformed review findings', async () => {
   const cases: ReadonlyArray<{
-    readonly mode: 'empty' | 'failed-empty' | 'missing-location' | 'illegal-severity' | 'empty-evidence'
-      | 'unaccepted-ref' | 'subject-child-body' | 'foreign-subject-child-body' | undefined;
+    readonly mode: 'empty' | 'failed-empty' | 'missing-findings' | 'failed-missing-findings'
+      | 'missing-location' | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref'
+      | 'subject-child-body' | 'foreign-subject-child-body' | undefined;
     readonly expected: 'succeeded' | 'blocked';
     readonly error?: RegExp;
   }> = [
@@ -3517,6 +3524,9 @@ if (!coldConsumerMode) test('native public CLI review findings contract permits 
     { mode: 'subject-child-body', expected: 'succeeded' },
     { mode: undefined, expected: 'succeeded' },
     { mode: 'failed-empty', expected: 'blocked', error: /non-passed review result requires findings/ },
+    { mode: 'missing-findings', expected: 'succeeded' },
+    { mode: 'failed-missing-findings', expected: 'blocked',
+      error: /a review delivery must state its concrete findings/ },
     { mode: 'missing-location', expected: 'blocked', error: /locationRef/ },
     { mode: 'illegal-severity', expected: 'blocked', error: /severity/ },
     { mode: 'empty-evidence', expected: 'blocked', error: /evidenceRefs/ },
@@ -3605,7 +3615,7 @@ if (!coldConsumerMode) test('native public CLI review findings contract permits 
         });
         for (const delivery of reviewDeliveries) {
           assert.equal(delivery.entry.result.status, 'passed');
-          if (current.mode === 'empty') {
+          if (current.mode === 'empty' || current.mode === 'missing-findings') {
             assert.deepEqual(delivery.entry.result.findings, [],
               'a passed review may carry zero findings without inventing one');
           } else {
