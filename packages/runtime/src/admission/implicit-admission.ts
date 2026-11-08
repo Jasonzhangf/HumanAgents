@@ -25,7 +25,7 @@ const DEFAULT_OWNER_ID = 'runtime-coordinator';
 
 const DEFAULT_QUEUE_CONFIGS: Readonly<Record<(typeof ACTIVE_ADMISSION_QUEUE_KINDS)[number], AdmissionQueueConfig>> = {
   interactive: { kind: 'interactive', concurrencyLimit: 1, maxBacklog: 32 },
-  execution: { kind: 'execution', concurrencyLimit: 1, maxBacklog: 32 },
+  execution: { kind: 'execution', concurrencyLimit: 8, maxBacklog: 32 },
 };
 
 function assertNonNegativeSafeInteger(value: number, label: string): void {

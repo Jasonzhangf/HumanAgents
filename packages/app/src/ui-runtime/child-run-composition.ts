@@ -35,6 +35,7 @@ import type {
 } from '../../../runtime/src/gateway/ports.js';
 import type {
   RegisteredParentChildCall,
+  ReviewAgentInput,
   TaskRuntimeIncarnation,
 } from '../../../runtime/src/orchestration/types.js';
 import type { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
@@ -65,6 +66,32 @@ import type {
 import type { ToolOperationAdmissionReceipt } from './execution-admission.js';
 
 const OWNER = 'humanagent.app.child-run-composition';
+
+/**
+ * The reviewed execution body is a cross-turn evidence source for a review
+ * child. Bind only the exact subject artifact referenced by verified review
+ * material to its real immutable EvidenceRef; this is an alias lookup, not a
+ * second evidence scope.
+ */
+function reviewSubjectDeliveryAliases(input: ReviewAgentInput): ReadonlyMap<string, EvidenceRef> {
+  const aliases = new Map<string, EvidenceRef>();
+  for (const [index, subjectRef] of input.workerAssignment.targetRefs.entries()) {
+    const subject = input.reviewMaterial.subjects[index];
+    const producedLocator = input.workerResult.producedArtifactRefs[index];
+    const producedBody = input.workerResult.producedArtifactBodies?.[index];
+    if (subject === undefined
+      || subject.ref !== subjectRef
+      || producedLocator === undefined
+      || producedBody === undefined
+      || subject.body !== producedBody) continue;
+    const evidence = input.workerResult.evidenceRefs.find((candidate) => candidate.locator === producedLocator);
+    if (evidence !== undefined
+      && evidence.scope.taskId?.value === input.workerResult.taskId.value) {
+      aliases.set(subjectRef, evidence);
+    }
+  }
+  return aliases;
+}
 
 /**
  * The real admission surface this binder consumes. `createServiceExecutionAdmission`
@@ -295,13 +322,10 @@ function childInitialInput(
   assignment: WorkAssignment,
 ): string {
   if (request.kind === 'execution') return request.initialInputText;
-  const material = request.input.reviewMaterial;
-  return canonicalJsonStringify({
-    acceptanceCriteria: material.acceptanceCriteria,
-    reviewKind: request.input.reviewAssignment.reviewKind,
-    subjects: material.subjects,
-    executorEvidence: material.executorEvidence ?? [],
-  });
+  // The review prompt already carries the acceptance criteria, the subject
+  // bodies and the review delivery instructions, so it is the canonical
+  // initial input, mirroring the execution child's prompt delivery.
+  return request.initialInputText;
 }
 
 /**
@@ -339,6 +363,9 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
       operationId: childOpId,
       executionEpoch: incarnation.executionEpoch,
     };
+    const reviewSubjectAliases = request.kind === 'review'
+      ? reviewSubjectDeliveryAliases(request.input)
+      : new Map<string, EvidenceRef>();
     const assignment = childWorkAssignment(request, incarnation);
     const turnId = newActiveTurnId(childOpId.value);
     const currentTurnRef = `active-turn://${turnId}`;
@@ -479,6 +506,12 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
         for (const ref of candidates) {
           byReference.set(ref.evidenceId.value, ref);
           byReference.set(ref.locator, ref);
+        }
+        // A reviewer may cite the exact subject body handed to it in the
+        // review material. The alias resolves only through the verified
+        // subject artifact; an arbitrary or foreign reference remains absent.
+        for (const [reference, ref] of reviewSubjectAliases) {
+          byReference.set(reference, ref);
         }
         const resolved: EvidenceRef[] = [];
         for (const reference of deliveryRefs) {

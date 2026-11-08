@@ -31,7 +31,7 @@ import { createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJ
   createJsonlSemanticHistoryJournal, readCommittedNativeSegmentSource } from '../checkpoint-journal.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
 import { createNativeExecution } from './native-execution.js';
-import { APP_CHILD_CALL_TOOL, APP_CHILD_TOOLS, createAppChildProducer } from './child-producer.js';
+import { APP_CHILD_CALL_TOOL, APP_CHILD_TOOLS, appChildTools, createAppChildProducer } from './child-producer.js';
 import { createInspectionTurnResourceReader } from './inspection-resources.js';
 import { createInspectionStopResourceReader } from '../inspection-stop-resources.js';
 import {
@@ -46,7 +46,7 @@ import { createNativeBoundaryContinuation } from './native-boundary-continuation
 import { createJsonlNativeSaveProgressPort } from '../../../adapters/jsonl/src/native-save-progress.js';
 import { frozenTurnCloseRef, readCheckpointClosurePreparation } from '../../../runtime/src/checkpoints/closure.js';
 import { closeAgentProvider, type AgentProviderComposition } from '../agent-driver-composition.js';
-import type { RuntimeExecutionDriver, RuntimeExecutionPreparationInput } from '../../../runtime/src/ui-runtime/coordinator.js';
+import type { RuntimeChildLifecycleObserver, RuntimeExecutionDriver, RuntimeExecutionPreparationInput } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { ProviderAgentDriverOptions } from '../../../adapters/provider/src/agent-driver.js';
 import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/agent-driver.js';
 import type { AcceptedRawFact, AdmittedTurnIdentity, CompletionReadInput, EvidenceRef,
@@ -1647,7 +1647,7 @@ export function createDefaultExecutionComposition(input: {
       };
       const liveNative = native;
       const driver: RuntimeExecutionDriver = { standardTurn,
-        bindChildCallManager(manager) {
+        bindChildCallManager(manager, onChildLifecycle?: RuntimeChildLifecycleObserver) {
           if (input.agentRoster === undefined) return;
           if (!input.agentRoster.length) missing('the configured child roster is empty');
           if (!active || !composition || !toolScope) missing('the configured child producer requires a live parent, Provider and tool scope');
@@ -1657,6 +1657,7 @@ export function createDefaultExecutionComposition(input: {
             ...(toolScope.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: toolScope.webSearchProviderConfig }),
             principalOwner: input.principalOwner, now: input.now });
           childProducer = createAppChildProducer({ manager, parent: active, parentAssignment: assignment,
+            onChildLifecycle,
             checkpoints: createAppChildCheckpointAdapter({ store: nativeCheckpoints, parent: active,
               originalAdmittedTurn: admittedTurn, recoveryStateRef }),
             refinedDeliveryStore: createFilesystemRefinedDeliveryStore(new ImmutableAssetStore(input.artifactsRoot)),
@@ -1666,7 +1667,7 @@ export function createDefaultExecutionComposition(input: {
             inspectionSelection: inspection.helpers.selectionReader,
             admitChildOperation: createAppChildOperationAdmission({ admission: admitted, binding,
               parent: active, registration: childCallRegistration }), now: input.now });
-          providerToolExecution.tools.push(...APP_CHILD_TOOLS);
+          providerToolExecution.tools.push(...appChildTools(input.agentRoster));
         },
         kind: liveNative.driver.kind, capabilities: () => liveNative.driver.capabilities(),
         start: (value) => liveNative.driver.start(value), resume: (value) => liveNative.driver.resume(value),

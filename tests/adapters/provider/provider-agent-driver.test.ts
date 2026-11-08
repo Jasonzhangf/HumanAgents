@@ -464,6 +464,96 @@ test('provider agent driver executes a complete Responses tool call once and con
   ]);
 });
 
+test('provider agent driver turns malformed final Responses tool arguments into a paired model-correctable failed result', async () => {
+  const malformed = '{"path":';
+  let round = 0;
+  const executeCalls: string[] = [];
+  const requestBodies: string[] = [];
+  const fetch: V3ProviderFetch = async (_url, init) => {
+    requestBodies.push(String(init.body));
+    round += 1;
+    if (round === 1) {
+      return delayedResponse(chunks([
+        `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp-malformed-tool' } })}\n\n`,
+        `data: ${JSON.stringify({
+          type: 'response.function_call_arguments.done',
+          call_id: 'call-malformed-tool',
+          output_index: 0,
+          arguments: malformed,
+        })}\n\n`,
+        `data: ${JSON.stringify({
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            call_id: 'call-malformed-tool',
+            name: 'file_read',
+            arguments: malformed,
+          },
+        })}\n\n`,
+        `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-malformed-tool' } })}\n\n`,
+      ]));
+    }
+    return delayedResponse(chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp-after-malformed-tool' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_text.done', item_id: 'final-message', text: 'corrected the tool arguments' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-after-malformed-tool' } })}\n\n`,
+    ]));
+  };
+  const instance = new ProviderAgentDriver({
+    port: realProviderAdapter(fetch),
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute(input) {
+        executeCalls.push(input.call.callId);
+        return {
+          output: JSON.stringify({ path: String(input.call.arguments.path), content: 'unexpected execution' }),
+          outputRefs: [],
+          evidenceRefs: [evidence],
+        };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
+
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+
+  const toolCall = events.find((event) => event.providerEvent.toolCall !== undefined)?.providerEvent.toolCall;
+  assert.equal(toolCall?.callId, 'call-malformed-tool');
+  assert.equal(toolCall?.toolId, 'file.read');
+  assert.deepEqual(toolCall?.arguments, {}, 'malformed input stays in the sidecar, not the business payload');
+  const toolResult = events.find((event) => event.kind === 'provider.tool-result')?.providerEvent.toolResult;
+  assert.equal(toolResult?.callId, 'call-malformed-tool');
+  assert.equal(toolResult?.toolId, 'file.read');
+  assert.equal(toolResult?.status, 'failed');
+  assert.equal(toolResult?.error?.code, 'tool.arguments.invalid-json');
+  assert.equal(toolResult?.error?.category, 'validation');
+  assert.equal(toolResult?.error?.retryable, 'retryable');
+  assert.deepEqual(toolResult?.error?.nextAction, { kind: 'continue', ref: 'responses-tool-call' });
+  assert.equal(executeCalls.length, 0, 'malformed arguments must not reach the tool executor');
+  assert.equal(events.at(-1)?.terminalState, 'succeeded');
+  assert.equal(requestBodies.length, 2);
+  const continuation = JSON.parse(requestBodies[1] ?? '{}') as {
+    readonly input?: readonly { readonly type?: string; readonly call_id?: string; readonly arguments?: string; readonly output?: string }[];
+  };
+  const continuationCall = continuation.input?.find((item) => item.type === 'function_call');
+  const continuationOutput = continuation.input?.find((item) => item.type === 'function_call_output');
+  assert.equal(continuationCall?.call_id, 'call-malformed-tool');
+  assert.equal(continuationCall?.arguments, malformed);
+  assert.equal(continuationOutput?.call_id, 'call-malformed-tool');
+  assert.match(continuationOutput?.output ?? '', /invalid JSON|Unexpected end/);
+});
+
 test('parallel batch: provider agent driver runs declared generic tools concurrently and preserves call order', async () => {
   let round = 0;
   const submissions: ProviderSubmitInput[] = [];

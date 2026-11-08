@@ -35,9 +35,13 @@ import {
   FileCheckpointStore,
   UiRuntimeJournal,
   UiRuntimeService,
+  startUiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js';
+import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
+import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
+import { createDeterministicServeOrchestrationPorts } from '../../packages/app/src/serve-orchestration.js';
 import { createServiceExecutionAdmission } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { ServiceExecutionCheckpointStore } from '../../packages/app/src/ui-runtime/execution-composition.js';
 import { createPreparedOperationBoundary } from '../../packages/app/src/prepared-operation-boundary.js';
@@ -45,9 +49,12 @@ import { createJsonlRuntimeTaskCurrentStateJournal } from '../../packages/app/sr
 import { TASK_EXECUTION_ACTION_ID, TASK_EXECUTION_CAPABILITY } from '../../packages/app/src/ui-runtime/task-control.js';
 import {
   MemoryCoordinator,
+  RuntimeTaskCoordinator,
   type AttentionPort,
 } from '../../packages/runtime/src/index.js';
 import type { RuntimeBindingSnapshot } from '../../packages/runtime/src/admission/admitted-turn.js';
+import { projectTaskGrantAuthority, type TaskGrantPort } from '../../packages/runtime/src/admission/task-grant.js';
+import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import type {
   ExecutionAgentPort,
   MergeCoordinatorPort,
@@ -1117,6 +1124,371 @@ test('task events stream reports provider request rounds and child lifecycle ste
     const settleTurn = provider.find((event) => event.state === 'settled')?.turnId;
     assert.ok(dispatchTurn, 'dispatched provider event must carry turnId');
     assert.equal(dispatchTurn, settleTurn, 'dispatched and settled steps must report the same real turn');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('formal startUiRuntime entry streams four child lifecycle steps through terminal succeeded', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-formal-child-'));
+  const checkpointRoot = join(root, 'checkpoints');
+  const evidenceRoot = join(root, 'evidence');
+  const eventJournal = createJsonlEventJournal({ filePath: join(root, 'events.jsonl') });
+  const publishers = { async resolvePublisher() { return null; } };
+  let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+  try {
+    const orchestration = createServeRuntimeComposition({
+      maxRuntimes: 2,
+      eventBusPorts: {
+        journal: eventJournal,
+        publishers,
+        consumers: { async resolveConsumer() { return null; } },
+        externalOperations: eventJournal,
+        barrierIntents: eventJournal,
+      },
+      feedbackPorts: { journal: eventJournal, publishers },
+      feedbackPublisherId: 'formal-child-lifecycle',
+      ...createDeterministicServeOrchestrationPorts(),
+    });
+    const accessControl = await AccessControlService.open({
+      credentialPath: join(root, 'security', 'web-access.json'),
+      create: true,
+    });
+    const challenge = await accessControl.issuePairingChallenge();
+    const session = await accessControl.consumePairingCode(challenge.code);
+    const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+    runtime = await startUiRuntime({
+      mode: 'fake',
+      accessControl,
+      // The serve runtime publisher scope is the canonical UI organ; the
+      // formal entry must use the same organ so orchestration feedback passes
+      // the trusted-publisher scope check.
+      organId: id('organ', 'humanagent-ui'),
+      binding,
+      port: buildFakeExecutionPort(binding, 1),
+      checkpointRoot,
+      productRoot: root,
+      evidenceRoot,
+      uiRoot: join(process.cwd(), 'docs', 'ui'),
+      portNumber: 0,
+      memory: testMemory('formal-child-lifecycle'),
+      explicitBrainInterpreter: {
+        async interpret() { throw new Error('formal child lifecycle test drives tasks directly'); },
+      },
+      runtimeComposition: { createTaskAssembly: orchestration.createTaskAssembly },
+    });
+    // Drive the real implicit-Brain consumer path so `defaultOrchestrate()`
+    // marks the operation orchestrated exactly as `serve` does.
+    await confirmRequirement(runtime.service, 'formal-child-lifecycle');
+    await runtime.service.dispatchNextExplicitRequirement();
+    try {
+      await waitFor(() => runtime!.service.listTasks().completed[0]?.state === 'succeeded', 15000);
+    } catch (error) {
+      const tasks = runtime.service.listTasks();
+      const issue = runtime.service.implicitSchedulingIssue();
+      throw new Error(`${(error as Error).message}\nissue=${issue === undefined ? 'none' : JSON.stringify(issue)}\nlist=${JSON.stringify(tasks)}`);
+    }
+    const taskId = runtime.service.listTasks().completed[0]!.taskId.value;
+    const sse = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(taskId)}/events`, {
+      headers: { accept: 'text/event-stream', cookie },
+    });
+    assert.equal(sse.status, 200, `event stream failed ${sse.status}`);
+    const events = sseFrames(await sse.text()).map((frame) => JSON.parse(frame.data) as {
+      readonly kind: string;
+      readonly state: string;
+      readonly turnId?: string;
+    });
+    const completed = runtime.service.listTasks().completed[0]!;
+    assert.equal(completed.state, 'succeeded');
+    const provider = events.filter((event) => event.kind === 'provider.model');
+    const states = provider.map((event) => event.state);
+    for (const childState of ['child.prepared', 'child.returned', 'child.adopted', 'review.checkpointed']) {
+      assert.ok(states.includes(childState), `missing ${childState}: ${states.join(',')}`);
+    }
+  } finally {
+    if (runtime !== undefined) {
+      try { await runtime.close(); } catch { /* preserve primary failure */ }
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('active turn derives ownerRef and permissionRevision from the real granted task revision', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-permission-snapshot-'));
+  try {
+    const taskControlJournal = new JsonlOrganJournal(join(root, 'task-control.jsonl'));
+    const grantJournal = new JsonlTaskGrantJournal(taskControlJournal);
+    const taskId = id('task', 'permission-snapshot-task');
+    const grantScope: ScopeRef = { organId, taskId };
+    const grantRequest = {
+      taskId,
+      owner: fixtureControlOwner,
+      capability: {
+        actionId: TASK_EXECUTION_ACTION_ID,
+        capabilities: [TASK_EXECUTION_CAPABILITY],
+        scope: grantScope,
+      },
+    } as const;
+    await grantJournal.grant({ ...grantRequest, requestId: 'permission-grant-1', expectedRevision: 0 });
+    const secondGrant = await grantJournal.grant({ ...grantRequest, requestId: 'permission-grant-2', expectedRevision: 1 });
+    assert.equal(secondGrant.grant?.revision, 2);
+    assert.equal(secondGrant.grant?.state, 'granted');
+
+    const activeTurnJournal = new FileActiveTurnJournal(join(root, 'active-turn.jsonl'));
+    let driverCreated = false;
+    let derivedOwner = '';
+    let derivedRevision = '';
+    const coordinator = new RuntimeTaskCoordinator({
+      organId,
+      createDriver: () => {
+        driverCreated = true;
+        throw new Error('stop after binding');
+      },
+      checkpointStoreFor: (candidateTaskId, cycleId) => new FileCheckpointStore(
+        join(root, `checkpoint-${candidateTaskId.value}-${cycleId.value}.jsonl`),
+      ),
+      attentionPort: attentionPort(),
+      principalOwner: fixtureControlOwner,
+      admitExecution: async () => {},
+      activeTurnJournal,
+      permissionSnapshotFor: async ({ taskId: candidateTaskId }) => {
+        const readback = await grantJournal.readTaskGrant(candidateTaskId);
+        const authority = projectTaskGrantAuthority({ readback, principalOwner: fixtureControlOwner });
+        derivedOwner = authority.owner;
+        derivedRevision = authority.permissionRevision;
+        return { ownerRef: authority.owner, permissionRevision: authority.permissionRevision };
+      },
+    });
+    coordinator.createTask({ title: 'permission snapshot', directive: 'derive the revision from the real grant', taskId });
+    const allocation = coordinator.prepareExecution(taskId, { prompt: 'permission snapshot execution' });
+    await assert.rejects(() => coordinator.releaseExecution(taskId, allocation.operationId), /stop after binding/);
+
+    const opened = (await activeTurnJournal.replay()).find((record) => record.kind === 'binding-opened');
+    assert.equal(opened?.kind, 'binding-opened', 'openActiveTurn must write the binding-opened record');
+    if (opened?.kind !== 'binding-opened') throw new Error('openActiveTurn did not write a binding-opened record');
+    assert.equal(derivedOwner, fixtureControlOwner);
+    assert.equal(derivedRevision, '2');
+    assert.equal(opened.binding.admittedTurn.permissionRevision, '2');
+    assert.equal(opened.binding.execution.runtimeId, `ui-runtime-${allocation.operationId.value}`);
+    assert.equal(opened.binding.execution.executionEpoch, allocation.executionEpoch);
+    assert.ok(driverCreated, 'the derived snapshot must not stop the release before the driver boundary');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('openActiveTurn fails explicitly when the task grant is missing and writes no binding', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-permission-snapshot-missing-'));
+  try {
+    const grantJournal = new JsonlTaskGrantJournal(new JsonlOrganJournal(join(root, 'task-control.jsonl')));
+    const taskId = id('task', 'permission-snapshot-missing-task');
+    const activeTurnJournal = new FileActiveTurnJournal(join(root, 'active-turn.jsonl'));
+    let driverCreated = false;
+    const coordinator = new RuntimeTaskCoordinator({
+      organId,
+      createDriver: () => {
+        driverCreated = true;
+        throw new Error('must not start a provider for a missing grant');
+      },
+      checkpointStoreFor: (candidateTaskId, cycleId) => new FileCheckpointStore(
+        join(root, `checkpoint-${candidateTaskId.value}-${cycleId.value}.jsonl`),
+      ),
+      attentionPort: attentionPort(),
+      principalOwner: fixtureControlOwner,
+      admitExecution: async () => {},
+      activeTurnJournal,
+      permissionSnapshotFor: async ({ taskId: candidateTaskId }) => {
+        const readback = await grantJournal.readTaskGrant(candidateTaskId);
+        const authority = projectTaskGrantAuthority({ readback, principalOwner: fixtureControlOwner });
+        return { ownerRef: authority.owner, permissionRevision: authority.permissionRevision };
+      },
+    });
+    coordinator.createTask({ title: 'missing grant', directive: 'must fail at openActiveTurn', taskId });
+    const allocation = coordinator.prepareExecution(taskId, { prompt: 'missing grant execution' });
+    await assert.rejects(() => coordinator.releaseExecution(taskId, allocation.operationId), /task grant is missing/);
+    assert.deepEqual(await activeTurnJournal.replay(), []);
+    assert.equal(driverCreated, false, 'a missing grant must never reach the provider driver');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('UiRuntimeService real assembly derives the active-turn permission revision from the durable grant', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-service-permission-snapshot-'));
+  try {
+    const taskControlJournal = new JsonlOrganJournal(join(root, 'task-control.jsonl'));
+    const grantJournal = new JsonlTaskGrantJournal(taskControlJournal);
+    const activeTurnJournal = new FileActiveTurnJournal(join(root, 'active-turn.jsonl'));
+
+    let readTaskGrantCount = 0;
+    const countingGrantPort: TaskGrantPort = {
+      readTaskGrant: async (candidate) => {
+        readTaskGrantCount += 1;
+        return grantJournal.readTaskGrant(candidate);
+      },
+      grant: (input) => grantJournal.grant(input),
+      revoke: (input) => grantJournal.revoke(input),
+      withAuthorizedNewBusiness: (input, register) => grantJournal.withAuthorizedNewBusiness(input, register),
+    };
+
+    let admitCount = 0;
+    const service = new UiRuntimeService({
+      mode: 'fake',
+      organId,
+      principalOwner: fixtureControlOwner,
+      taskGrantPort: countingGrantPort,
+      binding,
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+      checkpointStoreFor: (candidateTaskId, cycleId) => new FileCheckpointStore(
+        join(root, `task-${candidateTaskId.value}-cycle-${cycleId.value}.jsonl`),
+      ),
+      attentionPort: attentionPort(),
+      providerState: 'ready',
+      journal: new UiRuntimeJournal(join(root, 'ui-runtime.jsonl')),
+      closurePort: new UiRuntimeJournal(join(root, 'closure.jsonl')),
+      memory: testMemory('service-permission-snapshot'),
+      explicitBrainInterpreter: { interpret: async () => { throw new Error('explicit brain is not configured for the permission snapshot test'); } },
+      activeTurnJournal,
+      runtimeComposition: {
+        admitExecution: async () => {
+          admitCount += 1;
+        },
+        createTaskAssembly({ scope, checkpointJournal, executionAgent, maxAttempts, childCallPort }) {
+          const pool = runtimePool();
+          const orchestration = new OrchestrationManager({
+            ownerId: 'w2-live-step-test',
+            runtimePool: pool,
+            executionAgent: executionAgent as ExecutionAgentPort,
+            reviewAgent: passingReviewAgent(),
+            mergeCoordinator,
+            maxAttempts: maxAttempts ?? 1,
+            ...(childCallPort === undefined ? {} : { childCallPort }),
+          });
+          return { orchestration, runtimePool: pool };
+        },
+      },
+    });
+
+    // `UiRuntimeService.createTask` mints its own Task id, so the durable grant
+    // is written for the real service-created Task before the release reads it.
+    const task = service.createTask({ title: 'service permission snapshot', directive: 'derive revision from the durable grant' });
+    const grantScope: ScopeRef = { organId, taskId: task.taskId };
+    const grantRequest = {
+      taskId: task.taskId,
+      owner: fixtureControlOwner,
+      capability: {
+        actionId: TASK_EXECUTION_ACTION_ID,
+        capabilities: [TASK_EXECUTION_CAPABILITY],
+        scope: grantScope,
+      },
+    } as const;
+    const firstGrant = await grantJournal.grant({ ...grantRequest, requestId: 'service-grant-1', expectedRevision: 0 });
+    assert.equal(firstGrant.grant?.revision, 1);
+    const secondGrant = await grantJournal.grant({ ...grantRequest, requestId: 'service-grant-2', expectedRevision: 1 });
+    assert.equal(secondGrant.grant?.revision, 2);
+    assert.equal(secondGrant.grant?.state, 'granted');
+
+    const started = await service.startExecution(task.taskId, { prompt: 'permission snapshot execution' });
+
+    // The release resolves at the admission/driver boundary; let the fake
+    // execution reach its terminal state before reading the durable journal or
+    // removing the fixture root.
+    await waitFor(() => service.taskDashboard(task.taskId).state === 'succeeded', 8000);
+
+    const opened = (await activeTurnJournal.replay()).find((record) => record.kind === 'binding-opened');
+    if (!opened || opened.kind !== 'binding-opened') throw new Error('openActiveTurn did not write a binding-opened record');
+    assert.equal(opened.binding.admittedTurn.permissionRevision, '2');
+    assert.equal(opened.binding.execution.runtimeId, `ui-runtime-${started.operationId.value}`);
+    assert.equal(opened.binding.execution.executionEpoch, started.executionEpoch);
+    assert.ok(readTaskGrantCount >= 2, `permissionSnapshotFor must read the durable grant through the real service wiring: read count=${readTaskGrantCount}`);
+    assert.equal(admitCount, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('UiRuntimeService real assembly rejects revoked and wrong-owner grants before any binding', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-service-permission-boundary-'));
+  try {
+    const taskControlJournal = new JsonlOrganJournal(join(root, 'task-control.jsonl'));
+    const grantJournal = new JsonlTaskGrantJournal(taskControlJournal);
+    const activeTurnJournal = new FileActiveTurnJournal(join(root, 'active-turn.jsonl'));
+    let admitCount = 0;
+    const service = new UiRuntimeService({
+      mode: 'fake',
+      organId,
+      principalOwner: fixtureControlOwner,
+      taskGrantPort: grantJournal,
+      binding,
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+      checkpointStoreFor: (candidateTaskId, cycleId) => new FileCheckpointStore(
+        join(root, `task-${candidateTaskId.value}-cycle-${cycleId.value}.jsonl`),
+      ),
+      attentionPort: attentionPort(),
+      providerState: 'ready',
+      journal: new UiRuntimeJournal(join(root, 'ui-runtime.jsonl')),
+      closurePort: new UiRuntimeJournal(join(root, 'closure.jsonl')),
+      memory: testMemory('service-permission-boundary'),
+      explicitBrainInterpreter: { interpret: async () => { throw new Error('explicit brain is not configured for the permission boundary test'); } },
+      activeTurnJournal,
+      runtimeComposition: {
+        admitExecution: async () => {
+          admitCount += 1;
+        },
+      },
+    });
+
+    const assertExplicitDenial = (error: unknown): true => {
+      const code = (error as { readonly code?: unknown } | undefined)?.code;
+      const message = error instanceof Error ? error.message : String(error);
+      const surface = `${typeof code === 'string' ? code : ''} ${message}`;
+      assert.match(surface, /task grant|permission|authority/i, `denied start must name the authorization failure: ${surface}`);
+      return true;
+    };
+
+    // A revoked grant stays in the durable readback but is not active authority.
+    const revokedTask = service.createTask({ title: 'revoked grant', directive: 'must fail before binding' });
+    const revokedScope: ScopeRef = { organId, taskId: revokedTask.taskId };
+    await grantJournal.grant({
+      taskId: revokedTask.taskId,
+      requestId: 'revoked-grant-1',
+      expectedRevision: 0,
+      owner: fixtureControlOwner,
+      capability: { actionId: TASK_EXECUTION_ACTION_ID, capabilities: [TASK_EXECUTION_CAPABILITY], scope: revokedScope },
+    });
+    const revoked = await grantJournal.revoke({ requestId: 'revoked-grant-revoke', taskId: revokedTask.taskId, owner: fixtureControlOwner, expectedRevision: 1 });
+    assert.equal(revoked.grant?.state, 'revoked');
+    const revokedBefore = (await activeTurnJournal.replay()).length;
+    await assert.rejects(() => service.startExecution(revokedTask.taskId, { prompt: 'revoked grant execution' }), assertExplicitDenial);
+    assert.equal((await activeTurnJournal.replay()).length, revokedBefore, 'a revoked grant must not write any active-turn record');
+    assert.ok(service.taskDashboard(revokedTask.taskId).state !== 'running', 'a revoked grant must not start the execution');
+
+    // A wrong-owner grant stays granted but its owner is not the verified principal.
+    const wrongOwner = 'service-not-the-principal';
+    const wrongTask = service.createTask({ title: 'wrong owner grant', directive: 'must fail before binding' });
+    const wrongScope: ScopeRef = { organId, taskId: wrongTask.taskId };
+    await grantJournal.grant({
+      taskId: wrongTask.taskId,
+      requestId: 'wrong-owner-grant-1',
+      expectedRevision: 0,
+      owner: fixtureControlOwner,
+      capability: { actionId: TASK_EXECUTION_ACTION_ID, capabilities: [TASK_EXECUTION_CAPABILITY], scope: wrongScope },
+    });
+    const wrong = await grantJournal.grant({
+      taskId: wrongTask.taskId,
+      requestId: 'wrong-owner-grant-2',
+      expectedRevision: 1,
+      owner: wrongOwner,
+      capability: { actionId: TASK_EXECUTION_ACTION_ID, capabilities: [TASK_EXECUTION_CAPABILITY], scope: wrongScope },
+    });
+    assert.equal(wrong.grant?.revision, 2);
+    assert.equal(wrong.grant?.owner, wrongOwner);
+    const wrongBefore = (await activeTurnJournal.replay()).length;
+    await assert.rejects(() => service.startExecution(wrongTask.taskId, { prompt: 'wrong owner grant execution' }), assertExplicitDenial);
+    assert.equal((await activeTurnJournal.replay()).length, wrongBefore, 'a wrong-owner grant must not write any active-turn record');
+    assert.ok(service.taskDashboard(wrongTask.taskId).state !== 'running', 'a wrong-owner grant must not start the execution');
+
+    assert.equal(admitCount, 2, 'each denied start must still reach the admission edge before the turn open');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

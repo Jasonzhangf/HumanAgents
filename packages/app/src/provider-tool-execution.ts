@@ -513,7 +513,9 @@ function reportOutputRef(outputId: string): string {
  * the readback route can resolve a report without any in-process bookkeeping.
  */
 function reportAssetId(outputId: string, contentDigest: string): string {
-  return safeId(`provider-tool-output-${outputId}-${contentDigest.slice(-12)}`);
+  const prefix = 'provider-tool-output-';
+  const suffix = contentDigest.slice(-12);
+  return safeId(`${prefix}${safeId(outputId).slice(0, 96 - prefix.length - suffix.length - 1)}-${suffix}`);
 }
 
 function outputIdFromRef(outputRef: string): string | undefined {
@@ -527,7 +529,9 @@ function artifactOutputRef(outputId: string): string {
 }
 
 function artifactAssetId(outputId: string, contentDigest: string): string {
-  return safeId(`provider-tool-artifact-${outputId}-${contentDigest.slice(-12)}`);
+  const prefix = 'provider-tool-artifact-';
+  const suffix = contentDigest.slice(-12);
+  return safeId(`${prefix}${safeId(outputId).slice(0, 96 - prefix.length - suffix.length - 1)}-${suffix}`);
 }
 
 function outputIdFromArtifactRef(artifactRef: string): string | undefined {

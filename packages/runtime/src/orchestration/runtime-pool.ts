@@ -374,6 +374,27 @@ export class AgentRuntimePoolManager {
       }
     }
 
+    if (decision.action === 'recycle') {
+      const recyclable = this.runtimes.get(decision.runtimeId);
+      if (recyclable) {
+        try {
+          await this.disposeRuntime(recyclable);
+          this.runtimes.delete(recyclable.runtimeId);
+        } catch (error) {
+          return {
+            status: 'blocked',
+            issue: issueFromError(error, {
+              code: 'runtime-recycle-failed',
+              ownerId: decision.ownerId,
+              scope: input.scope,
+              conditionRef: `orchestration.runtime.recycle.${recyclable.runtimeId}`,
+              fallbackEvidenceRefs: input.evidenceRefs,
+            }),
+          };
+        }
+      }
+    }
+
     this.generationSequence += 1;
     const generation = this.generationSequence;
     const spawning: RuntimeRecord = {

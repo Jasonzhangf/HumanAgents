@@ -96,7 +96,7 @@ export interface OrchestrationRuntimePoolSnapshot {
   readonly runtimes: readonly OrchestrationRuntimeCandidate[];
 }
 
-export type OrchestrationPoolAction = 'reuse' | 'spawn' | 'wait' | 'blocked';
+export type OrchestrationPoolAction = 'reuse' | 'spawn' | 'recycle' | 'wait' | 'blocked';
 
 export interface OrchestrationPoolDecision {
   readonly action: OrchestrationPoolAction;

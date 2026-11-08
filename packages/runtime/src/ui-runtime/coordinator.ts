@@ -277,6 +277,22 @@ export interface RuntimeTaskSnapshot {
   readonly error?: RuntimeTaskError;
 }
 
+/**
+ * One real child lifecycle fact produced by the child call port or the native
+ * child producer after the owning checkpoint / return / adoption mutation
+ * already committed. The runtime observes it to project the same
+ * `provider.model` step into the task event stream; it never synthesizes the
+ * event itself.
+ */
+export interface RuntimeChildLifecycleEvent {
+  readonly state: 'child.prepared' | 'child.returned' | 'child.adopted' | 'review.checkpointed';
+  readonly kind: 'execution' | 'review';
+  readonly invocationId: string;
+  readonly turnId: string;
+}
+
+export type RuntimeChildLifecycleObserver = (event: RuntimeChildLifecycleEvent) => void;
+
 export interface RuntimeExecutionDriver extends AgentDriver {
   close(): Promise<ProviderCloseResult>;
   /**
@@ -288,7 +304,10 @@ export interface RuntimeExecutionDriver extends AgentDriver {
    * compiling and running unchanged; the coordinator never mints a manager,
    * driver, pool or assembly just to bind one.
    */
-  bindChildCallManager?(manager: Pick<OrchestrationManager, 'callChild'>): void;
+  bindChildCallManager?(
+    manager: Pick<OrchestrationManager, 'callChild'>,
+    observer?: RuntimeChildLifecycleObserver,
+  ): void;
   /** Canonical turn owner; a transport or projection checkpoint cannot replace it. */
   readonly standardTurn?: {
     acceptReviews(refs: readonly JournalCommitRef[]): Promise<void>;
@@ -703,12 +722,28 @@ export interface RuntimeTaskCoordinatorOptions {
   };
   readonly recoveryReferencesFor?: (binding: import('../../../contracts/src/index.js').ActiveTurnBinding) => Promise<Pick<RecoveryCaptureReferences, 'completionLookups' | 'recovery'>>;
   /**
+   * The verified runtime principal used to derive the task-scoped grant
+   * authority. It is a wiring fact, not a control source; it is only supplied
+   * to `permissionSnapshotFor` and is never persisted here.
+   */
+  readonly principalOwner?: string;
+  /**
    * Runtime permission/binding snapshot used to open the active turn. It must
    * come from real assembled Runtime inputs. It is required whenever an
    * orchestrated execution is admitted; a missing snapshot stops the active
    * turn open instead of fabricating a permission revision.
    */
   readonly permissionSnapshot?: RuntimeBindingSnapshot;
+  /**
+   * Derives the real owner and permission revision from the task-scoped grant
+   * instead of a static snapshot. When bound, `permissionSnapshot` supplies no
+   * authority; the Runtime derives `runtimeId`/`executionEpoch` from the
+   * operation and the returned owner/revision from the committed grant.
+   */
+  readonly permissionSnapshotFor?: (input: {
+    readonly taskId: TaskId;
+    readonly principalOwner: string;
+  }) => Promise<Pick<RuntimeBindingSnapshot, 'ownerRef' | 'permissionRevision'>>;
   /**
    * Stores the refined child delivery asset so a cold read can resolve it. The
    * App assembles the durable store; the Runtime only references it.
@@ -2906,6 +2941,7 @@ export class RuntimeTaskCoordinator {
     record.composition = undefined;
     record.checkpointBoundary = undefined;
     record.taskAssembly = undefined;
+    delete record.assignment;
     record.implicitRequirement = input.implicitRequirement;
     record.nextStep = '完成执行注册与覆盖后释放';
     record.allowedActions = ['stop'];
@@ -3231,7 +3267,7 @@ export class RuntimeTaskCoordinator {
     // executor, which resolves the driver from this record instead of a second
     // acquire or a stale placeholder.
     record.driver = prepared.driver;
-    this.bindChildCallManager(prepared.driver, assembly);
+    this.bindChildCallManager(prepared.driver, assembly, record, operation, scope);
     const assignment = prepared.source.assignment;
     const stageNodeId = `stage-${operation.operationId.value}`;
     record.currentNode = RUNTIME_NODE_MARKERS.orchestrationPlan;
@@ -4549,7 +4585,31 @@ export class RuntimeTaskCoordinator {
   ): Promise<ActiveTurnContext | undefined> {
     if (!this.options.activeTurnJournal && !this.options.activeTurnJournalFor) return undefined;
     if (record.activeTurn?.admittedTurn.turnId === newActiveTurnId(operation.operationId.value)) return record.activeTurn;
-    const snapshot = this.options.permissionSnapshot;
+    let snapshot = this.options.permissionSnapshot;
+    if (this.options.permissionSnapshotFor) {
+      const derived = await this.options.permissionSnapshotFor({
+        taskId: record.taskId,
+        principalOwner: this.options.principalOwner ?? '',
+      });
+      if (
+        derived === undefined
+        || derived.ownerRef.trim() === ''
+        || derived.permissionRevision.trim() === ''
+      ) {
+        throw new RuntimeTaskControlError(
+          'active-turn.permission-snapshot.invalid',
+          RUNTIME_OWNER,
+          'the derived permission snapshot is missing its owner or grant revision',
+          'read the committed task grant before admitting an orchestrated execution',
+        );
+      }
+      snapshot = {
+        runtimeId: this.runtimeId(operation.operationId),
+        executionEpoch: operation.executionEpoch,
+        ownerRef: derived.ownerRef,
+        permissionRevision: derived.permissionRevision,
+      };
+    }
     if (!snapshot) {
       throw new RuntimeTaskControlError(
         'active-turn.permission-snapshot.missing',
@@ -5004,9 +5064,32 @@ export class RuntimeTaskCoordinator {
   private bindChildCallManager(
     driver: RuntimeExecutionDriver | undefined,
     assembly: RuntimeTaskAssembly | undefined,
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
   ): void {
     if (driver === undefined || assembly === undefined) return;
-    driver.bindChildCallManager?.(assembly.orchestration);
+    const observer: RuntimeChildLifecycleObserver = (event) => {
+      if (record.operationId === undefined || operation === undefined) return;
+      const canPushLive = record.executionEpoch === operation.executionEpoch
+        && !operation.events.some((entry) => entry.kind === 'execution.terminal' && entry.terminalPhase === 'final');
+      if (!canPushLive) return;
+      this.pushEvent(
+        record,
+        operation,
+        'provider.model',
+        event.state,
+        event.kind === 'execution'
+          ? `child ${event.state} ${event.invocationId}`
+          : `child review ${event.invocationId} ${event.state}`,
+        [this.operationScopeEvidence(scope, event.state)],
+        STEP_OWNER,
+        false,
+        undefined,
+        { turn: { turnId: event.turnId, requestId: event.invocationId } },
+      );
+    };
+    driver.bindChildCallManager?.(assembly.orchestration, observer);
   }
 
   private async decideOrchestratorAction(
@@ -5536,7 +5619,7 @@ export class RuntimeTaskCoordinator {
                   attemptPreparationInput,
                 );
                 record.driver = attemptDriver;
-                coordinator.bindChildCallManager(attemptDriver, record.taskAssembly);
+                coordinator.bindChildCallManager(attemptDriver, record.taskAssembly, record, operation, scope);
                 if (record.stopping) {
                   stoppingPreparation = true;
                   await coordinator.stopPreparedExecution(record, operation);
@@ -5594,7 +5677,7 @@ export class RuntimeTaskCoordinator {
                   attemptExecutionEpoch: operation.executionEpoch,
                 };
                 const retryDriver = await coordinator.options.createDriver(retryPreparationInput);
-                coordinator.bindChildCallManager(retryDriver, record.taskAssembly);
+                coordinator.bindChildCallManager(retryDriver, record.taskAssembly, record, operation, scope);
                 const retryBoundary = new ContextCheckpointBoundary(
                   coordinator.options.checkpointStoreFor(record.taskId, scope.cycleId!),
                   coordinator.now,
@@ -5754,7 +5837,7 @@ export class RuntimeTaskCoordinator {
           maxAttempts: 2,
           ...(childCallPort === undefined ? {} : { childCallPort }),
         });
-        this.bindChildCallManager(driver, record.taskAssembly);
+        this.bindChildCallManager(driver, record.taskAssembly, record, operation, scope);
         const stageNodeId = `stage-${operation.operationId.value}`;
         // Single Runtime assignment construction (shared with the admitted-turn
         // producer); never rebuilt per admission/composition/dispatch.
@@ -5956,7 +6039,7 @@ export class RuntimeTaskCoordinator {
               taskId: record.taskId,
             });
           }
-          this.bindChildCallManager(driver, record.taskAssembly);
+          this.bindChildCallManager(driver, record.taskAssembly, record, operation, scope);
         }
         // The Runtime/composition is started exactly once. A clean retryable
         // provider transport failure (the first real request never reached a
@@ -6259,8 +6342,23 @@ export class RuntimeTaskCoordinator {
         } catch (cleanupError) {
           attachCleanupError(cleanupError);
         }
+        // The canonical tail commits this turn's checkpoint before align(). If
+        // that durable fact exists, the failure is post-commit: keep the exact
+        // transport cause, but mark committed-recovery instead of reporting the
+        // transport close as if the turn's committed result was lost.
+        const committedCheckpoint = record.checkpoint;
+        if (committedCheckpoint !== undefined) {
+          this.markCommittedCheckpointRecovery(record, effectiveError.nextAction);
+        }
         await this.tryPersistCurrentState(record,
           `turn-pending:${record.taskId.value}:${operation.operationId.value}:${effectiveError.code}`, scope);
+        if (committedCheckpoint !== undefined) {
+          this.pushEvent(record, operation, 'execution.terminal', 'blocked',
+            'checkpoint committed; post-commit lifecycle requires recovery',
+            [...closedProviderEvidenceRefs, ...committedCheckpoint.evidenceRefs],
+            effectiveError.ownerId, true, effectiveError.nextAction, { error: effectiveError }, 'final');
+          return;
+        }
         this.pushEvent(record, operation, 'execution.terminal', 'blocked', effectiveError.message,
           closedProviderEvidenceRefs, effectiveError.ownerId, effectiveError.retryable, effectiveError.nextAction, { error: effectiveError }, 'final');
         return;

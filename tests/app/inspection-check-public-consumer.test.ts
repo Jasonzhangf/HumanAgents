@@ -471,6 +471,128 @@ test('advertised child tools expose inspection selection and its independent out
   assert.equal(deliverProperties?.inspectionOutcome?.type, 'object');
 });
 
+test('advertised child.call defaults kind to execution and keeps review target-free', () => {
+  // Fifth real-frontend run: the model omitted target because the advertised
+  // schema marked it optional, then the runtime rejected it. The schema must
+  // describe the same execution contract the runtime parses.
+  // Sixth real-frontend run: the model omitted kind the same way, so the
+  // advertised contract must also describe the parser's execution default.
+  const call = APP_CHILD_TOOLS.find((tool) => tool.toolId === 'child.call');
+  const schema = call?.inputSchema as {
+    readonly required?: readonly string[];
+    readonly oneOf?: readonly {
+      readonly properties?: { readonly kind?: { readonly const?: string; readonly enum?: readonly string[] } };
+      readonly required?: readonly string[];
+    }[];
+  } | undefined;
+  const topLevelRequired = schema?.required ?? [];
+  const branches = schema?.oneOf ?? [];
+  const kindOf = (branch: (typeof branches)[number]) =>
+    branch.properties?.kind?.const ?? branch.properties?.kind?.enum?.[0];
+  const execution = branches.find((branch) => kindOf(branch) === 'execution');
+  assert.ok(execution, 'child.call must describe the execution branch');
+  for (const field of ['instructions', 'successCriteria', 'target']) {
+    assert.ok(execution!.required?.includes(field), `execution branch must require ${field}`);
+  }
+  assert.ok(!topLevelRequired.includes('kind'), 'top-level schema must not require kind; the parser defaults it to execution');
+  assert.ok(!execution!.required?.includes('kind'), 'execution branch must not require kind');
+  const review = branches.find((branch) => kindOf(branch) === 'review');
+  assert.ok(review, 'child.call must describe the review branch');
+  assert.ok(!review!.required?.includes('target'), 'review branch must not require target');
+  for (const field of ['kind', 'reviewKind', 'subjectInvocationId']) {
+    assert.ok(review!.required?.includes(field), `review branch must require ${field}`);
+  }
+});
+
+test('child.call execution without kind defaults to execution through the public producer', async () => {
+  // Sixth real-frontend run: the model omitted kind, and the parser rejected
+  // the call before admission. The runtime contract must default it.
+  const admitted: { readonly kind: string; readonly agentId: string }[] = [];
+  const producer = createAppChildProducer({
+    manager: {
+      async callChild() { throw new Error('the kindless fixture must not dispatch a child'); },
+    } as never,
+    parent: {
+      admittedTurn: { turnId: 'kindless-turn' },
+      executionIdentity: () => ({ executionEpoch: 1 }),
+    } as unknown as ActiveTurnContext,
+    parentAssignment: {} as never,
+    checkpoints: {
+      async pre() { throw new Error('pre-checkpoint must not run in the kindless fixture'); },
+      async post() { throw new Error('post-checkpoint must not run in the kindless fixture'); },
+    },
+    refinedDeliveryStore: {
+      async store() { throw new Error('refined store must not run in the kindless fixture'); },
+      async read() { throw new Error('refined read must not run in the kindless fixture'); },
+    },
+    bodyAssets: {
+      target: () => 'kindless-body',
+      async write() { throw new Error('body write must not run in the kindless fixture'); },
+      async read() { throw new Error('body read must not run in the kindless fixture'); },
+    },
+    bindChildRun: async () => { throw new Error('bindChildRun must not run in the kindless fixture'); },
+    prepareAgentProvider: async () => { throw new Error('prepareAgentProvider must not run in the kindless fixture'); },
+    roster: [{ agentId: 'executor', roleId: 'execution' }],
+    admitChildOperation: async (input) => {
+      admitted.push({ kind: input.kind, agentId: input.selected.agentId });
+      throw new Error('admission reached');
+    },
+  });
+  const error = await producer.execute({
+    execution: {
+      runtimeId: 'kindless-runtime',
+      taskId,
+      operationId: id('operation', 'kindless-child'),
+      executionEpoch,
+    },
+    scope: executionScope,
+    requestId: 'request-kindless-child',
+    call: {
+      callId: 'call-kindless-child', toolId: 'child.call', continuationRef: 'continuation-kindless-child',
+      arguments: {
+        purpose: 'compute 2+2', agentId: 'executor',
+        instructions: 'compute 2+2 and return exactly 4',
+        successCriteria: ['body is 4'], target: 'answer.txt',
+      },
+    },
+    signal: new AbortController().signal,
+  }).then(
+    () => undefined,
+    (caught: unknown) => (caught instanceof Error ? caught : new Error(String(caught))),
+  );
+  assert.ok(error, 'the kindless fixture must stop at admission');
+  assert.equal(error!.message, 'admission reached');
+  assert.deepEqual(admitted, [{ kind: 'execution', agentId: 'executor' }]);
+});
+
+test('advertised child.call enumerates the configured roster agentIds', async () => {
+  // Seventh real-frontend run: the model advertised itself the agentId
+  // "default", which is not in the configured roster. The advertised contract
+  // must derive agentId from the roster single source and name each configured
+  // id, so the unconfigured "default" is never advertised.
+  const childProducer = await import('../../packages/app/src/ui-runtime/child-producer.js') as unknown as {
+    readonly appChildCallTool?: (
+      roster: readonly { readonly agentId: string; readonly roleId: string }[],
+    ) => {
+      readonly description: string;
+      readonly inputSchema: {
+        readonly properties?: { readonly agentId?: { readonly enum?: readonly string[] } };
+      };
+    };
+  };
+  const roster = [
+    { agentId: 'orchestration-default', roleId: 'execution' },
+    { agentId: 'interaction-default', roleId: 'interaction' },
+  ];
+  const callTool = childProducer.appChildCallTool?.(roster);
+  assert.ok(callTool, 'child-producer must export appChildCallTool for the roster-derived advertisement');
+  const agentIdSchema = callTool!.inputSchema.properties?.agentId;
+  assert.deepEqual(agentIdSchema?.enum, ['orchestration-default', 'interaction-default']);
+  assert.ok(!agentIdSchema?.enum?.includes('default'), 'the unconfigured id "default" must not be advertised');
+  assert.match(callTool!.description, /orchestration-default/);
+  assert.match(callTool!.description, /interaction-default/);
+});
+
 test('App child producer settles the same typed inspection delivery on new and replay without rerun', async () => {
   // Failure basis: a new inspection call can lose its typed outcome, and replay can
   // run the child again or skip required settlement. Impact: a measurement is lost
