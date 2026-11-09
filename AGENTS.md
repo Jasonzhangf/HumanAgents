@@ -80,7 +80,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - master 是项目唯一负责人，项目进度由 master 负责推进、验收、集成和汇报；peer 缺位或失联不改变 master 的进度责任。
 - 推动项目向前是最高优先级。master 必须主动用尽一切可用编排手段解除阻塞并保持主线前进，不能把 peer 缺位、角色缺失、外部等待或权限缺口当作停下等待的借口；无法完成当前动作时继续推进其他可执行工作。
 - 任何角色缺失都要灵活处理：reviewer、planner、裁判或其他固定角色缺失时，按现有编排规则改派可用 peer、独立 worker 或已有 review/plan 流程承接，不得因角色缺失暂停或卡住整条主线。
-- 独立 reviewer 优先选择另一个空闲 peer 或独立 worker；没有可用的 idle peer，且 subagent 独立 review 不可用的极端情况下，master（Jenny）可亲自承担独立 review，仍须按现有 review 合同产出真实审查证据，不得把“角色缺失”写成硬阻塞。
+- 独立 reviewer 默认使用独立 Codex 编排的独立 reviewer（`codex-auto-review` / Codex OAuth 独立会话）；独立 reviewer 不可用时，用普通空闲 peer 承接 review；仍有 reviewer 或 peer 空闲时，让它 review。master（Jenny）不是默认 review 对象，不承担常规评审。只有没有 idle worker、subagent review 入口真实失效且已确认无其他可承接 peer 的极端情况下，master 才能临时自代 review，并按 review 合同记录实际审查者、已尝试路径、极端原因和独立性缺口，不得把该结果标为正常独立 review。
 - 具体 feature/debug/重构/迁移/清理任务必须拆分给 peer 执行；master 只做目标拆解、
   依赖判定、派发、证据验收、集成裁决和最终验收，不亲自实现 peer-owned concrete task。
 - 全局规则提供原则，本项目规则提供 HumanAgent 的执行细节；不得把项目细节反向当作全局规则。
