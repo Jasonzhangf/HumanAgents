@@ -516,10 +516,11 @@ async function nativeResponsesUpstream(input: {
         const footerEntry = toolResult.output.split('\n').find((line) => line.startsWith('- evidenceId='));
         const ref = footerEntry?.match(/^- evidenceId=([^ ]+)/)?.[1];
         if (!ref) throw new Error('native wire file-write evidence footer is missing');
-        const section = (text: string) => ({ text, evidenceRefs: [ref] });
-        response.end(frame(toolCall('native-end', 'humanagent_turn_end', { summary: {
-          goal: section('Run the native CLI task'), actions: section('Wrote the native process result'),
-          result: section('Physical file readback is available'), expectedNextStep: section('Close this turn'),
+        response.end(frame(toolCall('native-end', 'humanagent_turn_end', { outcome: 'completed', summary: {
+          goal: 'Run the native CLI task',
+          actions: ['Wrote the native process result'],
+          result: { status: 'completed', text: 'Physical file readback is available' },
+          nextStep: 'Close this turn',
         }, deliveryRefs: [ref] })));
         return;
       }
