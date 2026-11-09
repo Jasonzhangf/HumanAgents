@@ -207,7 +207,11 @@ import {
   OrganHealthError,
   healthEvidenceRefs,
 } from '../../../runtime/src/health/index.js';
-import { DecisionTraceJournal, ExplicitBrainDecisionError } from '../../../runtime/src/explicit-brain/index.js';
+import {
+  DecisionTraceJournal,
+  ExplicitBrainDecisionError,
+  ExplicitBrainTerminalOutputError,
+} from '../../../runtime/src/explicit-brain/index.js';
 import type { ExplicitBrainAgentTarget, ExplicitBrainInputInterpreter } from '../explicit-brain-runtime.js';
 import type { MemoryReviewState } from '../memory-runtime.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
@@ -2261,6 +2265,28 @@ function apiError(error: unknown): UiRuntimeApiError {
       error.message,
       'inspect the explicit brain tool admission and scoped runtime owner',
       409,
+    );
+  }
+  if (error instanceof ExplicitBrainTerminalOutputError && error.closed) {
+    return new UiRuntimeApiError(
+      'explicit-brain.invalid-terminal-output',
+      'humanagent.runtime.explicit-brain',
+      `${error.message} (interaction ${error.interactionId})`,
+      `inspect the preserved raw Provider output for interaction ${error.interactionId}, then resubmit the explicit input`,
+      409,
+      error.evidenceRefs,
+      error,
+    );
+  }
+  if (error instanceof ExplicitBrainTerminalOutputError) {
+    return new UiRuntimeApiError(
+      'explicit-brain.terminal-output-recovery-pending',
+      'humanagent.runtime.explicit-brain',
+      `${error.message} (interaction ${error.interactionId})`,
+      `inspect the interaction state for interaction ${error.interactionId} and recover the failed terminal output before resubmitting`,
+      409,
+      error.evidenceRefs,
+      error,
     );
   }
   if (error instanceof RuntimeTaskControlError) {

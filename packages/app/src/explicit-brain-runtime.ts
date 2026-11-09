@@ -4,6 +4,7 @@ import {
   EXPLICIT_BRAIN_TEMPLATE_REF,
   id,
   type ExecutionRuntimePort,
+  type EvidenceRef,
   type InteractionParentProviderExecutionIdentityRef,
   type InteractionTurnIdentity,
   type OrganId,
@@ -30,6 +31,7 @@ import { WorkspaceCodeSearchFunctions } from '../../adapters/operations/src/inde
 import {
   ExplicitBrainDecisionExecutor,
   ExplicitBrainOperationalToolError,
+  ExplicitBrainTerminalOutputError,
   ExplicitTurnHelperSession,
   createInteractionParentTurnRawOwner,
   readInteractionProviderSettlement,
@@ -94,13 +96,15 @@ function digestArguments(args: Readonly<Record<string, unknown>>): string {
  * shape for its one re-answer allowance without matching error text, and it
  * keeps every other parse failure on its existing non-retryable lane.
  */
-class MultipleIntakeDecisionsError extends ExplicitBrainOperationalToolError {
+class MultipleIntakeDecisionsError extends ExplicitBrainTerminalOutputError {
   readonly decisionCount: number;
 
-  constructor(decisionCount: number) {
+  constructor(interactionId: string, decisionCount: number, cause?: unknown, evidenceRefs?: readonly EvidenceRef[]) {
     super(
-      'unsupported-tool',
+      interactionId,
       `interaction agent returned invalid JSON: the terminal output holds ${decisionCount} top-level JSON decision objects, and the intake contract requires exactly one`,
+      cause,
+      evidenceRefs,
     );
     this.name = 'MultipleIntakeDecisionsError';
     this.decisionCount = decisionCount;
@@ -400,44 +404,65 @@ function topLevelJsonObjectSpans(text: string): readonly { readonly start: numbe
 }
 
 /** Exported for focused contract tests of the explicit-intake reply parser. */
-export function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretationInput): ExplicitBrainInterpretation {
+export function parseInterpreterOutput(
+  output: string,
+  input: ExplicitBrainInterpretationInput,
+  evidenceRefs: readonly EvidenceRef[] = [],
+): ExplicitBrainInterpretation {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(output)?.[1];
   const scoped = fenced ?? output;
   const spans = topLevelJsonObjectSpans(scoped);
   const objects: Record<string, unknown>[] = [];
   let parseError: string | undefined;
+  let parseFailure: unknown;
   for (const span of spans) {
     let value: unknown;
     try {
       value = JSON.parse(scoped.slice(span.start, span.end));
     } catch (error) {
       parseError ??= error instanceof Error ? error.message : String(error);
+      parseFailure ??= error;
       continue;
     }
     if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
     objects.push(value as Record<string, unknown>);
   }
   if (objects.length === 0) {
-    throw new ExplicitBrainOperationalToolError(
-      'unsupported-tool',
+    throw new ExplicitBrainTerminalOutputError(
+      input.interactionId,
       spans.length === 0
         ? 'interaction agent returned invalid JSON: the terminal output holds no JSON decision object'
         : `interaction agent returned invalid JSON: ${parseError ?? 'the terminal output holds no JSON decision object'}`,
+      parseFailure,
+      evidenceRefs,
     );
   }
   if (objects.length === 1) {
     // One top-level object is the decision candidate: whether it satisfies the
     // intake contract is the contract check, not a span count.
-    return parseDecisionRecord(unwrapDecisionEnvelope(objects[0]!), input);
+    try {
+      return parseDecisionRecord(unwrapDecisionEnvelope(objects[0]!), input);
+    } catch (error) {
+      throw new ExplicitBrainTerminalOutputError(
+        input.interactionId,
+        `interaction agent returned a single JSON decision object that fails the explicit intake contract: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        error,
+        evidenceRefs,
+      );
+    }
   }
   // A model may echo the request envelope it was handed (`interactionId`,
   // `rawInput`, `taskCandidates`, ...) in front of its decision. That echo
   // states no decision kind, so only the objects that state one are decisions.
   const decisions = objects.filter((entry) => typeof entry.kind === 'string');
   if (decisions.length === 0) {
-    throw new ExplicitBrainOperationalToolError(
-      'unsupported-tool',
+    throw new ExplicitBrainTerminalOutputError(
+      input.interactionId,
       `interaction agent returned invalid JSON: the terminal output holds ${objects.length} top-level JSON objects and none of them is a decision object`,
+      undefined,
+      evidenceRefs,
     );
   }
   // Validate every candidate first, then select by priority. An invalid
@@ -445,15 +470,17 @@ export function parseInterpreterOutput(output: string, input: ExplicitBrainInter
   // completed tool execution into a blocked intake. Only when no candidate is
   // valid does the bounded re-answer path run, exactly once.
   const valid: ExplicitBrainInterpretation[] = [];
+  let candidateFailure: unknown;
   for (const candidate of decisions) {
     try {
       valid.push(parseDecisionRecord(candidate, input));
-    } catch {
+    } catch (error) {
       // Not a valid decision; a later candidate may still be valid.
+      candidateFailure ??= error;
     }
   }
   if (valid.length === 0) {
-    throw new MultipleIntakeDecisionsError(decisions.length);
+    throw new MultipleIntakeDecisionsError(input.interactionId, decisions.length, candidateFailure, evidenceRefs);
   }
   valid.sort((left, right) => intakeDecisionPriority(left.kind) - intakeDecisionPriority(right.kind));
   return valid[0]!;
@@ -670,6 +697,7 @@ export function createProviderExplicitBrainInterpreter(input: {
   ): Promise<never> => {
     try {
       await target.closeUnparseableTurn({ failedAt: input.clock.now() });
+      if (parseError instanceof ExplicitBrainTerminalOutputError) parseError.markClosed();
     } catch (closeError) {
       throw new AggregateError(
         [parseError, closeError],
@@ -718,7 +746,11 @@ export function createProviderExplicitBrainInterpreter(input: {
       : await live.owner.readFinalTurnOutput();
     let interpretation: ExplicitBrainInterpretation;
     try {
-      interpretation = parseInterpreterOutput(finalParentOutput.assistantText, request);
+      interpretation = parseInterpreterOutput(
+        finalParentOutput.assistantText,
+        request,
+        finalParentOutput.assistantContentRefs,
+      );
     } catch (parseError) {
       // The provider close is already committed here, so the unusable terminal
       // output can be closed by its own honest fact without leaving the turn
@@ -1027,7 +1059,11 @@ export function createProviderExplicitBrainInterpreter(input: {
             const finalParentOutput = await coldOwner.readClosedTurnOutput();
             let interpretation: ExplicitBrainInterpretation;
             try {
-              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, effectiveRequest);
+              interpretation = parseInterpreterOutput(
+                finalParentOutput.assistantText,
+                effectiveRequest,
+                finalParentOutput.assistantContentRefs,
+              );
             } catch (parseError) {
               // The closed turn's own durable terminal output is unusable.
               // Re-reading it can never recover; close it so new input works.
@@ -1065,7 +1101,11 @@ export function createProviderExplicitBrainInterpreter(input: {
             const finalParentOutput = await coldOwner.readReconciledTurnOutput();
             let interpretation: ExplicitBrainInterpretation;
             try {
-              interpretation = parseInterpreterOutput(finalParentOutput.assistantText, effectiveRequest);
+              interpretation = parseInterpreterOutput(
+                finalParentOutput.assistantText,
+                effectiveRequest,
+                finalParentOutput.assistantContentRefs,
+              );
             } catch (parseError) {
               return await closeUnparseableTurn(coldOwner, parseError);
             }
@@ -1120,6 +1160,7 @@ export function createProviderExplicitBrainInterpreter(input: {
        * explicit error and its own recovery lane.
        */
       let unparseableOutput = false;
+      let unparseableOutputFailure: unknown;
       /**
        * True only when the freshly executed batch above is unparseable because
        * it carried more than one complete decision object. This is the one
@@ -1286,12 +1327,17 @@ export function createProviderExplicitBrainInterpreter(input: {
         if (continuation === undefined) {
           const finalParentOutput = await createdOwner.readFinalTurnOutput();
           try {
-            interpretation = parseInterpreterOutput(finalParentOutput.assistantText, effectiveRequest);
+            interpretation = parseInterpreterOutput(
+              finalParentOutput.assistantText,
+              effectiveRequest,
+              finalParentOutput.assistantContentRefs,
+            );
           } catch (parseError) {
             // The terminal output is durable and unusable. Mark the shape so the
             // catch below can close the turn honestly after the provider close,
             // instead of leaving it pending forever.
             unparseableOutput = true;
+            unparseableOutputFailure = parseError;
             freshMultipleIntakeDecisions = parseError instanceof MultipleIntakeDecisionsError;
             throw parseError;
           }
@@ -1425,6 +1471,9 @@ export function createProviderExplicitBrainInterpreter(input: {
           // original explicit parse error stays the primary failure.
           try {
             await owner.closeUnparseableTurn({ failedAt: input.clock.now() });
+            if (unparseableOutputFailure instanceof ExplicitBrainTerminalOutputError) {
+              unparseableOutputFailure.markClosed();
+            }
           } catch (closeError) {
             cleanupFailures.push(closeError);
           }

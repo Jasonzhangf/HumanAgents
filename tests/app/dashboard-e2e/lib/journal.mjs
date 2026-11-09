@@ -20,8 +20,10 @@
  * contains nothing matching.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { open, readdir, readFile, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { taskIdValue } from './binding.mjs';
 
@@ -29,6 +31,7 @@ const KIND_PREFIX = (kind) => String(kind ?? '').split(' · ')[0];
 const RUNNER_REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const CHECKPOINT_FILE_NAME = /^task-[^\s]+-cycle-[^\s]+\.jsonl$/;
 const CONTROL_CHECKPOINT_FILE_NAME = 'task-control.jsonl';
+const EXPLICIT_BRAIN_JOURNAL_NAME = 'explicit-brain.jsonl';
 const OPERATION_LOCATOR = /^operation\/([^/]+)\/checkpoint$/;
 const CHECKPOINT_RECOVERY_LOCATOR = /^operation\/([^/]+)\/checkpoint-recovery$/;
 
@@ -52,12 +55,16 @@ async function loadAuthoritativeClasses(repoPath = RUNNER_REPO) {
   if (typeof jsonl.JsonlOrganJournal !== 'function') {
     throw new Error(`${jsonlPath} does not export JsonlOrganJournal`);
   }
+  if (typeof jsonl.applyExplicitBrainStateRecord !== 'function') {
+    throw new Error(`${jsonlPath} does not export applyExplicitBrainStateRecord`);
+  }
   if (typeof ui.UiRuntimeJournal !== 'function') {
     throw new Error(`${uiPath} does not export UiRuntimeJournal`);
   }
   authoritativeClasses = {
     repoPath: resolve(repoPath),
     JsonlOrganJournal: jsonl.JsonlOrganJournal,
+    applyExplicitBrainStateRecord: jsonl.applyExplicitBrainStateRecord,
     UiRuntimeJournal: ui.UiRuntimeJournal,
   };
   return authoritativeClasses;
@@ -161,23 +168,30 @@ export function isCheckpointJournalFile(path) {
   return CHECKPOINT_FILE_NAME.test(name) || name === CONTROL_CHECKPOINT_FILE_NAME;
 }
 
-function parseLooseJournal(text, path) {
-  const records = [];
-  const lines = text.split('\n');
-  for (let index = 0; index < lines.length; index += 1) {
-    const trimmed = lines[index].trim();
-    if (!trimmed) continue;
-    try {
-      const record = JSON.parse(trimmed);
-      if (record && typeof record === 'object' && record.__position === undefined) {
-        record.__position = index;
+async function scanLooseJournalForClassification(path) {
+  let hasCheckpoint = false;
+  const lines = createInterface({
+    input: createReadStream(path, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  });
+  let index = 0;
+  try {
+    for await (const line of lines) {
+      const trimmed = line.trim();
+      const position = index;
+      index += 1;
+      if (!trimmed) continue;
+      try {
+        const record = JSON.parse(trimmed);
+        if (record?.kind === 'checkpoint') hasCheckpoint = true;
+      } catch (error) {
+        throw new Error(`${path}: damaged journal record at line ${position + 1}: ${error instanceof Error ? error.message : String(error)}`);
       }
-      records.push(record);
-    } catch (error) {
-      throw new Error(`${path}: damaged journal record at line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  } finally {
+    lines.close();
   }
-  return records;
+  return { hasCheckpoint };
 }
 
 function withPosition(record, index) {
@@ -185,6 +199,76 @@ function withPosition(record, index) {
     Object.defineProperty(record, '__position', { value: index, enumerable: false, configurable: true });
   }
   return record;
+}
+
+/**
+ * Stream a JSONL file line by line without materializing it as one string.
+ * The interaction journal reaches several hundred megabytes, so one
+ * `readFile(..., 'utf8')` exceeds the V8 string limit and crashes before any
+ * record is read. Lines are decoded in bounded chunks; an over-long line fails
+ * loudly instead of silently dropping evidence.
+ */
+async function streamJournalLines(filePath, visit, { chunkBytes = 64 * 1024, maxLineBytes = 16 * 1024 * 1024 } = {}) {
+  const handle = await open(filePath, 'r');
+  const decoder = new TextDecoder();
+  const buffer = Buffer.allocUnsafe(chunkBytes);
+  let pending = '';
+  let lineNumber = 0;
+  const emit = (line) => {
+    lineNumber += 1;
+    const trimmed = line.trim();
+    if (trimmed) visit(trimmed, lineNumber);
+  };
+  try {
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      const text = decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
+      let start = 0;
+      for (let index = text.indexOf('\n'); index !== -1; index = text.indexOf('\n', start)) {
+        emit(pending + text.slice(start, index));
+        pending = '';
+        start = index + 1;
+      }
+      pending += text.slice(start);
+      if (pending.length > maxLineBytes) {
+        throw new Error(`${filePath}: journal line ${lineNumber + 1} exceeds ${maxLineBytes} bytes`);
+      }
+    }
+    const tail = decoder.decode();
+    if (tail) pending += tail;
+    if (pending.trim()) emit(pending);
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Read only the latest decoded explicit-brain state from the interaction
+ * journal. The state is delta-encoded, so the latest state still needs the full
+ * baseline chain, but only the running baseline and the latest decoded state are
+ * retained instead of every historical record.
+ */
+async function readLatestExplicitBrainState(filePath, applyRecord) {
+  let baseline;
+  let latest;
+  await streamJournalLines(filePath, (line, lineNumber) => {
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`${filePath}: damaged journal record at line ${lineNumber}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (parsed?.kind !== 'explicit-brain.state') return;
+    try {
+      const decoded = applyRecord(parsed, baseline);
+      baseline = decoded.baseline;
+      latest = decoded.record;
+    } catch (error) {
+      throw new Error(`${filePath}: damaged explicit-brain state at line ${lineNumber}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+  return latest;
 }
 
 /**
@@ -209,16 +293,25 @@ export async function readJournalStrict(paths, options = {}) {
 
   const uiPaths = [];
   const checkpointPaths = [];
+  const explicitBrainRecords = [];
   for (const path of list) {
-    let text;
-    try {
-      text = await readFile(path, 'utf8');
-    } catch (error) {
-      return { ok: false, records: [], error: `${path}: ${error instanceof Error ? error.message : String(error)}` };
+    if (basename(path) === EXPLICIT_BRAIN_JOURNAL_NAME) {
+      // The interaction journal reaches several hundred megabytes. A whole-file
+      // readFile/JSONL split exceeds the V8 string limit, so the strict read
+      // streams the file and keeps only the delta-decoded latest state that the
+      // settlement proof consumes.
+      let latestState;
+      try {
+        latestState = await readLatestExplicitBrainState(path, classes.applyExplicitBrainStateRecord);
+      } catch (error) {
+        return { ok: false, records: [], error: error instanceof Error ? error.message : String(error) };
+      }
+      if (latestState) explicitBrainRecords.push(latestState);
+      continue;
     }
-    let parsed;
+    let classification;
     try {
-      parsed = parseLooseJournal(text, path);
+      classification = await scanLooseJournalForClassification(path);
     } catch (error) {
       return { ok: false, records: [], error: error instanceof Error ? error.message : String(error) };
     }
@@ -226,7 +319,7 @@ export async function readJournalStrict(paths, options = {}) {
       checkpointPaths.push(path);
     } else if (basename(path) === 'ui-runtime-journal.jsonl') {
       uiPaths.push(path);
-    } else if (parsed.some((record) => record?.kind === 'checkpoint')) {
+    } else if (classification.hasCheckpoint) {
       // A caller may point the settlement proof at a checkpoint journal without
       // the canonical task-cycle file name; classify it by its real record kind.
       checkpointPaths.push(path);
@@ -237,6 +330,7 @@ export async function readJournalStrict(paths, options = {}) {
 
   const records = [];
   const checkpointRecords = [];
+  explicitBrainRecords.forEach((record, index) => records.push(withPosition(record, index)));
   for (const path of uiPaths) {
     let uiRecords;
     try {

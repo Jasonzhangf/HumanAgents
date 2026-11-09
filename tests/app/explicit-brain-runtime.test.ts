@@ -10,12 +10,17 @@ import {
   createExplicitBrainRuntime,
   createProviderExplicitBrainInterpreter,
   parseInterpreterOutput,
+  type ExplicitBrainInputInterpreter,
 } from '../../packages/app/src/explicit-brain-runtime.js';
 import {
   publishInteractionProviderSettlement,
   readInteractionProviderSettlement,
 } from '../../packages/runtime/src/explicit-brain/index.js';
-import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
+import {
+  DecisionTraceJournal,
+  DecisionTraceStore,
+  ExplicitBrainTerminalOutputError,
+} from '../../packages/runtime/src/explicit-brain/index.js';
 import {
   createInteractionParentTurnRawOwner,
   type InteractionSemanticCheckpointJournalPort,
@@ -24,7 +29,7 @@ import {
   type InteractionParentTurnSnapshot,
   type InteractionParentTurnAppend,
 } from '../../packages/runtime/src/explicit-brain/index.js';
-import { id, validateProviderSettlement, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef, type InteractionTurnIdentity, type OrganId, type OccurrenceExecutionOwner, type JournalCommitRef } from '../../packages/contracts/src/index.js';
+import { id, validateProviderSettlement, type EvidenceRef, type ProviderBinding, type ProviderCloseResult, type InteractionParentProviderExecutionIdentityRef, type InteractionProviderSettlementReceipt, type AnyProviderExecutionIdentityRef, type TasklessProviderExecutionIdentityRef, type InteractionTurnIdentity, type OrganId, type OccurrenceExecutionOwner, type JournalCommitRef } from '../../packages/contracts/src/index.js';
 import { ProviderAgentDriver, ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -5779,6 +5784,985 @@ test('provider explicit brain interpreter closes an unparseable live epoch and k
   } finally {
     await runtime?.close();
     await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: C1 observed an existing-task change whose Provider terminal
+// output was invalid JSON and whose public API collapsed to
+// `ui-runtime.unexpected`. Probability is confirmed by that live receipt; the
+// impact is that the user cannot tell what failed or which raw output to inspect.
+// Cost is one seeded terminal turn on the existing real Journal and evidence
+// fixture. The target assertion is the public typed-error boundary, not setup.
+test('public explicit interpret exposes invalid JSON as a typed failure with raw linkage', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-organize-public-red-'));
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-organize-public-red', providerId: 'provider-organize-public-red', protocol: 'responses',
+    endpointRef: 'recorded://organize-public-red', modelRef: 'model-organize-public-red',
+    configDigest: 'sha256:organize-public-red-config', capabilityDigest: 'sha256:organize-public-red-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const serviceJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [] });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps,
+    binding,
+    parentJournal: deps.parentJournal,
+    checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal,
+    turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port,
+  });
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId: deps.organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 0 }),
+    providerState: 'ready',
+    journal: serviceJournal,
+    closurePort: serviceJournal,
+    checkpointStoreFor: () => new FileCheckpointStore(join(root, 'checkpoint.jsonl')),
+    attentionPort: {
+      async publish(input) { return { attentionId: input.attentionId, delivered: true }; },
+      async resolve(input) { return { attentionId: input.attentionId, delivered: true }; },
+    },
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: 'organize-public-red',
+    },
+    explicitBrainInterpreter: interpreter,
+    runtimeComposition: { admitExecution: async () => {} },
+  });
+
+  try {
+    const rawInput = 'Rewrite the existing task objective and add an acceptance condition';
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: 'ui:organize-public-red',
+      rawInput,
+      channel: 'business',
+      requestKind: 'existing-task-change',
+    });
+    const interaction = await service.inspectExplicitInteraction(interactionId);
+    const request = {
+      interactionId,
+      inputRevision: 1,
+      sourceRef: interaction.sourceRef,
+      rawInput: interaction.rawInput,
+      clarifications: [],
+      taskCandidates: [],
+    };
+    const turn: InteractionTurnIdentity = {
+      organId: scope.organId,
+      interactionScopeId: scope.interactionScopeId,
+      interactionId,
+      inputRevision: 1,
+      turnId: 'explicit-interpret-organize-public-red',
+    };
+    const operationScope = { organId: scope.organId, operationId: id('operation', 'op-organize-public-red') };
+    const execution = {
+      runtimeId: turn.turnId,
+      ...operationScope,
+      executionEpoch: 1,
+      interactionTurn: turn,
+    };
+    const owner = createInteractionParentTurnRawOwner({
+      turn,
+      execution,
+      scope: operationScope,
+      initialInput: {
+        ref: await deps.rawEvidence.write({
+          scope: operationScope,
+          kind: 'execution',
+          type: 'initial-input',
+          locator: turn.turnId,
+          content: JSON.stringify(request),
+        }),
+        view: { kind: 'utf8-text' as const },
+      },
+      providerBinding: binding,
+      executionOwner: {
+        daemonLeaseId: 'lease-organize-public-red',
+        daemonGeneration: 1,
+        processStartToken: 'process-organize-public-red',
+      },
+      journal: deps.parentJournal,
+      rawContent: deps.rawContent,
+    });
+    await owner.openTurnInput();
+    const terminalRequest = { turnId: turn.turnId, requestId: 'request-organize-public-red' };
+    await owner.registerRequest({
+      execution,
+      record: { request: terminalRequest, scope: operationScope, phase: 'dispatching' },
+    });
+    await owner.registerRequest({
+      execution,
+      record: { request: terminalRequest, scope: operationScope, phase: 'dispatched' },
+    });
+    const invalidOutput = '{"kind":"answer","normalizedInput":"Rewrite the existing task objective and add an acceptance condition","knownFacts":[],"answer":"8","decisionRefs":[],}';
+    const invalidRaw = {
+      ref: await deps.rawEvidence.write({
+        scope: operationScope,
+        kind: 'execution',
+        type: 'assistant-text',
+        locator: 'invalid-terminal-output',
+        content: invalidOutput,
+      }),
+      view: { kind: 'utf8-text' as const },
+    };
+    await owner.acceptRawFact({
+      execution,
+      scope: operationScope,
+      request: terminalRequest,
+      producerSeq: 1,
+      fact: {
+        kind: 'content',
+        channel: 'assistant-text',
+        update: 'full',
+        contentUnitId: 'invalid-terminal-output',
+        content: invalidRaw,
+        complete: true,
+      },
+    });
+    await owner.acceptRawFact({
+      execution,
+      scope: operationScope,
+      request: terminalRequest,
+      producerSeq: 2,
+      fact: { kind: 'request-complete', terminal: 'completed' },
+    });
+    await owner.registerRequest({
+      execution,
+      record: { request: terminalRequest, scope: operationScope, phase: 'settled' },
+    });
+    await owner.recordProviderClose({
+      providerBinding: binding,
+      result: {
+        bindingId: binding.bindingId,
+        providerId: binding.providerId,
+        protocol: binding.protocol,
+        state: 'closed',
+        evidenceRefs: [await deps.rawEvidence.write({
+          scope: operationScope,
+          kind: 'execution',
+          type: 'close',
+          locator: 'organize-public-red-close',
+          content: 'closed',
+        })],
+      },
+      closedAt: new Date().toISOString(),
+    });
+
+    let publicError: UiRuntimeApiError | undefined;
+    await assert.rejects(
+      () => service.interpretExplicitInput({ interactionId }),
+      (error: unknown) => {
+        if (!(error instanceof UiRuntimeApiError)) throw error;
+        publicError = error;
+        assert.ok(error.code !== 'ui-runtime.unexpected',
+          'invalid JSON must cross the public service as a typed explicit-brain failure');
+        assert.equal(error.ownerId, 'humanagent.runtime.explicit-brain');
+        assert.ok(error.message.includes('invalid JSON'), error.message);
+        assert.ok(error.message.includes(interactionId),
+          'the public failure must keep its interaction association');
+        assert.ok(error.nextAction !== 'inspect the runtime error and retry from a new operation',
+          'the public failure must name an actionable recovery');
+        if (error.causeBody === undefined) {
+          throw new Error('the public failure must preserve the original parse failure');
+        }
+        assert.ok(error.causeBody.message.includes('Unexpected')
+          || error.causeBody.message.includes('invalid JSON'), error.causeBody.message);
+        return true;
+      },
+    );
+    if (publicError === undefined) throw new Error('the public failure was not captured');
+    assert.equal(publicError.code, 'explicit-brain.invalid-terminal-output',
+      'the closed unusable output uses the exact terminal-output code');
+    assert.ok(publicError.nextAction.includes('resubmit the explicit input'),
+      'a proven closed failure may promise one resubmit');
+    const [publicEvidenceRef] = publicError.evidenceRefs ?? [];
+    assert.ok(publicEvidenceRef !== undefined,
+      'the public failure must carry the committed raw-output evidence reference');
+    assert.equal(
+      new TextDecoder().decode(await deps.rawContent.read({
+        scope: publicEvidenceRef.scope,
+        content: {
+          ref: publicEvidenceRef,
+          view: { kind: 'utf8-text' as const },
+        },
+      })),
+      invalidOutput,
+      'the public evidence reference must resolve to the original Provider output',
+    );
+    const failures = await deps.parentJournal.readScopeParseFailures(scope);
+    assert.equal(failures.length, 1, 'the unusable terminal output is closed by one parse-failure fact');
+    const parseFailureSnapshot = await deps.parentJournal.readTurnSnapshot(failures[0]!.fact.turn);
+    const assistantContent = parseFailureSnapshot.acceptedFacts
+      .map(({ fact }) => fact.envelope.fact)
+      .find((fact) => fact.kind === 'content' && fact.channel === 'assistant-text');
+    if (assistantContent === undefined || assistantContent.kind !== 'content') {
+      throw new Error('the committed assistant-text fact is missing');
+    }
+    assert.equal(
+      new TextDecoder().decode(await deps.rawContent.read({
+        scope: parseFailureSnapshot.turnInput!.fact.scope,
+        content: assistantContent.content,
+      })),
+      invalidOutput,
+      'the original Provider output stays readable through the Journal evidence reference',
+    );
+    assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'matching',
+      'a failed organize turn must not fabricate a proposal or confirmed task mutation');
+    assert.equal(service.listTasks().counts.total, 0,
+      'the failed organize turn must not create or change a task');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: an existing-task-change terminal output can contain decision-
+// shaped JSON while every decision candidate fails the intake contract. The
+// user then has no valid decision, so the public service must preserve the
+// failure and leave the seeded target untouched until a separate confirmation.
+// Probability is confirmed by the parser's zero-valid-candidate path; impact is
+// a fabricated proposal or a target revision change before confirmation. Cost is
+// one closed terminal turn on the existing Journal fixture and one seeded task.
+test('public explicit interpret keeps a seeded existing target unchanged when no decision is valid', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-organize-no-decision-target-'));
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-organize-no-decision-target',
+    providerId: 'provider-organize-no-decision-target',
+    protocol: 'responses',
+    endpointRef: 'recorded://organize-no-decision-target',
+    modelRef: 'model-organize-no-decision-target',
+    configDigest: 'sha256:organize-no-decision-target-config',
+    capabilityDigest: 'sha256:organize-no-decision-target-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const serviceJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [] });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps,
+    binding,
+    parentJournal: deps.parentJournal,
+    checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal,
+    turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port,
+  });
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId: deps.organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 0 }),
+    providerState: 'ready',
+    journal: serviceJournal,
+    closurePort: serviceJournal,
+    checkpointStoreFor: () => new FileCheckpointStore(join(root, 'checkpoint.jsonl')),
+    attentionPort: {
+      async publish(input) { return { attentionId: input.attentionId, delivered: true }; },
+      async resolve(input) { return { attentionId: input.attentionId, delivered: true }; },
+    },
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: 'organize-no-decision-target',
+    },
+    explicitBrainInterpreter: interpreter,
+    runtimeComposition: { admitExecution: async () => {} },
+  });
+
+  const latestExplicitState = () => {
+    const record = serviceJournal.replay()
+      .filter((entry) => entry.kind === 'explicit-brain.state')
+      .at(-1);
+    if (record?.kind !== 'explicit-brain.state') {
+      throw new Error('the explicit interaction state was not persisted');
+    }
+    return record.state;
+  };
+  const latestTargetRevision = (taskId: string): number => {
+    const record = serviceJournal.replay()
+      .filter((entry) => (entry.kind === 'task.created' || entry.kind === 'task.updated')
+        && entry.taskId.value === taskId)
+      .at(-1);
+    if (record === undefined
+      || (record.kind !== 'task.created' && record.kind !== 'task.updated')) {
+      throw new Error('the seeded target task revision was not persisted');
+    }
+    return record.directiveRevision;
+  };
+
+  try {
+    const target = service.createTask({
+      title: 'existing organize target',
+      directive: 'keep the existing target input',
+    });
+    const targetDetailBefore = service.taskDetail(target.taskId);
+    const targetDashboardBefore = service.taskDashboard(target.taskId);
+    const targetRevisionBefore = latestTargetRevision(target.taskId.value);
+
+    const rawInput = 'Rewrite the existing task objective and add an acceptance condition';
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: 'ui:organize-no-decision-target',
+      rawInput,
+      channel: 'business',
+      requestKind: 'existing-task-change',
+    });
+    // The runtime persists its first explicit-brain state only when it accepts
+    // the input, so the durable baseline is captured after reception: that is
+    // the state the failed organize turn must leave unchanged.
+    const explicitStateBefore = latestExplicitState();
+    const envelopesBefore = explicitStateBefore.inbox.envelopes.length;
+    const taskInputRevisionsBefore = JSON.stringify(explicitStateBefore.taskInputRevisions ?? []);
+    const interaction = await service.inspectExplicitInteraction(interactionId);
+    const request = {
+      interactionId,
+      inputRevision: 1,
+      sourceRef: interaction.sourceRef,
+      rawInput: interaction.rawInput,
+      clarifications: [],
+      taskCandidates: [{
+        taskId: target.taskId.value,
+        title: target.title,
+        status: target.state,
+        currentInput: target.input,
+      }],
+    };
+    const turn: InteractionTurnIdentity = {
+      organId: scope.organId,
+      interactionScopeId: scope.interactionScopeId,
+      interactionId,
+      inputRevision: 1,
+      turnId: 'explicit-interpret-organize-no-decision-target',
+    };
+    const operationScope = {
+      organId: scope.organId,
+      operationId: id('operation', 'op-organize-no-decision-target'),
+    };
+    const execution = {
+      runtimeId: turn.turnId,
+      ...operationScope,
+      executionEpoch: 1,
+      interactionTurn: turn,
+    };
+    const owner = createInteractionParentTurnRawOwner({
+      turn,
+      execution,
+      scope: operationScope,
+      initialInput: {
+        ref: await deps.rawEvidence.write({
+          scope: operationScope,
+          kind: 'execution',
+          type: 'initial-input',
+          locator: turn.turnId,
+          content: JSON.stringify(request),
+        }),
+        view: { kind: 'utf8-text' as const },
+      },
+      providerBinding: binding,
+      executionOwner: {
+        daemonLeaseId: 'lease-organize-no-decision-target',
+        daemonGeneration: 1,
+        processStartToken: 'process-organize-no-decision-target',
+      },
+      journal: deps.parentJournal,
+      rawContent: deps.rawContent,
+    });
+    await owner.openTurnInput();
+    const terminalRequest = { turnId: turn.turnId, requestId: 'request-organize-no-decision-target' };
+    await owner.registerRequest({
+      execution,
+      record: { request: terminalRequest, scope: operationScope, phase: 'dispatching' },
+    });
+    await owner.registerRequest({
+      execution,
+      record: { request: terminalRequest, scope: operationScope, phase: 'dispatched' },
+    });
+    const proposal = {
+      revision: 1,
+      intent: 'change' as const,
+      title: 'Rewrite the existing target',
+      objective: 'Rewrite the existing target',
+      deliverable: 'A revised target',
+      deliveryConditions: [],
+      evidenceRefs: [],
+      blockingGaps: [],
+    };
+    const decisionItems = [
+      JSON.stringify({
+        kind: 'requirement',
+        normalizedInput: rawInput,
+        knownFacts: [],
+        decisionRefs: [],
+        intent: 'change',
+        proposal,
+      }),
+      JSON.stringify({
+        kind: 'requirement',
+        normalizedInput: rawInput,
+        knownFacts: [],
+        decisionRefs: [],
+        proposal: { ...proposal, revision: 999 },
+      }),
+    ];
+    for (const [index, text] of decisionItems.entries()) {
+      await owner.acceptRawFact({
+        execution,
+        scope: operationScope,
+        request: terminalRequest,
+        producerSeq: index + 1,
+        fact: {
+          kind: 'content',
+          channel: 'assistant-text',
+          update: 'full',
+          contentUnitId: `invalid-decision-${index}`,
+          content: {
+            ref: await deps.rawEvidence.write({
+              scope: operationScope,
+              kind: 'execution',
+              type: 'assistant-text',
+              locator: `invalid-decision-${index}`,
+              content: text,
+            }),
+            view: { kind: 'utf8-text' as const },
+          },
+          complete: true,
+        },
+      });
+    }
+    await owner.acceptRawFact({
+      execution,
+      scope: operationScope,
+      request: terminalRequest,
+      producerSeq: 3,
+      fact: { kind: 'request-complete', terminal: 'completed' },
+    });
+    await owner.registerRequest({
+      execution,
+      record: { request: terminalRequest, scope: operationScope, phase: 'settled' },
+    });
+    await owner.recordProviderClose({
+      providerBinding: binding,
+      result: {
+        bindingId: binding.bindingId,
+        providerId: binding.providerId,
+        protocol: binding.protocol,
+        state: 'closed',
+        evidenceRefs: [await deps.rawEvidence.write({
+          scope: operationScope,
+          kind: 'execution',
+          type: 'close',
+          locator: 'organize-no-decision-target-close',
+          content: 'closed',
+        })],
+      },
+      closedAt: new Date().toISOString(),
+    });
+
+    let publicError: UiRuntimeApiError | undefined;
+    await assert.rejects(
+      () => service.interpretExplicitInput({ interactionId }),
+      (error: unknown) => {
+        if (!(error instanceof UiRuntimeApiError)) throw error;
+        publicError = error;
+        assert.ok(error.code !== 'ui-runtime.unexpected',
+          `zero valid decision candidates must cross the public service as a typed explicit-brain failure (observed ${error.code})`);
+        assert.ok(error.code.startsWith('explicit-brain.'), `unexpected public error code: ${error.code}`);
+        assert.equal(error.ownerId, 'humanagent.runtime.explicit-brain');
+        assert.ok(error.message.includes('2 top-level JSON decision objects'), error.message);
+        assert.ok(error.message.includes(interactionId),
+          'the public failure must keep its interaction association');
+        assert.ok(error.nextAction !== 'inspect the runtime error and retry from a new operation',
+          'the public failure must name an actionable recovery');
+        assert.ok(error.httpStatus !== 500, 'a recoverable no-decision failure must not be a generic 500');
+        if (error.causeBody === undefined) {
+          throw new Error('the public failure must preserve the original no-decision failure');
+        }
+        assert.ok(error.causeBody.message.includes('2 top-level JSON decision objects'), error.causeBody.message);
+        return true;
+      },
+    );
+    if (publicError === undefined) throw new Error('the public failure was not captured');
+    assert.equal(publicError.code, 'explicit-brain.invalid-terminal-output',
+      'the closed no-decision output uses the exact terminal-output code');
+    assert.ok(publicError.nextAction.includes('resubmit the explicit input'),
+      'a proven closed failure may promise one resubmit');
+    const [publicEvidenceRef] = publicError.evidenceRefs ?? [];
+    assert.ok(publicEvidenceRef !== undefined,
+      'the public failure must carry the committed raw-output evidence reference');
+    const publicEvidenceText = new TextDecoder().decode(await deps.rawContent.read({
+      scope: publicEvidenceRef.scope,
+      content: {
+        ref: publicEvidenceRef,
+        view: { kind: 'utf8-text' as const },
+      },
+    }));
+    assert.ok(decisionItems.includes(publicEvidenceText),
+      'the public evidence reference must resolve to one committed no-decision output');
+
+    const afterFailure = await service.inspectExplicitInteraction(interactionId);
+    assert.equal(afterFailure.state, 'matching',
+      'the no-decision failure must stay recoverable, not fabricate a proposal');
+    assert.equal(afterFailure.draft, undefined);
+    assert.equal(afterFailure.revision, undefined);
+    assert.equal(afterFailure.confirmation, undefined);
+
+    const targetDetailAfter = service.taskDetail(target.taskId);
+    const targetDashboardAfter = service.taskDashboard(target.taskId);
+    const explicitStateAfter = latestExplicitState();
+    assert.deepEqual(targetDetailAfter, targetDetailBefore,
+      'the failed organize turn must not change the existing target detail before confirmation');
+    assert.equal(targetDashboardAfter.input, targetDashboardBefore.input,
+      'the failed organize turn must not change the target input');
+    assert.equal(targetDashboardAfter.executionEpoch, targetDashboardBefore.executionEpoch,
+      'the failed organize turn must not advance the target execution epoch');
+    assert.equal(latestTargetRevision(target.taskId.value), targetRevisionBefore,
+      'the failed organize turn must not change the target directive revision');
+    assert.equal(explicitStateAfter.inbox.envelopes.length, envelopesBefore,
+      'the failed organize turn must not append a target requirement envelope');
+    assert.equal(JSON.stringify(explicitStateAfter.taskInputRevisions ?? []), taskInputRevisionsBefore,
+      'the failed organize turn must not append a target input revision');
+    assert.equal(service.listTasks().counts.total, 1,
+      'the existing target remains the only task after the failed organize turn');
+
+    const failures = await deps.parentJournal.readScopeParseFailures(scope);
+    assert.equal(failures.length, 1, 'the unusable terminal output is closed by one parse-failure fact');
+    const parseFailureSnapshot = await deps.parentJournal.readTurnSnapshot(failures[0]!.fact.turn);
+    const assistantContent = parseFailureSnapshot.acceptedFacts
+      .map(({ fact }) => fact.envelope.fact)
+      .find((fact) => fact.kind === 'content' && fact.channel === 'assistant-text');
+    if (assistantContent === undefined || assistantContent.kind !== 'content') {
+      throw new Error('the committed assistant-text fact is missing');
+    }
+    assert.equal(
+      new TextDecoder().decode(await deps.rawContent.read({
+        scope: parseFailureSnapshot.turnInput!.fact.scope,
+        content: assistantContent.content,
+      })),
+      decisionItems[0],
+      'the original no-decision output stays readable through the Journal evidence reference',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: one syntactically valid decision object can still fail the
+// explicit intake contract. The parser then throws an operational tool error,
+// which the public service collapses to `ui-runtime.unexpected` instead of the
+// closed terminal-output failure. Impact: the user loses the raw-output link
+// and the genuinely available recovery path. Cost: one seeded terminal turn on
+// the existing Journal and evidence fixture.
+test('public explicit interpret returns a closed typed failure for one contract-invalid decision object', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-organize-single-invalid-decision-'));
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-organize-single-invalid-decision',
+    providerId: 'provider-organize-single-invalid-decision',
+    protocol: 'responses',
+    endpointRef: 'recorded://organize-single-invalid-decision',
+    modelRef: 'model-organize-single-invalid-decision',
+    configDigest: 'sha256:organize-single-invalid-decision-config',
+    capabilityDigest: 'sha256:organize-single-invalid-decision-capability',
+  };
+  const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
+  const serviceJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [] });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    ...deps,
+    binding,
+    parentJournal: deps.parentJournal,
+    checkpointJournal: deps.helperJournal,
+    helperJournal: deps.helperJournal,
+    turnHelperJournal: deps.helperJournal,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port,
+  });
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId: deps.organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 0 }),
+    providerState: 'ready',
+    journal: serviceJournal,
+    closurePort: serviceJournal,
+    checkpointStoreFor: () => new FileCheckpointStore(join(root, 'checkpoint.jsonl')),
+    attentionPort: {
+      async publish(input) { return { attentionId: input.attentionId, delivered: true }; },
+      async resolve(input) { return { attentionId: input.attentionId, delivered: true }; },
+    },
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: 'organize-single-invalid-decision',
+    },
+    explicitBrainInterpreter: interpreter,
+    runtimeComposition: { admitExecution: async () => {} },
+  });
+
+  const latestExplicitState = () => {
+    const record = serviceJournal.replay()
+      .filter((entry) => entry.kind === 'explicit-brain.state')
+      .at(-1);
+    if (record?.kind !== 'explicit-brain.state') {
+      throw new Error('the explicit interaction state was not persisted');
+    }
+    return record.state;
+  };
+  const latestTargetRevision = (taskId: string): number => {
+    const record = serviceJournal.replay()
+      .filter((entry) => (entry.kind === 'task.created' || entry.kind === 'task.updated')
+        && entry.taskId.value === taskId)
+      .at(-1);
+    if (record === undefined
+      || (record.kind !== 'task.created' && record.kind !== 'task.updated')) {
+      throw new Error('the seeded target task revision was not persisted');
+    }
+    return record.directiveRevision;
+  };
+
+  try {
+    const target = service.createTask({
+      title: 'existing organize target',
+      directive: 'keep the existing target input',
+    });
+    const targetDetailBefore = service.taskDetail(target.taskId);
+    const targetDashboardBefore = service.taskDashboard(target.taskId);
+    const targetRevisionBefore = latestTargetRevision(target.taskId.value);
+
+    const rawInput = 'Rewrite the existing task objective and add an acceptance condition';
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: 'ui:organize-single-invalid-decision',
+      rawInput,
+      channel: 'business',
+      requestKind: 'existing-task-change',
+    });
+    const explicitStateBefore = latestExplicitState();
+    const envelopesBefore = explicitStateBefore.inbox.envelopes.length;
+    const taskInputRevisionsBefore = JSON.stringify(explicitStateBefore.taskInputRevisions ?? []);
+    const interaction = await service.inspectExplicitInteraction(interactionId);
+    const request = {
+      interactionId,
+      inputRevision: 1,
+      sourceRef: interaction.sourceRef,
+      rawInput: interaction.rawInput,
+      clarifications: [],
+      taskCandidates: [{
+        taskId: target.taskId.value,
+        title: target.title,
+        status: target.state,
+        currentInput: target.input,
+      }],
+    };
+    const turn: InteractionTurnIdentity = {
+      organId: scope.organId,
+      interactionScopeId: scope.interactionScopeId,
+      interactionId,
+      inputRevision: 1,
+      turnId: 'explicit-interpret-organize-single-invalid-decision',
+    };
+    const operationScope = {
+      organId: scope.organId,
+      operationId: id('operation', 'op-organize-single-invalid-decision'),
+    };
+    const execution = {
+      runtimeId: turn.turnId,
+      ...operationScope,
+      executionEpoch: 1,
+      interactionTurn: turn,
+    };
+    const owner = createInteractionParentTurnRawOwner({
+      turn,
+      execution,
+      scope: operationScope,
+      initialInput: {
+        ref: await deps.rawEvidence.write({
+          scope: operationScope,
+          kind: 'execution',
+          type: 'initial-input',
+          locator: turn.turnId,
+          content: JSON.stringify(request),
+        }),
+        view: { kind: 'utf8-text' as const },
+      },
+      providerBinding: binding,
+      executionOwner: {
+        daemonLeaseId: 'lease-organize-single-invalid-decision',
+        daemonGeneration: 1,
+        processStartToken: 'process-organize-single-invalid-decision',
+      },
+      journal: deps.parentJournal,
+      rawContent: deps.rawContent,
+    });
+    await owner.openTurnInput();
+    const terminalRequest = {
+      turnId: turn.turnId,
+      requestId: 'request-organize-single-invalid-decision',
+    };
+    await owner.registerRequest({
+      execution,
+      record: { request: terminalRequest, scope: operationScope, phase: 'dispatching' },
+    });
+    await owner.registerRequest({
+      execution,
+      record: { request: terminalRequest, scope: operationScope, phase: 'dispatched' },
+    });
+    const invalidDecision = JSON.stringify({
+      kind: 'answer',
+      normalizedInput: rawInput,
+      knownFacts: [],
+      answer: '',
+      decisionRefs: [],
+    });
+    await owner.acceptRawFact({
+      execution,
+      scope: operationScope,
+      request: terminalRequest,
+      producerSeq: 1,
+      fact: {
+        kind: 'content',
+        channel: 'assistant-text',
+        update: 'full',
+        contentUnitId: 'single-invalid-decision',
+        content: {
+          ref: await deps.rawEvidence.write({
+            scope: operationScope,
+            kind: 'execution',
+            type: 'assistant-text',
+            locator: 'single-invalid-decision',
+            content: invalidDecision,
+          }),
+          view: { kind: 'utf8-text' as const },
+        },
+        complete: true,
+      },
+    });
+    await owner.acceptRawFact({
+      execution,
+      scope: operationScope,
+      request: terminalRequest,
+      producerSeq: 2,
+      fact: { kind: 'request-complete', terminal: 'completed' },
+    });
+    await owner.registerRequest({
+      execution,
+      record: { request: terminalRequest, scope: operationScope, phase: 'settled' },
+    });
+    await owner.recordProviderClose({
+      providerBinding: binding,
+      result: {
+        bindingId: binding.bindingId,
+        providerId: binding.providerId,
+        protocol: binding.protocol,
+        state: 'closed',
+        evidenceRefs: [await deps.rawEvidence.write({
+          scope: operationScope,
+          kind: 'execution',
+          type: 'close',
+          locator: 'organize-single-invalid-decision-close',
+          content: 'closed',
+        })],
+      },
+      closedAt: new Date().toISOString(),
+    });
+
+    let publicError: UiRuntimeApiError | undefined;
+    await assert.rejects(
+      () => service.interpretExplicitInput({ interactionId }),
+      (error: unknown) => {
+        if (!(error instanceof UiRuntimeApiError)) throw error;
+        publicError = error;
+        assert.ok(error.code !== 'ui-runtime.unexpected',
+          `one contract-invalid decision must cross the public service as a typed explicit-brain failure (observed ${error.code})`);
+        assert.equal(error.ownerId, 'humanagent.runtime.explicit-brain');
+        assert.ok(error.message.includes('answer decision requires a non-empty answer'), error.message);
+        assert.ok(error.message.includes(interactionId),
+          'the public failure must keep its interaction association');
+        assert.ok(error.httpStatus !== 500, 'a recoverable contract-invalid decision must not be a generic 500');
+        if (error.causeBody === undefined) {
+          throw new Error('the public failure must preserve the original decision-contract failure');
+        }
+        assert.ok(error.causeBody.message.includes('answer decision requires a non-empty answer'),
+          error.causeBody.message);
+        return true;
+      },
+    );
+    if (publicError === undefined) throw new Error('the public failure was not captured');
+    assert.equal(publicError.code, 'explicit-brain.invalid-terminal-output',
+      'the durably closed contract-invalid decision uses the exact terminal-output code');
+    assert.ok(publicError.nextAction.includes('then resubmit the explicit input'),
+      'a proven closed failure may promise one resubmit');
+    const [publicEvidenceRef] = publicError.evidenceRefs ?? [];
+    assert.ok(publicEvidenceRef !== undefined,
+      'the public failure must carry the committed raw-output evidence reference');
+    assert.equal(
+      new TextDecoder().decode(await deps.rawContent.read({
+        scope: publicEvidenceRef.scope,
+        content: {
+          ref: publicEvidenceRef,
+          view: { kind: 'utf8-text' as const },
+        },
+      })),
+      invalidDecision,
+      'the public evidence reference must resolve to the original Provider output',
+    );
+
+    const failures = await deps.parentJournal.readScopeParseFailures(scope);
+    assert.equal(failures.length, 1,
+      'the contract-invalid decision is closed by exactly one durable parse-failure fact');
+    const parseFailureSnapshot = await deps.parentJournal.readTurnSnapshot(failures[0]!.fact.turn);
+    assert.equal(parseFailureSnapshot.parseFailure?.fact.terminalRequestId, terminalRequest.requestId);
+    const assistantContent = parseFailureSnapshot.acceptedFacts
+      .map(({ fact }) => fact.envelope.fact)
+      .find((fact) => fact.kind === 'content' && fact.channel === 'assistant-text');
+    if (assistantContent === undefined || assistantContent.kind !== 'content') {
+      throw new Error('the committed assistant-text fact is missing');
+    }
+    assert.equal(
+      new TextDecoder().decode(await deps.rawContent.read({
+        scope: parseFailureSnapshot.turnInput!.fact.scope,
+        content: assistantContent.content,
+      })),
+      invalidDecision,
+      'the Journal keeps the original contract-invalid decision readable',
+    );
+
+    const afterFailure = await service.inspectExplicitInteraction(interactionId);
+    assert.equal(afterFailure.state, 'matching',
+      'the closed failure stays recoverable without fabricating a proposal');
+    assert.equal(afterFailure.draft, undefined);
+    assert.equal(afterFailure.revision, undefined);
+    assert.equal(afterFailure.confirmation, undefined);
+
+    const targetDetailAfter = service.taskDetail(target.taskId);
+    const targetDashboardAfter = service.taskDashboard(target.taskId);
+    const explicitStateAfter = latestExplicitState();
+    assert.deepEqual(targetDetailAfter, targetDetailBefore,
+      'the failed organize turn must not change the existing target before confirmation');
+    assert.equal(targetDashboardAfter.input, targetDashboardBefore.input,
+      'the failed organize turn must not change the target input');
+    assert.equal(targetDashboardAfter.executionEpoch, targetDashboardBefore.executionEpoch,
+      'the failed organize turn must not advance the target execution epoch');
+    assert.equal(latestTargetRevision(target.taskId.value), targetRevisionBefore,
+      'the failed organize turn must not change the target directive revision');
+    assert.equal(explicitStateAfter.inbox.envelopes.length, envelopesBefore,
+      'the failed organize turn must not append a target requirement envelope');
+    assert.equal(JSON.stringify(explicitStateAfter.taskInputRevisions ?? []), taskInputRevisionsBefore,
+      'the failed organize turn must not append a target input revision');
+    assert.equal(service.listTasks().counts.total, 1,
+      'the existing target remains the only task after the failed organize turn');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: the public boundary must never call an unclosed terminal
+// output a safe retry. When the typed error arrives without a committed
+// parse-failure closure, the interaction remains matching and the public error
+// must keep the raw-output reference while withholding the closed-state
+// resubmit promise. Cost: one typed interpreter failure on the fake service.
+test('public explicit interpret keeps an unclosed terminal-output failure as recovery-pending', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-organize-unclosed-terminal-output-'));
+  const deps = parentDependencies();
+  const binding: ProviderBinding = {
+    bindingId: 'binding-organize-unclosed-terminal-output',
+    providerId: 'provider-organize-unclosed-terminal-output',
+    protocol: 'responses',
+    endpointRef: 'recorded://organize-unclosed-terminal-output',
+    modelRef: 'model-organize-unclosed-terminal-output',
+    configDigest: 'sha256:organize-unclosed-terminal-output-config',
+    capabilityDigest: 'sha256:organize-unclosed-terminal-output-capability',
+  };
+  const operationScope = {
+    organId: deps.organId,
+    operationId: id('operation', 'op-organize-unclosed-terminal-output'),
+  };
+  const rawOutput = '{"kind":"answer","normalizedInput":"x","knownFacts":[],"answer":"y","decisionRefs":[],}';
+  let rawEvidenceRef: EvidenceRef | undefined;
+  const interpreter: ExplicitBrainInputInterpreter = {
+    async interpret(input) {
+      rawEvidenceRef = await deps.rawEvidence.write({
+        scope: operationScope,
+        kind: 'execution',
+        type: 'assistant-text',
+        locator: 'unclosed-terminal-output',
+        content: rawOutput,
+      });
+      throw new ExplicitBrainTerminalOutputError(
+        input.interactionId,
+        'interaction agent returned invalid JSON: the terminal output holds no JSON decision object',
+        new SyntaxError('Unexpected end of JSON input'),
+        [rawEvidenceRef],
+      );
+    },
+  };
+  const serviceJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId: deps.organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 0 }),
+    providerState: 'ready',
+    journal: serviceJournal,
+    closurePort: serviceJournal,
+    checkpointStoreFor: () => new FileCheckpointStore(join(root, 'checkpoint.jsonl')),
+    attentionPort: {
+      async publish(input) { return { attentionId: input.attentionId, delivered: true }; },
+      async resolve(input) { return { attentionId: input.attentionId, delivered: true }; },
+    },
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: 'organize-unclosed-terminal-output',
+    },
+    explicitBrainInterpreter: interpreter,
+    runtimeComposition: { admitExecution: async () => {} },
+  });
+
+  try {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: 'ui:organize-unclosed-terminal-output',
+      rawInput: 'Rewrite the existing task objective and add an acceptance condition',
+      channel: 'business',
+      requestKind: 'existing-task-change',
+    });
+    let publicError: UiRuntimeApiError | undefined;
+    await assert.rejects(
+      () => service.interpretExplicitInput({ interactionId }),
+      (error: unknown) => {
+        if (!(error instanceof UiRuntimeApiError)) throw error;
+        publicError = error;
+        assert.equal(error.code, 'explicit-brain.terminal-output-recovery-pending');
+        assert.ok(error.nextAction.includes('before resubmitting'),
+          'an unclosed failure must not promise the closed-state resubmit path');
+        assert.ok(!error.nextAction.includes('then resubmit the explicit input'),
+          'the safe retry text belongs only to a proven closure');
+        return true;
+      },
+    );
+    if (publicError === undefined) throw new Error('the public failure was not captured');
+    const [publicEvidenceRef] = publicError.evidenceRefs ?? [];
+    assert.ok(publicEvidenceRef !== undefined,
+      'the unclosed public failure must still carry the raw-output evidence reference');
+    assert.equal(
+      new TextDecoder().decode(await deps.rawContent.read({
+        scope: publicEvidenceRef.scope,
+        content: {
+          ref: publicEvidenceRef,
+          view: { kind: 'utf8-text' as const },
+        },
+      })),
+      rawOutput,
+      'the unclosed public evidence reference must resolve to the original Provider output',
+    );
+    assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'matching',
+      'an unclosed failure keeps the interaction in its real matching state');
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
