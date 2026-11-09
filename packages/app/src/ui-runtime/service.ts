@@ -3573,6 +3573,60 @@ export class UiRuntimeService {
     };
   }
 
+  private narrowObservationAgentDebugInspections(
+    projection: PipelineObservationProjection,
+    activity: Awaited<ReturnType<UiRuntimeService['taskAgentActivityFor']>>,
+  ): PipelineObservationProjection['agentDebugInspections'] {
+    if (!activity.ok) {
+      if (
+        activity.failure.code === 'agent-activity.invalid-selection'
+        || activity.failure.code === 'agent-activity.selection-not-found'
+        || activity.failure.code === 'agent-activity.conflicting-agent-role-selection'
+      ) {
+        throw new UiRuntimeApiError(
+          'agent-activity.invalid-agent-role-selection',
+          'humanagent.app.ui-runtime.agent-activity',
+          activity.failure.message,
+          activity.failure.nextAction,
+          400,
+        );
+      }
+      return projection.agentDebugInspections;
+    }
+    if (activity.value.mode !== 'selected' || activity.value.selected === undefined) {
+      return projection.agentDebugInspections;
+    }
+    const selectedRoles = new Set<string>();
+    for (const record of activity.value.selected) {
+      const role = record.instance.kind === 'incarnation'
+        ? record.instance.roleId
+        : activity.value.selectedRole;
+      if (role !== undefined) selectedRoles.add(role);
+    }
+    if (selectedRoles.size === 0) return projection.agentDebugInspections;
+    if (selectedRoles.size > 1) {
+      throw new UiRuntimeApiError(
+        'agent-activity.invalid-agent-role-selection',
+        'humanagent.app.ui-runtime.agent-activity',
+        'the selected agent instance has conflicting canonical roles',
+        'select one exact agent instance with one canonical role',
+        400,
+      );
+    }
+    const [role] = selectedRoles;
+    const matched = projection.agentDebugInspections.filter((inspection) => inspection.agentRole === role);
+    if (matched.length !== 1) {
+      throw new UiRuntimeApiError(
+        'agent-activity.invalid-agent-role-selection',
+        'humanagent.app.ui-runtime.agent-activity',
+        `the selected agent instance role ${String(role)} is not canonical`,
+        'select an agent instance with one canonical role',
+        400,
+      );
+    }
+    return matched;
+  }
+
   async scopedObservation(
     taskId: TaskId,
     selectedNodeId?: string,
@@ -3594,9 +3648,11 @@ export class UiRuntimeService {
         debugContext,
       );
       const rawActivity = await this.taskAgentActivityFor(resolved.source, resolved.mode, taskId, agentSelection);
+      const agentActivity = this.normalizeScopedObservationAgentActivity(task, rawActivity);
       return {
         ...projection,
-        agentActivity: this.normalizeScopedObservationAgentActivity(task, rawActivity),
+        agentDebugInspections: this.narrowObservationAgentDebugInspections(projection, agentActivity),
+        agentActivity,
       };
     }
     const debugContext = await this.buildObservationDebugContextForTask(resolved.entry.snapshot);
@@ -3609,9 +3665,11 @@ export class UiRuntimeService {
       debugContext,
     );
     const rawActivity = await this.taskAgentActivityFor(resolved.source, resolved.mode, taskId, agentSelection);
+    const agentActivity = this.normalizeScopedObservationAgentActivity(resolved.entry.snapshot, rawActivity);
     return {
       ...projection,
-      agentActivity: this.normalizeScopedObservationAgentActivity(resolved.entry.snapshot, rawActivity),
+      agentDebugInspections: this.narrowObservationAgentDebugInspections(projection, agentActivity),
+      agentActivity,
     };
   }
 

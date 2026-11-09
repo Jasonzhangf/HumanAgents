@@ -1,5 +1,6 @@
 import type {
   AcceptedChildDelivery,
+  AgentRoleId,
   ChildInvocationRecord,
   I2JournalPort,
   JournalCommitRef,
@@ -1232,7 +1233,7 @@ export async function readTaskAgentActivity(
     readonly query: TaskAgentActivitySelectionQuery;
     readonly currentAuthority?: AgentActivityCurrentAuthority;
   },
-): Promise<RuntimeReadResult<RuntimeAgentActivityProjection>> {
+): Promise<RuntimeReadResult<RuntimeAgentActivityProjection & { readonly selectedRole?: AgentRoleId }>> {
   const assembled = await assembleTaskAgentActivityCoreContext(options);
   if (!assembled.ok) return projectionFailure(assembled.failure);
   try {
@@ -1274,6 +1275,9 @@ export async function readTaskAgentActivity(
       unavailableSources: [...child.unavailableSources, ...pool.unavailableSources, ...review.unavailableSources],
     });
     if (!projected.ok) return projected;
+    const selection = nativeAllocationRoleFor(context.sources.nativeAllocations, options.query);
+    if (!selection.ok) return projectionFailure(selection.failure);
+    const selectedRole = selection.role;
     const identity = decodeTaskIdentityRecords(context.controlRecords)
       .find((candidate) => sameTaskIdentityScope(candidate.scope, context.taskScope));
     const guidance = resolveTaskFlowGuidanceFromBinding(identity?.taskFlow);
@@ -1303,13 +1307,47 @@ export async function readTaskAgentActivity(
     }));
     return {
       ok: true,
-      value: { ...projected.value, actualExecutionGraph },
+      value: {
+        ...projected.value,
+        actualExecutionGraph,
+        ...(selectedRole === undefined ? {} : { selectedRole }),
+      },
     };
   } catch (error) {
     return projectionFailure(readFailure('agent-activity.remaining-source-unavailable',
       error instanceof Error ? error.message : String(error),
       'preserve and inspect the child, pool or I2 source before retrying').failure);
   }
+}
+
+function nativeAllocationRoleFor(
+  allocations: readonly AgentActivityNativeSource[],
+  query: TaskAgentActivitySelectionQuery,
+): { readonly ok: true; readonly role: AgentRoleId | undefined }
+  | { readonly ok: false; readonly failure: AgentActivityCoreReadFailure } {
+  if (query.instance?.kind !== 'native-execution') return { ok: true, role: undefined };
+  const expected = query.instance.execution;
+  const roles = new Set<AgentRoleId>();
+  for (const source of allocations) {
+    const allocation = source.allocation;
+    if (allocation.taskId.value !== query.taskId.value) continue;
+    if (allocation.runtimeId !== expected.runtimeId) continue;
+    if (allocation.executionEpoch !== expected.executionEpoch) continue;
+    if (query.assignmentId !== undefined && allocation.assignmentId !== query.assignmentId) continue;
+    if (allocation.role !== undefined) roles.add(allocation.role);
+  }
+  if (roles.size > 1) {
+    return {
+      ok: false,
+      failure: readFailure(
+        'agent-activity.conflicting-agent-role-selection',
+        'the selected native execution matches allocations with conflicting canonical roles',
+        'select one exact native allocation with one canonical role',
+      ).failure,
+    };
+  }
+  const [role] = roles;
+  return { ok: true, role };
 }
 
 function liveAuthority(options: AssembleTaskAgentActivityRemainingSourcesOptions): AgentActivityCurrentAuthority | undefined {

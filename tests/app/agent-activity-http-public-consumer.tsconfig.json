@@ -9,6 +9,7 @@
     "../../packages/context-events/src/node-modules.d.ts",
     "../../packages/config/src/node-modules.d.ts",
     "../../packages/runtime/src/node-modules.d.ts",
-    "agent-activity-http-public-consumer.test.ts"
+    "agent-activity-http-public-consumer.test.ts",
+    "agent-filter-http-public-consumer.test.ts"
   ]
 }

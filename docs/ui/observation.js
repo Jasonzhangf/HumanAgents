@@ -477,6 +477,14 @@ function renderAgentDebugCard(inspection) {
 function renderAgentDebugInspectionsSection(projection) {
   const inspections = Array.isArray(projection?.agentDebugInspections) ? projection.agentDebugInspections : []
   if (inspections.length === 0) return null
+  const read = projection?.agentActivity
+  const selectedRecords = read?.ok === true ? read.value?.selected : undefined
+  const selectedNativeWithoutRole = read?.ok === true
+    && read.value?.mode === 'selected'
+    && Array.isArray(selectedRecords)
+    && selectedRecords.length > 0
+    && selectedRecords.every((record) => record?.instance?.kind === 'native-execution')
+    && read.value?.selectedRole === undefined
   const section = element('section', undefined, 'section agent-debug-section')
   section.dataset.agentDebugSection = 'true'
   section.setAttribute('aria-label', '五角色五维只读调试视图')
@@ -486,6 +494,12 @@ function renderAgentDebugInspectionsSection(projection) {
     element('span', `${inspections.length} 个角色`, 'section-meta'),
   )
   section.append(head)
+  if (selectedNativeWithoutRole) {
+    const marker = element('p', '无角色范围：所选原生执行实例未记录 canonical role，保留五角色调试卡片。', 'section-note')
+    marker.dataset.agentRoleScope = 'unscoped-native'
+    marker.dataset.agentRoleScopeLabel = '无角色范围'
+    section.append(marker)
+  }
   const grid = element('div', undefined, 'agent-debug-grid')
   for (const inspection of inspections) {
     grid.append(renderAgentDebugCard(inspection))
