@@ -248,6 +248,7 @@ function projectInteractionCard(input) {
       waitingOn: input.card.waitingOn,
       startedAt: input.card.startedAt,
       ...(input.liveness === undefined ? {} : { liveness: input.liveness }),
+      ...(input.committedRequestNumber === undefined ? {} : { requestNumber: input.committedRequestNumber }),
       // The page-local stream fact has its own carrier. `cardMetadata.transport`
       // is the typed `InteractionTraceTransport` and must not be overloaded with
       // a four-value page-local state.
@@ -300,9 +301,7 @@ export function projectInteractionCardFromSnapshot(snapshot) {
   const userTurn = {
     sourceKind: 'user',
     ...(enteredAt === undefined ? {} : { occurredAt: enteredAt }),
-    markdown: typeof requestNumber === 'number'
-      ? `第 ${requestNumber} 次请求 · ${snapshot?.rawInput || fallbackText(snapshot?.reply, '尚未收到输入')}`
-      : snapshot?.rawInput || fallbackText(snapshot?.reply, '尚未收到输入'),
+    markdown: snapshot?.rawInput || fallbackText(snapshot?.reply, '尚未收到输入'),
   }
   const entries = [interactiveEntry({
     sequence: 1,
@@ -357,6 +356,7 @@ export function projectInteractionCardFromSnapshot(snapshot) {
   return projectInteractionCard({
     taskState: toLifecycleState(interactionState),
     ...(stateLabel === undefined ? {} : { stateLabel }),
+    ...(typeof requestNumber === 'number' ? { committedRequestNumber: requestNumber } : {}),
     source: {
       state: 'ready',
       label: '显式大脑',

@@ -26,6 +26,8 @@ const rccBaseUrl = (process.env.ENTRY_ANSWERED_RCC_BASE_URL ?? 'http://127.0.0.1
 const model = process.env.ENTRY_ANSWERED_MODEL ?? 'gpt-5.5';
 const route = process.env.ENTRY_ANSWERED_ROUTE ?? 'rcc/ui-responses';
 const binding = process.env.ENTRY_ANSWERED_BINDING ?? 'ui-rcc-responses';
+const input = process.env.ENTRY_ANSWERED_INPUT?.trim() ?? '13 加 14 等于多少？';
+const expectedAnswer = process.env.ENTRY_ANSWERED_EXPECTED_ANSWER?.trim();
 const cliPath = resolve(repoRoot, 'dist/app/app/src/cli.js');
 const playwrightModule = await import(process.env.ENTRY_ANSWERED_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js');
 const playwright = playwrightModule.default ?? playwrightModule;
@@ -124,6 +126,8 @@ const receipt = {
   model,
   route,
   binding,
+  input,
+  ...(expectedAnswer ? { expectedAnswer } : {}),
   checks: [],
 };
 try {
@@ -164,7 +168,7 @@ try {
 
   await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#entry-form textarea[name="rawInput"]', { timeout: 30_000 });
-  await page.fill('#entry-form textarea[name="rawInput"]', '13 加 14 等于多少？');
+  await page.fill('#entry-form textarea[name="rawInput"]', input);
   await page.click('#entry-form button[type="submit"]');
 
   const answerDeadline = Date.now() + 180_000;
@@ -329,10 +333,29 @@ try {
   }
   visible ??= await readVisible();
   receipt.visible = visible;
+  const pageDom = await page.content();
+  await writeFile(join(evidenceRoot, 'entry-answered-dom.html'), pageDom, 'utf8');
+  receipt.domPath = join(evidenceRoot, 'entry-answered-dom.html');
   await page.screenshot({ path: join(evidenceRoot, 'entry-answered-page.png'), fullPage: true });
+  const answerCard = page.locator('#entry-direct-answer');
+  assertThat(await answerCard.count() === 1, 'direct-answer card element is present in DOM');
+  receipt.cardElementPath = join(evidenceRoot, 'entry-answered-card.png');
+  await answerCard.screenshot({ path: receipt.cardElementPath });
   assertThat(visible.tone === 'success', 'answer uses success tone', visible);
-  assertThat(visible.statusText.includes(snapshot.reply), 'reply is visible in the main status region', { visible, reply: snapshot.reply });
+  assertThat(visible.statusText === '本次请求已直接回答', 'the status banner reports the direct-answer result', visible);
   assertThat(visible.visiblePageText.includes(snapshot.reply), 'reply is visible in page text', { visibleText: visible.visiblePageText, reply: snapshot.reply });
+  assertThat(!/第\s*\d+\s*次请求/.test(visible.visiblePageText), 'internal request ordinal is not visible', {
+    pageText: visible.visiblePageText,
+  });
+  if (expectedAnswer) {
+    assertThat(visible.visiblePageText.includes(expectedAnswer), 'expected answer is visible in page text', {
+      visibleText: visible.visiblePageText,
+      expectedAnswer,
+    });
+  }
+  assertThat(!visible.visiblePageText.includes('继续执行尚未完成的任务'), 'no stale task instruction is visible', {
+    pageText: visible.visiblePageText,
+  });
   assertThat(!visible.hasRetrySubmission, 'answered result has no retry-submission action', visible);
   assertThat(!visible.technicalDetailOpen, 'answer is not hidden in an open technical detail dialog');
   assertThat(!visible.visiblePageText.includes('状态：answered'), 'raw interaction state is not exposed as page text', { pageText: visible.visiblePageText });
@@ -342,18 +365,25 @@ try {
   assertThat(tasksBefore !== null && tasksAfter !== null, 'the isolated task list is readable before and after', { tasksBefore, tasksAfter });
   assertThat(tasksAfter === tasksBefore && tasksAfter === 0, 'simple answer does not create a task', { tasksBefore, tasksAfter });
   assertThat(snapshot.draft === undefined, 'an answered interaction carries no draft', snapshot.draft);
-  assertThat(visible.visiblePageText.includes('尚未提交任务'), 'the queue area still reports no submitted task', { pageText: visible.visiblePageText });
+  assertThat(
+    visible.visiblePageText.includes('本次请求已直接回答，未创建任务。'),
+    'the queue area reports the direct answer without creating a task',
+    { pageText: visible.visiblePageText },
+  );
   receipt.pageErrors = pageErrors;
+  receipt.cardMetadata = { requestNumber: snapshot.requestNumber };
   receipt.checks.push(
     'state=answered',
-    'reply is visible in main status and page text',
+    'reply is visible in the direct-answer card and page text',
+    ...(expectedAnswer ? [`expected answer ${expectedAnswer} is visible`] : []),
+    'no internal request ordinal',
+    'no unrelated task summary or stale task instruction',
     'success tone',
     'no retry action',
     'no landing navigation',
     'zero pageerror',
     'no draft, no task, no queue entry',
   );
-  await page.screenshot({ path: join(evidenceRoot, 'entry-answered.png'), fullPage: true });
   await context.close();
 } catch (error) {
   failure = error;
