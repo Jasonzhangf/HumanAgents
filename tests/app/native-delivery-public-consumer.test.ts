@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type WorkResult, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef, type InteractionHelperIdentity } from '../../packages/contracts/src/index.js';
+import { id, canonicalJsonStringify, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type WorkResult, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef } from '../../packages/contracts/src/index.js';
 import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
@@ -65,11 +65,8 @@ const PERSISTENCE_ROOT = process.env.HUMANAGENT_TEST_ROOT
  * store and fatal-UTF-8 readback.
  */
 const EXACT_BODY = 'EXACT\u4f53 single logical delivery \ud83d\ude80\nline two';
-const SUMMARY_RESULT = 'summary result is a different material';
 const CHILD_BODY = 'Independent child result for adoption';
 const EXPLICIT_HELPER_PARENT_MARKER = 'parent-private-n3: use the bounded helper result to answer this question.';
-const EXPLICIT_HELPER_CHILD_INPUT = 'child-only-input-n3';
-const EXPLICIT_HELPER_CHILD_SUMMARY = 'unrefined-child-result-n3';
 const EXPLICIT_HELPER_REFINED_TEXT = 'accepted-refined-result-n3';
 const INSPECTION_DEFINITION_ID = 'native-inspection-definition';
 const INSPECTION_DEFINITION_VERSION = '1';
@@ -678,7 +675,8 @@ async function assertPriorSemanticCheckpointWire(
   const wire = semanticCheckpointWires(raw).find((entry) => entry.goal === goal);
   assert.ok(wire, `the captured execution request contains the ${goal} semantic checkpoint`);
   if (!wire) throw new Error(`the captured execution request is missing the ${goal} semantic checkpoint`);
-  const publicationRecord = (await fixture.journal.verify()).records.find((record) =>
+  const records = (await fixture.journal.verify()).records;
+  const publicationRecord = records.find((record) =>
     record.payload?.['kind'] === 'native-semantic-history-publication'
     && record.scope.taskId?.value === taskId.value
     && (() => {
@@ -699,14 +697,27 @@ async function assertPriorSemanticCheckpointWire(
   if (!checkpoint || typeof checkpoint.summary !== 'string') {
     throw new Error(`the durable ${goal} semantic checkpoint is malformed`);
   }
+  const checkpointId = checkpoint.id as { readonly value?: unknown; readonly scope?: { readonly value?: unknown } } | undefined;
+  const contextViewRecord = records.find((record) => {
+    const view = record.payload as {
+      readonly kind?: string;
+      readonly checkpoint?: { readonly checkpoint?: { readonly id?: { readonly value?: unknown; readonly scope?: { readonly value?: unknown } } } };
+    } | undefined;
+    if (view?.kind !== 'native-semantic-context-view') return false;
+    const viewCheckpoint = view.checkpoint?.checkpoint;
+    if (viewCheckpoint === undefined) return false;
+    return viewCheckpoint.id?.value === checkpointId?.value
+      && viewCheckpoint.id?.scope?.value === checkpointId?.scope?.value;
+  });
+  const committedEvidenceRefs = contextViewRecord?.payload?.['evidenceRefs'];
   assert.deepEqual(wire.checkpointId, checkpoint.id,
     `the ${goal} wire checkpointId equals the durable typed checkpoint ID`);
   assert.equal(wire.committedAt, relationship?.receipt?.committedAt,
     `the ${goal} wire committedAt equals the durable receipt time`);
   assert.equal(wire.description, checkpoint.summary,
     `the ${goal} wire description equals the durable checkpoint summary`);
-  assert.deepEqual(wire.evidenceRefs, checkpoint.evidenceRefs,
-    `the ${goal} wire top-level evidenceRefs equal the committed evidence references`);
+  assert.deepEqual(wire.evidenceRefs, committedEvidenceRefs,
+    `the ${goal} wire top-level evidenceRefs equal the committed context-view evidence references`);
   assert.ok(Array.isArray(wire.adoptedChildren), `the ${goal} wire keeps its adopted children`);
 }
 
@@ -950,24 +961,6 @@ function explicitHelperModelText(body: ResponsesWireBody): string {
     .join('\n');
 }
 
-function explicitHelperToolOutput(wire: ResponsesWireBody, callId: string): string | undefined {
-  return wire.input?.find((item) =>
-    item.type === 'function_call_output' && item.call_id === callId)?.output;
-}
-
-function explicitHelperCall(
-  callId: string,
-  name: 'dispatch_helper' | 'accept_helper',
-  args: unknown,
-): readonly Record<string, unknown>[] {
-  return [
-    { type: 'response.created', response: { id: callId } },
-    { type: 'response.output_item.done', output_index: 0, item: {
-      type: 'function_call', call_id: callId, name, arguments: JSON.stringify(args) } },
-    { type: 'response.completed', response: { id: callId } },
-  ];
-}
-
 function explicitHelperText(text: string): readonly Record<string, unknown>[] {
   return [
     { type: 'response.created', response: { id: 'n3-explicit-helper-text' } },
@@ -1084,128 +1077,25 @@ async function textOnlyResponsesUpstream(input: {
       if (input.scenario?.kind === 'explicit-helper') {
         const wire = parseResponsesWire(body);
         if (wire === undefined) throw new Error('explicit helper fixture received a non-JSON Responses request');
-        const invoke = (callId: string, name: 'dispatch_helper' | 'accept_helper', args: unknown) => {
-          response.writeHead(200, { 'content-type': 'text/event-stream' });
-          response.end(frame(explicitHelperCall(callId, name, args)));
-        };
-        if (wire.model === input.scenario.childModel) {
-          explicitHelperPhase = 'child-provider-start';
-          const helperJournal = new JsonlInteractionHelperJournal(input.journal);
-          const opened = await new JsonlInteractionParentTurnJournal(input.journal).readScopeOpenedTurns({
-            organId: id('organ', 'humanagent-ui'),
-            interactionScopeId: requireText(input.interactionScopeId,
-              'the explicit helper interaction scope'),
-          });
-          assert.equal(opened.length, 1, 'the isolated fixture has one open parent turn');
-          const helpers = await helperJournal.readTurnHelpers(opened[0]!.fact.turn);
-          assert.equal(helpers.length, 1, 'the open parent turn dispatched one helper');
-          const helper = helpers[0]!;
-          const dispatch = helper.readback.dispatchAccepted;
-          if (dispatch === null) throw new Error('the child Provider start has no durable dispatch');
-          const incarnation = dispatch.fact.incarnation;
-          if (incarnation === undefined) throw new Error('the durable dispatch has no incarnation');
-          assert.equal(incarnation.modelRef, input.scenario.childModel,
-            'the durable dispatch selects the configured child model');
-          assert.equal('execution' in wire, false,
-            'the child HTTP body carries no runtime execution identity');
-          assert.equal(helper.readback.returned, null, 'the child Provider start precedes the durable return');
-          const prompt = explicitHelperModelText(wire);
-          assert.ok(prompt.includes(EXPLICIT_HELPER_CHILD_INPUT),
-            'the child receives its specified handoff input');
-          assert.equal(prompt.includes('parent-private-n3'), false,
-            'the child does not inherit the parent raw marker');
-          response.writeHead(200, { 'content-type': 'text/event-stream' });
-          response.end(frame(explicitHelperText(JSON.stringify({
-            agentId: 'orchestration-default',
-            producedArtifactRefs: [],
-            producedArtifactDigests: [],
-            status: 'succeeded',
-            summary: EXPLICIT_HELPER_CHILD_SUMMARY,
-            outputRefs: [],
-            evidenceRefs: [],
-            nextAction: 'settle',
-          }))));
-          return;
-        }
         assert.equal(wire.model, input.scenario.parentModel,
           'the parent selects its configured Provider model');
-        const dispatchOutput = explicitHelperToolOutput(wire, 'n3-dispatch');
-        if (dispatchOutput === undefined) {
-          explicitHelperPhase = 'parent-dispatch';
-          assert.ok(explicitHelperModelText(wire).includes(EXPLICIT_HELPER_PARENT_MARKER),
-            'the parent wire carries the private marker used by the child-context exclusion assertion');
-          assert.ok(wire.tools?.some((tool) => tool.name === 'dispatch_helper'));
-          invoke('n3-dispatch', 'dispatch_helper', {
-            selection: { roleId: 'orchestration', configuredAgentId: 'orchestration-default' },
-            assignmentFields: {
-              objective: 'Return the bounded child-only result',
-              targetRefs: [],
-              expectedOutputRefs: [],
-              expectedArtifactDigests: [],
-              acceptanceCriteriaDigest: `sha256:${'a'.repeat(64)}`,
-              successCriteria: ['Return the specified structured helper result'],
-              failureCriteria: ['Unable to return the bounded result'],
-              incompleteCriteria: ['Partial result'],
-              requiredCapabilities: [],
-              mergeGate: 'not-required',
-            },
-            inputs: {
-              question: EXPLICIT_HELPER_CHILD_INPUT,
-              resultContract: 'Return the specified structured helper result',
-            },
-            evidenceRefs: [],
-          });
-          return;
-        }
-        explicitHelperPhase = 'parent-dispatch-returned';
-        const dispatched = requireRecord(JSON.parse(requireText(dispatchOutput, 'the dispatch tool output')),
-          'the dispatch receipt');
-        const dispatchedIdentity = requireRecord(dispatched.identity, 'the dispatch receipt identity');
-        const helperCallId = requireText(dispatchedIdentity.helperCallId,
-          'the dispatch receipt helper call ID');
-        const helperJournal = new JsonlInteractionHelperJournal(input.journal);
-        const dispatchIdentity: InteractionHelperIdentity = {
-          organId: id('organ', requireText(requireRecord(dispatchedIdentity.organId, 'the dispatch organ').value,
-            'the dispatch organ value')),
-          interactionScopeId: requireText(dispatchedIdentity.interactionScopeId,
-            'the dispatch interaction scope'),
-          interactionId: requireText(dispatchedIdentity.interactionId, 'the dispatch interaction ID'),
-          inputRevision: requireNumber(dispatchedIdentity.inputRevision, 'the dispatch input revision'),
-          parentTurnId: requireText(dispatchedIdentity.parentTurnId, 'the dispatch parent turn ID'),
-          assignmentId: requireText(dispatchedIdentity.assignmentId, 'the dispatch assignment ID'),
-          helperCallId,
-          attempt: requireNumber(dispatchedIdentity.attempt, 'the dispatch attempt'),
-        };
-        const returned = await helperJournal.readExact(dispatchIdentity);
-        if (returned.returned === null) throw new Error('the parent receives no durable returned helper fact');
-        assert.equal(returned.returned.fact.result.summary, EXPLICIT_HELPER_CHILD_SUMMARY,
-          'the parent receives the actual child result');
-        if (explicitHelperToolOutput(wire, 'n3-accept') === undefined) {
-          assert.equal(returned.ownerAccepted, null, 'returned is not owner acceptance before the owner accepts');
-          assert.equal(returned.adoptedCheckpoint, null, 'returned creates no adopted checkpoint before owner acceptance');
-          invoke('n3-accept', 'accept_helper', {
-            helperCallId,
-            refinedText: EXPLICIT_HELPER_REFINED_TEXT,
-            acceptanceRef: 'acceptance:n3-public-helper',
-            evidenceRefs: [],
-          });
-          return;
-        }
-        assert.ok(returned.ownerAccepted !== null, 'the accepted helper has a durable owner acceptance');
-        assert.equal(returned.ownerAccepted?.fact.result.helperCallId, helperCallId,
-          'owner acceptance retains the actual helper call ID');
-        assert.ok(returned.adoptedCheckpoint !== null,
-          'owner acceptance creates a durable adopted checkpoint');
         explicitHelperPhase = 'parent-answer';
-        assert.deepEqual((wire.input ?? [])
-          .filter((item) => item.type === 'function_call'
-            && (item.name === 'dispatch_helper' || item.name === 'accept_helper'))
-          .map((item) => item.name), ['dispatch_helper', 'accept_helper'],
-        'the answer request replays both actual explicit helper tools');
+        assert.ok(explicitHelperModelText(wire).includes(EXPLICIT_HELPER_PARENT_MARKER),
+          'the parent wire carries the explicit intake marker');
+        assert.equal(
+          wire.tools?.some((tool) => tool.name === 'dispatch_helper') ?? false,
+          false,
+          'the explicit interpreter never advertises the retired dispatch_helper',
+        );
+        assert.equal(
+          wire.tools?.some((tool) => tool.name === 'accept_helper') ?? false,
+          false,
+          'the explicit interpreter never advertises the retired accept_helper',
+        );
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.end(frame(explicitHelperText(JSON.stringify({
           kind: 'answer',
-          normalizedInput: 'bounded public helper proof',
+          normalizedInput: EXPLICIT_HELPER_PARENT_MARKER,
           knownFacts: [],
           answer: EXPLICIT_HELPER_REFINED_TEXT,
           decisionRefs: [],
@@ -1755,35 +1645,34 @@ async function textOnlyResponsesUpstream(input: {
         ? [readFact.entry.envelope.fact.rawOutput.ref.locator] : [];
       const multiTurn = input.turnCount !== undefined;
       const endCallId = multiTurn ? `call-turn-${plannerAttempts + 1}-end` : 'call-text-end';
-      const publicResultText = multiTurn
-        ? (plannerAttempts === 0 ? CHILD_BODY
-            : input.turnCount === 3 && plannerAttempts === 1 ? TURN_TWO_DELIVERY : EXACT_BODY)
-        : EXACT_BODY;
+      // `summary.result.text` is the one canonical public result, so it is also
+      // the turn's semantic conclusion. Intermediate turns publish their own
+      // conclusion; the final turn publishes the exact delivery body.
       const closeSummary = (goal: string, actions: string, result: string, nextStep: string) => ({
         goal,
         actions: [actions],
         result: { status: 'completed' as const, text: result },
         nextStep,
       });
+      const turnOneResult = inspectThisTurn
+        ? (input.inspect === 'file.list'
+            ? `${TURN_ONE_RESULT}; Listed the workspace directory read-only; no file content read`
+            : `${TURN_ONE_RESULT}; Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed`)
+        : TURN_ONE_RESULT;
       const endSummary = multiTurn ? (plannerAttempts === 0 ? closeSummary(
-        TURN_ONE_GOAL, TURN_ONE_ACTIONS,
-        inspectThisTurn
-          ? (input.inspect === 'file.list'
-              ? `${TURN_ONE_RESULT}; Listed the workspace directory read-only; no file content read`
-              : `${TURN_ONE_RESULT}; Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed`)
-          : publicResultText,
+        TURN_ONE_GOAL, TURN_ONE_ACTIONS, turnOneResult,
         TURN_ONE_NEXT,
-      ) : (input.turnCount === 3 || input.reviewPerCycle) && plannerAttempts === 1 ? closeSummary(
-        TURN_TWO_GOAL, TURN_TWO_ACTIONS, publicResultText, TURN_TWO_NEXT,
+      ) : input.turnCount === 3 && plannerAttempts === 1 ? closeSummary(
+        TURN_TWO_GOAL, TURN_TWO_ACTIONS, TURN_TWO_RESULT, TURN_TWO_NEXT,
       ) : input.turnCount === 3 && plannerAttempts === 2 ? closeSummary(
         'Complete the third standard turn from committed multi-turn semantic history',
         'Consume both prior semantic checkpoints and close the third turn',
-        publicResultText, 'Close the final third turn',
-      ) : closeSummary(TURN_ONE_GOAL, TURN_ONE_ACTIONS, TURN_ONE_RESULT, TURN_ONE_NEXT)) : closeSummary(
+        EXACT_BODY, 'Close the final third turn',
+      ) : closeSummary(TURN_TWO_GOAL, TURN_TWO_ACTIONS, EXACT_BODY, TURN_TWO_NEXT)) : closeSummary(
         'Deliver the exact text body', 'End the pure-text turn',
         inspectThisTurn && input.inspect === 'file.list'
           ? 'Listed the workspace directory read-only: read-delivery.txt present; no file content read'
-          : SUMMARY_RESULT,
+          : EXACT_BODY,
         'Close this turn',
       );
       const summaryWithInspection = input.inspection && multiTurn && plannerAttempts > 0
@@ -2657,7 +2546,7 @@ async function fetchTaskForCaptureStop(origin: string, taskId: TaskId, cookie: s
   return body;
 }
 
-if (!coldConsumerMode) test('public explicit taskless helper dispatch and owner acceptance use configured native providers', async () => {
+if (!coldConsumerMode) test('public explicit taskless intake answers without the retired helper dispatch surface', async () => {
   const fixture = await textOnlyFixture(
     false,
     true,
@@ -2722,66 +2611,14 @@ if (!coldConsumerMode) test('public explicit taskless helper dispatch and owner 
 
     const helperJournal = new JsonlInteractionHelperJournal(fixture.journal);
     const helpers = await helperJournal.readTurnHelpers(turn);
-    assert.equal(helpers.length, 1, 'the public interaction dispatched exactly one helper');
-    const helper = helpers[0]!;
-    const dispatch = helper.readback.dispatchAccepted;
-    const returned = helper.readback.returned;
-    const ownerAccepted = helper.readback.ownerAccepted;
-    const adoptedCheckpoint = helper.readback.adoptedCheckpoint;
-    if (dispatch === null) throw new Error('the helper dispatch is not durable');
-    if (returned === null) throw new Error('the actual child result is not durably returned');
-    assert.equal(returned.fact.result.agentId, 'orchestration-default');
-    assert.equal(returned.fact.result.summary, EXPLICIT_HELPER_CHILD_SUMMARY);
-    if (ownerAccepted === null) throw new Error('the parent did not explicitly accept the returned helper result');
-    assert.equal(ownerAccepted.fact.acceptanceRef, 'acceptance:n3-public-helper');
-    assert.equal(ownerAccepted.fact.acceptedBy, 'humanagent.runtime.explicit-brain');
-    if (adoptedCheckpoint === null) throw new Error('owner acceptance committed no adopted helper checkpoint');
-    assert.equal(adoptedCheckpoint.checkpoint.phase, 'adopted');
-    assert.equal(adoptedCheckpoint.checkpoint.description, EXPLICIT_HELPER_REFINED_TEXT);
-    assert.equal(
-      adoptedCheckpoint.checkpoint.recovery.dispatchAcceptedCommitId,
-      dispatch.commit.commitId,
-    );
-    assert.equal(
-      adoptedCheckpoint.checkpoint.recovery.returnedCommitId,
-      returned.commit.commitId,
-    );
-    assert.equal(
-      adoptedCheckpoint.checkpoint.recovery.ownerAcceptedCommitId,
-      ownerAccepted.commit.commitId,
-    );
+    assert.deepEqual(helpers, [], 'the retired explicit helper surface dispatches no helper');
 
-    const evidenceRoot = join(fixture.paths.artifactsRoot, 'ui-provider-evidence');
-    const rawContent = providerRawContentReader(
-      filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot)),
-    );
-    const refinedBytes = await rawContent.read({
-      scope: ownerAccepted.fact.refinedResult.ref.scope,
-      content: ownerAccepted.fact.refinedResult,
-    });
-    assert.equal(new TextDecoder().decode(refinedBytes), EXPLICIT_HELPER_REFINED_TEXT);
-
-    const semanticCheckpoint = await helperJournal.readSemanticCheckpointExact(turn);
-    if (semanticCheckpoint === null) throw new Error('the answered turn committed no semantic checkpoint');
-    assert.ok(semanticCheckpoint.checkpoint.claims.some((claim) =>
-      claim.fact.includes(EXPLICIT_HELPER_REFINED_TEXT)),
-    'the semantic checkpoint carries the owner-accepted refined result');
-    assert.ok(semanticCheckpoint.checkpoint.semanticAssetRefs.some((ref) =>
-      ref.locator === ownerAccepted.fact.refinedResult.ref.locator),
-    'the semantic checkpoint references the durable refined asset');
-
-    console.log('n3-public-helper-receipt', JSON.stringify({
+    console.log('public-explicit-taskless-intake-receipt', JSON.stringify({
       interactionId,
-      helperCallId: helper.identity.helperCallId,
-      dispatchCommitId: dispatch.commit.commitId,
-      returnedCommitId: returned.commit.commitId,
-      ownerAcceptedCommitId: ownerAccepted.commit.commitId,
       phase: fixture.upstream.explicitHelperPhase(),
       parentModel: 'text.only.model',
-      childModel: 'child.only.model',
-      returnedSummary: returned.fact.result.summary,
-      refinedText: EXPLICIT_HELPER_REFINED_TEXT,
       answer: interpreted.reply,
+      helperCount: helpers.length,
     }));
     passed = true;
   } finally {
@@ -3141,7 +2978,7 @@ test('native child orphan tool call surfaces typed recover and retries delivery'
     };
     assert.equal(receipt.taskId, taskId.value);
     assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
-    assert.equal(receipt.output, TURN_ONE_RESULT);
+    assert.equal(receipt.output, EXACT_BODY);
 
     const stream = fixture.upstream.orphanChildStream();
     assert.deepEqual(stream.map((event) => event.type), [
@@ -4124,13 +3961,36 @@ if (!coldConsumerMode) test('native two.turn public CLI consumer retains adopted
     assert.equal(inspectResult === EXACT_BODY, false, 'the bounded conclusion is not the complete raw file body');
     assert.ok(Array.isArray(inspectCheckpoint.evidenceRefs),
       'the first-turn semantic checkpoint exposes top-level evidence refs');
-    const inspectEvidence = (inspectCheckpoint.evidenceRefs as readonly {
-      readonly locator?: unknown;
-      readonly scope?: unknown;
-    }[]).find((ref) => ref.locator === acceptedInspectRef.locator);
-    assert.ok(inspectEvidence, 'the first-turn semantic checkpoint cites the accepted inspect locator');
+    // Canonical contract (3c0b49f89, W1-A B1): the semantic checkpoint keeps
+    // per-section evidence empty; the turn-level resolved inspect evidence
+    // travels on the accepted standard-end command and its operation control
+    // result. The citation must still be exact: dropping or rewriting the
+    // inspect delivery ref still fails.
+    assert.equal((inspectCheckpoint.evidenceRefs as readonly unknown[]).length, 0,
+      'the canonical first-turn semantic checkpoint keeps per-section evidence empty');
+    type CapturedOperationControl = {
+      readonly operations?: readonly {
+        readonly result?: { readonly evidenceRefs?: readonly { readonly locator?: unknown; readonly scope?: unknown }[] };
+      }[];
+    };
+    const firstTurnClosures = verified.records.filter((record) => {
+      if (record.payload?.['kind'] !== 'checkpoint-closure') return false;
+      const closure = record.payload['closure'] as
+        { readonly checkpointId?: unknown } | undefined;
+      if (closure?.checkpointId === undefined || inspectCheckpoint.checkpointId === undefined) return false;
+      return canonicalJsonStringify(closure.checkpointId) === canonicalJsonStringify(inspectCheckpoint.checkpointId);
+    });
+    const inspectEvidence = firstTurnClosures
+      .flatMap((record) => {
+        const closure = record.payload?.['closure'] as
+          { readonly operationControl?: CapturedOperationControl } | undefined;
+        return closure?.operationControl?.operations ?? [];
+      })
+      .flatMap((operation) => operation.result?.evidenceRefs ?? [])
+      .find((ref) => ref.locator === acceptedInspectRef.locator);
+    assert.ok(inspectEvidence, 'the accepted first-turn control result cites the accepted inspect locator');
     assert.deepEqual(inspectEvidence, acceptedInspectRef,
-      'the first-turn semantic checkpoint cites the exact accepted inspect ref');
+      'the accepted first-turn control result cites the exact accepted inspect ref');
     const operationIds = parentCoverageRecords
       .map((record) => record.scope.operationId?.value)
       .filter((value): value is string => typeof value === 'string' && value.length > 0);
@@ -4886,15 +4746,16 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
   let passed = false;
   try {
     // Blood-component guard stays on the admitted turn: the advertised wire
-    // tool must carry deliveryText, while deliveryRefs may be empty for a
-    // text-only delivery. The underlying control schema keeps the same pair.
+    // tool must carry the canonical summary.result.text plus summary.nextStep,
+    // while deliveryRefs may be empty for a text-only delivery. The underlying
+    // control schema keeps the same shape and never revives deliveryText.
     const advertised = ADVERTISED_STANDARD_TURN_END_TOOL.inputSchema as unknown as JsonSchemaProperties;
-    assert.equal(advertised.properties.deliveryText?.type, 'string');
+    assert.equal(advertised.properties.deliveryText, undefined, 'the retired top-level deliveryText field is absent');
     assert.equal(advertised.properties.deliveryRefs?.minItems, undefined, 'text-only delivery must not require refs');
     assert.deepEqual(advertised.properties.summary?.required,
-      ['goal', 'actions', 'result', 'expectedNextStep']);
+      ['goal', 'actions', 'result', 'nextStep']);
     const underlying = STANDARD_TURN_END_TOOL.inputSchema as unknown as JsonSchemaProperties;
-    assert.equal(underlying.properties.deliveryText?.type, 'string');
+    assert.equal(underlying.properties.deliveryText, undefined, 'the retired top-level deliveryText field is absent');
     assert.equal(underlying.properties.deliveryRefs?.minItems, undefined);
 
     // Real fixture-owned A1 credential and paired control session.
@@ -4989,7 +4850,10 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
       assert.ok(sent.tools?.some((tool) => tool.name === name), `default composition advertises ${name}`);
     }
     if (!advertisedWire) throw new Error('advertised wire tool is absent');
-    assert.equal(advertisedWire.parameters?.properties?.['deliveryText']?.type, 'string');
+    assert.equal(advertisedWire.parameters?.properties?.['deliveryText'], undefined,
+      'the advertised wire never revives the retired deliveryText field');
+    assert.equal(advertisedWire.parameters?.properties?.['summary']?.type, 'object',
+      'the advertised wire carries the canonical summary object');
     assert.equal(advertisedWire.parameters?.properties?.['deliveryRefs']?.minItems, undefined);
     const plannerWire = plannerPosts()[0];
     assert.ok(plannerWire, 'the complete sample sends its real independent Planner request');
@@ -5134,21 +4998,29 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
     }));
 
     // Exact read over the existing ImmutableAssetStore, using the deterministic
-    // raw-arguments view; the parsed body must differ from every summary part.
+    // raw-arguments view; summary.result.text is the one canonical body and
+    // the retired top-level deliveryText field must stay absent.
     const evidenceRoot = join(fixture.paths.artifactsRoot, 'ui-provider-evidence');
     const rawRead = providerRawContentReader(filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot)));
     const argumentsBytes = await rawRead.read({ scope: endCall.entry.envelope.scope, content: fact.rawArguments });
     const argumentsJson = new TextDecoder('utf-8', { fatal: true }).decode(argumentsBytes);
     const parsedArgs = JSON.parse(argumentsJson) as {
       readonly deliveryText?: string; readonly deliveryRefs?: readonly string[];
-      readonly summary?: { readonly result?: { readonly text?: string }; readonly goal?: { readonly text?: string } };
+      readonly summary?: {
+        readonly result?: { readonly status?: string; readonly text?: string };
+        readonly goal?: string;
+        readonly nextStep?: string;
+      };
     };
-    assert.equal(parsedArgs.deliveryText, EXACT_BODY);
+    assert.equal(parsedArgs.deliveryText, undefined, 'the retired top-level deliveryText field is absent');
     assert.deepEqual(parsedArgs.deliveryRefs, []);
-    assert.equal(parsedArgs.deliveryText !== parsedArgs.summary?.result?.text, true,
-      'the exact body is not the summary result text');
-    assert.equal(parsedArgs.deliveryText !== parsedArgs.summary?.goal?.text, true,
-      'the exact body is not a summary section text');
+    assert.equal(parsedArgs.summary?.result?.text, EXACT_BODY,
+      'the canonical summary result text is the exact delivery body');
+    assert.equal(parsedArgs.summary?.result?.status, 'completed');
+    assert.ok(typeof parsedArgs.summary?.goal === 'string' && parsedArgs.summary.goal.length > 0,
+      'the summary carries a non-empty goal');
+    assert.ok(typeof parsedArgs.summary?.nextStep === 'string' && parsedArgs.summary.nextStep.length > 0,
+      'the summary carries a non-empty next step');
 
     // The standalone immutable delivery body: the accepted `deliveryText` must
     // be materialized through the existing asset owner as its own body, and the
@@ -5217,8 +5089,16 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
       'the canonical commit carries its real Journal sequence');
     assert.match(publicCommit.ref.recordDigest, /^sha256:[0-9a-f]{64}$/,
       'the canonical commit carries its real Journal record digest');
-    assert.equal(publicCommit.ref.sourceId.startsWith('standard-turn-delivery:'),
-      true, 'the canonical commit source is the real accepted end call, not a Provider event or summary');
+    // Canonical publication identity is `pub:${operationId}:${activeTurnId}`,
+    // derived from the real accepted end call scope, never from a Provider
+    // event id or a summary string.
+    const endOperationId = endCall.entry.envelope.scope.operationId?.value;
+    if (endOperationId === undefined) {
+      throw new Error('the accepted end call carries no operation identity');
+    }
+    assert.equal(publicCommit.ref.sourceId,
+      `pub:${endOperationId}:${newActiveTurnId(endOperationId)}`,
+      'the canonical commit source is the real accepted end call, not a Provider event or summary');
     assert.equal(publication.publicCommitWatermark, publicCommit.ref.journalSeq,
       'the publication watermark is the committed record itself');
 
@@ -5336,7 +5216,8 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
         digest: `sha256:${createHash('sha256').update(standaloneBody.bytes).digest('hex')}`,
       },
       rawArgumentsRef: fact.rawArguments.ref,
-      parsedDeliveryText: parsedArgs.deliveryText,
+      parsedResultText: parsedArgs.summary?.result?.text,
+      parsedResultStatus: parsedArgs.summary?.result?.status,
       deliveryRefs: parsedArgs.deliveryRefs,
     });
     // The archived byte assets are written as their exact UTF-8 text: the
@@ -5367,9 +5248,9 @@ if (!coldConsumerMode) test('native text-only delivery advertised end, independe
     assert.equal(plannerPosts().length, 1, 'the pure-text run uses exactly one independent Planner request');
     assert.equal(posts().length, 8, 'seven execution requests and one independent Planner request');
     console.log('native text-only delivery', JSON.stringify({
-      body: parsedArgs.deliveryText,
+      body: parsedArgs.summary?.result?.text,
       bodyBytes: Buffer.from(EXACT_BODY, 'utf8').length,
-      bodyDiffersFromSummary: parsedArgs.deliveryText !== parsedArgs.summary?.result?.text,
+      bodyIsCanonicalResult: parsedArgs.summary?.result?.text === EXACT_BODY,
       acceptedEndCalls: endCalls.length,
       deliveryRefs: parsedArgs.deliveryRefs,
       executionPosts: executionPosts().length,
