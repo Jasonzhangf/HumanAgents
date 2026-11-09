@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { id, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type WorkResult, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef } from '../../packages/contracts/src/index.js';
+import { id, canonicalJsonStringify, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type WorkResult, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef } from '../../packages/contracts/src/index.js';
 import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
@@ -3961,13 +3961,36 @@ if (!coldConsumerMode) test('native two.turn public CLI consumer retains adopted
     assert.equal(inspectResult === EXACT_BODY, false, 'the bounded conclusion is not the complete raw file body');
     assert.ok(Array.isArray(inspectCheckpoint.evidenceRefs),
       'the first-turn semantic checkpoint exposes top-level evidence refs');
-    const inspectEvidence = (inspectCheckpoint.evidenceRefs as readonly {
-      readonly locator?: unknown;
-      readonly scope?: unknown;
-    }[]).find((ref) => ref.locator === acceptedInspectRef.locator);
-    assert.ok(inspectEvidence, 'the first-turn semantic checkpoint cites the accepted inspect locator');
+    // Canonical contract (3c0b49f89, W1-A B1): the semantic checkpoint keeps
+    // per-section evidence empty; the turn-level resolved inspect evidence
+    // travels on the accepted standard-end command and its operation control
+    // result. The citation must still be exact: dropping or rewriting the
+    // inspect delivery ref still fails.
+    assert.equal((inspectCheckpoint.evidenceRefs as readonly unknown[]).length, 0,
+      'the canonical first-turn semantic checkpoint keeps per-section evidence empty');
+    type CapturedOperationControl = {
+      readonly operations?: readonly {
+        readonly result?: { readonly evidenceRefs?: readonly { readonly locator?: unknown; readonly scope?: unknown }[] };
+      }[];
+    };
+    const firstTurnClosures = verified.records.filter((record) => {
+      if (record.payload?.['kind'] !== 'checkpoint-closure') return false;
+      const closure = record.payload['closure'] as
+        { readonly checkpointId?: unknown } | undefined;
+      if (closure?.checkpointId === undefined || inspectCheckpoint.checkpointId === undefined) return false;
+      return canonicalJsonStringify(closure.checkpointId) === canonicalJsonStringify(inspectCheckpoint.checkpointId);
+    });
+    const inspectEvidence = firstTurnClosures
+      .flatMap((record) => {
+        const closure = record.payload?.['closure'] as
+          { readonly operationControl?: CapturedOperationControl } | undefined;
+        return closure?.operationControl?.operations ?? [];
+      })
+      .flatMap((operation) => operation.result?.evidenceRefs ?? [])
+      .find((ref) => ref.locator === acceptedInspectRef.locator);
+    assert.ok(inspectEvidence, 'the accepted first-turn control result cites the accepted inspect locator');
     assert.deepEqual(inspectEvidence, acceptedInspectRef,
-      'the first-turn semantic checkpoint cites the exact accepted inspect ref');
+      'the accepted first-turn control result cites the exact accepted inspect ref');
     const operationIds = parentCoverageRecords
       .map((record) => record.scope.operationId?.value)
       .filter((value): value is string => typeof value === 'string' && value.length > 0);

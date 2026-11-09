@@ -59,6 +59,24 @@ product candidates outside this task, with their original failures preserved.
 - `#14`/`#15` shared helper: semantic checkpoint wire top-level `evidenceRefs`
   is compared with the committed `native-semantic-context-view` `evidenceRefs`,
   which is the acceptance source evidence the shipped product commits.
+- `#14` inspect-locator assertion: the committed `#14` also required the
+  first-turn semantic checkpoint's own `evidenceRefs` to cite the accepted
+  inspect `rawOutput.ref`. Under the canonical contract that array is empty by
+  construction: `projectTurnCloseSummary`
+  (`packages/app/src/ui-runtime/execution-composition.ts:97`) pins each summary
+  section's `evidenceRefs` to `[]`, `buildTurnCheckpoint`
+  (`packages/runtime/src/agent-loop/runtime.ts:2026`) derives the checkpoint
+  `evidenceRefs` from those sections, and `semantic-history.ts:1012` projects
+  the context view from `acceptance.sourceEvidenceRefs`. The turn-level
+  resolved inspect evidence now travels on the accepted standard-end command
+  (`resolvedEvidenceRefs`) and the `operation.completed` operation-control
+  result. Owner ruling `m1794228225873-737` (option A) authorized moving this
+  assertion to the canonical owner without weakening it: `#14` now asserts the
+  first-turn checkpoint closure's `operationControl` result `evidenceRefs`
+  deep-equal the accepted inspect `rawOutput.ref` (`locator`, `evidenceId`,
+  `scope`), and separately asserts the canonical checkpoint top-level
+  `evidenceRefs` is empty. `assertPriorSemanticCheckpointWire` keeps pinning
+  the wire `evidenceRefs` to the durable context-view refs.
 - `#19`: the advertised end carries no top-level `deliveryText`, the canonical
   `summary` requires `goal`/`actions`/`result`/`nextStep`, the exact body is
   `summary.result.text`, and the publication source is
@@ -75,11 +93,14 @@ assertions check.
 
 ```
 pnpm exec tsc -p tests/app/native-delivery.tsconfig.json
-HUMANAGENT_TEST_ROOT=$(mktemp -d /tmp/ha-native-final.XXXXXX) \
+HUMANAGENT_TEST_ROOT=$(mktemp -d /tmp/ha-grace-r14-green.XXXXXX) \
   node --test dist/tests-native-text/tests/app/native-delivery-public-consumer.test.js
 ```
 
 Result: `tests 21`, `pass 19`, `fail 2`.
+Raw log: `.worker-runs/ruling-request-14-20261109/full21.green.stdout.log`
+(exit `.worker-runs/ruling-request-14-20261109/full21.green.exit`). Isolated
+`#14` GREEN: `.worker-runs/ruling-request-14-20261109/isolated14.patch.stdout.log`.
 
 - Pass: `#4` `#7` `#14` `#15` `#19` `#20` and every other test except the two
   excluded product candidates.
