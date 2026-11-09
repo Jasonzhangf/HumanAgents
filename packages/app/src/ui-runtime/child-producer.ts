@@ -70,7 +70,7 @@ import type {
   InspectionSelectionReader,
 } from '../../../runtime/src/agent-loop/inspection-turn-boundary.js';
 import { ProviderAgentDriver } from '../../../adapters/provider/src/index.js';
-import type { ProviderToolExecutionResult } from '../../../adapters/provider/src/index.js';
+import type { ProviderAgentEvent, ProviderToolExecutionResult } from '../../../adapters/provider/src/index.js';
 import type { ProviderToolExecutionPort } from '../../../adapters/provider/src/index.js';
 import type { ProviderAgentDriverOptions } from '../../../adapters/provider/src/agent-driver.js';
 import { closeAgentProvider, type AgentProviderComposition } from '../agent-driver-composition.js';
@@ -740,7 +740,7 @@ async function runIndependentChild(input: {
   const runtimeId = input.incarnation.runtimeId;
   const taskId = input.incarnation.taskId;
   const executionEpoch = input.incarnation.executionEpoch;
-  const events: AgentEvent[] = [];
+  const events: ProviderAgentEvent[] = [];
   let terminalState: ProviderTerminalState | undefined;
   let terminalError: string | undefined;
   let requests = 0;
@@ -836,6 +836,10 @@ async function runIndependentChild(input: {
         reason: 'the child call was cancelled; recovery responsibility is retained and nothing is replayed',
       };
     }
+    const orphan = orphanToolCallNotClosed(events);
+    if (orphan !== undefined) {
+      return { state: 'preserved', events, reason: orphan };
+    }
     return { state: 'failed', events, reason: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -846,6 +850,21 @@ function isAbort(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function orphanToolCallNotClosed(events: readonly ProviderAgentEvent[]): string | undefined {
+  const open = new Set<string>();
+  const completed = new Set<string>();
+  for (const event of events) {
+    const callId = event.providerEvent.toolCall?.callId;
+    if (callId !== undefined) completed.add(callId);
+    const started = /(?:^|-)tool-(.+)-started(?:-\d+)?$/u.exec(event.providerEvent.eventId);
+    if (started !== null && started[1] !== undefined) open.add(started[1]);
+  }
+  const unclosed = [...open].filter((callId) => !completed.has(callId));
+  return unclosed.length === 0
+    ? undefined
+    : `stream/tool-call-not-closed: child response stream ended with open function_call ${unclosed.join(',')}`;
 }
 
 /**
@@ -957,7 +976,9 @@ function createChildDeliveryExecutor(input: {
       if (input.kind === 'execution' && input.inspection === undefined && inspectionOutcome !== undefined) {
         throw new Error('a non-inspection execution cannot carry an inspection outcome');
       }
-      const candidateFindings = input.kind === 'review' ? parseReviewFindingSelectors(args.findings) : [];
+      const candidateFindings = judgment !== undefined
+        ? parseReviewFindingSelectors(args.findings, judgment)
+        : [];
       const identity = await input.standardEndOwner.resolveBoundTurn({
         execution: request.execution,
         ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
@@ -1067,8 +1088,12 @@ function readInspectionOutcome(value: unknown): InspectionExecutionOutcome {
   return outcome as InspectionExecutionOutcome;
 }
 
-function parseReviewFindingSelectors(value: unknown): readonly ReviewFindingSelectors[] {
+function parseReviewFindingSelectors(
+  value: unknown,
+  judgment: ReviewStatus,
+): readonly ReviewFindingSelectors[] {
   if (value === undefined || value === null) {
+    if (judgment === 'passed') return [];
     throw new Error('a review delivery must state its concrete findings');
   }
   if (!Array.isArray(value)) {
@@ -1491,8 +1516,13 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
   // The control successor is derived from the actual controller facts, not
   // from model text or business payload. A failed append must not release the
   // refined result as success.
+  const orphan = outcome.state === 'preserved' && outcome.reason.startsWith('stream/tool-call-not-closed:')
+    ? outcome.reason
+    : undefined;
+  const failureMessage = orphan ?? (outcome.state === 'failed' ? outcome.reason : undefined);
   const status: 'succeeded' | 'failed' | 'cancelled' | 'blocked' = resolved.state === 'returned'
     ? 'succeeded'
+    : orphan !== undefined ? 'blocked'
     : outcome.state === 'failed' || settlement?.state === 'failed' ? 'failed'
     : settlement?.state === 'cancelled' || settlement?.state === 'stopped' ? 'cancelled'
     : 'blocked';
@@ -1520,7 +1550,7 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
       evidenceRefs: terminalEvidence,
       ...(result === undefined ? {} : { result }),
       ...(status === 'failed' && resolved.state === 'blocked'
-        ? { failure: { message: outcome.state === 'failed' ? outcome.reason : resolved.reason } }
+        ? { failure: { message: failureMessage ?? resolved.reason } }
         : {}),
     });
   } catch (error) {
@@ -1585,6 +1615,10 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
             signal: execution.signal ?? new AbortController().signal,
           });
           if (resolved.state === 'blocked') {
+            const toolCallNotClosed = resolved.reason.startsWith('stream/tool-call-not-closed:');
+            const conditionRef = toolCallNotClosed
+              ? 'stream/tool-call-not-closed'
+              : `child:${execution.assignment.assignmentId}:no-delivery`;
             return {
               taskId: execution.assignment.taskId,
               pipelineNodeId: execution.assignment.pipelineNodeId,
@@ -1595,11 +1629,12 @@ export function createConfiguredExecutionAgent(input: ConfiguredChildAgentInput)
               inputRevision: execution.assignment.inputRevision,
               summary: boundedSummary(resolved.reason),
               evidenceRefs: [],
-              nextAction: 'attention',
+              nextAction: 'wait',
               producedArtifactRefs: [],
-              status: 'failed',
+              status: 'blocked',
               outputRefs: [],
-              failureRef: `child:${execution.assignment.assignmentId}:no-delivery`,
+              conditionRef,
+              failureRef: toolCallNotClosed ? resolved.reason : conditionRef,
             };
           }
           return resolved.inspectionDelivery === undefined
@@ -1846,6 +1881,16 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
         return { invocationId: prepareInput.invocationId, checkpointReceiptRef };
       },
       async recordReturn(returnInput: ChildCallReturnInput): Promise<void> {
+        // A blocked or cancelled execution produced no deliverable, so it is
+        // not recorded as a durable child delivery. Recording one would create
+        // a selection obligation the parent can only discharge by adopting an
+        // empty body; instead the blocked result stays a recoverable, retryable
+        // outcome that the parent handles with a fresh child.call. A legitimate
+        // failed or incomplete result is terminal and must stay adoptable.
+        if (returnInput.kind === 'execution'
+          && (returnInput.result.status === 'blocked' || returnInput.result.status === 'cancelled')) {
+          return;
+        }
         if (findDelivery(parent, returnInput.invocationId) === undefined) {
           const refinedDelivery: RawAsset = await input.refinedDeliveryStore.store({
             scope: returnInput.scope,
@@ -1950,18 +1995,23 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
     scope: ScopeRef,
   ): ProviderToolExecutionResult {
     if (result.state === 'returned' && result.kind === 'execution') {
+      const work = result.result;
+      const blocked = work.status === 'blocked';
       return {
         output: JSON.stringify({
           state: 'returned',
           kind: 'execution',
           invocationId: result.invocationId,
           incarnation: result.incarnation,
-          status: result.result.status,
-          summary: result.result.summary.slice(0, MAX_REFINED_CHARS),
-          outputRefs: [...result.result.outputRefs],
+          status: work.status,
+          ...(blocked && work.conditionRef !== undefined ? { conditionRef: work.conditionRef } : {}),
+          ...(blocked ? { reason: work.failureRef ?? work.summary } : {}),
+          ...(blocked ? { nextAction: { kind: 'recover', ref: work.conditionRef ?? 'orchestration.child-call.blocked' } } : {}),
+          summary: work.summary.slice(0, MAX_REFINED_CHARS),
+          outputRefs: [...work.outputRefs],
         }),
-        outputRefs: [...result.result.outputRefs],
-        evidenceRefs: boundedEvidence(result.result.evidenceRefs),
+        outputRefs: [...work.outputRefs],
+        evidenceRefs: boundedEvidence(work.evidenceRefs),
         status: 'succeeded',
       };
     }

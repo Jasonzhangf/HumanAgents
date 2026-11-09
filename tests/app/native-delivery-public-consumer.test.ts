@@ -1016,8 +1016,10 @@ async function textOnlyResponsesUpstream(input: {
   readonly parallelChild?: boolean;
   readonly reviewPerCycle?: boolean;
   readonly badReviewSelector?: boolean;
-  readonly reviewFindingsMode?: 'empty' | 'failed-empty' | 'missing-location'
-    | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref';
+  readonly reviewFindingsMode?: 'empty' | 'failed-empty' | 'missing-findings'
+    | 'failed-missing-findings' | 'missing-location' | 'illegal-severity'
+    | 'empty-evidence' | 'unaccepted-ref'
+    | 'subject-child-body' | 'foreign-subject-child-body';
   readonly inspection?: boolean;
   readonly turnCount?: 2 | 3;
   readonly scenario?: TextOnlyFixtureScenario;
@@ -1027,10 +1029,12 @@ async function textOnlyResponsesUpstream(input: {
   readonly holdFirstExecutionOnce?: () => Promise<void>;
   readonly holdInspectionAfterAdoptOnce?: () => Promise<void>;
   readonly failTurnEndDrain?: boolean;
+  readonly orphanChildCallOnce?: boolean;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean;
   inspectionInvocations(): readonly { callId: string; invocationId: string }[];
   inspectionChildRequests(): readonly { body: string; parentCallId: string }[];
+  orphanChildStream(): readonly Record<string, unknown>[];
   explicitHelperPhase(): string | undefined;
   close(): Promise<void> }> {
   const wires: Wire[] = [];
@@ -1048,6 +1052,8 @@ async function textOnlyResponsesUpstream(input: {
   let firstExecutionHeld = false;
   let inspectionAdoptHeld = false;
   let explicitHelperPhase: string | undefined;
+  let orphanChildStreamed = false;
+  const orphanChildStreamEvents: Record<string, unknown>[] = [];
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
   const server = createServer((request, response) => {
     void (async () => {
@@ -1421,15 +1427,43 @@ async function textOnlyResponsesUpstream(input: {
           assert.equal(wire.model, review ? 'review.only.model' : 'child.only.model');
           assert.equal(body.includes('text-only delivery probe'), false, 'child context excludes parent transcript');
           if (review) assert.ok(body.includes(executionBody), 'review receives complete execution subject');
+          const subjectChildBodyRef = review
+            ? /Subject 1 \(([^)]+)\):/.exec(body)?.[1]
+            : undefined;
+          const subjectChildBodyMode = review && (input.reviewFindingsMode === 'subject-child-body'
+            || input.reviewFindingsMode === 'foreign-subject-child-body');
+          if (subjectChildBodyMode) {
+            assert.ok(subjectChildBodyRef?.startsWith('child-body:execution:invocation:child:'),
+              `review prompt exposes the executor child-body reference: ${body}`);
+          }
+          const delivered = resultFor(`cycle-${cycle}-child-delivery`);
+          if (!delivered && subjectChildBodyMode) {
+            const evidenceRef = input.reviewFindingsMode === 'subject-child-body'
+              ? subjectChildBodyRef!
+              : 'child-body:execution:invocation:child:not-in-this-attempt';
+            invoke(`cycle-${cycle}-child-delivery`, 'humanagent_child_deliver', {
+              body: `Cycle ${cycle} independent quality review`,
+              judgment: 'passed',
+              findings: [{
+                detail: `Cycle ${cycle} reviewed the executor child body`,
+                severity: 'advisory',
+                locationRef: `Cycle ${cycle} execution subject`,
+                evidenceRefs: [evidenceRef],
+              }],
+            });
+            return;
+          }
           if (review && !resultFor(`cycle-${cycle}-review-read`)) {
             invoke(`cycle-${cycle}-review-read`, 'file_read', { path: 'review-evidence.txt' });
             return;
           }
-          const delivered = resultFor(`cycle-${cycle}-child-delivery`);
           if (!delivered) {
             const ref = /evidenceId=([^\s]+)/.exec(resultFor(`cycle-${cycle}-review-read`)?.output ?? '')?.[1];
             const locationRef = `Cycle ${cycle} execution subject`;
             const failedEmpty = input.reviewFindingsMode === 'failed-empty';
+            const missingFindings = input.reviewFindingsMode === 'missing-findings'
+              || input.reviewFindingsMode === 'failed-missing-findings';
+            const failedJudgment = failedEmpty || input.reviewFindingsMode === 'failed-missing-findings';
             const findings = !review ? undefined
               : input.reviewFindingsMode === 'empty' || failedEmpty ? []
               : input.reviewFindingsMode === 'missing-location' ? [{
@@ -1455,7 +1489,9 @@ async function textOnlyResponsesUpstream(input: {
                 }];
             invoke(`cycle-${cycle}-child-delivery`, 'humanagent_child_deliver', {
               body: review ? `Cycle ${cycle} independent quality review` : executionBody,
-              ...(review ? { judgment: failedEmpty ? 'failed' : 'passed', findings } : {}),
+              ...(review
+                ? { judgment: failedJudgment ? 'failed' : 'passed', ...(missingFindings ? {} : { findings }) }
+                : {}),
             });
           } else {
             const deliveryEvidence = delivered.output!.split('\n')
@@ -1521,6 +1557,28 @@ async function textOnlyResponsesUpstream(input: {
         if (wire.tools?.some((tool) => tool.name === 'humanagent_child_deliver')) {
           assert.equal(wire.model, 'child.only.model', 'child selects its configured Provider model');
           assert.equal(body.includes('text-only delivery probe'), false, 'child does not inherit parent request history');
+          if (input.orphanChildCallOnce && !orphanChildStreamed) {
+            orphanChildStreamed = true;
+            const orphanResponseId = 'orphan-child-call';
+            orphanChildStreamEvents.push(
+              { type: 'response.created', response: { id: orphanResponseId } },
+              { type: 'response.in_progress', response: { id: orphanResponseId } },
+              {
+                type: 'response.output_item.added',
+                output_index: 0,
+                item: {
+                  type: 'function_call',
+                  call_id: 'call-orphan-child',
+                  name: 'humanagent_child_deliver',
+                  arguments: '',
+                  status: 'in_progress',
+                },
+              },
+            );
+            response.writeHead(200, { 'content-type': 'text/event-stream' });
+            response.end(frame(orphanChildStreamEvents));
+            return;
+          }
           const records = (await input.journal.verify()).records;
           assert.ok(records.some((record) => record.kind === 'checkpoint'), 'pre-call checkpoint is committed before child Provider request');
           const parallelIndex = input.parallelChild && body.includes('Independent child result b') ? 1 : 0;
@@ -1613,13 +1671,42 @@ async function textOnlyResponsesUpstream(input: {
               agentId: 'orchestration-default', kind: 'execution', successCriteria: ['Return the complete result'] });
             return;
           }
-          const refined = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
-            state?: string; invocationId?: string; summary?: string };
-          assert.equal(refined.state, 'returned', `real producer returns the child: ${called.output}`);
-          assert.equal(refined.summary, CHILD_BODY);
-          if (!resultFor('call-parent-adopt')) {
-            invoke('call-parent-adopt', 'child_adopt', { invocationId: refined.invocationId });
-            return;
+          const firstChildResult = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+            state?: string; status?: string; invocationId?: string; summary?: string; reason?: string;
+            nextAction?: { readonly kind?: string; readonly ref?: string };
+          };
+          if (input.orphanChildCallOnce && firstChildResult.status === 'blocked') {
+            assert.match(firstChildResult.reason ?? '', /^stream\/tool-call-not-closed:/);
+            assert.equal(firstChildResult.nextAction?.kind, 'recover');
+            assert.equal(firstChildResult.nextAction?.ref, 'stream/tool-call-not-closed');
+            const retryCallId = 'call-parent-child-retry';
+            const retried = resultFor(retryCallId);
+            if (!retried) {
+              invoke(retryCallId, 'child_call', { purpose: 'Produce an independent result',
+                instructions: 'Independently produce the complete child result, publish it with humanagent_child_deliver, and finish the child turn with evidence for the parent to adopt.',
+                target: 'Independent child result for the parent to adopt',
+                agentId: 'orchestration-default', kind: 'execution', successCriteria: ['Return the complete result'] });
+              return;
+            }
+            const retriedResult = JSON.parse(retried.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+              state?: string; invocationId?: string; status?: string; summary?: string;
+            };
+            assert.equal(retriedResult.state, 'returned', `child retry returns a result: ${retried.output}`);
+            assert.equal(retriedResult.status, 'succeeded', `child retry succeeds: ${retried.output}`);
+            assert.equal(retriedResult.summary, CHILD_BODY);
+            if (!resultFor('call-parent-adopt')) {
+              invoke('call-parent-adopt', 'child_adopt', { invocationId: retriedResult.invocationId });
+              return;
+            }
+          } else {
+            const refined = JSON.parse(called.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+              state?: string; invocationId?: string; summary?: string };
+            assert.equal(refined.state, 'returned', `real producer returns the child: ${called.output}`);
+            assert.equal(refined.summary, CHILD_BODY);
+            if (!resultFor('call-parent-adopt')) {
+              invoke('call-parent-adopt', 'child_adopt', { invocationId: refined.invocationId });
+              return;
+            }
           }
         }
       }
@@ -1744,6 +1831,7 @@ async function textOnlyResponsesUpstream(input: {
       callId, invocationId,
     })),
     inspectionChildRequests: () => inspectionChildRequests.map((entry) => ({ ...entry })),
+    orphanChildStream: () => orphanChildStreamEvents.map((event) => structuredClone(event)),
     explicitHelperPhase: () => explicitHelperPhase,
     baseUrl: `http://127.0.0.1:${address.port}`,
     close: async () => {
@@ -1768,8 +1856,10 @@ async function textOnlyFixture(
   badReviewSelector = false,
   scenario?: TextOnlyFixtureScenario,
   failTurnEndDrain = false,
-  reviewFindingsMode: 'empty' | 'failed-empty' | 'missing-location' | 'illegal-severity'
-    | 'empty-evidence' | 'unaccepted-ref' | undefined = undefined,
+  reviewFindingsMode: 'empty' | 'failed-empty' | 'missing-findings' | 'failed-missing-findings'
+    | 'missing-location' | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref' | 'subject-child-body'
+    | 'foreign-subject-child-body' | undefined = undefined,
+  orphanChildCallOnce = false,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1788,6 +1878,7 @@ async function textOnlyFixture(
     interactionScopeId: `runtime:${paths.projectKey}`,
     ...(scenario === undefined ? {} : { scenario }),
     ...(failTurnEndDrain ? { failTurnEndDrain: true } : {}),
+    ...(orphanChildCallOnce ? { orphanChildCallOnce: true } : {}),
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
     ...(holdInspectionAfterAdoptOnce === undefined ? {} : { holdInspectionAfterAdoptOnce }),
@@ -3034,6 +3125,242 @@ if (!coldConsumerMode) test('native parallel child calls overlap and retain orde
   }
 });
 
+test('native child orphan tool call surfaces typed recover and retries delivery', async () => {
+  const fixture = await textOnlyFixture(
+    false, true, false, 2, undefined, undefined, undefined, false, undefined, false, false,
+    undefined, false, undefined, true,
+  );
+  let passed = false;
+  try {
+    const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 2);
+    assert.equal(result.code, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout.slice(result.stdout.indexOf('{'), result.stdout.lastIndexOf('}') + 1)) as {
+      readonly taskId?: string;
+      readonly state?: string;
+      readonly output?: string;
+    };
+    assert.equal(receipt.taskId, taskId.value);
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
+    assert.equal(receipt.output, TURN_ONE_RESULT);
+
+    const stream = fixture.upstream.orphanChildStream();
+    assert.deepEqual(stream.map((event) => event.type), [
+      'response.created',
+      'response.in_progress',
+      'response.output_item.added',
+    ]);
+    const added = stream[2]?.item as {
+      readonly type?: string;
+      readonly call_id?: string;
+      readonly name?: string;
+      readonly arguments?: string;
+      readonly status?: string;
+    } | undefined;
+    assert.equal(added?.type, 'function_call');
+    assert.equal(added?.call_id, 'call-orphan-child');
+    assert.equal(added?.name, 'humanagent_child_deliver');
+    assert.equal(added?.arguments, '');
+    assert.equal(added?.status, 'in_progress');
+    assert.equal(stream.some((event) => event.type === 'response.function_call_arguments.delta'), false);
+    assert.equal(stream.some((event) => event.type === 'response.function_call_arguments.done'), false);
+    assert.equal(stream.some((event) => event.type === 'response.output_item.done'), false);
+    assert.equal(stream.some((event) => event.type === 'response.completed'), false);
+
+    const retryRequest = fixture.upstream.wires.find((wire) =>
+      (parseResponsesWire(wire.body)?.input ?? []).some((item) =>
+        item.type === 'function_call'
+        && item.name === 'child_call'
+        && item.call_id === 'call-parent-child-retry'));
+    assert.ok(retryRequest, 'the parent retries the child call after the typed recover result');
+    if (retryRequest === undefined) throw new Error('the child retry request is absent');
+    const firstOutput = (parseResponsesWire(retryRequest.body)?.input ?? []).find((item) =>
+      item.type === 'function_call_output' && item.call_id === 'call-parent-child');
+    assert.ok(firstOutput?.output, 'the retry request replays the first child result');
+    const firstResult = JSON.parse(firstOutput!.output!.split('\n[HumanAgent evidence refs]')[0]!) as {
+      readonly state?: string;
+      readonly status?: string;
+      readonly reason?: string;
+      readonly nextAction?: { readonly kind?: string; readonly ref?: string };
+    };
+    assert.equal(firstResult.state, 'returned');
+    assert.equal(firstResult.status, 'blocked');
+    assert.match(firstResult.reason ?? '', /^stream\/tool-call-not-closed:/);
+    assert.ok(firstResult.reason !== 'failed result did not match a failure criterion');
+    assert.equal(firstResult.nextAction?.kind, 'recover');
+    assert.equal(firstResult.nextAction?.ref, 'stream/tool-call-not-closed');
+
+    const childCalls = fixture.upstream.wires
+      .flatMap((wire) => parseResponsesWire(wire.body)?.model === 'child.only.model'
+        ? parseResponsesWire(wire.body)?.input ?? []
+        : [])
+      .filter((item) => item.type === 'function_call');
+    assert.ok(childCalls.some((item) => item.name === 'humanagent_child_deliver'),
+      'the retried child turn delivers a complete body');
+    assert.ok(childCalls.some((item) => item.name === 'humanagent_turn_end'),
+      'the retried child turn completes with a standard end');
+    passed = true;
+  } finally {
+    await fixture.upstream.close();
+    if (passed) await rm(fixture.root, { recursive: true });
+    else console.error(`orphan child fixture retained: ${fixture.root}`);
+  }
+});
+
+// The shared recordReturn guard must not swallow a legitimate per-criterion
+// failure: a child that honestly fails a declared failure criterion still needs
+// a durable delivery so the parent can adopt the failure outcome. Impact: a
+// real criterion failure becomes an unselectable dead end. Probability:
+// unknown. Cost: one focused in-process producer with a real Journal and asset
+// store; no Provider or external model.
+test('app child producer keeps a legitimate per-criterion failure adoptable as a durable delivery', async () => {
+  await mkdir(PERSISTENCE_ROOT, { recursive: true });
+  const root = await mkdtemp(join(PERSISTENCE_ROOT, 'per-criterion-failure-'));
+  try {
+    const filePath = join(root, 'organ.jsonl');
+    const journal = new JsonlOrganJournal(filePath);
+    const taskScope = { organId: id('organ', 'per-criterion-organ'), taskId: id('task', 'per-criterion-task') };
+    const scope: ScopeRef = { ...taskScope, cycleId: id('cycle', 'per-criterion-cycle'),
+      operationId: id('operation', 'per-criterion-operation') };
+    const admission = await journal.append({ commitId: 'per-criterion-admission', kind: 'event', scope,
+      payload: { kind: 'per-criterion-admission' } });
+    const admissionCommitRef: JournalCommitRef = { commitId: admission.commitId!, journalSeq: admission.seq,
+      recordDigest: admission.recordDigest };
+    const recovery: EvidenceRef = { evidenceId: id('evidence', 'per-criterion-recovery'), kind: 'execution',
+      source: 'per-criterion-consumer', locator: 'observation://per-criterion/recovery', scope: taskScope };
+    const parentAssignment: WorkAssignment = { assignmentId: 'per-criterion-parent', taskId: taskScope.taskId,
+      pipelineNodeId: 'per-criterion-node', attempt: 1, executionEpoch: 1, inputRevision: 1,
+      objective: 'return the bounded result or fail the declared criterion', targetRefs: ['per-criterion-target'],
+      expectedOutputRefs: ['per-criterion-output'], successCriteria: ['return the bounded result'],
+      failureCriteria: ['the upstream source is unavailable'], incompleteCriteria: [],
+      requiredCapabilities: ['execute'], mergeGate: 'required' };
+    const admittedTurn: AdmittedTurn = { turnId: 'per-criterion-turn',
+      workAssignmentRef: parentAssignment.assignmentId, taskRef: taskScope.taskId, scopeRef: scope,
+      cycleRef: scope.cycleId!, inputRevision: 1, directiveRevision: 1, executionEpoch: 1,
+      runtimeBindingRef: 'per-criterion-runtime', permissionRevision: 'per-criterion-permission',
+      admissionEvidenceRefs: [admission.commitId!], currentTurnRef: 'per-criterion-current',
+      recoveryStateRef: admission.commitId! };
+    const parent = await ActiveTurnContext.open({
+      journal: createJsonlActiveTurnJournal({ filePath, journal, turnId: admittedTurn.turnId }),
+      binding: { admittedTurn, assignment: parentAssignment, scope,
+        execution: { runtimeId: 'per-criterion-runtime', executionEpoch: 1 } },
+      currentTurnRef: admittedTurn.currentTurnRef,
+    });
+    const bodyAssets = createChildBodyAssetPort({ store: new ImmutableAssetStore(join(root, 'assets')) });
+    const failureRef = 'the upstream source is unavailable';
+    const failedResult: WorkResult = {
+      taskId: parentAssignment.taskId, pipelineNodeId: parentAssignment.pipelineNodeId,
+      agentId: 'configured-worker', assignmentId: parentAssignment.assignmentId,
+      attempt: parentAssignment.attempt, executionEpoch: parentAssignment.executionEpoch,
+      inputRevision: parentAssignment.inputRevision,
+      producedArtifactRefs: [], status: 'failed', summary: failureRef,
+      outputRefs: [], evidenceRefs: [], nextAction: 'attention', failureRef,
+    };
+    let refinedStores = 0;
+    let recordedInvocationId: string | undefined;
+    const producer = createAppChildProducer({
+      manager: {
+        async callChild(input) {
+          if (input.kind !== 'execution') throw new Error('the per-criterion fixture only dispatches execution');
+          const childInvocationId = input.call.invocationId;
+          recordedInvocationId = childInvocationId;
+          await input.childCallPort.prepare({
+            kind: 'execution', invocationId: childInvocationId, assignment: input.assignment,
+            agentId: 'configured-worker', attempt: input.assignment.attempt,
+            executionEpoch: input.assignment.executionEpoch, scope: input.scope,
+          });
+          await input.childCallPort.recordReturn({
+            kind: 'execution', invocationId: childInvocationId, assignment: input.assignment,
+            agentId: 'configured-worker', attempt: input.assignment.attempt,
+            executionEpoch: input.assignment.executionEpoch, scope: input.scope,
+            result: {
+              ...failedResult,
+              assignmentId: input.assignment.assignmentId,
+              pipelineNodeId: input.assignment.pipelineNodeId,
+              attempt: input.assignment.attempt,
+              executionEpoch: input.assignment.executionEpoch,
+              inputRevision: input.assignment.inputRevision,
+            },
+          });
+          return { state: 'returned', kind: 'execution', invocationId: childInvocationId,
+            incarnation: { runtimeId: 'per-criterion-runtime', generation: 1,
+              agentInstanceId: 'per-criterion-instance', roleId: 'execution', taskId: taskScope.taskId,
+              assignmentId: input.assignment.assignmentId, executionEpoch: 1 },
+            result: failedResult };
+        },
+      },
+      parent,
+      parentAssignment,
+      checkpoints: {
+        async pre(input) {
+          return {
+            checkpoint: {
+              id: id('checkpoint', 'per-criterion-pre'), scope: input.selected.scope,
+              cycleId: scope.cycleId!, seq: 1, previousCheckpointId: null, directiveRevision: 1,
+              executionEpoch: 1, outcome: 'succeeded', summary: 'per-criterion child pre-call anchor',
+              recoveryStateRef: recovery, evidenceRefs: [recovery], next: { kind: 'continue' },
+            },
+            previous: null, commitRef: admissionCommitRef,
+          };
+        },
+        async post() { throw new Error('post checkpoint is outside this per-criterion consumer'); },
+      },
+      refinedDeliveryStore: {
+        async store() {
+          refinedStores += 1;
+          return { ref: { ...recovery, evidenceId: id('evidence', 'per-criterion-refined') },
+            view: { kind: 'utf8-text' } };
+        },
+        async read() { return new TextEncoder().encode(failureRef); },
+      },
+      bodyAssets,
+      bindChildRun: async () => { throw new Error('the per-criterion consumer replaces child execution'); },
+      prepareAgentProvider: async () => { throw new Error('the per-criterion consumer replaces Provider composition'); },
+      roster: [{ agentId: 'configured-worker', roleId: 'execution' }],
+      admitChildOperation: async () => ({
+        authority: {} as never, authorityCommitRef: admissionCommitRef,
+        businessRegistrationCommitRef: admissionCommitRef, coverageCommitRef: admissionCommitRef,
+        childAdmission: { authorityCommitRef: admissionCommitRef,
+          businessRegistrationCommitRef: admissionCommitRef, coverageCommitRef: admissionCommitRef },
+        intent: {} as never, registration: {} as never,
+      }),
+    });
+    const outcome = await producer.execute({
+      execution: { runtimeId: 'per-criterion-runtime', taskId: taskScope.taskId,
+        operationId: scope.operationId!, executionEpoch: 1 },
+      requestId: 'per-criterion-request',
+      call: { callId: 'per-criterion-call', toolId: APP_CHILD_CALL_TOOL.toolId,
+        continuationRef: 'per-criterion-continuation',
+        arguments: { purpose: 'return the bounded result', agentId: 'configured-worker', kind: 'execution',
+          instructions: 'return the complete result or fail the declared criterion',
+          successCriteria: ['return the bounded result'],
+          failureCriteria: ['the upstream source is unavailable'], target: 'per-criterion-target' } },
+      scope,
+      signal: new AbortController().signal,
+    });
+    assert.equal(outcome.status, 'succeeded', JSON.stringify(outcome));
+    const deliveries = parent.entries().filter(
+      (entry): entry is Exclude<typeof entry, { readonly envelope: unknown }> => !('envelope' in entry),
+    );
+    assert.equal(deliveries.length, 1,
+      'the legitimate per-criterion failure must be recorded as a durable delivery');
+    const delivery = deliveries[0];
+    assert.equal(delivery.kind, 'execution');
+    if (delivery.kind !== 'execution') throw new Error('expected an execution child delivery');
+    assert.equal(delivery.result.status, 'failed');
+    assert.equal(delivery.result.failureRef, failureRef);
+    assert.equal(refinedStores, 1, 'the refined delivery store must persist the failed result');
+    assert.equal(recordedInvocationId, delivery.invocationId);
+    const returned = JSON.parse(outcome.output!) as {
+      readonly state?: string; readonly status?: string; readonly invocationId?: string;
+    };
+    assert.equal(returned.state, 'returned');
+    assert.equal(returned.status, 'failed');
+    await parent.recordChildAdoption(delivery.invocationId, delivery);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // r353 exposed masked child failure reasons; probability is unknown. Impact:
 // wrong cause and recovery. Cost: one bounded local public CLI fixture. The
 // selector deliberately violates the declared 256-character tool schema.
@@ -3187,18 +3514,25 @@ if (!coldConsumerMode) test('native review child failure preserves primary reaso
 
 if (!coldConsumerMode) test('native public CLI review findings contract permits passed empty findings and rejects malformed review findings', async () => {
   const cases: ReadonlyArray<{
-    readonly mode: 'empty' | 'failed-empty' | 'missing-location' | 'illegal-severity' | 'empty-evidence'
-      | 'unaccepted-ref' | undefined;
+    readonly mode: 'empty' | 'failed-empty' | 'missing-findings' | 'failed-missing-findings'
+      | 'missing-location' | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref'
+      | 'subject-child-body' | 'foreign-subject-child-body' | undefined;
     readonly expected: 'succeeded' | 'blocked';
     readonly error?: RegExp;
   }> = [
     { mode: 'empty', expected: 'succeeded' },
+    { mode: 'subject-child-body', expected: 'succeeded' },
     { mode: undefined, expected: 'succeeded' },
     { mode: 'failed-empty', expected: 'blocked', error: /non-passed review result requires findings/ },
+    { mode: 'missing-findings', expected: 'succeeded' },
+    { mode: 'failed-missing-findings', expected: 'blocked',
+      error: /a review delivery must state its concrete findings/ },
     { mode: 'missing-location', expected: 'blocked', error: /locationRef/ },
     { mode: 'illegal-severity', expected: 'blocked', error: /severity/ },
     { mode: 'empty-evidence', expected: 'blocked', error: /evidenceRefs/ },
     { mode: 'unaccepted-ref', expected: 'blocked', error: /evidence/ },
+    { mode: 'foreign-subject-child-body', expected: 'blocked',
+      error: /does not resolve to evidence scoped to this child turn/ },
   ];
   for (const current of cases) {
     const fixture = await textOnlyFixture(false, true, false, 2, undefined, undefined, undefined,
@@ -3281,7 +3615,7 @@ if (!coldConsumerMode) test('native public CLI review findings contract permits 
         });
         for (const delivery of reviewDeliveries) {
           assert.equal(delivery.entry.result.status, 'passed');
-          if (current.mode === 'empty') {
+          if (current.mode === 'empty' || current.mode === 'missing-findings') {
             assert.deepEqual(delivery.entry.result.findings, [],
               'a passed review may carry zero findings without inventing one');
           } else {
@@ -3290,6 +3624,10 @@ if (!coldConsumerMode) test('native public CLI review findings contract permits 
             assert.equal(finding.severity, 'advisory');
             assert.ok(finding.locationRef.length > 0);
             assert.ok(finding.evidenceRefs.length > 0);
+            if (current.mode === 'subject-child-body') {
+              assert.ok(finding.evidenceRefs.some((ref) => ref.evidenceId.value.startsWith('child-body-execution-')),
+                'the review finding cites the reviewed executor child body asset');
+            }
           }
           const reviewBodyAsset = delivery.entry.result.evidenceRefs
             .find((ref) => ref.evidenceId.value.startsWith('child-body-review-'));

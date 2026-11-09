@@ -28,6 +28,7 @@ import type {
   RequestToolSurfaceUse,
 } from '../../../contracts/src/provider-request-context.js';
 import { ProviderAdapterError } from './errors.js';
+import { invalidRawArguments, markInvalidToolArguments } from './tool-arguments.js';
 import type { ProviderEvidenceSink } from './evidence.js';
 import { mapOpenAIFinishReason } from './openai-finish-reason.js';
 import type {
@@ -1260,7 +1261,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             type: 'function_call' as const,
             call_id: continuation.callId,
             name: responsesWireToolName(continuation.toolId),
-            arguments: JSON.stringify(continuation.arguments),
+            arguments: invalidRawArguments(continuation.arguments) ?? JSON.stringify(continuation.arguments),
           }, {
             type: 'function_call_output' as const,
             call_id: continuation.callId,
@@ -1518,27 +1519,6 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
           const name = responsesToolId(wireName);
           const argumentsJson = requireStringValue(item, 'arguments', context.execution, raw.type);
           this.closeToolArguments(context, callId);
-          let args: unknown;
-          try {
-            args = JSON.parse(argumentsJson || '{}');
-          } catch (cause) {
-            throw new ProviderAdapterError({
-              code: 'tool.arguments.invalid-json',
-              category: 'protocol',
-              phase: 'tool',
-              message: cause instanceof Error ? cause.message : 'provider tool arguments are invalid JSON',
-              scope: context.execution,
-            });
-          }
-          if (!args || typeof args !== 'object' || Array.isArray(args)) {
-            throw new ProviderAdapterError({
-              code: 'tool.arguments.invalid-shape',
-              category: 'protocol',
-              phase: 'tool',
-              message: 'provider tool arguments must be a JSON object',
-              scope: context.execution,
-            });
-          }
           const continuationRef = context.responsesCurrentResponseId?.get('current');
           if (!continuationRef) {
             throw new ProviderAdapterError({
@@ -1550,6 +1530,45 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             });
           }
           const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, { wireName, toolId: name, arguments: argumentsJson })];
+          let args: BusinessPayload;
+          try {
+            args = parseToolArguments(argumentsJson, context.execution);
+          } catch (cause) {
+            if (!(cause instanceof ProviderAdapterError)
+              || cause.providerError.code !== 'tool.arguments.invalid-json') {
+              throw cause;
+            }
+            if (context.responsesPendingToolCalls?.has(callId)) {
+              return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `tool/${callId}/duplicate`), evidenceRefs)] };
+            }
+            context.responsesPendingToolCalls?.add(callId);
+            const invalidArguments: BusinessPayload = {};
+            markInvalidToolArguments(invalidArguments, argumentsJson, cause.providerError.message);
+            return {
+              events: [
+                ownedEvent(
+                  context.execution,
+                  context.scope,
+                  'tool',
+                  raw.type,
+                  eventId(context, raw.type, `tool/${callId}`),
+                  `tool-${callId}`,
+                  { kind: 'continue', ref: 'responses-tool-call' },
+                  {
+                    outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)],
+                    evidenceRefs,
+                    summary: `调用工具参数无效：${name}`,
+                    toolCall: { callId, toolId: name, arguments: invalidArguments, continuationRef },
+                  },
+                ),
+              ],
+              rawFacts: [toolCallFact(
+                unitId('responses', 'tool-arguments', callId),
+                { callId, toolId: name, arguments: invalidArguments, continuationRef },
+                rawAsset(evidenceRefs[0], { kind: 'arguments' }),
+              )],
+            };
+          }
           if (context.responsesPendingToolCalls?.has(callId)) {
             return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `tool/${callId}/duplicate`), evidenceRefs)] };
           }
@@ -1568,13 +1587,13 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
                   outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)],
                   evidenceRefs,
                   summary: `调用工具：${name}`,
-                  toolCall: { callId, toolId: name, arguments: args as BusinessPayload, continuationRef },
+                  toolCall: { callId, toolId: name, arguments: args, continuationRef },
                 },
               ),
             ],
             rawFacts: [toolCallFact(
               unitId('responses', 'tool-arguments', callId),
-              { callId, toolId: name, arguments: args as BusinessPayload, continuationRef },
+              { callId, toolId: name, arguments: args, continuationRef },
               rawAsset(evidenceRefs[0], { kind: 'arguments' }),
             )],
           };

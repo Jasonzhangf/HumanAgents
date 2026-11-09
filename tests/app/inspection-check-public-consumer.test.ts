@@ -444,6 +444,7 @@ test('inspection actor rejects a changed immutable check and a foreign structure
   );
 
   const missingBodyRun = buildPort({
+    result: workResult(''),
     material: { ref: outputRef, body: '' },
   });
   await assert.rejects(
