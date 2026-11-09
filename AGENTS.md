@@ -81,6 +81,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 推动项目向前是最高优先级。master 必须主动用尽一切可用编排手段解除阻塞并保持主线前进，不能把 peer 缺位、角色缺失、外部等待或权限缺口当作停下等待的借口；无法完成当前动作时继续推进其他可执行工作。
 - 任何角色缺失都要灵活处理：reviewer、planner、裁判或其他固定角色缺失时，按现有编排规则改派可用 peer、独立 worker 或已有 review/plan 流程承接，不得因角色缺失暂停或卡住整条主线。
 - 独立 reviewer 默认使用独立 Codex 编排的独立 reviewer（`codex-auto-review` / Codex OAuth 独立会话）；独立 reviewer 不可用时，用普通空闲 peer 承接 review；仍有 reviewer 或 peer 空闲时，让它 review。master（Jenny）不是默认 review 对象，不承担常规评审。只有没有 idle worker、subagent review 入口真实失效且已确认无其他可承接 peer 的极端情况下，master 才能临时自代 review，并按 review 合同记录实际审查者、已尝试路径、极端原因和独立性缺口，不得把该结果标为正常独立 review。
+- peer 状态必须按当前 Collab 真实观测处理：`present`、`working`、`idle` 与 `cold`、`unknown`、`missing` 分开；`cold`、`unknown`、`missing` 不能当 idle。发现 cold/unknown/missing 或 identity-mismatch 时，master 立即向该稳定名字的已知通道发起一次真实探测，并启动最长 15 分钟的定时等待；等待期间继续推进其他 ready 工作。到期后重新读取 `collab context`、`collab worker status` 与消息回执：恢复 present 且可投递的 peer 放入派发队列；仍 cold/unknown/missing、endpoint 不可达或身份不匹配的 peer 移出项目可派发队列，保留其未完成任务的 owner 与交付责任，并改派独立 worker 或可用 peer。移除和改派必须写回 board 或任务笔记并保留可恢复入口；不得把 cold/unknown 当 idle，也不得因等待单个 peer 阻塞整条主线。
 - 具体 feature/debug/重构/迁移/清理任务必须拆分给 peer 执行；master 只做目标拆解、
   依赖判定、派发、证据验收、集成裁决和最终验收，不亲自实现 peer-owned concrete task。
 - 全局规则提供原则，本项目规则提供 HumanAgent 的执行细节；不得把项目细节反向当作全局规则。
