@@ -12,14 +12,14 @@
       "ownerRel": "packages/app/src/ui-runtime/server.ts",
       "ownerSymbol": "UiRuntime server semantic GET/SSE and observation GET routes",
       "implementationStatus": "candidate-scoped-semantic-and-observation-http",
-      "contract": "The observation route parses optionalI2ReadScope, the scope subtree, node selection and decodeTaskAgentActivitySelectionQuery, then calls UiRuntimeService.scopedObservation."
+      "contract": "The observation route parses optionalI2ReadScope, the scope subtree, node selection and decodeTaskAgentActivitySelectionQuery, then calls UiRuntimeService.scopedObservation. Invalid or incomplete selection fails before projection; no selection keeps the five-role catalog. The decoded URL is not a role authority."
     },
     "load_task_truth": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
       "ownerSymbol": "UiRuntimeService scoped task read resolver/scopedObservation/projectDurableTaskInventory/semanticObservation/scopedSemanticObservation",
       "implementationStatus": "candidate-scoped-observation-truth",
-      "contract": "The shared resolver selects the serve-bound live source or the declared project/mode durable inventory. Foreign admissions come from that inventory, not the serve-bound requirementAdmissions map. The same selected task scope supplies already owner-decoded native allocation, active-turn, resumed-segment, child invocation and delivery, review, and Planner records. Those typed facts are the actual-execution source; assignment-graph fact replay is not required. For a valid bound live read, App overlays only a captured pending Runtime publication state onto the authoritative same-binding durable projection; successful durable commits, output text and publicCommitWatermark remain the durable values, and no uncommitted text is exposed. A read failure retains the current confirmed commits and watermark as unknown. Foreign durable reads remain durable reads and do not borrow serve-bound live publication. Both semantic builders forward the defined snapshot publicOutput (state and commits with exact {ref, text}) and its publicCommitWatermark into the semantic envelope unchanged; order, text, refs and the two independent watermarks are preserved, and an absent value stays omitted without a new reader. Missing or unavailable sources remain explicit. The committed taskFlow binding resolves the static read-only TaskFlowGuidance in packages/core/src/task-flow-definition.ts; its typed stages, dependencies, layout and loops ride the same task_projection payload. For product board/session read, A1 composes this same task truth with exact refs and scope; load_task_truth does not mint a session identity or a board classification."
+      "contract": "The shared resolver selects the serve-bound live source or the declared project/mode durable inventory. Foreign admissions come from that inventory, not the serve-bound requirementAdmissions map. The same selected task scope supplies already owner-decoded native allocation, active-turn, resumed-segment, child invocation and delivery, review, and Planner records. Those typed facts are the actual-execution source; assignment-graph fact replay is not required. When an explicit instance is selected, only a matched incarnation.roleId or native allocation.role can supply a card role; a legal native allocation without role is retained as an explicit role-less selection. For a valid bound live read, App overlays only a captured pending Runtime publication state onto the authoritative same-binding durable projection; successful durable commits, output text and publicCommitWatermark remain the durable values, and no uncommitted text is exposed. A read failure retains the current confirmed commits and watermark as unknown. Foreign durable reads remain durable reads and do not borrow serve-bound live publication. Both semantic builders forward the defined snapshot publicOutput (state and commits with exact {ref, text}) and its publicCommitWatermark into the semantic envelope unchanged; order, text, refs and the two independent watermarks are preserved, and an absent value stays omitted without a new reader. Missing or unavailable sources remain explicit. The committed taskFlow binding resolves the static read-only TaskFlowGuidance in packages/core/src/task-flow-definition.ts; its typed stages, dependencies, layout and loops ride the same task_projection payload. For product board/session read, A1 composes this same task truth with exact refs and scope; load_task_truth does not mint a session identity or a board classification."
     },
     "load_event_history": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
@@ -32,20 +32,20 @@
       "ownerRel": "packages/runtime/src/observation/agent-activity.ts",
       "ownerSymbol": "selectTaskAgentActivity",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "从同范围 Journal 事实绑定五类 Agent 的真实 invocation identity，不创建第二身份源。"
+      "designNote": "先在同一任务范围内匹配所选真实实例，再只从匹配事实读取角色：incarnation 使用既有 roleId，native allocation 使用既有 allocation.role。无选择保持五角色；合法的 native allocation 无 role 时保留五角色并显式标注无角色范围。非法、不完整、非 canonical role 或未匹配显式失败。不从名称、node、runtimeId、assignmentId 或日志猜测角色，不新增第二角色真源。"
     },
     "project_five_dimension_agent_debug": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "只读投影当前轮、上下文、模型、工具与错误五维 AgentDebugInspection，不写 Journal。"
+      "designNote": "UI 保持角色级五维 AgentDebugInspection 投影；App 在 Runtime 已匹配实例并取得权威角色后，收窄最终公开 agentDebugInspections。无选择或无角色 native 选择保留五角色；浏览器不保留第二套角色过滤，节点 ownerAgentRole 详情也不被 Agent 选择覆盖。不写 Journal。"
     },
     "render_readonly_agent_drawer": {
       "ownerPath": "docs/ui/observation.js",
       "ownerRel": "docs/ui/observation.js",
-      "ownerSymbol": "mountSemanticObservationPanel",
+      "ownerSymbol": "renderAgentDebugInspectionsSection and renderAgentDebugCard for the public grid; renderNodeDrawer with selectedNode.debugInspection/ownerAgentRole for node detail",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "只读渲染 Agent Debug 抽屉，不提供控制动作或写请求。"
+      "designNote": "只读渲染 App 已收窄的公开 agentDebugInspections 网格；节点详情仍按 selectedNode.ownerAgentRole 独立选择，不提供控制动作或写请求。无角色 native 范围显式呈现，不回退为伪造角色。"
     },
     "normalize_context_events": {
       "ownerPath": "packages/context-events/src/normalize.ts",
