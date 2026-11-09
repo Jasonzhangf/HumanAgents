@@ -664,3 +664,20 @@ main a474cf109 上 `pnpm build:runtime` 的 ui-runtime tsc 步骤出现类型回
 - 两个 P1 根因确认：`1e9099b` = `packages/ui/projection/runtime.ts:389,588` 与 `packages/app/src/ui-runtime/service.ts:1943,5229` 在 succeeded 时把 nextStep 强改为空，而测试要求终态行保留「查看任务详情」；`c5d4671` = checkpoint identity mismatch，抛点 `packages/contracts/src/index.ts:817 assertCheckpointIdentity`，需 runtime owner 定位 operation/checkpoint scope 首次偏离。
 
 - 12:05 UTC：Emma 退回两张 P1 邀请，明确用户分工为「Emma 负责质检与验收、Jenny 安排实现修复」。已按 task policy 重新派发：`p1-ui-terminal-nextstep-20261103` → executor Alice / reviewer Emma；`p1-runtime-checkpoint-identity-20261103` → executor David / reviewer Emma；均 `invited`。goal 已重新武装 20m，CEO 报告 rev 17 已记录。
+
+## 2026-11-08 Entry Task-List Drawer Rework
+
+- Canonical requirements: `/Volumes/extension/code/humanagent/.appsdk/requirements.json`,
+  version 35, requirement id `humanagent-entry-task-list-in-drawer`.
+- Contract: `docs/goals/humanagent-entry-task-list-drawer-20261108.md`, copied from
+  `/Volumes/extension/code/humanagent/docs/goals/humanagent-entry-task-list-drawer-20261108.md`.
+- The browser proof now serves this worktree's `docs/ui` on an OS-assigned localhost
+  port and proxies `/api/*` to the live runtime at `http://127.0.0.1:10086`.
+- The live `/api/tasks` read returned HTTP 200 with 7 task rows. The proof derives
+  drawer expectations from that response and records the task IDs in
+  `docs/verification/humanagent-entry-task-list-drawer-20261108/checks.json`.
+- Desktop and mobile browser checks passed 39/39, including open, close, reopen,
+  Escape, no horizontal overflow, no page errors, and a post-close invalid
+  submission with no mutating API request.
+- This rework remains in the registered worktree and candidate branch; it does
+  not merge, push, close, install, restart a daemon, or change cold start.

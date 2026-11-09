@@ -2,8 +2,10 @@
 
 - Task id: `humanagent-entry-task-list-drawer-20261108`
 - Parent task: `humanagent-mvp-delivery-20261106`
-- Requirement: v33 `humanagent-entry-task-list-in-drawer` ("入口页的任务列表可放在抽屉中，可以隐藏").
-- Contract: `docs/goals/humanagent-entry-task-list-drawer-20261108.md`.
+- Canonical requirements: `/Volumes/extension/code/humanagent/.appsdk/requirements.json`, version 35.
+- Requirement id: `humanagent-entry-task-list-in-drawer` ("入口页的任务列表可放在抽屉中，可以隐藏").
+- Contract: `docs/goals/humanagent-entry-task-list-drawer-20261108.md`; copied from
+  `/Volumes/extension/code/humanagent/docs/goals/humanagent-entry-task-list-drawer-20261108.md`.
 
 ## 长期目标
 
@@ -47,23 +49,36 @@
 
 ## 真实前端浏览器验收（改动后）
 
-被测 UI：`dist/app/ui`（`docs/ui` 的构建副本，`scripts/copy-ui-assets.mjs` 同源复制）。
+被测 UI：本 worktree 的 `docs/ui`。测试脚本在同一进程启动一个本地静态服务器，监听
+系统分配的空闲端口，静态服务该目录，并把 `/api/*` 代理到真实 runtime
+`http://127.0.0.1:10086`。浏览器不再拦截或伪造 `/api/tasks`。
 
 ```
 cd <worktree>
-cp -R docs/ui/. dist/app/ui/
-ENTRY_DRAWER_UI_ROOT="$PWD/dist/app/ui" \
+ENTRY_DRAWER_UI_ROOT="$PWD/docs/ui" \
 ENTRY_DRAWER_EVIDENCE="$PWD/docs/verification/humanagent-entry-task-list-drawer-20261108" \
+ENTRY_DRAWER_RUNTIME="http://127.0.0.1:10086" \
 node tests/ui/entry-task-list-drawer-browser.mjs
 ```
 
-- 结果：34/34 通过（desktop 1440x1000 与 mobile 390x844 各一轮）。
+- 本轮实际入口 URL：`http://127.0.0.1:56869/index.html`（空闲端口每次动态分配，
+  实际值同时记录在 `checks.json` 的 `evidence.entryUrl`）。
+- 真实 `/api/tasks` 观察：HTTP 200，`mode=rcc`，7 项任务；task IDs 为
+  `scheduled-task-b258bd97ecc762223c7a`、`ui-task-implicit-draft-172`、
+  `ui-task-implicit-draft-246`、`ui-task-implicit-draft-253`、
+  `ui-task-implicit-draft-248`、`ui-task-implicit-draft-251`、
+  `ui-task-implicit-draft-257`。原始响应保留在 `real-api-tasks.json`。
+- 结果：39/39 通过（desktop 1440x1000 与 mobile 390x844 各一轮）。
 - 覆盖：主区无内联列表；存在 aria-haspopup=dialog 的「任务列表」触发器；点击打开
-  抽屉显示真实 taskId/状态/title；抽屉无横向溢出；关闭/再次打开/Esc 关闭；
-  关闭后入口表单仍可用且未跳转；无页面错误。
-- 复现证据：`checks.json` 与
+  抽屉后，浏览器断言直接从上述真实 `/api/tasks` 响应生成，逐项核对 taskId、状态和
+  semantic title；抽屉无横向溢出；关闭/再次打开/Esc 关闭；关闭后入口表单仍可用且
+  未跳转；无页面错误。
+- 关闭后的表单路径：提交纯空白输入，页面显示「请先填写任务输入。」，HTTP 调用中没有
+  POST/PUT/PATCH/DELETE，证明没有触达任务创建或修改。
+- 复现证据：`checks.json`、`real-api-tasks.json` 与
   `entry-task-list-drawer-open-{desktop-1440,mobile-390}.png`、
-  `entry-task-list-drawer-closed-{desktop-1440,mobile-390}.png`。
+  `entry-task-list-drawer-closed-{desktop-1440,mobile-390}.png`、
+  `entry-task-list-drawer-form-validation-{desktop-1440,mobile-390}.png`。
 
 既有证明回归（同一被测 UI）：
 
@@ -73,9 +88,6 @@ node tests/ui/entry-task-list-drawer-browser.mjs
 
 ## 未校验 / 剩余缺口
 
-- 本沙箱禁 TCP 绑定，`tests/ui/entry-flow-browser.mjs` 的真实 RCC Section B
-  未执行（仅 Section A 通过）。该 Section B 的行读取选择器已同步改为打开抽屉，
-  但需在可绑定端口的环境复跑。
 - 契约文字提到任务行含 "task id, status, priority, owner"。现有任务源
   `/api/tasks`（`RuntimeTaskRowProjection`）不携带 priority/owner 字段；为不改
   第二份任务数据，抽屉只呈现源实际携带的 taskId 链接、状态、语义 title、时间与

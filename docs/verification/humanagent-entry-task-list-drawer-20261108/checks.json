@@ -1,6 +1,96 @@
 {
-  "uiRoot": "/Volumes/Intel/playground/humanagent/humanagent-entry-task-list-drawer-20261108/docs/ui",
+  "evidence": {
+    "servingCommand": "ENTRY_DRAWER_UI_ROOT=\"/Volumes/Intel/playground/humanagent/humanagent-entry-task-list-drawer-20261108/docs/ui\" ENTRY_DRAWER_EVIDENCE=\"/Volumes/Intel/playground/humanagent/humanagent-entry-task-list-drawer-20261108/docs/verification/humanagent-entry-task-list-drawer-20261108\" ENTRY_DRAWER_RUNTIME=\"http://127.0.0.1:10086\" /opt/homebrew/Cellar/node@22/22.22.2_2/bin/node /Volumes/Intel/playground/humanagent/humanagent-entry-task-list-drawer-20261108/tests/ui/entry-task-list-drawer-browser.mjs",
+    "staticRoot": "/Volumes/Intel/playground/humanagent/humanagent-entry-task-list-drawer-20261108/docs/ui",
+    "apiProxyBase": "http://127.0.0.1:10086",
+    "entryUrl": "http://127.0.0.1:59766/index.html",
+    "taskSource": {
+      "url": "http://127.0.0.1:10086/api/tasks",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8",
+      "responseFile": "real-api-tasks.json",
+      "surface": "runtime-task-list",
+      "mode": "rcc",
+      "counts": {
+        "running": 0,
+        "waiting": 4,
+        "completed": 3,
+        "stopped": 0,
+        "draft": 0,
+        "failed": 0,
+        "total": 7
+      },
+      "taskIds": [
+        "scheduled-task-b258bd97ecc762223c7a",
+        "ui-task-implicit-draft-172",
+        "ui-task-implicit-draft-246",
+        "ui-task-implicit-draft-253",
+        "ui-task-implicit-draft-248",
+        "ui-task-implicit-draft-251",
+        "ui-task-implicit-draft-257"
+      ],
+      "stateLabels": [
+        "受阻",
+        "执行受阻",
+        "执行已完成"
+      ],
+      "titles": [
+        "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+        "审计 ~/code/humanagent：MVP 达成度与项目架构",
+        "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+        "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+        "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+        "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+        "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容"
+      ]
+    },
+    "browserRun": {
+      "command": "ENTRY_DRAWER_UI_ROOT=\"/Volumes/Intel/playground/humanagent/humanagent-entry-task-list-drawer-20261108/docs/ui\" ENTRY_DRAWER_EVIDENCE=\"/Volumes/Intel/playground/humanagent/humanagent-entry-task-list-drawer-20261108/docs/verification/humanagent-entry-task-list-drawer-20261108\" ENTRY_DRAWER_RUNTIME=\"http://127.0.0.1:10086\" /opt/homebrew/Cellar/node@22/22.22.2_2/bin/node /Volumes/Intel/playground/humanagent/humanagent-entry-task-list-drawer-20261108/tests/ui/entry-task-list-drawer-browser.mjs",
+      "startedAt": "2026-11-09T05:51:23.630Z",
+      "finishedAt": "2026-11-09T05:51:25.273Z",
+      "viewports": [
+        {
+          "label": "desktop-1440",
+          "viewport": {
+            "width": 1440,
+            "height": 1000
+          }
+        },
+        {
+          "label": "mobile-390",
+          "viewport": {
+            "width": 390,
+            "height": 844
+          }
+        }
+      ],
+      "passes": true
+    }
+  },
   "checks": [
+    {
+      "name": "live /api/tasks responds 200",
+      "pass": true,
+      "detail": 200
+    },
+    {
+      "name": "live /api/tasks returns real task rows",
+      "pass": true,
+      "detail": 7
+    },
+    {
+      "name": "live /api/tasks observation records every task id",
+      "pass": true,
+      "detail": [
+        "scheduled-task-b258bd97ecc762223c7a",
+        "ui-task-implicit-draft-172",
+        "ui-task-implicit-draft-246",
+        "ui-task-implicit-draft-253",
+        "ui-task-implicit-draft-248",
+        "ui-task-implicit-draft-251",
+        "ui-task-implicit-draft-257"
+      ]
+    },
     {
       "name": "desktop-1440 entry main column exposes the task-list trigger",
       "pass": true,
@@ -9,7 +99,7 @@
         "hasTrigger": true,
         "triggerLabel": "任务列表",
         "triggerHaspopup": "dialog",
-        "summaryText": "队列与任务状态2 项任务数量2任务列表"
+        "summaryText": "队列与任务状态7 项任务数量7任务列表"
       }
     },
     {
@@ -18,9 +108,9 @@
       "detail": 0
     },
     {
-      "name": "desktop-1440 entry main column keeps the compact task count",
+      "name": "desktop-1440 entry main column keeps the live task count",
       "pass": true,
-      "detail": "队列与任务状态2 项任务数量2任务列表"
+      "detail": "队列与任务状态7 项任务数量7任务列表"
     },
     {
       "name": "desktop-1440 the task-list trigger advertises a dialog",
@@ -28,53 +118,136 @@
       "detail": "dialog"
     },
     {
-      "name": "desktop-1440 the drawer opens with the task list",
+      "name": "desktop-1440 the drawer opens with the live task list",
       "pass": true,
       "detail": [
         {
-          "taskId": "task-2",
-          "status": "排队中",
-          "heading": "整理发布说明",
-          "href": "./task-dashboard.html?task=task-2"
+          "taskId": "scheduled-task-b258bd97ecc762223c7a",
+          "status": "受阻",
+          "heading": "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+          "href": "./task-dashboard.html?task=scheduled-task-b258bd97ecc762223c7a"
         },
         {
-          "taskId": "task-1",
-          "status": "执行中",
-          "heading": "读取 README 并汇报",
-          "href": "./task-dashboard.html?task=task-1"
+          "taskId": "ui-task-implicit-draft-172",
+          "status": "执行受阻",
+          "heading": "审计 ~/code/humanagent：MVP 达成度与项目架构",
+          "href": "./task-dashboard.html?task=scheduled-task-ed83c3fa70aed6c4b9b5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-246",
+          "status": "执行受阻",
+          "heading": "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+          "href": "./task-dashboard.html?task=scheduled-task-b0df6b626d78055778f9&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-253",
+          "status": "执行受阻",
+          "heading": "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-91816a001b706f2a8efa&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-248",
+          "status": "执行已完成",
+          "heading": "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+          "href": "./task-dashboard.html?task=scheduled-task-b150b7f368156d54edf5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-251",
+          "status": "执行已完成",
+          "heading": "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-114cee60ce9d71de57e0&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-257",
+          "status": "执行已完成",
+          "heading": "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-585a8e31513becec923b&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
         }
       ]
     },
     {
-      "name": "desktop-1440 drawer rows carry the real task ids from the task source",
+      "name": "desktop-1440 drawer rows carry the live task ids",
       "pass": true,
-      "detail": [
-        "task-2",
-        "task-1"
-      ]
+      "detail": {
+        "expected": [
+          "scheduled-task-b258bd97ecc762223c7a",
+          "ui-task-implicit-draft-172",
+          "ui-task-implicit-draft-246",
+          "ui-task-implicit-draft-253",
+          "ui-task-implicit-draft-248",
+          "ui-task-implicit-draft-251",
+          "ui-task-implicit-draft-257"
+        ],
+        "actual": [
+          "scheduled-task-b258bd97ecc762223c7a",
+          "ui-task-implicit-draft-172",
+          "ui-task-implicit-draft-246",
+          "ui-task-implicit-draft-253",
+          "ui-task-implicit-draft-248",
+          "ui-task-implicit-draft-251",
+          "ui-task-implicit-draft-257"
+        ]
+      }
     },
     {
-      "name": "desktop-1440 drawer rows carry the real task status",
+      "name": "desktop-1440 drawer rows carry the live task states",
       "pass": true,
-      "detail": [
-        "排队中",
-        "执行中"
-      ]
+      "detail": {
+        "expected": [
+          "受阻",
+          "执行受阻",
+          "执行受阻",
+          "执行受阻",
+          "执行已完成",
+          "执行已完成",
+          "执行已完成"
+        ],
+        "actual": [
+          "受阻",
+          "执行受阻",
+          "执行受阻",
+          "执行受阻",
+          "执行已完成",
+          "执行已完成",
+          "执行已完成"
+        ]
+      }
     },
     {
-      "name": "desktop-1440 drawer rows carry the committed semantic title",
+      "name": "desktop-1440 drawer rows carry the live semantic titles",
       "pass": true,
-      "detail": [
-        "整理发布说明",
-        "读取 README 并汇报"
-      ]
+      "detail": {
+        "expected": [
+          "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+          "审计 ~/code/humanagent：MVP 达成度与项目架构",
+          "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+          "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+          "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容"
+        ],
+        "actual": [
+          "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+          "审计 ~/code/humanagent：MVP 达成度与项目架构",
+          "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+          "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+          "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容"
+        ]
+      }
     },
     {
       "name": "desktop-1440 drawer rows link to the task dashboard",
       "pass": true,
       "detail": [
-        "./task-dashboard.html?task=task-2",
-        "./task-dashboard.html?task=task-1"
+        "./task-dashboard.html?task=scheduled-task-b258bd97ecc762223c7a",
+        "./task-dashboard.html?task=scheduled-task-ed83c3fa70aed6c4b9b5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-b0df6b626d78055778f9&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-91816a001b706f2a8efa&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-b150b7f368156d54edf5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-114cee60ce9d71de57e0&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-585a8e31513becec923b&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
       ]
     },
     {
@@ -97,19 +270,29 @@
       "detail": true
     },
     {
-      "name": "desktop-1440 the entry form stays usable after the drawer closes",
+      "name": "desktop-1440 the entry form stays available after the drawer closes",
       "pass": true,
       "detail": true
     },
     {
       "name": "desktop-1440 closing the drawer does not navigate away",
       "pass": true,
-      "detail": "http://humanagent.entry-task-list-drawer.test/index.html"
+      "detail": "http://127.0.0.1:59766/index.html"
     },
     {
-      "name": "desktop-1440 the drawer reopens with the same task list",
+      "name": "desktop-1440 empty entry after close shows the real validation without mutation",
       "pass": true,
-      "detail": 2
+      "detail": {
+        "message": "request.invalid-field请先填写任务输入。技术详情",
+        "formPresent": true,
+        "path": "/index.html",
+        "mutatingApiRequests": []
+      }
+    },
+    {
+      "name": "desktop-1440 the drawer reopens with the same live task list",
+      "pass": true,
+      "detail": 7
     },
     {
       "name": "desktop-1440 Escape closes the drawer back to the entry page",
@@ -129,7 +312,7 @@
         "hasTrigger": true,
         "triggerLabel": "任务列表",
         "triggerHaspopup": "dialog",
-        "summaryText": "队列与任务状态2 项任务数量2任务列表"
+        "summaryText": "队列与任务状态7 项任务数量7任务列表"
       }
     },
     {
@@ -138,9 +321,9 @@
       "detail": 0
     },
     {
-      "name": "mobile-390 entry main column keeps the compact task count",
+      "name": "mobile-390 entry main column keeps the live task count",
       "pass": true,
-      "detail": "队列与任务状态2 项任务数量2任务列表"
+      "detail": "队列与任务状态7 项任务数量7任务列表"
     },
     {
       "name": "mobile-390 the task-list trigger advertises a dialog",
@@ -148,53 +331,136 @@
       "detail": "dialog"
     },
     {
-      "name": "mobile-390 the drawer opens with the task list",
+      "name": "mobile-390 the drawer opens with the live task list",
       "pass": true,
       "detail": [
         {
-          "taskId": "task-2",
-          "status": "排队中",
-          "heading": "整理发布说明",
-          "href": "./task-dashboard.html?task=task-2"
+          "taskId": "scheduled-task-b258bd97ecc762223c7a",
+          "status": "受阻",
+          "heading": "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+          "href": "./task-dashboard.html?task=scheduled-task-b258bd97ecc762223c7a"
         },
         {
-          "taskId": "task-1",
-          "status": "执行中",
-          "heading": "读取 README 并汇报",
-          "href": "./task-dashboard.html?task=task-1"
+          "taskId": "ui-task-implicit-draft-172",
+          "status": "执行受阻",
+          "heading": "审计 ~/code/humanagent：MVP 达成度与项目架构",
+          "href": "./task-dashboard.html?task=scheduled-task-ed83c3fa70aed6c4b9b5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-246",
+          "status": "执行受阻",
+          "heading": "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+          "href": "./task-dashboard.html?task=scheduled-task-b0df6b626d78055778f9&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-253",
+          "status": "执行受阻",
+          "heading": "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-91816a001b706f2a8efa&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-248",
+          "status": "执行已完成",
+          "heading": "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+          "href": "./task-dashboard.html?task=scheduled-task-b150b7f368156d54edf5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-251",
+          "status": "执行已完成",
+          "heading": "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-114cee60ce9d71de57e0&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-257",
+          "status": "执行已完成",
+          "heading": "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-585a8e31513becec923b&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
         }
       ]
     },
     {
-      "name": "mobile-390 drawer rows carry the real task ids from the task source",
+      "name": "mobile-390 drawer rows carry the live task ids",
       "pass": true,
-      "detail": [
-        "task-2",
-        "task-1"
-      ]
+      "detail": {
+        "expected": [
+          "scheduled-task-b258bd97ecc762223c7a",
+          "ui-task-implicit-draft-172",
+          "ui-task-implicit-draft-246",
+          "ui-task-implicit-draft-253",
+          "ui-task-implicit-draft-248",
+          "ui-task-implicit-draft-251",
+          "ui-task-implicit-draft-257"
+        ],
+        "actual": [
+          "scheduled-task-b258bd97ecc762223c7a",
+          "ui-task-implicit-draft-172",
+          "ui-task-implicit-draft-246",
+          "ui-task-implicit-draft-253",
+          "ui-task-implicit-draft-248",
+          "ui-task-implicit-draft-251",
+          "ui-task-implicit-draft-257"
+        ]
+      }
     },
     {
-      "name": "mobile-390 drawer rows carry the real task status",
+      "name": "mobile-390 drawer rows carry the live task states",
       "pass": true,
-      "detail": [
-        "排队中",
-        "执行中"
-      ]
+      "detail": {
+        "expected": [
+          "受阻",
+          "执行受阻",
+          "执行受阻",
+          "执行受阻",
+          "执行已完成",
+          "执行已完成",
+          "执行已完成"
+        ],
+        "actual": [
+          "受阻",
+          "执行受阻",
+          "执行受阻",
+          "执行受阻",
+          "执行已完成",
+          "执行已完成",
+          "执行已完成"
+        ]
+      }
     },
     {
-      "name": "mobile-390 drawer rows carry the committed semantic title",
+      "name": "mobile-390 drawer rows carry the live semantic titles",
       "pass": true,
-      "detail": [
-        "整理发布说明",
-        "读取 README 并汇报"
-      ]
+      "detail": {
+        "expected": [
+          "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+          "审计 ~/code/humanagent：MVP 达成度与项目架构",
+          "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+          "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+          "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容"
+        ],
+        "actual": [
+          "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+          "审计 ~/code/humanagent：MVP 达成度与项目架构",
+          "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+          "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+          "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容"
+        ]
+      }
     },
     {
       "name": "mobile-390 drawer rows link to the task dashboard",
       "pass": true,
       "detail": [
-        "./task-dashboard.html?task=task-2",
-        "./task-dashboard.html?task=task-1"
+        "./task-dashboard.html?task=scheduled-task-b258bd97ecc762223c7a",
+        "./task-dashboard.html?task=scheduled-task-ed83c3fa70aed6c4b9b5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-b0df6b626d78055778f9&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-91816a001b706f2a8efa&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-b150b7f368156d54edf5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-114cee60ce9d71de57e0&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc",
+        "./task-dashboard.html?task=scheduled-task-585a8e31513becec923b&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
       ]
     },
     {
@@ -217,19 +483,29 @@
       "detail": true
     },
     {
-      "name": "mobile-390 the entry form stays usable after the drawer closes",
+      "name": "mobile-390 the entry form stays available after the drawer closes",
       "pass": true,
       "detail": true
     },
     {
       "name": "mobile-390 closing the drawer does not navigate away",
       "pass": true,
-      "detail": "http://humanagent.entry-task-list-drawer.test/index.html"
+      "detail": "http://127.0.0.1:59766/index.html"
     },
     {
-      "name": "mobile-390 the drawer reopens with the same task list",
+      "name": "mobile-390 empty entry after close shows the real validation without mutation",
       "pass": true,
-      "detail": 2
+      "detail": {
+        "message": "request.invalid-field请先填写任务输入。技术详情",
+        "formPresent": true,
+        "path": "/index.html",
+        "mutatingApiRequests": []
+      }
+    },
+    {
+      "name": "mobile-390 the drawer reopens with the same live task list",
+      "pass": true,
+      "detail": 7
     },
     {
       "name": "mobile-390 Escape closes the drawer back to the entry page",
@@ -244,29 +520,102 @@
   ],
   "observations": [
     {
+      "name": "live /api/tasks response",
+      "value": {
+        "url": "http://127.0.0.1:10086/api/tasks",
+        "status": 200,
+        "contentType": "application/json; charset=utf-8",
+        "responseFile": "real-api-tasks.json",
+        "surface": "runtime-task-list",
+        "mode": "rcc",
+        "counts": {
+          "running": 0,
+          "waiting": 4,
+          "completed": 3,
+          "stopped": 0,
+          "draft": 0,
+          "failed": 0,
+          "total": 7
+        },
+        "taskIds": [
+          "scheduled-task-b258bd97ecc762223c7a",
+          "ui-task-implicit-draft-172",
+          "ui-task-implicit-draft-246",
+          "ui-task-implicit-draft-253",
+          "ui-task-implicit-draft-248",
+          "ui-task-implicit-draft-251",
+          "ui-task-implicit-draft-257"
+        ],
+        "stateLabels": [
+          "受阻",
+          "执行受阻",
+          "执行已完成"
+        ],
+        "titles": [
+          "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+          "审计 ~/code/humanagent：MVP 达成度与项目架构",
+          "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+          "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+          "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+          "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容"
+        ]
+      }
+    },
+    {
       "name": "desktop-1440 entry main column",
       "value": {
         "inlineRows": 0,
         "hasTrigger": true,
         "triggerLabel": "任务列表",
         "triggerHaspopup": "dialog",
-        "summaryText": "队列与任务状态2 项任务数量2任务列表"
+        "summaryText": "队列与任务状态7 项任务数量7任务列表"
       }
     },
     {
       "name": "desktop-1440 drawer rows",
       "value": [
         {
-          "taskId": "task-2",
-          "status": "排队中",
-          "heading": "整理发布说明",
-          "href": "./task-dashboard.html?task=task-2"
+          "taskId": "scheduled-task-b258bd97ecc762223c7a",
+          "status": "受阻",
+          "heading": "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+          "href": "./task-dashboard.html?task=scheduled-task-b258bd97ecc762223c7a"
         },
         {
-          "taskId": "task-1",
-          "status": "执行中",
-          "heading": "读取 README 并汇报",
-          "href": "./task-dashboard.html?task=task-1"
+          "taskId": "ui-task-implicit-draft-172",
+          "status": "执行受阻",
+          "heading": "审计 ~/code/humanagent：MVP 达成度与项目架构",
+          "href": "./task-dashboard.html?task=scheduled-task-ed83c3fa70aed6c4b9b5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-246",
+          "status": "执行受阻",
+          "heading": "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+          "href": "./task-dashboard.html?task=scheduled-task-b0df6b626d78055778f9&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-253",
+          "status": "执行受阻",
+          "heading": "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-91816a001b706f2a8efa&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-248",
+          "status": "执行已完成",
+          "heading": "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+          "href": "./task-dashboard.html?task=scheduled-task-b150b7f368156d54edf5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-251",
+          "status": "执行已完成",
+          "heading": "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-114cee60ce9d71de57e0&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-257",
+          "status": "执行已完成",
+          "heading": "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-585a8e31513becec923b&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
         }
       ]
     },
@@ -286,8 +635,17 @@
         "hasTrigger": true,
         "triggerLabel": "任务列表",
         "triggerHaspopup": "dialog",
-        "summaryText": "队列与任务状态2 项任务数量2任务列表",
+        "summaryText": "队列与任务状态7 项任务数量7任务列表",
         "inputPresent": true
+      }
+    },
+    {
+      "name": "desktop-1440 post-close form validation",
+      "value": {
+        "message": "request.invalid-field请先填写任务输入。技术详情",
+        "formPresent": true,
+        "path": "/index.html",
+        "mutatingApiRequests": []
       }
     },
     {
@@ -297,23 +655,53 @@
         "hasTrigger": true,
         "triggerLabel": "任务列表",
         "triggerHaspopup": "dialog",
-        "summaryText": "队列与任务状态2 项任务数量2任务列表"
+        "summaryText": "队列与任务状态7 项任务数量7任务列表"
       }
     },
     {
       "name": "mobile-390 drawer rows",
       "value": [
         {
-          "taskId": "task-2",
-          "status": "排队中",
-          "heading": "整理发布说明",
-          "href": "./task-dashboard.html?task=task-2"
+          "taskId": "scheduled-task-b258bd97ecc762223c7a",
+          "status": "受阻",
+          "heading": "用一句话说明 HumanAgent 的持久化根目录并写入 /tmp/ha-accept-root.md",
+          "href": "./task-dashboard.html?task=scheduled-task-b258bd97ecc762223c7a"
         },
         {
-          "taskId": "task-1",
-          "status": "执行中",
-          "heading": "读取 README 并汇报",
-          "href": "./task-dashboard.html?task=task-1"
+          "taskId": "ui-task-implicit-draft-172",
+          "status": "执行受阻",
+          "heading": "审计 ~/code/humanagent：MVP 达成度与项目架构",
+          "href": "./task-dashboard.html?task=scheduled-task-ed83c3fa70aed6c4b9b5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-246",
+          "status": "执行受阻",
+          "heading": "写入 hello 到 /tmp/humanagent-d45-accept.txt 并回报文件内容",
+          "href": "./task-dashboard.html?task=scheduled-task-b0df6b626d78055778f9&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-253",
+          "status": "执行受阻",
+          "heading": "在当前工作区创建 mia-relay-test-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-91816a001b706f2a8efa&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-248",
+          "status": "执行已完成",
+          "heading": "在 workspace 创建 humanagent-d45-accept.txt 并回报文件内容",
+          "href": "./task-dashboard.html?task=scheduled-task-b150b7f368156d54edf5&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-251",
+          "status": "执行已完成",
+          "heading": "在当前工作区创建 mia-user-test-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-114cee60ce9d71de57e0&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
+        },
+        {
+          "taskId": "ui-task-implicit-draft-257",
+          "status": "执行已完成",
+          "heading": "在当前工作区创建 mia-e2e-20261107.txt 并回报路径与内容",
+          "href": "./task-dashboard.html?task=scheduled-task-585a8e31513becec923b&projectKey=-Users-fanzhang-.humanagent-workspace&mode=rcc"
         }
       ]
     },
@@ -333,8 +721,17 @@
         "hasTrigger": true,
         "triggerLabel": "任务列表",
         "triggerHaspopup": "dialog",
-        "summaryText": "队列与任务状态2 项任务数量2任务列表",
+        "summaryText": "队列与任务状态7 项任务数量7任务列表",
         "inputPresent": true
+      }
+    },
+    {
+      "name": "mobile-390 post-close form validation",
+      "value": {
+        "message": "request.invalid-field请先填写任务输入。技术详情",
+        "formPresent": true,
+        "path": "/index.html",
+        "mutatingApiRequests": []
       }
     }
   ]
