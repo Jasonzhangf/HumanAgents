@@ -1,0 +1,341 @@
+{
+  "uiRoot": "/Volumes/Intel/playground/humanagent/humanagent-entry-task-list-drawer-20261108/docs/ui",
+  "checks": [
+    {
+      "name": "desktop-1440 entry main column exposes the task-list trigger",
+      "pass": true,
+      "detail": {
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "任务列表",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2任务列表"
+      }
+    },
+    {
+      "name": "desktop-1440 entry main column does not render the inline task list rows",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "desktop-1440 entry main column keeps the compact task count",
+      "pass": true,
+      "detail": "队列与任务状态2 项任务数量2任务列表"
+    },
+    {
+      "name": "desktop-1440 the task-list trigger advertises a dialog",
+      "pass": true,
+      "detail": "dialog"
+    },
+    {
+      "name": "desktop-1440 the drawer opens with the task list",
+      "pass": true,
+      "detail": [
+        {
+          "taskId": "task-2",
+          "status": "排队中",
+          "heading": "整理发布说明",
+          "href": "./task-dashboard.html?task=task-2"
+        },
+        {
+          "taskId": "task-1",
+          "status": "执行中",
+          "heading": "读取 README 并汇报",
+          "href": "./task-dashboard.html?task=task-1"
+        }
+      ]
+    },
+    {
+      "name": "desktop-1440 drawer rows carry the real task ids from the task source",
+      "pass": true,
+      "detail": [
+        "task-2",
+        "task-1"
+      ]
+    },
+    {
+      "name": "desktop-1440 drawer rows carry the real task status",
+      "pass": true,
+      "detail": [
+        "排队中",
+        "执行中"
+      ]
+    },
+    {
+      "name": "desktop-1440 drawer rows carry the committed semantic title",
+      "pass": true,
+      "detail": [
+        "整理发布说明",
+        "读取 README 并汇报"
+      ]
+    },
+    {
+      "name": "desktop-1440 drawer rows link to the task dashboard",
+      "pass": true,
+      "detail": [
+        "./task-dashboard.html?task=task-2",
+        "./task-dashboard.html?task=task-1"
+      ]
+    },
+    {
+      "name": "desktop-1440 drawer content has no horizontal overflow",
+      "pass": true,
+      "detail": {
+        "scrollWidth": 456,
+        "clientWidth": 456,
+        "overflowX": false
+      }
+    },
+    {
+      "name": "desktop-1440 closing the drawer hides it again",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "desktop-1440 the task-list trigger remains on the entry page",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "desktop-1440 the entry form stays usable after the drawer closes",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "desktop-1440 closing the drawer does not navigate away",
+      "pass": true,
+      "detail": "http://humanagent.entry-task-list-drawer.test/index.html"
+    },
+    {
+      "name": "desktop-1440 the drawer reopens with the same task list",
+      "pass": true,
+      "detail": 2
+    },
+    {
+      "name": "desktop-1440 Escape closes the drawer back to the entry page",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-1440 entry page produced no runtime errors",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "mobile-390 entry main column exposes the task-list trigger",
+      "pass": true,
+      "detail": {
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "任务列表",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2任务列表"
+      }
+    },
+    {
+      "name": "mobile-390 entry main column does not render the inline task list rows",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "mobile-390 entry main column keeps the compact task count",
+      "pass": true,
+      "detail": "队列与任务状态2 项任务数量2任务列表"
+    },
+    {
+      "name": "mobile-390 the task-list trigger advertises a dialog",
+      "pass": true,
+      "detail": "dialog"
+    },
+    {
+      "name": "mobile-390 the drawer opens with the task list",
+      "pass": true,
+      "detail": [
+        {
+          "taskId": "task-2",
+          "status": "排队中",
+          "heading": "整理发布说明",
+          "href": "./task-dashboard.html?task=task-2"
+        },
+        {
+          "taskId": "task-1",
+          "status": "执行中",
+          "heading": "读取 README 并汇报",
+          "href": "./task-dashboard.html?task=task-1"
+        }
+      ]
+    },
+    {
+      "name": "mobile-390 drawer rows carry the real task ids from the task source",
+      "pass": true,
+      "detail": [
+        "task-2",
+        "task-1"
+      ]
+    },
+    {
+      "name": "mobile-390 drawer rows carry the real task status",
+      "pass": true,
+      "detail": [
+        "排队中",
+        "执行中"
+      ]
+    },
+    {
+      "name": "mobile-390 drawer rows carry the committed semantic title",
+      "pass": true,
+      "detail": [
+        "整理发布说明",
+        "读取 README 并汇报"
+      ]
+    },
+    {
+      "name": "mobile-390 drawer rows link to the task dashboard",
+      "pass": true,
+      "detail": [
+        "./task-dashboard.html?task=task-2",
+        "./task-dashboard.html?task=task-1"
+      ]
+    },
+    {
+      "name": "mobile-390 drawer content has no horizontal overflow",
+      "pass": true,
+      "detail": {
+        "scrollWidth": 346,
+        "clientWidth": 346,
+        "overflowX": false
+      }
+    },
+    {
+      "name": "mobile-390 closing the drawer hides it again",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "mobile-390 the task-list trigger remains on the entry page",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "mobile-390 the entry form stays usable after the drawer closes",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "mobile-390 closing the drawer does not navigate away",
+      "pass": true,
+      "detail": "http://humanagent.entry-task-list-drawer.test/index.html"
+    },
+    {
+      "name": "mobile-390 the drawer reopens with the same task list",
+      "pass": true,
+      "detail": 2
+    },
+    {
+      "name": "mobile-390 Escape closes the drawer back to the entry page",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-390 entry page produced no runtime errors",
+      "pass": true,
+      "detail": []
+    }
+  ],
+  "observations": [
+    {
+      "name": "desktop-1440 entry main column",
+      "value": {
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "任务列表",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2任务列表"
+      }
+    },
+    {
+      "name": "desktop-1440 drawer rows",
+      "value": [
+        {
+          "taskId": "task-2",
+          "status": "排队中",
+          "heading": "整理发布说明",
+          "href": "./task-dashboard.html?task=task-2"
+        },
+        {
+          "taskId": "task-1",
+          "status": "执行中",
+          "heading": "读取 README 并汇报",
+          "href": "./task-dashboard.html?task=task-1"
+        }
+      ]
+    },
+    {
+      "name": "desktop-1440 drawer overflow",
+      "value": {
+        "scrollWidth": 456,
+        "clientWidth": 456,
+        "overflowX": false
+      }
+    },
+    {
+      "name": "desktop-1440 after close",
+      "value": {
+        "openDrawers": 0,
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "任务列表",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2任务列表",
+        "inputPresent": true
+      }
+    },
+    {
+      "name": "mobile-390 entry main column",
+      "value": {
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "任务列表",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2任务列表"
+      }
+    },
+    {
+      "name": "mobile-390 drawer rows",
+      "value": [
+        {
+          "taskId": "task-2",
+          "status": "排队中",
+          "heading": "整理发布说明",
+          "href": "./task-dashboard.html?task=task-2"
+        },
+        {
+          "taskId": "task-1",
+          "status": "执行中",
+          "heading": "读取 README 并汇报",
+          "href": "./task-dashboard.html?task=task-1"
+        }
+      ]
+    },
+    {
+      "name": "mobile-390 drawer overflow",
+      "value": {
+        "scrollWidth": 346,
+        "clientWidth": 346,
+        "overflowX": false
+      }
+    },
+    {
+      "name": "mobile-390 after close",
+      "value": {
+        "openDrawers": 0,
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "任务列表",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2任务列表",
+        "inputPresent": true
+      }
+    }
+  ]
+}

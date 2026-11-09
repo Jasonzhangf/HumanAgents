@@ -1237,6 +1237,24 @@ pre {
   overflow-y: auto;
 }
 
+/* The entry task list lives in a narrow shell-layer drawer, not the full-width
+   main column, so its rows stack instead of squeezing the title/status/time
+   columns together. */
+.entry-task-list-drawer {
+  align-self: start;
+  align-content: start;
+}
+
+.entry-task-list-drawer .task-row-link {
+  grid-template-columns: 1fr;
+  gap: 8px;
+  align-content: start;
+}
+
+.entry-task-list-drawer .task-row-link .state-chip {
+  justify-self: start;
+}
+
 .shell-panel {
   display: grid;
   gap: 10px;

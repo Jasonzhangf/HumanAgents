@@ -817,11 +817,27 @@ function renderStatus(summary, rows) {
   }
   section.append(stats)
 
+  // The entry main column keeps only the compact status summary. The full task
+  // list is not duplicated here: it lives in the shared drawer, opened only
+  // when the human asks for it.
   if (rows.length === 0) {
     section.append(element('p', confirmation ? '需求已提交，等待隐式队列创建任务。' : '尚未提交任务。', 'empty'))
-    return
   }
-  const list = element('div', undefined, 'panel stack')
+  const trigger = element('button', '任务列表', 'button button--quiet')
+  trigger.type = 'button'
+  trigger.dataset.taskListDrawerTrigger = 'true'
+  trigger.setAttribute('aria-haspopup', 'dialog')
+  trigger.setAttribute('aria-label', `打开任务列表（${rows.length} 项）`)
+  trigger.addEventListener('click', () => openTaskListDrawer(rows, trigger))
+  section.append(trigger)
+}
+
+// One task row is a link to the task dashboard. The entry page keeps its own
+// row rendering (title, status, time) and carries the exact task id on the
+// link, but reuses the shared shell-layer drawer so the primary column never
+// repeats the full Task List page.
+function taskListEntries(rows) {
+  const fragment = document.createDocumentFragment()
   for (const row of rows) {
     const link = element('a', undefined, 'task-row-link')
     const currentId = row.currentExecutionTaskId && typeof row.currentExecutionTaskId === 'object'
@@ -837,6 +853,7 @@ function renderStatus(summary, rows) {
       ? taskExecutionHref(currentChild, false, row.scope)
       : taskDashboardHref(row.taskId.value)
     link.dataset.taskId = row.taskId.value
+    link.dataset.taskStatus = row.stateLabel || row.state || ''
     const copy = element('div')
     copy.append(element('h3', taskRowTitle(row)))
     copy.append(element('p', taskRowStateText(row)))
@@ -848,11 +865,27 @@ function renderStatus(summary, rows) {
     if (taskType) meta.append(element('span', taskType))
     link.append(copy, stateChip, meta)
     link.style.textDecoration = 'none'
-    list.append(link)
+    fragment.append(link)
     const executions = renderTaskExecutions(row, row.scope)
-    if (executions) list.append(executions)
+    if (executions) fragment.append(executions)
   }
-  section.append(list)
+  return fragment
+}
+
+// The entry task list drawer. It reuses the shared shell-layer frame through
+// openTechnicalDetail, so it is the same desktop side panel / mobile bottom
+// drawer as the rest of the product and never a second overlay primitive.
+function openTaskListDrawer(rows, trigger) {
+  const body = element('div', undefined, 'panel stack entry-task-list-drawer')
+  body.dataset.taskListDrawer = 'true'
+  body.append(taskListEntries(rows))
+  if (rows.length === 0) body.append(element('p', '当前没有任务。', 'empty'))
+  openTechnicalDetail({
+    eyebrow: '任务列表',
+    title: rows.length === 0 ? '当前任务' : `当前任务（${rows.length}）`,
+    content: body,
+    trigger,
+  })
 }
 
 function taskRows(tasks) {

@@ -441,14 +441,31 @@ async function readEditableValues(page) {
   });
 }
 
-// Wait for the exact committed task row that the entry page renders in place
-// after confirmation, then read its real identity, href and progress. The
-// entry page stays on index.html; it never navigates to observation on submit.
+// The entry task list is not in the primary column: it lives in the shared
+// shell-layer drawer, so open it before reading the committed row.
+async function openEntryTaskDrawer(page) {
+  const trigger = page.locator('button[data-task-list-drawer-trigger="true"]').first();
+  await trigger.waitFor({ state: 'visible', timeout: 5_000 });
+  if (await page.locator('dialog[data-technical-detail="true"][open] [data-task-list-drawer="true"]').count() === 0) {
+    await trigger.click();
+  }
+  await page
+    .locator('dialog[data-technical-detail="true"][open] [data-task-list-drawer="true"]')
+    .first()
+    .waitFor({ state: 'visible', timeout: 5_000 });
+}
+
+// Wait for the exact committed task row, then open the entry task list drawer
+// and read its real identity, href and progress. The entry page stays on
+// index.html; it never navigates to observation on submit.
 async function waitForSubmittedTaskRow(page, expectedTaskId, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    await openEntryTaskDrawer(page).catch(() => {});
     const row = await page.evaluate((taskId) => {
-      const link = document.querySelector(`#entry-live a.task-row-link[data-task-id="${taskId}"]`);
+      const link = document.querySelector(
+        `dialog[data-technical-detail="true"][open] a.task-row-link[data-task-id="${taskId}"]`,
+      );
       if (!link) return null;
       return {
         taskId: link.dataset.taskId,
@@ -461,7 +478,7 @@ async function waitForSubmittedTaskRow(page, expectedTaskId, timeoutMs = 20_000)
     if (row) return row;
     await sleep(100);
   }
-  throw new Error(`submitted task row ${expectedTaskId} did not render in #entry-live within ${timeoutMs} ms`);
+  throw new Error(`submitted task row ${expectedTaskId} did not render in the entry task list drawer within ${timeoutMs} ms`);
 }
 
 // Launch one fresh browser+context for a deterministic case. A constrained
@@ -1012,13 +1029,14 @@ async function waitForLiveExecutionCard(page, timeoutMs = 300_000) {
 async function waitForCommittedTaskId(page, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    await openEntryTaskDrawer(page).catch(() => {});
     const taskId = await page.evaluate(() => (
-      document.querySelector('#entry-live a.task-row-link[data-task-id]')?.dataset?.taskId ?? null
+      document.querySelector('dialog[data-technical-detail="true"][open] a.task-row-link[data-task-id]')?.dataset?.taskId ?? null
     )).catch(() => null);
     if (taskId) return taskId;
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
-  throw new Error('the committed task row never rendered in #entry-live');
+  throw new Error('the committed task row never rendered in the entry task list drawer');
 }
 
 /**

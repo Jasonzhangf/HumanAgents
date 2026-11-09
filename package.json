@@ -39,6 +39,7 @@
     "proof:auth-login": "node tests/ui/auth-login-browser.mjs",
     "proof:homepage-form": "pnpm build:contracts && node tests/ui/homepage-form-browser.mjs",
     "proof:entry-flow": "pnpm build:contracts && pnpm build:config && pnpm build:app && node tests/ui/entry-flow-browser.mjs",
+    "proof:entry-task-list-drawer": "pnpm build:contracts && pnpm build:config && pnpm build:app && node tests/ui/entry-task-list-drawer-browser.mjs",
     "proof:page-wiring": "pnpm build:contracts && pnpm build:config && pnpm build:app && node tests/ui/interaction-page-wiring-browser.mjs",
     "proof:work-card": "pnpm build:contracts && pnpm build:config && pnpm build:app && node tests/ui/interaction-work-card-browser.mjs",
     "proof:plan-control": "pnpm build:contracts && pnpm build:config && pnpm build:app && node tests/ui/interaction-plan-control-browser.mjs",
