@@ -12,21 +12,26 @@
  *   node scripts/c5d4671-rcc-receipt.mjs [receipt-path]
  */
 
-import { execFileSync, spawn } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const CLI_PATH = resolve('dist/app/app/src/cli.js');
 const RCC_BASE_URL = (process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444').replace(/\/$/, '');
 const MODEL = process.env.HUMANAGENT_UI_MODEL ?? 'gpt-5.5';
-const TERMINAL_TIMEOUT_MS = 180_000;
+const TERMINAL_TIMEOUT_MS = 600_000;
+// The locked builtin agent prompts (including the review prompt the RCC
+// orchestration ports require at startup) live in the agent-templates package.
+const TEMPLATE_ROOT = process.env.HUMANAGENT_TEMPLATE_ROOT
+  ?? resolve('packages/agent-templates/templates');
+
+// The isolated control root gets a real config.toml with room for both child
+// roles. The TOML fixture is the single source of truth for this receipt and is
+// validated by tests/app/c5d4671-receipt-config-public-consumer.test.ts.
+const RECEIPT_CONFIG_PATH = new URL('./c5d4671-receipt-config.toml', import.meta.url);
 
 const sleep = (ms) => new Promise((settle) => setTimeout(settle, ms));
-
-function git(args) {
-  return execFileSync('git', args, { encoding: 'utf8' }).trim();
-}
 
 function startServe(root) {
   const child = spawn(process.execPath, [
@@ -42,7 +47,11 @@ function startServe(root) {
     '--workspace', join(root, 'workspace'),
     '--control-root', join(root, 'control'),
     '--port', '0',
-  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  ], {
+    cwd: process.cwd(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, HUMANAGENT_TEMPLATE_ROOT: TEMPLATE_ROOT },
+  });
 
   let stdout = '';
   let stderr = '';
@@ -66,7 +75,9 @@ function startServe(root) {
 
   return {
     ready,
+    stdout: () => stdout,
     stderr: () => stderr,
+    capture: () => ({ stdout, stderr }),
     stop: async () => {
       if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise((done) => child.once('exit', done));
@@ -115,6 +126,7 @@ async function collectEvents(url, operationId, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const events = [];
+  let rawSse = '';
   try {
     const response = await fetch(`${url}/api/executions/${operationId}/events`, {
       headers: { accept: 'text/event-stream' },
@@ -123,7 +135,9 @@ async function collectEvents(url, operationId, timeoutMs) {
     if (!response.ok) throw new Error(`event stream failed ${response.status} for ${operationId}`);
     let buffer = '';
     for await (const chunk of response.body) {
-      buffer += Buffer.from(chunk).toString('utf8');
+      const text = Buffer.from(chunk).toString('utf8');
+      rawSse += text;
+      buffer += text;
       let index;
       while ((index = buffer.indexOf('\n\n')) !== -1) {
         const frame = buffer.slice(0, index);
@@ -135,14 +149,39 @@ async function collectEvents(url, operationId, timeoutMs) {
         if (!data) continue;
         events.push(JSON.parse(data));
         const last = events.at(-1);
-        if (last.kind === 'execution.terminal' && last.terminalPhase === 'final') return events;
+        if (last.kind === 'execution.terminal' && last.terminalPhase === 'final') return { events, rawSse };
       }
     }
-    return events;
+    return { events, rawSse };
   } finally {
     clearTimeout(timer);
     controller.abort();
   }
+}
+
+async function findTaskControlJournals(root, depth = 0) {
+  if (depth > 6) return [];
+  const entries = await readdir(root, { withFileTypes: true });
+  const paths = [];
+  for (const entry of entries) {
+    if (entry.name === '.DS_Store') continue;
+    const full = join(root, entry.name);
+    if (entry.isDirectory()) {
+      paths.push(...await findTaskControlJournals(full, depth + 1));
+    } else if (entry.isFile() && entry.name === 'task-control.jsonl') {
+      paths.push(full);
+    }
+  }
+  return paths;
+}
+
+async function readJsonl(path) {
+  const text = await readFile(path, 'utf8');
+  return text.split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      try { return JSON.parse(line); } catch { return { _raw: line }; }
+    });
 }
 
 async function waitForTerminal(url, taskId, timeoutMs) {
@@ -160,22 +199,43 @@ async function main() {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-c5d4671-rcc-'));
   await mkdir(join(root, 'workspace'), { recursive: true });
   await mkdir(join(root, 'control'), { recursive: true });
+  await writeFile(join(root, 'control', 'config.toml'), await readFile(RECEIPT_CONFIG_PATH, 'utf8'), 'utf8');
   const serve = startServe(root);
   const receipt = {
     proof: 'c5d4671-rcc-same-entry',
     generatedAt: new Date().toISOString(),
-    candidateCommit: git(['rev-parse', 'HEAD']),
     model: MODEL,
     rccBaseUrl: RCC_BASE_URL,
     state: 'UNVERIFIED',
   };
+  let removeRoot = false;
+  let receiptWritten = false;
+  const writeReceipt = async () => {
+    await mkdir(resolve(receiptPath, '..'), { recursive: true });
+    await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+    receiptWritten = true;
+  };
   try {
     const launched = await serve.ready;
     receipt.serveUrl = launched.url;
-    const prompt = 'You are a worker agent. Draft a one-line answer to "what is 2+2?" and then submit the final answer. Keep it short.';
+    const prompt = [
+      'You are the parent agent executing one formal humanagent turn.',
+      'Call child_call once with kind "execution", agentId "orchestration-default", purpose "compute 2+2",',
+      'instructions "Do not inspect any files. Compute 2+2 and return exactly the number 4 as the complete body.",',
+      'successCriteria ["body is 4"], and target "answer.txt".',
+      'After it returns, capture its invocationId and call child_adopt once with that execution invocationId.',
+      'Then call child_call once with kind "review", agentId "orchestration-default", purpose "review execution result", reviewKind "quality", and subjectInvocationId set to the execution invocationId you just adopted.',
+      'The review child persists its review with file.write, then delivers with humanagent_child_deliver and ends with humanagent_turn_end.',
+      'After the review returns, capture its invocationId and call child_adopt once with that review invocationId.',
+      'Finally call humanagent_turn_end with outcome "completed". Use the adopted child result as the final answer: 4.',
+    ].join(' ');
+    receipt.prompt = prompt;
     const started = await startTask(launched.url, prompt);
     receipt.task = started;
-    const events = await collectEvents(launched.url, started.operationId, TERMINAL_TIMEOUT_MS);
+    const collected = await collectEvents(launched.url, started.operationId, TERMINAL_TIMEOUT_MS);
+    const { events, rawSse } = collected;
+    receipt.rawSse = rawSse;
+    receipt.events = events;
     const dashboard = await waitForTerminal(launched.url, started.taskId, TERMINAL_TIMEOUT_MS);
     const provider = events
       .filter((event) => event.kind === 'provider.model')
@@ -203,6 +263,15 @@ async function main() {
       error: dashboard.error ?? null,
       checkpoint: dashboard.checkpoint ?? null,
     };
+    const controlPaths = await findTaskControlJournals(join(root, 'control'));
+    receipt.taskControl = await Promise.all(controlPaths.map(async (path) => ({
+      path,
+      entries: await readJsonl(path),
+    })));
+    receipt.committedCheckpoints = receipt.taskControl.flatMap((journal) =>
+      journal.entries
+        .filter((entry) => entry.kind === 'checkpoint')
+        .map((entry) => ({ journal: journal.path, entry })));
     const ok = dashboard.state === 'succeeded'
       && typeof dashboard.output === 'string' && dashboard.output.trim().length > 0
       && firstDispatched >= 0
@@ -222,13 +291,38 @@ async function main() {
         .map((s) => `missing ${s}`),
       (dispatchTurn === null || dispatchTurn !== settleTurn) && 'same dispatch/settle turn',
     ].filter(Boolean);
-    await mkdir(resolve(receiptPath, '..'), { recursive: true });
-    await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
-    console.log(JSON.stringify(receipt, null, 2));
+    receipt.serveOutput = serve.capture();
+    await writeReceipt();
+    console.log(JSON.stringify({
+      state: receipt.state,
+      receiptPath,
+      task: receipt.task,
+      provider: receipt.provider,
+      terminal: receipt.terminal,
+      missing: receipt.missing,
+    }, null, 2));
+    removeRoot = receipt.state === 'SUCCESS';
     if (receipt.state !== 'SUCCESS') process.exitCode = 1;
+  } catch (error) {
+    receipt.state = 'INCOMPLETE';
+    receipt.error = error instanceof Error ? error.stack ?? error.message : String(error);
+    receipt.serveOutput = serve.capture();
+    await writeReceipt().catch(() => undefined);
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
   } finally {
-    await serve.stop();
-    await rm(root, { recursive: true, force: true });
+    await serve.stop().catch((error) => {
+      receipt.stopError = error instanceof Error ? error.stack ?? error.message : String(error);
+    });
+    receipt.serveOutput = serve.capture();
+    await writeReceipt().catch((error) => {
+      console.error(`failed to write receipt: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    if (removeRoot && receiptWritten) {
+      await rm(root, { recursive: true, force: true });
+    } else {
+      console.error(`preserving evidence root: ${root}`);
+    }
   }
 }
 

@@ -660,6 +660,7 @@ function serviceFor(
   explicitProviderSettlementRead?: ExplicitProviderSettlementReadPort,
   taskGrantPort?: TaskGrantPort,
   principalOwner?: string,
+  maxConcurrentTasks?: number,
 ): UiRuntimeService {
   const runtimeJournal = journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   return new UiRuntimeService({
@@ -679,6 +680,7 @@ function serviceFor(
     ...(explicitProviderSettlementRead ? { explicitProviderSettlementRead } : {}),
     ...(taskGrantPort === undefined ? {} : { taskGrantPort }),
     ...(principalOwner === undefined ? {} : { principalOwner }),
+    ...(maxConcurrentTasks === undefined ? {} : { maxConcurrentTasks }),
     runtimeComposition: { admitExecution: async () => {} },
   });
 }
@@ -4818,7 +4820,21 @@ test('orchestrated confirmed requirement dispatches implicit executor agents thr
 
 test('runtime admission waits on actual running load and resumes when capacity is released', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-capacity-'));
-  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 100 }));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 100 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    1,
+  );
   service.startImplicitConsumer();
 
   const confirm = async (suffix: string): Promise<string> => {
@@ -5375,7 +5391,21 @@ test('runtime exposes a blocked requirement through status and resumes it after 
 
 test('implicit consumer attaches to an existing running task and wakes pending work at final', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-rebind-'));
-  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 100 }));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 100 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    1,
+  );
   const occupying = service.createTask({ title: 'occupy capacity', directive: 'occupy capacity' });
   await service.startExecution(occupying.taskId, { prompt: 'occupy capacity' });
 

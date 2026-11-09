@@ -594,7 +594,13 @@ function plannerPayload(raw: string): Record<string, unknown> | undefined {
       try {
         candidate = JSON.parse(part.text);
       } catch {
-        continue;
+        const start = part.text.lastIndexOf('\n\n{"role":"planner"');
+        if (start < 0) continue;
+        try {
+          candidate = JSON.parse(part.text.slice(start + 2));
+        } catch {
+          continue;
+        }
       }
       if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
         && (candidate as Record<string, unknown>).role === 'planner') {
@@ -970,6 +976,29 @@ function explicitHelperText(text: string): readonly Record<string, unknown>[] {
   ];
 }
 
+function responsesPromptText(wire: ResponsesWireBody): string {
+  return (wire.input ?? [])
+    .filter((item) => item.type === 'message' && item.role === 'user')
+    .flatMap((item) => item.content ?? [])
+    .filter((part) => part.type === 'input_text' && typeof part.text === 'string')
+    .map((part) => part.text as string)
+    .join('\n');
+}
+
+async function workspaceSnapshot(root: string): Promise<readonly string[]> {
+  const entries: string[] = [];
+  const visit = async (directory: string, prefix: string) => {
+    const children = await readdir(directory, { withFileTypes: true });
+    for (const child of children) {
+      const relative = prefix === '' ? child.name : `${prefix}/${child.name}`;
+      if (child.isDirectory()) await visit(join(directory, child.name), relative);
+      else entries.push(relative);
+    }
+  };
+  await visit(root, '');
+  return entries.sort();
+}
+
 /**
  * Controlled local Responses upstream. It answers the real RCC readiness
  * probes, then serves one generation: the advertised `humanagent_turn_end`
@@ -987,6 +1016,8 @@ async function textOnlyResponsesUpstream(input: {
   readonly parallelChild?: boolean;
   readonly reviewPerCycle?: boolean;
   readonly badReviewSelector?: boolean;
+  readonly reviewFindingsMode?: 'empty' | 'failed-empty' | 'missing-location'
+    | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref';
   readonly inspection?: boolean;
   readonly turnCount?: 2 | 3;
   readonly scenario?: TextOnlyFixtureScenario;
@@ -1313,9 +1344,16 @@ async function textOnlyResponsesUpstream(input: {
               .find((line) => line.startsWith('- evidenceId=child-body-execution-'));
             const ref = deliveryEvidence === undefined ? undefined : /locator=([^\s]+)/.exec(deliveryEvidence)?.[1];
             if (!ref) throw new Error(`inspection child delivery result has no body asset: ${delivered.output}`);
-            const section = { text: 'Inspection child work complete', evidenceRefs: [ref] };
-            invoke(endId, 'humanagent_turn_end', { summary: {
-              goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [ref] });
+            invoke(endId, 'humanagent_turn_end', {
+              outcome: 'completed',
+              summary: {
+                goal: 'Inspection child work complete',
+                actions: ['Inspection child work complete'],
+                result: { status: 'completed', text: 'Inspection child work complete' },
+                nextStep: 'Inspection child work complete',
+              },
+              deliveryRefs: [ref],
+            });
           }
           return;
         }
@@ -1390,20 +1428,50 @@ async function textOnlyResponsesUpstream(input: {
           const delivered = resultFor(`cycle-${cycle}-child-delivery`);
           if (!delivered) {
             const ref = /evidenceId=([^\s]+)/.exec(resultFor(`cycle-${cycle}-review-read`)?.output ?? '')?.[1];
+            const locationRef = `Cycle ${cycle} execution subject`;
+            const failedEmpty = input.reviewFindingsMode === 'failed-empty';
+            const findings = !review ? undefined
+              : input.reviewFindingsMode === 'empty' || failedEmpty ? []
+              : input.reviewFindingsMode === 'missing-location' ? [{
+                  detail: `Cycle ${cycle} delivery verified`,
+                  severity: 'advisory', evidenceRefs: [ref],
+                }]
+              : input.reviewFindingsMode === 'illegal-severity' ? [{
+                  detail: `Cycle ${cycle} delivery verified`,
+                  severity: 'critical', locationRef, evidenceRefs: [ref],
+                }]
+              : input.reviewFindingsMode === 'empty-evidence' ? [{
+                  detail: `Cycle ${cycle} delivery verified`,
+                  severity: 'advisory', locationRef, evidenceRefs: [],
+                }]
+              : input.reviewFindingsMode === 'unaccepted-ref' ? [{
+                  detail: `Cycle ${cycle} delivery verified`,
+                  severity: 'advisory', locationRef, evidenceRefs: ['not-accepted-evidence'],
+                }]
+              : [{
+                  detail: `Cycle ${cycle} delivery verified`, severity: 'advisory', locationRef,
+                  evidenceRefs: input.badReviewSelector && cycle === 1
+                    ? ['x'.repeat(257)] : ref === undefined ? [] : [ref],
+                }];
             invoke(`cycle-${cycle}-child-delivery`, 'humanagent_child_deliver', {
               body: review ? `Cycle ${cycle} independent quality review` : executionBody,
-              ...(review ? { judgment: 'passed', findings: [{ detail: `Cycle ${cycle} delivery verified`,
-                severity: 'advisory', evidenceRefs: input.badReviewSelector && cycle === 1
-                  ? ['x'.repeat(257)] : ref === undefined ? [] : [ref] }] } : {}),
+              ...(review ? { judgment: failedEmpty ? 'failed' : 'passed', findings } : {}),
             });
           } else {
             const deliveryEvidence = delivered.output!.split('\n')
               .find((line) => line.startsWith(`- evidenceId=child-body-${review ? 'review' : 'execution'}-`));
             const ref = /locator=([^\s]+)/.exec(deliveryEvidence ?? '')?.[1];
             assert.ok(ref, 'child delivery returns real evidence');
-            const section = { text: `Cycle ${cycle} child complete`, evidenceRefs: [ref] };
-            invoke(`cycle-${cycle}-child-end`, 'humanagent_turn_end', { summary: {
-              goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [ref] });
+            invoke(`cycle-${cycle}-child-end`, 'humanagent_turn_end', {
+              outcome: 'completed',
+              summary: {
+                goal: `Cycle ${cycle} child complete`,
+                actions: [`Cycle ${cycle} child complete`],
+                result: { status: 'completed' as const, text: `Cycle ${cycle} child complete` },
+                nextStep: `Cycle ${cycle} child complete`,
+              },
+              deliveryRefs: [ref],
+            });
           }
           return;
         }
@@ -1484,9 +1552,16 @@ async function textOnlyResponsesUpstream(input: {
               console.error('child delivery result has no body asset', delivered.output);
               throw new Error(`child delivery result has no asset: ${delivered.output}`);
             }
-            const section = { text: 'Child work complete', evidenceRefs: [ref] };
-            invoke(endId, 'humanagent_turn_end', { summary: {
-              goal: section, actions: section, result: section, expectedNextStep: section }, deliveryRefs: [ref] });
+            invoke(endId, 'humanagent_turn_end', {
+              outcome: 'completed',
+              summary: {
+                goal: 'Child work complete',
+                actions: ['Child work complete'],
+                result: { status: 'completed', text: 'Child work complete' },
+                nextStep: 'Child work complete',
+              },
+              deliveryRefs: [ref],
+            });
           }
           return;
         }
@@ -1570,7 +1645,6 @@ async function textOnlyResponsesUpstream(input: {
       const payload = coverage?.payload as { admissionCommitRef?: { commitId?: string } } | undefined;
       const admissionCommitId = payload?.admissionCommitRef?.commitId;
       if (!admissionCommitId) throw new Error('text-only run has no admitted operation coverage');
-      const section = (text: string) => ({ text, evidenceRefs: [admissionCommitId] });
       const activeEntries = inspectThisTurn ? await createJsonlActiveTurnJournal({ filePath: input.organFilePath,
         journal: input.journal, turnId: newActiveTurnId(coverage!.scope.operationId!.value) }).replay() : [];
       const readFact = activeEntries.find((entry) => entry.kind === 'accepted-fact'
@@ -1594,33 +1668,37 @@ async function textOnlyResponsesUpstream(input: {
         ? [readFact.entry.envelope.fact.rawOutput.ref.locator] : [];
       const multiTurn = input.turnCount !== undefined;
       const endCallId = multiTurn ? `call-turn-${plannerAttempts + 1}-end` : 'call-text-end';
-      const endSummary = multiTurn ? (plannerAttempts === 0 ? {
-        goal: section(TURN_ONE_GOAL), actions: section(TURN_ONE_ACTIONS),
-        result: inspectThisTurn
-          ? { text: input.inspect === 'file.list'
+      const publicResultText = multiTurn
+        ? (plannerAttempts === 0 ? CHILD_BODY
+            : input.turnCount === 3 && plannerAttempts === 1 ? TURN_TWO_DELIVERY : EXACT_BODY)
+        : EXACT_BODY;
+      const closeSummary = (goal: string, actions: string, result: string, nextStep: string) => ({
+        goal,
+        actions: [actions],
+        result: { status: 'completed' as const, text: result },
+        nextStep,
+      });
+      const endSummary = multiTurn ? (plannerAttempts === 0 ? closeSummary(
+        TURN_ONE_GOAL, TURN_ONE_ACTIONS,
+        inspectThisTurn
+          ? (input.inspect === 'file.list'
               ? `${TURN_ONE_RESULT}; Listed the workspace directory read-only; no file content read`
-              : `${TURN_ONE_RESULT}; Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed`,
-            evidenceRefs: [admissionCommitId, ...deliveryRefs] }
-          : section(TURN_ONE_RESULT),
-        expectedNextStep: section(TURN_ONE_NEXT),
-      } : (input.turnCount === 3 || input.reviewPerCycle) && plannerAttempts === 1 ? {
-        goal: section(TURN_TWO_GOAL), actions: section(TURN_TWO_ACTIONS),
-        result: section(TURN_TWO_RESULT), expectedNextStep: section(TURN_TWO_NEXT),
-      } : input.turnCount === 3 && plannerAttempts === 2 ? {
-        goal: section('Complete the third standard turn from committed multi-turn semantic history'),
-        actions: section('Consume both prior semantic checkpoints and close the third turn'),
-        result: section(SUMMARY_RESULT), expectedNextStep: section('Close the final third turn'),
-      } : {
-        goal: section(TURN_ONE_GOAL), actions: section(TURN_ONE_ACTIONS),
-        result: section(TURN_ONE_RESULT), expectedNextStep: section(TURN_ONE_NEXT),
-      }) : {
-        goal: section('Deliver the exact text body'), actions: section('End the pure-text turn'),
-        result: inspectThisTurn && input.inspect === 'file.list'
-          ? { text: 'Listed the workspace directory read-only: read-delivery.txt present; no file content read',
-            evidenceRefs: [admissionCommitId, ...deliveryRefs] }
-          : section(SUMMARY_RESULT),
-        expectedNextStep: section('Close this turn'),
-      };
+              : `${TURN_ONE_RESULT}; Inspected read-delivery.txt completely: two UTF-8 lines; read-only, no mutation performed`)
+          : publicResultText,
+        TURN_ONE_NEXT,
+      ) : (input.turnCount === 3 || input.reviewPerCycle) && plannerAttempts === 1 ? closeSummary(
+        TURN_TWO_GOAL, TURN_TWO_ACTIONS, publicResultText, TURN_TWO_NEXT,
+      ) : input.turnCount === 3 && plannerAttempts === 2 ? closeSummary(
+        'Complete the third standard turn from committed multi-turn semantic history',
+        'Consume both prior semantic checkpoints and close the third turn',
+        publicResultText, 'Close the final third turn',
+      ) : closeSummary(TURN_ONE_GOAL, TURN_ONE_ACTIONS, TURN_ONE_RESULT, TURN_ONE_NEXT)) : closeSummary(
+        'Deliver the exact text body', 'End the pure-text turn',
+        inspectThisTurn && input.inspect === 'file.list'
+          ? 'Listed the workspace directory read-only: read-delivery.txt present; no file content read'
+          : SUMMARY_RESULT,
+        'Close this turn',
+      );
       const summaryWithInspection = input.inspection && multiTurn && plannerAttempts > 0
         ? {
             ...endSummary,
@@ -1631,16 +1709,14 @@ async function textOnlyResponsesUpstream(input: {
             },
           }
         : endSummary;
-      const deliveryText = multiTurn ? (plannerAttempts === 0 ? CHILD_BODY
-        : input.turnCount === 3 && plannerAttempts === 1 ? TURN_TWO_DELIVERY : EXACT_BODY) : EXACT_BODY;
       const toolCall = [
         { type: 'response.created', response: { id: 'text-end' } },
         { type: 'response.output_item.added', output_index: 0,
           item: { type: 'function_call', call_id: endCallId, name: 'humanagent_turn_end', arguments: '' } },
         { type: 'response.output_item.done', output_index: 0,
           item: { type: 'function_call', call_id: endCallId, name: 'humanagent_turn_end', arguments: JSON.stringify({
+            outcome: 'completed',
             summary: summaryWithInspection,
-            ...(inspectThisTurn ? {} : { deliveryText }),
             deliveryRefs,
           }) } },
         { type: 'response.completed', response: { id: 'text-end' } },
@@ -1648,7 +1724,6 @@ async function textOnlyResponsesUpstream(input: {
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.end(frame(toolCall));
     })().catch((error: unknown) => {
-      if (input.reviewPerCycle) console.error('two-cycle upstream fixture error', error);
       response.writeHead(500, { 'content-type': 'text/plain' });
       response.end(String(error));
     });
@@ -1693,6 +1768,8 @@ async function textOnlyFixture(
   badReviewSelector = false,
   scenario?: TextOnlyFixtureScenario,
   failTurnEndDrain = false,
+  reviewFindingsMode: 'empty' | 'failed-empty' | 'missing-location' | 'illegal-severity'
+    | 'empty-evidence' | 'unaccepted-ref' | undefined = undefined,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1707,7 +1784,7 @@ async function textOnlyFixture(
   await mkdir(layout.modeRoot, { recursive: true });
   const journal = new JsonlOrganJournal(layout.organJournalPath);
   const upstream = await textOnlyResponsesUpstream({ model: 'text.only.model',
-    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount, reviewPerCycle, badReviewSelector,
+    organFilePath: layout.organJournalPath, journal, inspect, child, parallelChild, inspection, turnCount, reviewPerCycle, badReviewSelector, reviewFindingsMode,
     interactionScopeId: `runtime:${paths.projectKey}`,
     ...(scenario === undefined ? {} : { scenario }),
     ...(failTurnEndDrain ? { failTurnEndDrain: true } : {}),
@@ -3105,6 +3182,136 @@ if (!coldConsumerMode) test('native review child failure preserves primary reaso
     await fixture.upstream.close();
     if (passed) await rm(fixture.root, { recursive: true });
     else console.error(`review failure fixture retained: ${fixture.root}`);
+  }
+});
+
+if (!coldConsumerMode) test('native public CLI review findings contract permits passed empty findings and rejects malformed review findings', async () => {
+  const cases: ReadonlyArray<{
+    readonly mode: 'empty' | 'failed-empty' | 'missing-location' | 'illegal-severity' | 'empty-evidence'
+      | 'unaccepted-ref' | undefined;
+    readonly expected: 'succeeded' | 'blocked';
+    readonly error?: RegExp;
+  }> = [
+    { mode: 'empty', expected: 'succeeded' },
+    { mode: undefined, expected: 'succeeded' },
+    { mode: 'failed-empty', expected: 'blocked', error: /non-passed review result requires findings/ },
+    { mode: 'missing-location', expected: 'blocked', error: /locationRef/ },
+    { mode: 'illegal-severity', expected: 'blocked', error: /severity/ },
+    { mode: 'empty-evidence', expected: 'blocked', error: /evidenceRefs/ },
+    { mode: 'unaccepted-ref', expected: 'blocked', error: /evidence/ },
+  ];
+  for (const current of cases) {
+    const fixture = await textOnlyFixture(false, true, false, 2, undefined, undefined, undefined,
+      false, undefined, true, false, undefined, false, current.mode);
+    const reviewAgent = fixture.configuration.agentRoster.find((agent) => agent.roleId === 'review');
+    if (reviewAgent === undefined) {
+      throw new Error(`${String(current.mode)} review fixture has no explicit read-only agent`);
+    }
+    assert.deepEqual(reviewAgent.tools, [],
+      `${String(current.mode)} review fixture grants no workspace mutation tools`);
+    assert.deepEqual(reviewAgent.permissions, [],
+      `${String(current.mode)} review fixture grants no workspace mutation permissions`);
+    const workspaceBefore = await workspaceSnapshot(fixture.workspace);
+    let passed = false;
+    try {
+      const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 2);
+      assert.equal(result.code, 0, result.stderr);
+      const receiptStart = result.stdout.indexOf('{');
+      const receiptEnd = result.stdout.lastIndexOf('}');
+      assert.ok(receiptStart >= 0 && receiptEnd > receiptStart,
+        `the native review findings run prints its receipt: ${result.stdout}`);
+      const receipt = JSON.parse(result.stdout.slice(receiptStart, receiptEnd + 1)) as {
+        readonly state?: string;
+        readonly output?: string;
+        readonly error?: { readonly message?: string; readonly cleanupError?: unknown };
+      };
+      if (current.expected === 'succeeded') {
+        assert.equal(receipt.state, 'succeeded', `${String(current.mode)}: ${JSON.stringify(receipt)}`);
+        assert.equal(receipt.output, EXACT_BODY);
+        const scope = { organId: id('organ', 'humanagent-ui'), taskId };
+        const verified = await fixture.journal.verify();
+        const bindings = await listTaskActiveTurnBindings({ journal: fixture.journal, scope });
+        const turnIds = [...new Set(bindings.map((entry) => entry.binding.admittedTurn.turnId))];
+        const entries = turnIds.flatMap((turnId) => decodeActiveTurnRecords(verified.records, turnId));
+        type ReviewInvocationEntry = Extract<ActiveTurnJournalRecord, { kind: 'child-invocation' }> & {
+          readonly record: { readonly binding: { readonly kind: 'review' }; readonly postReviewCheckpointRef?: string };
+        };
+        type ReviewDeliveryEntry = Extract<ActiveTurnJournalRecord, { kind: 'child-delivery' }> & {
+          readonly entry: { readonly kind: 'review'; readonly result: ReviewResult };
+        };
+        const reviewInvocations = [...new Map(entries
+          .filter((entry): entry is ReviewInvocationEntry =>
+            entry.kind === 'child-invocation' && entry.record.binding.kind === 'review')
+          .map((entry) => [entry.record.invocationId, entry])).values()];
+        const reviewDeliveries = [...new Map(entries
+          .filter((entry): entry is ReviewDeliveryEntry =>
+            entry.kind === 'child-delivery' && entry.entry.kind === 'review')
+          .map((entry) => [entry.entry.invocationId, entry])).values()];
+        assert.equal(reviewInvocations.length, 2, `${String(current.mode)} reviews per cycle are retained`);
+        assert.equal(reviewDeliveries.length, 2, `${String(current.mode)} review deliveries per cycle are retained`);
+        const reviewWires = fixture.upstream.wires.filter((wire) => wire.method === 'POST'
+          && parseResponsesWire(wire.body)?.model === 'review.only.model');
+        assert.ok(reviewWires.length >= 2,
+          `${String(current.mode)} review requests reach the real child Provider entry`);
+        for (const wire of reviewWires) {
+          const reviewRequest = parseResponsesWire(wire.body);
+          if (reviewRequest === undefined) throw new Error(`review request body is not Responses JSON: ${wire.body}`);
+          const prompt = responsesPromptText(reviewRequest);
+          assert.ok(prompt.length > 0, `${String(current.mode)} review request carries its prompt`);
+          assert.ok(!prompt.includes('workspace'),
+            `${String(current.mode)} review prompt still names the user workspace: ${prompt}`);
+          assert.ok(!prompt.includes('Persist the complete review text'),
+            `${String(current.mode)} review prompt still requires a workspace file write: ${prompt}`);
+          assert.ok(!prompt.includes('workspace with file.write'),
+            `${String(current.mode)} review prompt still requires a workspace file write: ${prompt}`);
+          assert.ok(!prompt.includes('successful file.write result'),
+            `${String(current.mode)} review prompt still requires a workspace file write: ${prompt}`);
+        }
+        assert.deepEqual(await workspaceSnapshot(fixture.workspace), workspaceBefore,
+          `${String(current.mode)} read-only review mutates the project workspace`);
+        for (const invocation of reviewInvocations) {
+          assert.ok(invocation.record.postReviewCheckpointRef,
+            `${String(current.mode)} review retains its post-review checkpoint`);
+          assert.ok(verified.records.some((record) => record.checkpoint?.id.value
+            === invocation.record.postReviewCheckpointRef),
+          `${String(current.mode)} post-review checkpoint is durable`);
+        }
+        const reviewStore = createChildBodyAssetPort({
+          store: new ImmutableAssetStore(join(fixture.paths.artifactsRoot, 'ui-provider-evidence')),
+        });
+        for (const delivery of reviewDeliveries) {
+          assert.equal(delivery.entry.result.status, 'passed');
+          if (current.mode === 'empty') {
+            assert.deepEqual(delivery.entry.result.findings, [],
+              'a passed review may carry zero findings without inventing one');
+          } else {
+            assert.equal(delivery.entry.result.findings.length, 1);
+            const finding = delivery.entry.result.findings[0]!;
+            assert.equal(finding.severity, 'advisory');
+            assert.ok(finding.locationRef.length > 0);
+            assert.ok(finding.evidenceRefs.length > 0);
+          }
+          const reviewBodyAsset = delivery.entry.result.evidenceRefs
+            .find((ref) => ref.evidenceId.value.startsWith('child-body-review-'));
+          assert.ok(reviewBodyAsset,
+            `${String(current.mode)} review delivery retains its immutable body asset`);
+          const reviewBody = new TextDecoder('utf-8', { fatal: true })
+            .decode(await reviewStore.read({ ref: reviewBodyAsset!, view: { kind: 'utf8-text' } }));
+          assert.match(reviewBody, /^Cycle [12] independent quality review$/,
+            `${String(current.mode)} review body is independently readable from the existing asset store`);
+        }
+      } else {
+        assert.equal(receipt.state, 'blocked', `${String(current.mode)}: ${JSON.stringify(receipt)}`);
+        assert.match(receipt.error?.message ?? '', current.error!,
+          `${String(current.mode)} must fail at the malformed finding boundary`);
+        assert.equal(receipt.error?.cleanupError, undefined);
+      }
+      passed = true;
+    } finally {
+      await fixture.upstream.close();
+      if (passed) await rm(fixture.root, { recursive: true });
+      else console.error(`review findings contract fixture retained: ${fixture.root}`);
+    }
   }
 });
 

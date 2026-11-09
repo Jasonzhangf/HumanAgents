@@ -131,7 +131,10 @@ import {
   type AdmissionQueueKind,
   type RequirementAdmissionReceipt,
 } from '../../../runtime/src/admission/index.js';
-import type { TaskGrantPort } from '../../../runtime/src/admission/task-grant.js';
+import {
+  projectTaskGrantAuthority,
+  type TaskGrantPort,
+} from '../../../runtime/src/admission/task-grant.js';
 import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
@@ -152,6 +155,7 @@ import {
   type RuntimeTaskCoordinatorOptions,
   type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
+  type RuntimeChildLifecycleObserver,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { RuntimeColdExecutionResumeRequest } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
 import type { RuntimeInspectionStopCompletionReadPort } from '../../../runtime/src/ui-runtime/coordinator.js';
@@ -3128,6 +3132,7 @@ export class UiRuntimeService {
     this.nativeDriverBound = nativeDriverBound;
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
+      ...(options.principalOwner === undefined ? {} : { principalOwner: options.principalOwner }),
       checkpointStoreFor: options.checkpointStoreFor,
       publicOutputStoreFor: options.checkpointStoreFor,
       ...(options.effectLedgerFor === undefined ? {} : { effectLedgerFor: options.effectLedgerFor }),
@@ -3193,6 +3198,13 @@ export class UiRuntimeService {
       ...(options.initialInputStore === undefined ? {} : { initialInputStore: options.initialInputStore }),
       ...(options.recoveryReferencesFor === undefined ? {} : { recoveryReferencesFor: options.recoveryReferencesFor }),
       ...(options.permissionSnapshot === undefined ? {} : { permissionSnapshot: options.permissionSnapshot }),
+      ...(options.taskGrantPort === undefined || options.principalOwner === undefined ? {} : {
+        permissionSnapshotFor: async ({ taskId }) => {
+          const readback = await options.taskGrantPort!.readTaskGrant(taskId);
+          const authority = projectTaskGrantAuthority({ readback, principalOwner: options.principalOwner! });
+          return { ownerRef: authority.owner, permissionRevision: authority.permissionRevision };
+        },
+      }),
       ...(options.refinedDeliveryStore === undefined ? {} : { refinedDeliveryStore: options.refinedDeliveryStore }),
     });
     this.implicitBrain = new ImplicitBrainFifo({
@@ -8824,6 +8836,15 @@ export class MemoryBoundExecutionDriver implements AgentDriver {
     readonly receipt: MemoryContextReceipt;
   };
 
+  /**
+   * Forwards the native standard-turn lifecycle. The coordinator uses this
+   * presence to choose the native lane instead of opening a second coordinator
+   * active turn for the same business turn.
+   */
+  get standardTurn(): RuntimeExecutionDriver['standardTurn'] {
+    return (this.driver as Partial<RuntimeExecutionDriver>).standardTurn;
+  }
+
   constructor(
     private readonly driver: AgentDriver & { close(): Promise<ProviderCloseResult> },
     private readonly input: RuntimeExecutionDriverInput,
@@ -8869,9 +8890,9 @@ export class MemoryBoundExecutionDriver implements AgentDriver {
    * task's assembly. This wrapper only forwards the typed manager; it never
    * builds a manager, pool, driver or assembly of its own.
    */
-  bindChildCallManager(manager: Pick<OrchestrationManager, 'callChild'>): void {
-    (this.driver as Partial<RuntimeExecutionDriver & { bindChildCallManager?: (manager: Pick<OrchestrationManager, 'callChild'>) => void }>)
-      .bindChildCallManager?.(manager);
+  bindChildCallManager(manager: Pick<OrchestrationManager, 'callChild'>, observer?: RuntimeChildLifecycleObserver): void {
+    (this.driver as Partial<RuntimeExecutionDriver & { bindChildCallManager?: (manager: Pick<OrchestrationManager, 'callChild'>, observer?: RuntimeChildLifecycleObserver) => void }>)
+      .bindChildCallManager?.(manager, observer);
   }
 
   close(): Promise<ProviderCloseResult> {

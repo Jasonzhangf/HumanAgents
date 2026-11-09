@@ -620,6 +620,29 @@ test('runtime pool reuses idle runtimes, spawns at capacity, waits and blocks un
   assert.equal(released.status, 'released');
 });
 
+test('runtime pool recycles an idle runtime that lacks the required capability at capacity', async () => {
+  const factory = new FakeRuntimeFactory();
+  const pool = new AgentRuntimePoolManager({
+    maxRuntimes: 1,
+    factory,
+    initialRuntimes: [{ runtimeId: 'execution-slot', capabilities: ['provider.execution'] }],
+  });
+  // The sole runtime is idle but was started for provider.execution. A later
+  // child that requires quality.review must not hard-block while the freed slot
+  // only advertises an unrelated capability.
+  const acquired = await pool.acquire({
+    requiredCapabilities: ['quality.review'],
+    executionEpoch: 1,
+    ...poolExecutionIdentity('assignment-review'),
+    scope,
+  });
+  assert.equal(acquired.status, 'acquired');
+  if (acquired.status !== 'acquired') throw new Error(acquired.issue.reason);
+  assert.deepEqual(acquired.lease.capabilities, ['quality.review']);
+  assert.deepEqual(factory.disposes, ['execution-slot']);
+  assert.deepEqual(factory.starts, [acquired.lease.runtimeId]);
+});
+
 test('runtime pool reserves distinct idle runtimes before yielding', async () => {
   const { pool } = factoryPool({
     maxRuntimes: 2,
