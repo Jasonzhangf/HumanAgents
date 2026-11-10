@@ -385,12 +385,9 @@ function sanitizeUserVisibleOutput(value: string): string {
   const lines = cleaned
     .split(/\r?\n/u)
     .map((line) => {
-      const trimmed = line.replace(/[ \t]+$/u, '');
-      return /^证据[：:]\s*$/u.test(trimmed.trim()) ? '' : trimmed;
+      return /^证据[：:]\s*$/u.test(line.trim()) ? '' : line;
     });
-  while (lines[0]?.trim() === '') lines.shift();
-  while (lines.at(-1)?.trim() === '') lines.pop();
-  return lines.join('\n').replace(/\n{3,}/gu, '\n\n').trim();
+  return lines.join('\n').replace(/\n{3,}/gu, '\n\n');
 }
 
 function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
