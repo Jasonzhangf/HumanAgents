@@ -664,7 +664,7 @@ pre {
     align-items: flex-start;
     flex-direction: column;
     gap: 10px;
-    padding: 64px 20px 16px;
+    padding: 16px 20px;
   }
 
   .topnav {
@@ -710,12 +710,8 @@ pre {
     gap: 4px;
   }
 
-  /* On a phone the corner controls are 44px tall at the top and bottom edges
-     and 70px wide at the side edges. A vertical and horizontal safe inset
-     keeps every content column clear of all four controls at any scroll
-     position, so a card never shares a bounding box with a floating button. */
   .page {
-    padding: 72px 72px 88px;
+    padding: 24px 0 36px;
   }
 
   /* Keep the real step summary readable on a phone. The fixed-width phase,
@@ -1899,5 +1895,30 @@ pre {
   .product-drawer {
     width: 100%;
     max-width: 100%;
+  }
+}
+
+@media (max-width: 780px) {
+  /* On a phone, keep the four settings entries in one in-flow rail. The
+     previous fixed corner controls could cover page text while the document
+     scrolled underneath them. */
+  .shell-controls {
+    position: static;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+    pointer-events: auto;
+  }
+
+  .shell-corner {
+    position: static;
+    flex: 0 1 auto;
+    min-height: 44px;
+    padding: 6px 9px;
+    font-size: 12px;
   }
 }

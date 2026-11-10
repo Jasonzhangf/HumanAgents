@@ -1,0 +1,382 @@
+{
+  "uiRoot": "/Volumes/Intel/playground/humanagent/p1-memory-dead-face-mobile-overlay-fix-20261110/docs/ui",
+  "redProofMode": false,
+  "viewportMode": "mobile",
+  "checks": [
+    {
+      "name": "initial GET is exactly /api/memory/summary?namespace=project&limit=20",
+      "pass": true,
+      "detail": [
+        "/api/memory/summary?namespace=project&limit=20",
+        "/api/memory/summary?namespace=project&limit=20"
+      ]
+    },
+    {
+      "name": "candidate and reason controls are visible",
+      "pass": true,
+      "detail": {
+        "candidateVisible": true,
+        "reasonVisible": true,
+        "actionCount": 3,
+        "technicalDetailVisible": true,
+        "candidateRule": "Fixture candidate rule for page-level review proof"
+      }
+    },
+    {
+      "name": "candidate exposes the shared technical detail control",
+      "pass": true,
+      "detail": {
+        "candidateVisible": true,
+        "reasonVisible": true,
+        "actionCount": 3,
+        "technicalDetailVisible": true,
+        "candidateRule": "Fixture candidate rule for page-level review proof"
+      }
+    },
+    {
+      "name": "formal review endpoint accepts the click with HTTP 200",
+      "pass": true,
+      "detail": 200
+    },
+    {
+      "name": "one click sends exactly one review POST to /api/memory/review",
+      "pass": true,
+      "detail": [
+        {
+          "method": "POST",
+          "path": "/api/memory/review",
+          "body": {
+            "candidateId": "candidate-alpha",
+            "decision": "reject",
+            "decisionReason": "fixture reason for reject"
+          }
+        }
+      ]
+    },
+    {
+      "name": "review POST preserves the exact candidateId, decision and reason",
+      "pass": true,
+      "detail": {
+        "candidateId": "candidate-alpha",
+        "decision": "reject",
+        "decisionReason": "fixture reason for reject"
+      }
+    },
+    {
+      "name": "successful review refreshes the exact summary once",
+      "pass": true,
+      "detail": [
+        "/api/memory/summary?namespace=project&limit=20",
+        "/api/memory/summary?namespace=project&limit=20"
+      ]
+    },
+    {
+      "name": "shared technical detail exposes the exact candidate id",
+      "pass": true,
+      "detail": {
+        "open": true,
+        "candidateId": "candidate-alpha",
+        "sourceRefs": [
+          "fixture://docs/ui/memory.js",
+          "fixture://docs/ui/memory-actions.js"
+        ],
+        "sourceDigests": [
+          "fixture-digest-alpha",
+          "fixture-digest-beta"
+        ],
+        "text": "candidateIdcandidate-alphastatecandidatenamespaceprojectprojectKeyfixture-projecttaskIdfixture-tasksourceRefs[0]fixture://docs/ui/memory.jssourceRefs[1]fixture://docs/ui/memory-actions.jssourceDigests[0]fixture-digest-alphasourceDigests[1]fixture-digest-beta"
+      }
+    },
+    {
+      "name": "shared technical detail exposes every exact source ref",
+      "pass": true,
+      "detail": [
+        "fixture://docs/ui/memory.js",
+        "fixture://docs/ui/memory-actions.js"
+      ]
+    },
+    {
+      "name": "shared technical detail exposes every exact source digest",
+      "pass": true,
+      "detail": [
+        "fixture-digest-alpha",
+        "fixture-digest-beta"
+      ]
+    },
+    {
+      "name": "success scenario has no page exception",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "failed review returns the controlled typed HTTP failure",
+      "pass": true,
+      "detail": 500
+    },
+    {
+      "name": "typed review failure remains visible with its exact code, owner, message and next action",
+      "pass": true,
+      "detail": {
+        "tone": "danger",
+        "text": "memory.review.fixture-denied · fixture review was denied · owner=memory-coordinator · next=inspect the candidate and retry the fixture review",
+        "candidateVisible": true,
+        "reasonValue": "fixture reason for reject",
+        "actionDisabled": [
+          false,
+          false,
+          false
+        ]
+      }
+    },
+    {
+      "name": "typed failure does not become a success state or remove the candidate",
+      "pass": true,
+      "detail": {
+        "tone": "danger",
+        "text": "memory.review.fixture-denied · fixture review was denied · owner=memory-coordinator · next=inspect the candidate and retry the fixture review",
+        "candidateVisible": true,
+        "reasonValue": "fixture reason for reject",
+        "actionDisabled": [
+          false,
+          false,
+          false
+        ]
+      }
+    },
+    {
+      "name": "typed failure preserves the exact submitted reason for a retry",
+      "pass": true,
+      "detail": "fixture reason for reject"
+    },
+    {
+      "name": "typed failure does not refresh the summary",
+      "pass": true,
+      "detail": [
+        "/api/memory/summary?namespace=project&limit=20"
+      ]
+    },
+    {
+      "name": "typed failure sends exactly one exact review body",
+      "pass": true,
+      "detail": [
+        {
+          "method": "POST",
+          "path": "/api/memory/review",
+          "body": {
+            "candidateId": "candidate-alpha",
+            "decision": "reject",
+            "decisionReason": "fixture reason for reject"
+          }
+        }
+      ]
+    },
+    {
+      "name": "failure scenario has no page exception",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "mobile memory page computes one grid column",
+      "pass": true,
+      "detail": {
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "gridTemplateColumns": "362px",
+        "columnCount": 1,
+        "page": {
+          "left": 14,
+          "right": 376,
+          "width": 362
+        },
+        "primary": {
+          "left": 14,
+          "right": 376,
+          "width": 362
+        },
+        "support": {
+          "left": 14,
+          "right": 376,
+          "width": 362
+        },
+        "documentWidth": 390,
+        "horizontalOverflow": false,
+        "reasonInSupport": true,
+        "actionCount": 3
+      }
+    },
+    {
+      "name": "mobile primary and support panels stay substantial within the page",
+      "pass": true,
+      "detail": {
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "gridTemplateColumns": "362px",
+        "columnCount": 1,
+        "page": {
+          "left": 14,
+          "right": 376,
+          "width": 362
+        },
+        "primary": {
+          "left": 14,
+          "right": 376,
+          "width": 362
+        },
+        "support": {
+          "left": 14,
+          "right": 376,
+          "width": 362
+        },
+        "documentWidth": 390,
+        "horizontalOverflow": false,
+        "reasonInSupport": true,
+        "actionCount": 3
+      }
+    },
+    {
+      "name": "mobile memory page has no document horizontal overflow",
+      "pass": true,
+      "detail": {
+        "documentWidth": 390,
+        "viewportWidth": 390
+      }
+    },
+    {
+      "name": "mobile reason input is reachable by normal click",
+      "pass": true,
+      "detail": {
+        "reasonFocused": true
+      }
+    },
+    {
+      "name": "mobile original action click reaches the exact review POST",
+      "pass": true,
+      "detail": {
+        "status": 200,
+        "review": [
+          {
+            "method": "POST",
+            "path": "/api/memory/review",
+            "body": {
+              "candidateId": "candidate-alpha",
+              "decision": "reject",
+              "decisionReason": "fixture reason for reject"
+            }
+          }
+        ],
+        "initial": {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "gridTemplateColumns": "362px",
+          "columnCount": 1,
+          "page": {
+            "left": 14,
+            "right": 376,
+            "width": 362
+          },
+          "primary": {
+            "left": 14,
+            "right": 376,
+            "width": 362
+          },
+          "support": {
+            "left": 14,
+            "right": 376,
+            "width": 362
+          },
+          "documentWidth": 390,
+          "horizontalOverflow": false,
+          "reasonInSupport": true,
+          "actionCount": 3
+        }
+      }
+    },
+    {
+      "name": "mobile scenario has no page exception",
+      "pass": true,
+      "detail": []
+    }
+  ],
+  "observations": [
+    {
+      "name": "initial memory controls",
+      "value": {
+        "candidateVisible": true,
+        "reasonVisible": true,
+        "actionCount": 3,
+        "technicalDetailVisible": true,
+        "candidateRule": "Fixture candidate rule for page-level review proof"
+      }
+    },
+    {
+      "name": "candidate technical detail",
+      "value": {
+        "open": true,
+        "candidateId": "candidate-alpha",
+        "sourceRefs": [
+          "fixture://docs/ui/memory.js",
+          "fixture://docs/ui/memory-actions.js"
+        ],
+        "sourceDigests": [
+          "fixture-digest-alpha",
+          "fixture-digest-beta"
+        ],
+        "text": "candidateIdcandidate-alphastatecandidatenamespaceprojectprojectKeyfixture-projecttaskIdfixture-tasksourceRefs[0]fixture://docs/ui/memory.jssourceRefs[1]fixture://docs/ui/memory-actions.jssourceDigests[0]fixture-digest-alphasourceDigests[1]fixture-digest-beta"
+      }
+    },
+    {
+      "name": "typed review failure",
+      "value": {
+        "tone": "danger",
+        "text": "memory.review.fixture-denied · fixture review was denied · owner=memory-coordinator · next=inspect the candidate and retry the fixture review",
+        "candidateVisible": true,
+        "reasonValue": "fixture reason for reject",
+        "actionDisabled": [
+          false,
+          false,
+          false
+        ]
+      }
+    },
+    {
+      "name": "mobile memory layout",
+      "value": {
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "gridTemplateColumns": "362px",
+        "columnCount": 1,
+        "page": {
+          "left": 14,
+          "right": 376,
+          "width": 362
+        },
+        "primary": {
+          "left": 14,
+          "right": 376,
+          "width": 362
+        },
+        "support": {
+          "left": 14,
+          "right": 376,
+          "width": 362
+        },
+        "documentWidth": 390,
+        "horizontalOverflow": false,
+        "reasonInSupport": true,
+        "actionCount": 3
+      }
+    }
+  ],
+  "failures": 0,
+  "redProof": null,
+  "crashed": null,
+  "ok": true
+}

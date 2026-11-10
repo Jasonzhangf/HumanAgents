@@ -1,0 +1,11 @@
+{
+  "workspace": "/tmp/humanagent-p1-memory-final-20261110.ObxZ6G/workspace",
+  "controlRoot": "/tmp/humanagent-p1-memory-final-20261110.ObxZ6G/control",
+  "port": 28762,
+  "url": "http://127.0.0.1:28762",
+  "pid": 31895,
+  "stopSignal": "SIGTERM",
+  "processExited": true,
+  "portClosed": true,
+  "temporaryRootRemoved": true
+}

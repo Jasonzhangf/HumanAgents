@@ -13,7 +13,6 @@ import { bindMemoryReviewAction } from './memory-actions.js'
 import { renderProductBoardSection } from './product-board-view.js'
 
 export const MEMORY_SESSION_TITLE = '记忆 agent session'
-export const MEMORY_SESSION_SOURCE_UNAVAILABLE = 'session 来源不可用'
 export const MEMORY_CANDIDATES_TITLE = '候选（非 session）'
 
 const CANDIDATE_STATE_LABELS = Object.freeze({
@@ -74,6 +73,22 @@ function failureCopy(failure) {
   }
 }
 
+function userFacingFailureCopy(failure) {
+  const copy = failureCopy(failure)
+  if (copy.code === 'memory.scope-unavailable') {
+    return {
+      ...copy,
+      message: '当前页面缺少完整的记忆范围。',
+      nextAction: '请从任务或项目入口重新打开记忆页面。',
+    }
+  }
+  return {
+    ...copy,
+    message: '记忆读取暂时不可用。',
+    nextAction: '请刷新页面后重试。',
+  }
+}
+
 function failureEntries(failure, prefix) {
   const copy = failureCopy(failure)
   return [
@@ -93,10 +108,10 @@ function detailButton(make, label, detail, openDetail) {
 }
 
 function appendReadFailure(root, failure, make, openDetail, label = '技术详情') {
-  const copy = failureCopy(failure)
+  const copy = userFacingFailureCopy(failure)
   root.append(
-    make('p', `读取失败：${copy.message}`, 'panel muted'),
-    make('p', `恢复：${copy.nextAction}`, 'muted'),
+    make('p', `读取暂不可用：${copy.message}`, 'panel muted'),
+    make('p', copy.nextAction, 'muted'),
     detailButton(make, label, {
       title: '记忆读取技术详情',
       eyebrow: '只读证据',
@@ -146,8 +161,9 @@ export function memoryBoardSection(boardIndex) {
 
 /**
  * Render the memory-agent session area from the product board read. The board
- * has no declared memory session reader yet, so the normal result is an
- * explicit source-unavailable failure, not three empty lanes.
+ * has no declared memory session reader yet. That optional surface stays out
+ * of the page instead of turning an unsupported capability into a dead face.
+ * Review candidates remain in their independent section below.
  */
 export function renderMemorySessions(host, boardRead, options = {}) {
   const make = makeFactory(options)
@@ -168,33 +184,31 @@ export function renderMemorySessions(host, boardRead, options = {}) {
     return root
   }
 
+  const failures = Array.isArray(section?.failures) ? section.failures : []
+  if (boardRead?.ok === true && (
+    section === null
+    || failures.length === 0
+    || failures.every((failure) => failure?.code === 'memory.session-source-unavailable')
+  )) return null
+
   const root = make('section', undefined, 'section')
   root.dataset.memorySection = 'sessions'
   root.setAttribute('data-memory-section', 'sessions')
   root.append(make('h2', MEMORY_SESSION_TITLE))
 
   if (boardRead?.ok !== true) {
-    root.append(make('p', MEMORY_SESSION_SOURCE_UNAVAILABLE, 'panel muted'))
+    root.append(make('p', '记忆 session 读取暂不可用', 'panel muted'))
     appendReadFailure(root, boardRead?.failure, make, openDetail, 'session 来源详情')
     if (host !== undefined && host !== null) host.append(root)
     return root
   }
 
-  const failures = Array.isArray(section?.failures) && section.failures.length > 0
-    ? section.failures
-    : [{
-        code: 'memory.session-source-unavailable',
-        ownerId: 'humanagent.app.ui-runtime.product-session-read',
-        message: 'board 没有提供记忆 session 事实；记忆候选不是 session。',
-        nextAction: '确认记忆 session 读取 owner 后重新读取记忆板块。',
-      }]
-
-  root.append(make('p', MEMORY_SESSION_SOURCE_UNAVAILABLE, 'panel muted'))
+  root.append(make('p', '记忆 session 读取暂不可用', 'panel muted'))
   for (const failure of failures) {
-    const copy = failureCopy(failure)
+    const copy = userFacingFailureCopy(failure)
     root.append(
       make('p', copy.message, 'muted'),
-      make('p', `恢复：${copy.nextAction}`, 'muted'),
+      make('p', copy.nextAction, 'muted'),
     )
   }
   root.append(detailButton(make, 'session 来源详情', {

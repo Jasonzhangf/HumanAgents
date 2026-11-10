@@ -18,7 +18,6 @@ import test from 'node:test'
 
 import {
   MEMORY_CANDIDATES_TITLE,
-  MEMORY_SESSION_SOURCE_UNAVAILABLE,
   createMemoryReviewReason,
   memoryBoardSection,
   readProductBoard,
@@ -143,7 +142,7 @@ const reviewView = {
   ],
 }
 
-test('memory board session source stays explicitly unavailable', () => {
+test('memory board without a declared session reader leaves the dead surface out', () => {
   const memory = {
     board: 'memory',
     live: [],
@@ -158,33 +157,22 @@ test('memory board session source stays explicitly unavailable', () => {
   }
   const details = []
   const host = createElement('div')
-  renderMemorySessions(host, { ok: true, value: index }, {
+  const rendered = renderMemorySessions(host, { ok: true, value: index }, {
     element: createElement,
     openDetail: (detail) => details.push(detail),
   })
 
   assert.equal(memoryBoardSection(index), memory)
-  assert.match(text(host), new RegExp(MEMORY_SESSION_SOURCE_UNAVAILABLE))
-  assert.match(text(host), /no declared memory-agent session reader/)
-  assert.match(text(host), /bind a real memory session reader/)
-  assert.doesNotMatch(text(host), /没有条目/)
-  assert.equal(walk(host).some((node) => node.getAttribute('data-product-lane') === 'live'), false)
-
-  const detailButton = buttons(host, 'session 来源详情')[0]
-  assert.ok(detailButton, 'the failure keeps an on-demand detail entry')
-  detailButton.click()
-  assert.equal(details.length, 1)
-  assert.ok(details[0].entries.some(([key, value]) =>
-    key === 'failures[0].code' && value === 'memory.session-source-unavailable'))
-  assert.ok(details[0].entries.some(([key, value]) =>
-    key === 'failures[0].ownerId' && value === sessionSourceFailure.ownerId))
+  assert.equal(rendered, null)
+  assert.equal(text(host), '')
+  assert.equal(details.length, 0)
 
   const missingHost = createElement('div')
-  renderMemorySessions(missingHost, { ok: true, value: { ...index, boards: [] } }, {
+  const missingRendered = renderMemorySessions(missingHost, { ok: true, value: { ...index, boards: [] } }, {
     element: createElement,
   })
-  assert.match(text(missingHost), new RegExp(MEMORY_SESSION_SOURCE_UNAVAILABLE))
-  assert.doesNotMatch(text(missingHost), /没有条目/)
+  assert.equal(missingRendered, null)
+  assert.equal(text(missingHost), '')
 
   const failedHost = createElement('div')
   renderMemorySessions(failedHost, {
@@ -195,12 +183,21 @@ test('memory board session source stays explicitly unavailable', () => {
       message: 'board read failed',
       nextAction: 'retry the board read',
     },
-  }, { element: createElement })
+  }, {
+    element: createElement,
+    openDetail: (detail) => details.push(detail),
+  })
   const failedText = text(failedHost)
-  assert.match(failedText, new RegExp(MEMORY_SESSION_SOURCE_UNAVAILABLE))
-  assert.match(failedText, /board read failed/)
-  assert.match(failedText, /retry the board read/)
+  assert.match(failedText, /记忆读取暂时不可用/)
+  assert.match(failedText, /请刷新页面后重试/)
+  assert.doesNotMatch(failedText, /board read failed/)
+  assert.doesNotMatch(failedText, /retry the board read/)
+  assert.doesNotMatch(failedText, /来源不可用/)
   assert.doesNotMatch(failedText, /没有条目/)
+  buttons(failedHost, 'session 来源详情')[0].click()
+  assert.equal(details.length, 1)
+  assert.ok(details[0].entries.some(([key, value]) =>
+    key === 'failure.message' && value === 'board read failed'))
 })
 
 test('candidates stay a non-session review layer with namespace, reason and typed failure', async () => {
@@ -285,11 +282,22 @@ test('candidates stay a non-session review layer with namespace, reason and type
   await flush()
   assert.deepEqual(errors.at(-1), failure)
 
+  const unavailableDetails = []
   const unavailableHost = createElement('div')
-  renderMemoryCandidates(unavailableHost, { ok: false, failure }, { element: createElement })
-  assert.match(text(unavailableHost), /candidate review rejected/)
-  assert.match(text(unavailableHost), /inspect the candidate and retry the review/)
-  assert.doesNotMatch(text(unavailableHost), /当前没有待审核候选/)
+  renderMemoryCandidates(unavailableHost, { ok: false, failure }, {
+    element: createElement,
+    openDetail: (detail) => unavailableDetails.push(detail),
+  })
+  const unavailableText = text(unavailableHost)
+  assert.match(unavailableText, /读取暂不可用：记忆读取暂时不可用/)
+  assert.match(unavailableText, /请刷新页面后重试/)
+  assert.doesNotMatch(unavailableText, /candidate review rejected/)
+  assert.doesNotMatch(unavailableText, /inspect the candidate and retry the review/)
+  assert.doesNotMatch(unavailableText, /当前没有待审核候选/)
+  buttons(unavailableHost, '技术详情')[0].click()
+  assert.equal(unavailableDetails.length, 1)
+  assert.ok(unavailableDetails[0].entries.some(([key, value]) =>
+    key === 'failure.message' && value === 'candidate review rejected'))
 })
 
 test('refresh reads board and candidate summary without any review write', async () => {

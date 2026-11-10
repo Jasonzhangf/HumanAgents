@@ -1,0 +1,167 @@
+{
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "requests": [
+    "GET /api/runtime/status",
+    "GET /api/product/board?projectKey=fixture-project&mode=fake",
+    "GET /api/memory/summary?namespace=project&limit=20",
+    "GET /api/dashboard?scope=project&projectKey=fixture-project",
+    "GET /api/runtime/status",
+    "GET /api/runtime/status",
+    "GET /api/product/board?projectKey=fixture-project&mode=fake",
+    "GET /api/memory/summary?namespace=project&limit=20"
+  ],
+  "consoleMessages": [],
+  "pageErrors": [],
+  "checks": [
+    {
+      "name": "Memory page has no unavailable-session dead face",
+      "pass": false,
+      "detail": "HumanAgent\nDashboard\nTask List\n新建 Task\nMemory\n\nMEMORY AGENT\n\n记忆与候选审核\n\n查看记忆 agent session 与候选审核；接受、拒绝或延期都由你明确决定。\n\n运行正常\n\n服务已连接。\n\n技术详情\n记忆 agent session\n\nsession 来源不可用\n\nno declared memory-agent session reader exists; memory review candidates are not sessions\n\n恢复：bind a real memory session reader before enumerating the memory board\n\nsession 来源详情\n整理状态\nidle\n\n尚无记忆整理 operation。\n\n整理技术详情\n候选（非 session）\n\n当前没有待审核候选。\n\n工作范围\n查看方式\n显示设置\n输入设置"
+    },
+    {
+      "name": "floating settings controls do not overlap body text at 390x844",
+      "pass": false,
+      "detail": [
+        {
+          "page": "Task List",
+          "scrollY": 49,
+          "text": "HumanAgent",
+          "textRect": {
+            "x": 20,
+            "y": 23,
+            "width": 102.828125,
+            "height": 18,
+            "top": 23,
+            "right": 122.828125,
+            "bottom": 41,
+            "left": 20
+          },
+          "corner": "工作范围",
+          "cornerRect": {
+            "x": 10,
+            "y": 10,
+            "width": 70,
+            "height": 44,
+            "top": 10,
+            "right": 80,
+            "bottom": 54,
+            "left": 10
+          }
+        },
+        {
+          "page": "Task List",
+          "scrollY": 49,
+          "text": "Dashboard",
+          "textRect": {
+            "x": 20,
+            "y": 52.5,
+            "width": 70.4375,
+            "height": 17,
+            "top": 52.5,
+            "right": 90.4375,
+            "bottom": 69.5,
+            "left": 20
+          },
+          "corner": "工作范围",
+          "cornerRect": {
+            "x": 10,
+            "y": 10,
+            "width": 70,
+            "height": 44,
+            "top": 10,
+            "right": 80,
+            "bottom": 54,
+            "left": 10
+          }
+        },
+        {
+          "page": "Task List",
+          "scrollY": 49,
+          "text": "Memory",
+          "textRect": {
+            "x": 262.15625,
+            "y": 52.5,
+            "width": 52.796875,
+            "height": 17,
+            "top": 52.5,
+            "right": 314.953125,
+            "bottom": 69.5,
+            "left": 262.15625
+          },
+          "corner": "查看方式",
+          "cornerRect": {
+            "x": 310,
+            "y": 10,
+            "width": 70,
+            "height": 44,
+            "top": 10,
+            "right": 380,
+            "bottom": 54,
+            "left": 310
+          }
+        },
+        {
+          "page": "Task List",
+          "scrollY": 99,
+          "text": "Dashboard",
+          "textRect": {
+            "x": 20,
+            "y": 2.5,
+            "width": 70.4375,
+            "height": 17,
+            "top": 2.5,
+            "right": 90.4375,
+            "bottom": 19.5,
+            "left": 20
+          },
+          "corner": "工作范围",
+          "cornerRect": {
+            "x": 10,
+            "y": 10,
+            "width": 70,
+            "height": 44,
+            "top": 10,
+            "right": 80,
+            "bottom": 54,
+            "left": 10
+          }
+        },
+        {
+          "page": "Task List",
+          "scrollY": 99,
+          "text": "Memory",
+          "textRect": {
+            "x": 262.15625,
+            "y": 2.5,
+            "width": 52.796875,
+            "height": 17,
+            "top": 2.5,
+            "right": 314.953125,
+            "bottom": 19.5,
+            "left": 262.15625
+          },
+          "corner": "查看方式",
+          "cornerRect": {
+            "x": 310,
+            "y": 10,
+            "width": 70,
+            "height": 44,
+            "top": 10,
+            "right": 380,
+            "bottom": 54,
+            "left": 310
+          }
+        }
+      ]
+    },
+    {
+      "name": "focused browser proof has no page exception",
+      "pass": true,
+      "detail": []
+    }
+  ],
+  "pass": false
+}

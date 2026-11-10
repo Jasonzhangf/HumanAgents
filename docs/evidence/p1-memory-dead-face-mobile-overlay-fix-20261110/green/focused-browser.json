@@ -1,0 +1,36 @@
+{
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "requests": [
+    "GET /api/runtime/status",
+    "GET /api/product/board?projectKey=fixture-project&mode=fake",
+    "GET /api/memory/summary?namespace=project&limit=20",
+    "GET /api/dashboard?scope=project&projectKey=fixture-project",
+    "GET /api/runtime/status",
+    "GET /api/runtime/status",
+    "GET /api/product/board?projectKey=fixture-project&mode=fake",
+    "GET /api/memory/summary?namespace=project&limit=20"
+  ],
+  "consoleMessages": [],
+  "pageErrors": [],
+  "checks": [
+    {
+      "name": "Memory page has no unavailable-session dead face",
+      "pass": true,
+      "detail": "HumanAgent\nDashboard\nTask List\n新建 Task\nMemory\n\nMEMORY AGENT\n\n记忆与候选审核\n\n查看记忆 agent session 与候选审核；接受、拒绝或延期都由你明确决定。\n\n运行正常\n\n服务已连接。\n\n技术详情\n整理状态\nidle\n\n尚无记忆整理 operation。\n\n整理技术详情\n候选（非 session）\n\n当前没有待审核候选。\n\n工作范围\n查看方式\n显示设置\n输入设置"
+    },
+    {
+      "name": "floating settings controls do not overlap body text at 390x844",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "focused browser proof has no page exception",
+      "pass": true,
+      "detail": []
+    }
+  ],
+  "pass": true
+}

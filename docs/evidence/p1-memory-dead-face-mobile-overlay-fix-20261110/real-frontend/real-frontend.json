@@ -1,0 +1,1417 @@
+{
+  "baseUrl": "http://127.0.0.1:28762",
+  "desktopViewport": {
+    "width": 1280,
+    "height": 720
+  },
+  "mobileViewport": {
+    "width": 390,
+    "height": 844
+  },
+  "pair": {
+    "status": 200,
+    "authenticated": true
+  },
+  "screenshots": {
+    "memoryDesktop": "/Volumes/Intel/playground/humanagent/p1-memory-dead-face-mobile-overlay-fix-20261110/docs/evidence/p1-memory-dead-face-mobile-overlay-fix-20261110/real-frontend/memory-desktop-1280x720.png",
+    "tasksMobile": "/Volumes/Intel/playground/humanagent/p1-memory-dead-face-mobile-overlay-fix-20261110/docs/evidence/p1-memory-dead-face-mobile-overlay-fix-20261110/real-frontend/tasks-mobile-390x844.png",
+    "memoryMobile": "/Volumes/Intel/playground/humanagent/p1-memory-dead-face-mobile-overlay-fix-20261110/docs/evidence/p1-memory-dead-face-mobile-overlay-fix-20261110/real-frontend/memory-mobile-390x844.png"
+  },
+  "mobile": {
+    "taskList": {
+      "scrollSteps": [
+        0
+      ],
+      "receipts": [
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 0,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 651.640625,
+                "width": 68,
+                "height": 44,
+                "top": 651.640625,
+                "right": 121,
+                "bottom": 695.640625,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 651.640625,
+                "width": 68,
+                "height": 44,
+                "top": 651.640625,
+                "right": 193,
+                "bottom": 695.640625,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 651.640625,
+                "width": 68,
+                "height": 44,
+                "top": 651.640625,
+                "right": 265,
+                "bottom": 695.640625,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 651.640625,
+                "width": 68,
+                "height": 44,
+                "top": 651.640625,
+                "right": 337,
+                "bottom": 695.640625,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        }
+      ],
+      "overlaps": []
+    },
+    "memory": {
+      "scrollSteps": [
+        0,
+        36,
+        71,
+        107,
+        142
+      ],
+      "receipts": [
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 0,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 932.859375,
+                "width": 68,
+                "height": 44,
+                "top": 932.859375,
+                "right": 121,
+                "bottom": 976.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 932.859375,
+                "width": 68,
+                "height": 44,
+                "top": 932.859375,
+                "right": 193,
+                "bottom": 976.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 932.859375,
+                "width": 68,
+                "height": 44,
+                "top": 932.859375,
+                "right": 265,
+                "bottom": 976.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 932.859375,
+                "width": 68,
+                "height": 44,
+                "top": 932.859375,
+                "right": 337,
+                "bottom": 976.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        },
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 36,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 896.859375,
+                "width": 68,
+                "height": 44,
+                "top": 896.859375,
+                "right": 121,
+                "bottom": 940.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 896.859375,
+                "width": 68,
+                "height": 44,
+                "top": 896.859375,
+                "right": 193,
+                "bottom": 940.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 896.859375,
+                "width": 68,
+                "height": 44,
+                "top": 896.859375,
+                "right": 265,
+                "bottom": 940.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 896.859375,
+                "width": 68,
+                "height": 44,
+                "top": 896.859375,
+                "right": 337,
+                "bottom": 940.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        },
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 71,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 861.859375,
+                "width": 68,
+                "height": 44,
+                "top": 861.859375,
+                "right": 121,
+                "bottom": 905.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 861.859375,
+                "width": 68,
+                "height": 44,
+                "top": 861.859375,
+                "right": 193,
+                "bottom": 905.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 861.859375,
+                "width": 68,
+                "height": 44,
+                "top": 861.859375,
+                "right": 265,
+                "bottom": 905.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 861.859375,
+                "width": 68,
+                "height": 44,
+                "top": 861.859375,
+                "right": 337,
+                "bottom": 905.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        },
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 107,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 825.859375,
+                "width": 68,
+                "height": 44,
+                "top": 825.859375,
+                "right": 121,
+                "bottom": 869.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 825.859375,
+                "width": 68,
+                "height": 44,
+                "top": 825.859375,
+                "right": 193,
+                "bottom": 869.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 825.859375,
+                "width": 68,
+                "height": 44,
+                "top": 825.859375,
+                "right": 265,
+                "bottom": 869.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 825.859375,
+                "width": 68,
+                "height": 44,
+                "top": 825.859375,
+                "right": 337,
+                "bottom": 869.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        },
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 142,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 790.859375,
+                "width": 68,
+                "height": 44,
+                "top": 790.859375,
+                "right": 121,
+                "bottom": 834.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 790.859375,
+                "width": 68,
+                "height": 44,
+                "top": 790.859375,
+                "right": 193,
+                "bottom": 834.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 790.859375,
+                "width": 68,
+                "height": 44,
+                "top": 790.859375,
+                "right": 265,
+                "bottom": 834.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 790.859375,
+                "width": 68,
+                "height": 44,
+                "top": 790.859375,
+                "right": 337,
+                "bottom": 834.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        }
+      ],
+      "overlaps": []
+    }
+  },
+  "checks": [
+    {
+      "name": "real browser pairing succeeded",
+      "pass": true,
+      "detail": {
+        "status": 200,
+        "authenticated": true
+      }
+    },
+    {
+      "name": "desktop 1280x720 Memory page has no unavailable-session dead face",
+      "pass": true,
+      "detail": {
+        "leaked": [],
+        "text": "HumanAgent\nDashboard\nTask List\n新建 Task\nMemory\n\nMEMORY AGENT\n\n记忆与候选审核\n\n查看记忆 agent session 与候选审核；接受、拒绝或延期都由你明确决定。\n\n运行正常\n\n服务已连接。\n\n技术详情\n整理状态\nidle\n\n尚无记忆整理 operation。\n\n整理技术详情\n候选（非 session）\n\n当前没有待审核候选。\n\n工作范围\n查看方式\n显示设置\n输入设置"
+      }
+    },
+    {
+      "name": "mobile 390x844 Task List has four visible settings controls",
+      "pass": true,
+      "detail": [
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 0,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 651.640625,
+                "width": 68,
+                "height": 44,
+                "top": 651.640625,
+                "right": 121,
+                "bottom": 695.640625,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 651.640625,
+                "width": 68,
+                "height": 44,
+                "top": 651.640625,
+                "right": 193,
+                "bottom": 695.640625,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 651.640625,
+                "width": 68,
+                "height": 44,
+                "top": 651.640625,
+                "right": 265,
+                "bottom": 695.640625,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 651.640625,
+                "width": 68,
+                "height": 44,
+                "top": 651.640625,
+                "right": 337,
+                "bottom": 695.640625,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        }
+      ]
+    },
+    {
+      "name": "mobile 390x844 Task List body text is not covered by floating settings controls",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "mobile 390x844 Memory page has no unavailable-session dead face",
+      "pass": true,
+      "detail": {
+        "leaked": [],
+        "text": "HumanAgent\nDashboard\nTask List\n新建 Task\nMemory\n\nMEMORY AGENT\n\n记忆与候选审核\n\n查看记忆 agent session 与候选审核；接受、拒绝或延期都由你明确决定。\n\n运行正常\n\n服务已连接。\n\n技术详情\n整理状态\nidle\n\n尚无记忆整理 operation。\n\n整理技术详情\n候选（非 session）\n\n当前没有待审核候选。\n\n工作范围\n查看方式\n显示设置\n输入设置"
+      }
+    },
+    {
+      "name": "mobile 390x844 Memory has four visible settings controls",
+      "pass": true,
+      "detail": [
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 0,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 932.859375,
+                "width": 68,
+                "height": 44,
+                "top": 932.859375,
+                "right": 121,
+                "bottom": 976.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 932.859375,
+                "width": 68,
+                "height": 44,
+                "top": 932.859375,
+                "right": 193,
+                "bottom": 976.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 932.859375,
+                "width": 68,
+                "height": 44,
+                "top": 932.859375,
+                "right": 265,
+                "bottom": 976.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 932.859375,
+                "width": 68,
+                "height": 44,
+                "top": 932.859375,
+                "right": 337,
+                "bottom": 976.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        },
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 36,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 896.859375,
+                "width": 68,
+                "height": 44,
+                "top": 896.859375,
+                "right": 121,
+                "bottom": 940.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 896.859375,
+                "width": 68,
+                "height": 44,
+                "top": 896.859375,
+                "right": 193,
+                "bottom": 940.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 896.859375,
+                "width": 68,
+                "height": 44,
+                "top": 896.859375,
+                "right": 265,
+                "bottom": 940.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 896.859375,
+                "width": 68,
+                "height": 44,
+                "top": 896.859375,
+                "right": 337,
+                "bottom": 940.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        },
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 71,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 861.859375,
+                "width": 68,
+                "height": 44,
+                "top": 861.859375,
+                "right": 121,
+                "bottom": 905.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 861.859375,
+                "width": 68,
+                "height": 44,
+                "top": 861.859375,
+                "right": 193,
+                "bottom": 905.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 861.859375,
+                "width": 68,
+                "height": 44,
+                "top": 861.859375,
+                "right": 265,
+                "bottom": 905.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 861.859375,
+                "width": 68,
+                "height": 44,
+                "top": 861.859375,
+                "right": 337,
+                "bottom": 905.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        },
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 107,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 825.859375,
+                "width": 68,
+                "height": 44,
+                "top": 825.859375,
+                "right": 121,
+                "bottom": 869.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 825.859375,
+                "width": 68,
+                "height": 44,
+                "top": 825.859375,
+                "right": 193,
+                "bottom": 869.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 825.859375,
+                "width": 68,
+                "height": 44,
+                "top": 825.859375,
+                "right": 265,
+                "bottom": 869.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 825.859375,
+                "width": 68,
+                "height": 44,
+                "top": 825.859375,
+                "right": 337,
+                "bottom": 869.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        },
+        {
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "scrollY": 142,
+          "corners": [
+            {
+              "label": "工作范围",
+              "rect": {
+                "x": 53,
+                "y": 790.859375,
+                "width": 68,
+                "height": 44,
+                "top": 790.859375,
+                "right": 121,
+                "bottom": 834.859375,
+                "left": 53
+              }
+            },
+            {
+              "label": "查看方式",
+              "rect": {
+                "x": 125,
+                "y": 790.859375,
+                "width": 68,
+                "height": 44,
+                "top": 790.859375,
+                "right": 193,
+                "bottom": 834.859375,
+                "left": 125
+              }
+            },
+            {
+              "label": "显示设置",
+              "rect": {
+                "x": 197,
+                "y": 790.859375,
+                "width": 68,
+                "height": 44,
+                "top": 790.859375,
+                "right": 265,
+                "bottom": 834.859375,
+                "left": 197
+              }
+            },
+            {
+              "label": "输入设置",
+              "rect": {
+                "x": 269,
+                "y": 790.859375,
+                "width": 68,
+                "height": 44,
+                "top": 790.859375,
+                "right": 337,
+                "bottom": 834.859375,
+                "left": 269
+              }
+            }
+          ],
+          "textOverlaps": []
+        }
+      ]
+    },
+    {
+      "name": "mobile 390x844 Memory body text is not covered by floating settings controls",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "real frontend has no request failures",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "real frontend has no console errors",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "real frontend has no page exceptions",
+      "pass": true,
+      "detail": []
+    }
+  ],
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/memory.html",
+      "resourceType": "document"
+    },
+    {
+      "method": "GET",
+      "path": "/runtime.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/memory.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/state-colors.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/semantic-observation.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/runtime-shell.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/memory-actions.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/product-board-view.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/runtime-api.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/display-preferences.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/task-display.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/task-flow-groups.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/semantic-observation.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/semantic-observation-projection.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/product-location.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/api/runtime/status",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/dashboard?scope=system",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/runtime/status",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/product/board?projectKey=-private-tmp-humanagent-p1-memory-final-20261110.ObxZ6G-workspace&mode=fake",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/memory/summary?namespace=project&limit=20",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/tasks.html",
+      "resourceType": "document"
+    },
+    {
+      "method": "GET",
+      "path": "/runtime.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/tasks.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/tasks.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/state-colors.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/semantic-observation.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/runtime-shell.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/product-location.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/runtime-api.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/display-preferences.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/task-display.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/task-flow-groups.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/semantic-observation.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/semantic-observation-projection.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/api/runtime/status",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/dashboard?scope=project&projectKey=-private-tmp-humanagent-p1-memory-final-20261110.ObxZ6G-workspace",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/memory.html",
+      "resourceType": "document"
+    },
+    {
+      "method": "GET",
+      "path": "/runtime.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/memory.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/state-colors.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/semantic-observation.css",
+      "resourceType": "stylesheet"
+    },
+    {
+      "method": "GET",
+      "path": "/runtime-shell.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/memory-actions.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/product-board-view.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/runtime-api.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/display-preferences.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/task-display.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/task-flow-groups.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/semantic-observation.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/semantic-observation-projection.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/product-location.js",
+      "resourceType": "script"
+    },
+    {
+      "method": "GET",
+      "path": "/api/runtime/status",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/dashboard?scope=system",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/runtime/status",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/product/board?projectKey=-private-tmp-humanagent-p1-memory-final-20261110.ObxZ6G-workspace&mode=fake",
+      "resourceType": "fetch"
+    },
+    {
+      "method": "GET",
+      "path": "/api/memory/summary?namespace=project&limit=20",
+      "resourceType": "fetch"
+    }
+  ],
+  "responses": [
+    {
+      "path": "/memory.html",
+      "status": 200,
+      "contentType": "text/html; charset=utf-8"
+    },
+    {
+      "path": "/runtime.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/memory.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/state-colors.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/semantic-observation.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/memory-actions.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/product-board-view.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/runtime-shell.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/runtime-api.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/display-preferences.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/task-display.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/task-flow-groups.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/semantic-observation.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/product-location.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/semantic-observation-projection.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/api/runtime/status",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/api/dashboard?scope=system",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/api/runtime/status",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/api/product/board?projectKey=-private-tmp-humanagent-p1-memory-final-20261110.ObxZ6G-workspace&mode=fake",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/api/memory/summary?namespace=project&limit=20",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/tasks.html",
+      "status": 200,
+      "contentType": "text/html; charset=utf-8"
+    },
+    {
+      "path": "/tasks.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/runtime.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/tasks.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/state-colors.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/semantic-observation.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/product-location.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/runtime-shell.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/runtime-api.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/display-preferences.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/task-flow-groups.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/task-display.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/semantic-observation.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/semantic-observation-projection.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/api/runtime/status",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/api/dashboard?scope=project&projectKey=-private-tmp-humanagent-p1-memory-final-20261110.ObxZ6G-workspace",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/memory.html",
+      "status": 200,
+      "contentType": "text/html; charset=utf-8"
+    },
+    {
+      "path": "/runtime.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/memory.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/state-colors.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/semantic-observation.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8"
+    },
+    {
+      "path": "/memory-actions.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/product-board-view.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/runtime-shell.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/display-preferences.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/runtime-api.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/task-flow-groups.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/semantic-observation.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/semantic-observation-projection.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/product-location.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/task-display.js",
+      "status": 200,
+      "contentType": "text/javascript; charset=utf-8"
+    },
+    {
+      "path": "/api/runtime/status",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/api/dashboard?scope=system",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/api/runtime/status",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/api/memory/summary?namespace=project&limit=20",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    },
+    {
+      "path": "/api/product/board?projectKey=-private-tmp-humanagent-p1-memory-final-20261110.ObxZ6G-workspace&mode=fake",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8"
+    }
+  ],
+  "requestFailures": [],
+  "consoleMessages": [],
+  "pageErrors": [],
+  "pass": true
+}
