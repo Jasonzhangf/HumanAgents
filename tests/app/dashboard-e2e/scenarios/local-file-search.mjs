@@ -246,7 +246,12 @@ export async function runLocalFileSearchScenario(binding) {
   // so the rows are collected while paging back through the turns.
   const eventKindPrefix = (kindLabel) => String(kindLabel ?? '').split(' · ')[0];
   const isToolRequestRow = (row) => eventKindPrefix(row.kind) === 'provider.tool' && String(row.summary ?? '').startsWith('调用工具：');
-  const isRequestStartRow = (row) => String(row.kind ?? '').startsWith('provider.model') && row.summary === 'provider requested model work';
+  // The entry and dashboard now localize internal provider phase names (bug
+  // 486ddd4). The trace keeps the technical kind/state label but its summary
+  // must be the shared Chinese label, never the raw provider English copy.
+  const isRequestStartRow = (row) => String(row.kind ?? '').startsWith('provider.model') && row.summary === '已向模型请求工作';
+  const rawProviderCopyRow = (row) => typeof row.summary === 'string'
+    && /^(provider |Model is streaming|Dispatching request|Model request)/.test(row.summary);
   const allRows = [];
   const seenEventIds = new Set();
   for (const row of await collectDashboardEventRows(binding, () => false, 40)) {
@@ -269,6 +274,10 @@ export async function runLocalFileSearchScenario(binding) {
   const requestStartRows = allRows.filter(isRequestStartRow);
   if (requestStartRows.length === 0) {
     missing.push('terminal dashboard rendered no visible provider request-start row');
+  }
+  const rawProviderCopyRows = allRows.filter(rawProviderCopyRow);
+  if (rawProviderCopyRows.length > 0) {
+    missing.push(`terminal dashboard still rendered ${rawProviderCopyRows.length} raw provider English trace row(s)`);
   }
   const journalRequestStarts = turnEvidence?.requestStartTurns ?? 0;
   if (requestStartRows.length < Math.min(journalRequestStarts, 2)) {

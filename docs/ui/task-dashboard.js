@@ -29,6 +29,7 @@ import {
   taskReadScopeFromQuery,
   taskRowTitle,
 } from './runtime-shell.js'
+import { localizedStepSummary } from './step-labels.js'
 import {
   sameCheckpointAssetBodyAddress,
 } from './runtime-api.js'
@@ -3793,7 +3794,12 @@ function renderExecutionTraceSection(rerender = renderActiveReadingMode) {
         summary.append(
           element('time', formatPreciseTime(event.occurredAt)),
           element('span', `${event.kind} · ${event.state}`, 'event-kind'),
-          element('span', event.summary),
+          element(
+            'span',
+            event.kind === 'provider.model'
+              ? localizedStepSummary(event.summary)
+              : event.summary,
+          ),
           element('span', `seq=${event.seq}`, 'event-seq'),
         )
         details.append(summary)
