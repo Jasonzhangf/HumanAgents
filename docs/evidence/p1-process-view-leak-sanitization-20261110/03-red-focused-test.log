@@ -1,0 +1,78 @@
+TAP version 13
+# Subtest: child session process messages localize event identity and provider copy without hiding failure
+not ok 1 - child session process messages localize event identity and provider copy without hiding failure
+  ---
+  duration_ms: 15.024583
+  type: 'test'
+  location: '/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/tests/ui/process-view-leak-sanitization.test.mjs:82:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    child session process view must not expose runtime-task-event
+    
+    true !== false
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    assertNoInternalFields (file:///Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/tests/ui/process-view-leak-sanitization.test.mjs:73:12)
+    TestContext.<anonymous> (file:///Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/tests/ui/process-view-leak-sanitization.test.mjs:91:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: entry progress uses semantic Chinese phases instead of mechanical step numbers
+not ok 2 - entry progress uses semantic Chinese phases instead of mechanical step numbers
+  ---
+  duration_ms: 8.999167
+  type: 'test'
+  location: '/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/tests/ui/process-view-leak-sanitization.test.mjs:101:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /模型处理/u. Input:
+    
+    '步骤 1 模型正在准备输出 总耗时 00:00 本步 00:00'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: '步骤 1 模型正在准备输出 总耗时 00:00 本步 00:00'
+  operator: 'match'
+  stack: |-
+    TestContext.<anonymous> (file:///Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/tests/ui/process-view-leak-sanitization.test.mjs:122:14)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: runtime projection sanitizes raw output while retaining the real failure
+not ok 3 - runtime projection sanitizes raw output while retaining the real failure
+  ---
+  duration_ms: 1.347042
+  type: 'test'
+  location: '/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/tests/ui/process-view-leak-sanitization.test.mjs:136:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    projected task output must not expose provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c
+    
+    true !== false
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    assertNoInternalFields (file:///Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/tests/ui/process-view-leak-sanitization.test.mjs:73:12)
+    TestContext.<anonymous> (file:///Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/tests/ui/process-view-leak-sanitization.test.mjs:154:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..3
+# tests 3
+# suites 0
+# pass 0
+# fail 3
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 106.044417

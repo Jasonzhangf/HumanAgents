@@ -1,0 +1,460 @@
+
+> humanagent@0.1.43 test:ui /Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110
+> pnpm build:contracts && pnpm build:app && tsc -p tests/ui/tsconfig.json && node --test dist/tests/tests/ui/ui.test.js dist/tests/tests/ui/runtime-projection.test.js dist/tests/tests/ui/interaction-projection-public.test.js
+
+
+> humanagent@0.1.43 build:contracts /Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110
+> tsc -p packages/contracts/tsconfig.json && tsc -p tests/contracts/tsconfig.json
+
+
+> humanagent@0.1.43 build:app /Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110
+> tsc -p packages/app/tsconfig.json && node scripts/copy-template-assets.mjs && node scripts/copy-ui-assets.mjs
+
+TAP version 13
+# Subtest: interaction work card public export separates human summary from technical trace
+ok 1 - interaction work card public export separates human summary from technical trace
+  ---
+  duration_ms: 1.68775
+  type: 'test'
+  ...
+# Subtest: interaction projection keeps technical metadata in cardMetadata and trace details
+ok 2 - interaction projection keeps technical metadata in cardMetadata and trace details
+  ---
+  duration_ms: 0.571375
+  type: 'test'
+  ...
+# Subtest: interaction projection rejects entries that violate typed history scope
+ok 3 - interaction projection rejects entries that violate typed history scope
+  ---
+  duration_ms: 0.210042
+  type: 'test'
+  ...
+# Subtest: interaction projection carries the runtime liveness projection without re-deriving it
+ok 4 - interaction projection carries the runtime liveness projection without re-deriving it
+  ---
+  duration_ms: 0.092125
+  type: 'test'
+  ...
+# Subtest: interaction projection reports no liveness when the runtime reported no liveness facts
+ok 5 - interaction projection reports no liveness when the runtime reported no liveness facts
+  ---
+  duration_ms: 0.128625
+  type: 'test'
+  ...
+# Subtest: answered explicit snapshot projects as a succeeded interaction without invented identity
+ok 6 - answered explicit snapshot projects as a succeeded interaction without invented identity
+  ---
+  duration_ms: 0.306792
+  type: 'test'
+  ...
+# Subtest: explicit snapshot keeps the committed request number in metadata and out of the visible card
+ok 7 - explicit snapshot keeps the committed request number in metadata and out of the visible card
+  ---
+  duration_ms: 0.146208
+  type: 'test'
+  ...
+# Subtest: task waiting copy describes settlement without guessing activity from raw nodes
+ok 8 - task waiting copy describes settlement without guessing activity from raw nodes
+  ---
+  duration_ms: 0.818916
+  type: 'test'
+  ...
+# Subtest: a checkpoint confirms a record without declaring task or public result completion
+ok 9 - a checkpoint confirms a record without declaring task or public result completion
+  ---
+  duration_ms: 0.533083
+  type: 'test'
+  ...
+# Subtest: runtime task list classifies every task into a visible projection group
+ok 10 - runtime task list classifies every task into a visible projection group
+  ---
+  duration_ms: 0.889292
+  type: 'test'
+  ...
+# Subtest: runtime task list groups only exact committed lineage under one visible work item
+ok 11 - runtime task list groups only exact committed lineage under one visible work item
+  ---
+  duration_ms: 0.638208
+  type: 'test'
+  ...
+# Subtest: a root with its own failure or operation keeps its own facts over a waiting child
+ok 12 - a root with its own failure or operation keeps its own facts over a waiting child
+  ---
+  duration_ms: 0.209042
+  type: 'test'
+  ...
+# Subtest: runtime task rows retain existing terminal actions and result facts
+ok 13 - runtime task rows retain existing terminal actions and result facts
+  ---
+  duration_ms: 0.085709
+  type: 'test'
+  ...
+# Subtest: task waiting copy describes settlement without guessing activity from raw nodes
+ok 14 - task waiting copy describes settlement without guessing activity from raw nodes
+  ---
+  duration_ms: 0.108584
+  type: 'test'
+  ...
+# Subtest: a checkpoint confirms a record without declaring task or public result completion
+ok 15 - a checkpoint confirms a record without declaring task or public result completion
+  ---
+  duration_ms: 0.053
+  type: 'test'
+  ...
+# Subtest: runtime API maps every real task state to its declared chip tone
+ok 16 - runtime API maps every real task state to its declared chip tone
+  ---
+  duration_ms: 0.865875
+  type: 'test'
+  ...
+# Subtest: the browser runtime API keeps the bounded original cause chain
+ok 17 - the browser runtime API keeps the bounded original cause chain
+  ---
+  duration_ms: 0.343583
+  type: 'test'
+  ...
+# Subtest: runtime dashboard only reports hasRunning for execution-active tasks
+ok 18 - runtime dashboard only reports hasRunning for execution-active tasks
+  ---
+  duration_ms: 0.10575
+  type: 'test'
+  ...
+# Subtest: observation projection groups nodes into stable agent frames and ordered tool steps
+ok 19 - observation projection groups nodes into stable agent frames and ordered tool steps
+  ---
+  duration_ms: 1.151292
+  type: 'test'
+  ...
+# Subtest: observation projection carries the declared agent role and iteration without inventing them
+ok 20 - observation projection carries the declared agent role and iteration without inventing them
+  ---
+  duration_ms: 0.167542
+  type: 'test'
+  ...
+# Subtest: observation projection fails explicitly on unknown nodes, undeclared owners, and unknown roles
+ok 21 - observation projection fails explicitly on unknown nodes, undeclared owners, and unknown roles
+  ---
+  duration_ms: 0.37575
+  type: 'test'
+  ...
+# Subtest: runtime dashboard reports working only from real recent activity
+ok 22 - runtime dashboard reports working only from real recent activity
+  ---
+  duration_ms: 0.1405
+  type: 'test'
+  ...
+# Subtest: runtime liveness projection carries no transport state
+ok 23 - runtime liveness projection carries no transport state
+  ---
+  duration_ms: 0.041541
+  type: 'test'
+  ...
+# Subtest: runtime dashboard reports no-activity only past the declared silence budget
+ok 24 - runtime dashboard reports no-activity only past the declared silence budget
+  ---
+  duration_ms: 0.12375
+  type: 'test'
+  ...
+# Subtest: runtime dashboard returns to working when real activity resumes
+ok 25 - runtime dashboard returns to working when real activity resumes
+  ---
+  duration_ms: 0.046375
+  type: 'test'
+  ...
+# Subtest: runtime dashboard reports unknown instead of inventing progress without a real timestamp
+ok 26 - runtime dashboard reports unknown instead of inventing progress without a real timestamp
+  ---
+  duration_ms: 0.043875
+  type: 'test'
+  ...
+# Subtest: runtime dashboard refuses to derive no-activity from an unusable silence budget
+ok 27 - runtime dashboard refuses to derive no-activity from an unusable silence budget
+  ---
+  duration_ms: 0.037792
+  type: 'test'
+  ...
+# Subtest: runtime dashboard keeps failure explicit without inventing a human decision
+ok 28 - runtime dashboard keeps failure explicit without inventing a human decision
+  ---
+  duration_ms: 0.146041
+  type: 'test'
+  ...
+# Subtest: runtime dashboard reports idle instead of a liveness claim when nothing is executing
+ok 29 - runtime dashboard reports idle instead of a liveness claim when nothing is executing
+  ---
+  duration_ms: 0.037125
+  type: 'test'
+  ...
+# Subtest: runtime dashboard omits liveness when the runtime reported no real facts
+ok 30 - runtime dashboard omits liveness when the runtime reported no real facts
+  ---
+  duration_ms: 0.576709
+  type: 'test'
+  ...
+# Subtest: agent activity projection renders a native catalog through the real consumer
+ok 31 - agent activity projection renders a native catalog through the real consumer
+  ---
+  duration_ms: 0.911209
+  type: 'test'
+  ...
+# Subtest: agent activity projection keeps current and selected independent with exact refs
+ok 32 - agent activity projection keeps current and selected independent with exact refs
+  ---
+  duration_ms: 0.095708
+  type: 'test'
+  ...
+# Subtest: agent activity projection preserves unknown, unavailable and failure meaning
+ok 33 - agent activity projection preserves unknown, unavailable and failure meaning
+  ---
+  duration_ms: 0.193334
+  type: 'test'
+  ...
+# Subtest: agent activity projection renders a closed-turn planner call without a fabricated objective
+ok 34 - agent activity projection renders a closed-turn planner call without a fabricated objective
+  ---
+  duration_ms: 0.124875
+  type: 'test'
+  ...
+# Subtest: I2 runtime projections preserve optional task read scope and reject mismatched taskId
+ok 35 - I2 runtime projections preserve optional task read scope and reject mismatched taskId
+  ---
+  duration_ms: 0.426958
+  type: 'test'
+  ...
+# Subtest: dashboard projection keeps concise status entry points
+ok 36 - dashboard projection keeps concise status entry points
+  ---
+  duration_ms: 1.435167
+  type: 'test'
+  ...
+# Subtest: task list keeps running, decisions, and history separate
+ok 37 - task list keeps running, decisions, and history separate
+  ---
+  duration_ms: 0.301834
+  type: 'test'
+  ...
+# Subtest: task detail projection exposes only required user decisions
+ok 38 - task detail projection exposes only required user decisions
+  ---
+  duration_ms: 0.108917
+  type: 'test'
+  ...
+# Subtest: task dashboard maps agent roles without organ presentation language
+ok 39 - task dashboard maps agent roles without organ presentation language
+  ---
+  duration_ms: 0.210583
+  type: 'test'
+  ...
+# Subtest: task dashboard projects execution steps, checkpoint, and stop/recovery evidence
+ok 40 - task dashboard projects execution steps, checkpoint, and stop/recovery evidence
+  ---
+  duration_ms: 0.134459
+  type: 'test'
+  ...
+# Subtest: task dashboard projects runtime pool, assignment graph, agent previews, and feedback
+ok 41 - task dashboard projects runtime pool, assignment graph, agent previews, and feedback
+  ---
+  duration_ms: 0.26275
+  type: 'test'
+  ...
+# Subtest: task dashboard keeps stale, blocked, and reconcile states visible without raw control leakage
+ok 42 - task dashboard keeps stale, blocked, and reconcile states visible without raw control leakage
+  ---
+  duration_ms: 0.136292
+  type: 'test'
+  ...
+# Subtest: observation projection supports recursion, drawer details, return, and read-only rules
+ok 43 - observation projection supports recursion, drawer details, return, and read-only rules
+  ---
+  duration_ms: 1.345
+  type: 'test'
+  ...
+# Subtest: observation drawer maps assignment, feedback, and reconcile while staying read-only
+ok 44 - observation drawer maps assignment, feedback, and reconcile while staying read-only
+  ---
+  duration_ms: 0.443
+  type: 'test'
+  ...
+# Subtest: observation node detail carries the typed tool steps and owner role the drawer panes read
+ok 45 - observation node detail carries the typed tool steps and owner role the drawer panes read
+  ---
+  duration_ms: 0.488417
+  type: 'test'
+  ...
+# Subtest: observation projection presents typed event facts as human semantics
+ok 46 - observation projection presents typed event facts as human semantics
+  ---
+  duration_ms: 0.312458
+  type: 'test'
+  ...
+# Subtest: memory interaction surface keeps candidates behind explicit review
+ok 47 - memory interaction surface keeps candidates behind explicit review
+  ---
+  duration_ms: 0.206541
+  type: 'test'
+  ...
+# Subtest: command validation keeps observation read-only and decisions on explicit interaction surfaces
+ok 48 - command validation keeps observation read-only and decisions on explicit interaction surfaces
+  ---
+  duration_ms: 0.248583
+  type: 'test'
+  ...
+# Subtest: runtime UI consumes typed API without hardcoded success or direct source access
+ok 49 - runtime UI consumes typed API without hardcoded success or direct source access
+  ---
+  duration_ms: 36.373458
+  type: 'test'
+  ...
+# Subtest: semantic observation carries one complete scope through GET, SSE, and finite completion
+ok 50 - semantic observation carries one complete scope through GET, SSE, and finite completion
+  ---
+  duration_ms: 22.460583
+  type: 'test'
+  ...
+# Subtest: observation API keeps subtree, node, agent, project, and mode in one read
+ok 51 - observation API keeps subtree, node, agent, project, and mode in one read
+  ---
+  duration_ms: 0.627041
+  type: 'test'
+  ...
+# Subtest: confirmed task controls keep the exact scope and business body
+ok 52 - confirmed task controls keep the exact scope and business body
+  ---
+  duration_ms: 0.5275
+  type: 'test'
+  ...
+# Subtest: semantic panel closes a finite stream without disconnecting or publishing stale events
+ok 53 - semantic panel closes a finite stream without disconnecting or publishing stale events
+  ---
+  duration_ms: 15.600208
+  type: 'test'
+  ...
+# Subtest: memory review button exposes typed API failure and becomes usable again
+ok 54 - memory review button exposes typed API failure and becomes usable again
+  ---
+  duration_ms: 0.611291
+  type: 'test'
+  ...
+# Subtest: observation work-card adapter pairs tool calls with results and marks unprojected turns
+ok 55 - observation work-card adapter pairs tool calls with results and marks unprojected turns
+  ---
+  duration_ms: 13.344167
+  type: 'test'
+  ...
+# Subtest: explicit interaction UI executes route order and confirmation gate
+ok 56 - explicit interaction UI executes route order and confirmation gate
+  ---
+  duration_ms: 66.231291
+  type: 'test'
+  ...
+# Subtest: task clarification handler retries interpretation by typed state without resubmitting the answer
+ok 57 - task clarification handler retries interpretation by typed state without resubmitting the answer
+  ---
+  duration_ms: 0.624375
+  type: 'test'
+  ...
+# Subtest: explicit confirmation stays on the interaction page and exposes the FIFO receipt
+ok 58 - explicit confirmation stays on the interaction page and exposes the FIFO receipt
+  ---
+  duration_ms: 3.90425
+  type: 'test'
+  ...
+# Subtest: interaction card page adapter keeps technical identifiers in trace details only
+ok 59 - interaction card page adapter keeps technical identifiers in trace details only
+  ---
+  duration_ms: 0.368917
+  type: 'test'
+  ...
+# Subtest: interaction card page adapter preserves draft facts without leaking decision refs
+ok 60 - interaction card page adapter preserves draft facts without leaking decision refs
+  ---
+  duration_ms: 0.184333
+  type: 'test'
+  ...
+# Subtest: interaction card page adapter scoped ids are explicit and deterministic
+ok 61 - interaction card page adapter scoped ids are explicit and deterministic
+  ---
+  duration_ms: 0.038834
+  type: 'test'
+  ...
+# Subtest: interaction card keeps confirmed and dispatched as an interaction-only waiting state
+ok 62 - interaction card keeps confirmed and dispatched as an interaction-only waiting state
+  ---
+  duration_ms: 0.087333
+  type: 'test'
+  ...
+# Subtest: interaction card forwards a genuine dashboard task identity and fabricates none
+ok 63 - interaction card forwards a genuine dashboard task identity and fabricates none
+  ---
+  duration_ms: 0.094083
+  type: 'test'
+  ...
+# Subtest: interaction card DOM shows a declared lifecycle label after the requirement is confirmed
+ok 64 - interaction card DOM shows a declared lifecycle label after the requirement is confirmed
+  ---
+  duration_ms: 2.729291
+  type: 'test'
+  ...
+# Subtest: task dashboard execution trace localizes event identity and summary
+ok 65 - task dashboard execution trace localizes event identity and summary
+  ---
+  duration_ms: 5.249458
+  type: 'test'
+  ...
+# Subtest: entry page projects the post-confirmation state instead of the pre-confirmation snapshot
+ok 66 - entry page projects the post-confirmation state instead of the pre-confirmation snapshot
+  ---
+  duration_ms: 1.610959
+  type: 'test'
+  ...
+# Subtest: entry page attaches the receipt occurrence time to the user turn
+ok 67 - entry page attaches the receipt occurrence time to the user turn
+  ---
+  duration_ms: 0.83175
+  type: 'test'
+  ...
+# Subtest: entry work card shows the receipt time instead of 「时间未提供」
+ok 68 - entry work card shows the receipt time instead of 「时间未提供」
+  ---
+  duration_ms: 1.473292
+  type: 'test'
+  ...
+# Subtest: entry submit status shows a live progress indicator that clears on settle
+ok 69 - entry submit status shows a live progress indicator that clears on settle
+  ---
+  duration_ms: 1.457875
+  type: 'test'
+  ...
+# Subtest: entry page presents an answered snapshot as a success result instead of failing
+ok 70 - entry page presents an answered snapshot as a success result instead of failing
+  ---
+  duration_ms: 0.840459
+  type: 'test'
+  ...
+# Subtest: localizedStepSummary hides unknown provider copy and raw JSON
+ok 71 - localizedStepSummary hides unknown provider copy and raw JSON
+  ---
+  duration_ms: 0.421875
+  type: 'test'
+  ...
+# Subtest: localizedStepSummary maps real RCC execution stage summaries to concrete Chinese
+ok 72 - localizedStepSummary maps real RCC execution stage summaries to concrete Chinese
+  ---
+  duration_ms: 0.128333
+  type: 'test'
+  ...
+# Subtest: entry submit progress keeps a bounded readable step list under provider event flood
+ok 73 - entry submit progress keeps a bounded readable step list under provider event flood
+  ---
+  duration_ms: 1.420042
+  type: 'test'
+  ...
+1..73
+# tests 73
+# suites 0
+# pass 73
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 279.673667

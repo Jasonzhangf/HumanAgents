@@ -1,0 +1,4 @@
+
+> humanagent@0.1.43 build:app /Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110
+> tsc -p packages/app/tsconfig.json && node scripts/copy-template-assets.mjs && node scripts/copy-ui-assets.mjs
+

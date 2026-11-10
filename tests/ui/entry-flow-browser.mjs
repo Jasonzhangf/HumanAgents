@@ -989,6 +989,11 @@ const readLiveCard = () => {
   };
 };
 
+function isSemanticProgressPhase(value) {
+  const phase = String(value ?? '').trim();
+  return phase !== '' && /[\u4e00-\u9fff]/u.test(phase) && !/^步骤\s*\d+/u.test(phase);
+}
+
 const readEntryFailureSurface = () => {
   const banner = document.querySelector('[role="status"]');
   const panel = document.querySelector('#entry-error');
@@ -1001,7 +1006,7 @@ const readEntryFailureSurface = () => {
 
 /**
  * Wait until the in-place live progress card carries a real runtime step
- * (`步骤 <seq>`) with the total and per-step timers. This polls from Node so an
+ * (semantic Chinese phase) with the total and per-step timers. This polls from Node so an
  * upstream rejection surfaces the page's own reason instead of an opaque
  * timeout.
  */
@@ -1010,7 +1015,7 @@ async function waitForLiveExecutionCard(page, timeoutMs = 300_000) {
   let last = { hasBlock: false };
   while (Date.now() < deadline) {
     last = await page.evaluate(readLiveCard).catch(() => ({ hasBlock: false }));
-    if (last.hasBlock && /^步骤 \d+$/.test(last.phase ?? '') && last.timerCount === 2) return last;
+    if (last.hasBlock && isSemanticProgressPhase(last.phase) && last.timerCount === 2) return last;
     const failure = await page.evaluate(readEntryFailureSurface).catch(() => null);
     if (failure && (failure.tone === 'danger' || failure.panelText)) {
       throw new Error(
@@ -1146,7 +1151,7 @@ async function sectionB(artifactDir, root) {
           observe('once live card', card);
           record('once submit stays on the entry index', new URL(page.url()).pathname === '/index.html', page.url());
           record('once live card is visible after confirmation', card.hasBlock === true, card.hasBlock);
-          record('once live card shows a real execution step', /^步骤 \d+$/.test(card.phase ?? ''), card.phase);
+          record('once live card shows a semantic execution phase', isSemanticProgressPhase(card.phase), card.phase);
           record('once live card shows the real runtime summary', (card.detail ?? '').trim().length > 0, card.detail);
           record(
             'once live card shows total and per-step timers',
@@ -1222,7 +1227,7 @@ async function sectionB(artifactDir, root) {
           record(
             'detail layer lists real execution steps',
             detail.steps.length > 0
-              && detail.steps.every((step) => /^步骤 \d+$/.test(step.seq) && step.summary.length > 0),
+              && detail.steps.every((step) => isSemanticProgressPhase(step.seq) && step.summary.length > 0),
             detail.steps,
           );
           record(

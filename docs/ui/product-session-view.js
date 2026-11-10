@@ -1,4 +1,9 @@
 import { formatTime } from './runtime-api.js'
+import {
+  localizedEventKind,
+  localizedStepSummary,
+  sanitizeUserVisibleText,
+} from './step-labels.js'
 
 // Read-only renderer for one human-readable session read. It consumes
 // ProductMessage and PublicOutputPublicationProjection from the declared
@@ -77,10 +82,22 @@ function actorKind(actor) {
 
 function actorSourceText(actor) {
   if (!actor || typeof actor !== 'object') return '来源未记录'
-  const parts = []
-  if (nonEmpty(actor.sourceKind)) parts.push(actor.sourceKind.trim())
-  if (nonEmpty(actor.sourceRef)) parts.push(actor.sourceRef.trim())
-  return parts.length > 0 ? parts.join(' · ') : '来源未记录'
+  const sourceKind = nonEmpty(actor.sourceKind) ? actor.sourceKind.trim() : ''
+  const sourceRef = nonEmpty(actor.sourceRef) ? actor.sourceRef.trim() : ''
+  if (sourceKind === 'runtime-task-event') {
+    const kind = localizedEventKind(sourceRef || sourceKind)
+    return `执行进程 · ${kind}`
+  }
+  const parts = [sourceKind, sourceRef].filter(Boolean)
+  return parts.length > 0 ? sanitizeUserVisibleText(parts.join(' · ')) : '来源未记录'
+}
+
+function messageBodyText(message) {
+  const body = nonEmpty(message?.text) ? message.text : '正文未提供'
+  if (message?.actor?.sourceKind === 'runtime-task-event') {
+    return sanitizeUserVisibleText(localizedStepSummary(body))
+  }
+  return sanitizeUserVisibleText(body) || '正文未提供'
 }
 
 function renderMessageTime(make, message) {
@@ -121,7 +138,7 @@ function renderMessageDiagnostics(make, message) {
   if (eventId !== undefined || sourceId !== undefined) {
     const parts = []
     if (eventId !== undefined) parts.push(`eventId ${eventId}`)
-    if (sourceId !== undefined) parts.push(`sourceId ${sourceId}`)
+    if (sourceId !== undefined) parts.push(`来源 ${localizedEventKind(sourceId)}`)
     details.append(make('p', parts.join(' · '), 'product-session-diagnostic-line'))
   }
   for (const evidence of evidenceRefs) {
@@ -147,7 +164,7 @@ function renderMessage(make, message) {
   header.append(renderMessageTime(make, message ?? {}))
   item.append(header)
 
-  const bodyText = nonEmpty(message?.text) ? message.text : '正文未提供'
+  const bodyText = messageBodyText(message)
   item.append(markRole(make('div', bodyText, 'product-session-message-body'), 'message-body'))
 
   const diagnostics = renderMessageDiagnostics(make, message ?? {})
@@ -214,7 +231,7 @@ function renderPublicCommit(make, commit) {
     item.setAttribute('data-commit-record-digest', commit.recordDigest)
   }
 
-  const bodyText = typeof commit?.text === 'string' ? commit.text : '提交正文未提供'
+  const bodyText = sanitizeUserVisibleText(commit?.text) || '提交正文未提供'
   item.append(markRole(
     make('div', bodyText, 'product-session-commit-text'),
     'public-commit-text',

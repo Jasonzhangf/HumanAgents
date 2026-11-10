@@ -1,0 +1,834 @@
+{
+  "status": "PASS",
+  "evidenceRoot": "/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/docs/evidence/p1-process-view-leak-sanitization-20261110/browser",
+  "stopResult": "SIGTERM sent to isolated PID 29065",
+  "tempRootRemoved": true,
+  "failures": [],
+  "startup": {
+    "command": "serve",
+    "provider": "fake",
+    "mode": "fake",
+    "driverRef": "fake",
+    "url": "http://127.0.0.1:61737",
+    "listenAddress": "127.0.0.1",
+    "listenPort": 61737,
+    "bindingId": "fake-default",
+    "providerId": "fake-provider",
+    "endpointRef": "fake:replay",
+    "protocol": "responses",
+    "uiRoot": "/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/dist/app/ui",
+    "checkpointRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/checkpoints/ui-runtime",
+    "memoryRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/memory",
+    "projectKey": "-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace",
+    "eventJournal": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/journal/events.jsonl",
+    "supervisor": {
+      "leasePath": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/daemon/lease.json",
+      "controlEndpoint": {
+        "host": "127.0.0.1",
+        "port": 61737
+      },
+      "readyAt": "2026-11-10T22:23:20.007Z",
+      "stages": [
+        "cordis-host",
+        "serve-runtime",
+        "ui-runtime"
+      ]
+    },
+    "plugins": [
+      "humanagent.harness-kernel",
+      "humanagent.agent-templates",
+      "humanagent.fake-provider",
+      "humanagent.memory",
+      "humanagent.ui"
+    ],
+    "composition": {
+      "ownerId": "humanagent.app.entry-composition",
+      "complete": true,
+      "components": [
+        {
+          "component": "configuration",
+          "state": "composed",
+          "ownerId": "humanagent.config",
+          "message": "configuration and control roots are loaded by the app entry"
+        },
+        {
+          "component": "memory",
+          "state": "composed",
+          "ownerId": "humanagent.app.memory-composition",
+          "message": "memory coordinator, backend, and checkpoint boundary are composed by serve"
+        },
+        {
+          "component": "provider-execution",
+          "state": "composed",
+          "ownerId": "humanagent.provider-adapter",
+          "message": "the selected provider execution port is composed by the explicit mode"
+        },
+        {
+          "component": "ui-runtime",
+          "state": "composed",
+          "ownerId": "humanagent.runtime.ui",
+          "message": "task coordinator, journal, checkpoint store, and loopback server are composed by serve"
+        },
+        {
+          "component": "cordis-host",
+          "state": "composed",
+          "ownerId": "humanagent.app.cordis-host",
+          "message": "CordisHost is composed and exposes the live plugin inventory"
+        },
+        {
+          "component": "fixed-harness-kernel",
+          "state": "composed",
+          "ownerId": "humanagent.harness-kernel",
+          "message": "CordisHost unconditionally loaded the fixed Harness Kernel manifest"
+        },
+        {
+          "component": "fake-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.fake-provider",
+          "message": "the explicit fake execution port is loaded as a Cordis plugin"
+        },
+        {
+          "component": "template-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.agent-templates",
+          "message": "the agent template registry is loaded as a Cordis plugin"
+        },
+        {
+          "component": "memory-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.memory",
+          "message": "memory operations and context injection are loaded as a Cordis plugin"
+        },
+        {
+          "component": "ui-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.ui",
+          "message": "the UI runtime projection is loaded as a Cordis plugin"
+        },
+        {
+          "component": "supervisor-lease-startup-dispose",
+          "state": "composed",
+          "ownerId": "humanagent.app.supervisor",
+          "message": "serve acquires a daemon lease and runs staged startup/dispose with reverse cleanup"
+        },
+        {
+          "component": "rejected-interaction-closure",
+          "state": "composed",
+          "ownerId": "humanagent.runtime.explicit-intake",
+          "message": "serve exposes typed rejection and commits InteractionClosure to the UI runtime journal"
+        }
+      ]
+    },
+    "memoryAnalysisMode": "deterministic"
+  },
+  "url": "http://127.0.0.1:61737/task-dashboard.html?task=child-process-view-fixture&projectKey=fixture-project&mode=fake#/boards/interaction/live?scope=%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22fixture-project%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%7D&focus=%7B%22kind%22%3A%22interaction%22%2C%22taskRef%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%2C%22scope%22%3A%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22fixture-project%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%7D%7D",
+  "controlRoot": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control",
+  "workspace": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/workspace",
+  "desktop": {
+    "name": "desktop-child-dashboard",
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    },
+    "url": "http://127.0.0.1:61737/task-dashboard.html?task=child-process-view-fixture&projectKey=fixture-project&mode=fake#/boards/interaction/live?scope=%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22fixture-project%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%7D&focus=%7B%22kind%22%3A%22interaction%22%2C%22taskRef%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%2C%22scope%22%3A%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22fixture-project%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%7D%7D",
+    "text": "HumanAgent\n关联\n工作板块\n\nTASK DASHBOARD\n\n任务看板\n\n这里显示这个任务当前的状态、执行进展、关键节点和可执行操作。\n\n系统\n项目\n任务\n任务投影已同步\n刷新当前范围\n\n当前任务\n\n未整理名称的任务\n查看完整任务说明\n失败\n全部项目\n所属项目\n当前任务\n任务控制 / 执行授权\n当前会话\n来源未知执行进程 · 模型处理11/10 10:58\n模型正在推理\n来源未知执行进程 · 模型处理11/10 10:58\n模型正在准备输出\n来源未知执行进程 · 模型处理11/10 10:58\n模型请求已收束\n来源未知执行进程 · 执行结束11/10 10:58\n执行失败：真实失败原因\n来源未知执行进程 · 收拢执行11/10 10:58\n执行正在收拢\n来源未知执行进程 · 检查点提交11/10 10:58\n检查点已提交\n已提交结果\n已提交\n执行失败：真实失败原因\n语义观测\n运行与连接详情\n任务计划\n当前任务计划\n权威推理计划\n计划内容无法显示\n\n计划读取仍为失败状态；请打开技术详情查看原因和处理建议。\n\n技术详情\n执行轨迹与只读观测\n执行轨迹\n查看执行轨迹\n打开只读 Observation\n工作范围\n查看方式\n显示设置\n输入设置",
+    "allText": "\n    HumanAgent板块关联工作板块Task Dashboard任务看板这里显示这个任务当前的状态、执行进展、关键节点和可执行操作。系统项目任务任务投影已同步刷新当前范围当前任务未整理名称的任务查看完整任务说明失败全部项目所属项目当前任务任务控制 / 执行授权当前会话来源未知执行进程 · 模型处理11/10 10:58模型正在推理eventId 1 · 来源 执行进程来源未知执行进程 · 模型处理11/10 10:58模型正在准备输出eventId 2 · 来源 执行进程来源未知执行进程 · 模型处理11/10 10:58模型请求已收束eventId 3 · 来源 执行进程来源未知执行进程 · 执行结束11/10 10:58执行失败：真实失败原因eventId 4 · 来源 执行进程来源未知执行进程 · 收拢执行11/10 10:58执行正在收拢eventId 5 · 来源 执行进程来源未知执行进程 · 检查点提交11/10 10:58检查点已提交eventId 6 · 来源 执行进程已提交结果已提交执行失败：真实失败原因commitId commit-fixture-7 · journalSeq 7 · recordDigest fixture-digest-7publicCommitWatermark 7语义观测语义观测只读语义观测任务范围 · child-process-view-fixture任务范围 · child-process-view-fixture简洁语义动作原始正在读取语义观测只读读取任务语义观测信封。状态：读取中运行与连接详情任务业务状态失败连接新鲜度只读范围 · 最近同步 11/10 14:23:20最近业务事件11/10 10:58:05技术详情任务计划当前任务计划权威推理计划计划内容无法显示计划读取仍为失败状态；请打开技术详情查看原因和处理建议。技术详情执行轨迹与只读观测执行轨迹查看执行轨迹打开只读 Observation任务关联关闭关联链没有有依据的关联。工作区板块导航关闭板块导航细节与关联工作范围查看方式显示设置输入设置主动配置关闭\n    \n  \n\n",
+    "details": [
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "语义观测",
+        "open": false
+      },
+      {
+        "summary": "运行与连接详情",
+        "open": false
+      },
+      {
+        "summary": "任务计划",
+        "open": true
+      },
+      {
+        "summary": "执行轨迹与只读观测",
+        "open": true
+      }
+    ],
+    "screenshot": "/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/docs/evidence/p1-process-view-leak-sanitization-20261110/browser/desktop-child-dashboard-1280x720.png"
+  },
+  "mobile": {
+    "name": "mobile-child-dashboard",
+    "viewport": {
+      "width": 390,
+      "height": 844
+    },
+    "url": "http://127.0.0.1:61737/task-dashboard.html?task=child-process-view-fixture&projectKey=fixture-project&mode=fake#/boards/interaction/live?scope=%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22fixture-project%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%7D&focus=%7B%22kind%22%3A%22interaction%22%2C%22taskRef%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%2C%22scope%22%3A%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22fixture-project%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%7D%7D",
+    "text": "HumanAgent\n板块\n关联\n\nTASK DASHBOARD\n\n任务看板\n\n这里显示这个任务当前的状态、执行进展、关键节点和可执行操作。\n\n系统\n项目\n任务\n任务投影已同步\n刷新当前范围\n\n当前任务\n\n未整理名称的任务\n查看完整任务说明\n失败\n全部项目\n所属项目\n当前任务\n任务控制 / 执行授权\n当前会话\n来源未知执行进程 · 模型处理11/10 10:58\n模型正在推理\n来源未知执行进程 · 模型处理11/10 10:58\n模型正在准备输出\n来源未知执行进程 · 模型处理11/10 10:58\n模型请求已收束\n来源未知执行进程 · 执行结束11/10 10:58\n执行失败：真实失败原因\n来源未知执行进程 · 收拢执行11/10 10:58\n执行正在收拢\n来源未知执行进程 · 检查点提交11/10 10:58\n检查点已提交\n已提交结果\n已提交\n执行失败：真实失败原因\n语义观测\n运行与连接详情\n任务计划\n当前任务计划\n权威推理计划\n计划内容无法显示\n\n计划读取仍为失败状态；请打开技术详情查看原因和处理建议。\n\n技术详情\n执行轨迹与只读观测\n执行轨迹\n查看执行轨迹\n打开只读 Observation\n工作范围\n查看方式\n显示设置\n输入设置",
+    "allText": "\n    HumanAgent板块关联工作板块Task Dashboard任务看板这里显示这个任务当前的状态、执行进展、关键节点和可执行操作。系统项目任务任务投影已同步刷新当前范围当前任务未整理名称的任务查看完整任务说明失败全部项目所属项目当前任务任务控制 / 执行授权当前会话来源未知执行进程 · 模型处理11/10 10:58模型正在推理eventId 1 · 来源 执行进程来源未知执行进程 · 模型处理11/10 10:58模型正在准备输出eventId 2 · 来源 执行进程来源未知执行进程 · 模型处理11/10 10:58模型请求已收束eventId 3 · 来源 执行进程来源未知执行进程 · 执行结束11/10 10:58执行失败：真实失败原因eventId 4 · 来源 执行进程来源未知执行进程 · 收拢执行11/10 10:58执行正在收拢eventId 5 · 来源 执行进程来源未知执行进程 · 检查点提交11/10 10:58检查点已提交eventId 6 · 来源 执行进程已提交结果已提交执行失败：真实失败原因commitId commit-fixture-7 · journalSeq 7 · recordDigest fixture-digest-7publicCommitWatermark 7语义观测语义观测只读语义观测任务范围 · child-process-view-fixture任务范围 · child-process-view-fixture简洁语义动作原始正在读取语义观测只读读取任务语义观测信封。状态：读取中运行与连接详情任务业务状态失败连接新鲜度只读范围 · 最近同步 11/10 14:23:20最近业务事件11/10 10:58:05技术详情任务计划当前任务计划权威推理计划计划内容无法显示计划读取仍为失败状态；请打开技术详情查看原因和处理建议。技术详情执行轨迹与只读观测执行轨迹查看执行轨迹打开只读 Observation任务关联关闭关联链没有有依据的关联。工作区板块导航关闭板块导航细节与关联工作范围查看方式显示设置输入设置主动配置关闭\n    \n  \n\n",
+    "details": [
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "",
+        "open": false
+      },
+      {
+        "summary": "语义观测",
+        "open": false
+      },
+      {
+        "summary": "运行与连接详情",
+        "open": false
+      },
+      {
+        "summary": "任务计划",
+        "open": true
+      },
+      {
+        "summary": "执行轨迹与只读观测",
+        "open": true
+      }
+    ],
+    "screenshot": "/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/docs/evidence/p1-process-view-leak-sanitization-20261110/browser/mobile-child-dashboard-390x844.png"
+  },
+  "checks": [
+    {
+      "name": "desktop-child-dashboard visible body does not expose runtime-task-event",
+      "pass": true,
+      "detail": {
+        "field": "runtime-task-event"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose provider.model",
+      "pass": true,
+      "detail": {
+        "field": "provider.model"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose provider provided model reasoning",
+      "pass": true,
+      "detail": {
+        "field": "provider provided model reasoning"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose provider prepared model output",
+      "pass": true,
+      "detail": {
+        "field": "provider prepared model output"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose provider request settled",
+      "pass": true,
+      "detail": {
+        "field": "provider request settled"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose execution.terminal",
+      "pass": true,
+      "detail": {
+        "field": "execution.terminal"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose execution.settling",
+      "pass": true,
+      "detail": {
+        "field": "execution.settling"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose checkpoint.committed",
+      "pass": true,
+      "detail": {
+        "field": "checkpoint.committed"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose 步骤 27",
+      "pass": true,
+      "detail": {
+        "field": "步骤 27"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c",
+      "pass": true,
+      "detail": {
+        "field": "provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard visible body does not expose the raw answer marker",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-child-dashboard visible body retains the real failure",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-child-dashboard visible body shows Chinese model progress",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-child-dashboard visible body shows Chinese settlement progress",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose runtime-task-event",
+      "pass": true,
+      "detail": {
+        "field": "runtime-task-event"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose provider.model",
+      "pass": true,
+      "detail": {
+        "field": "provider.model"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose provider provided model reasoning",
+      "pass": true,
+      "detail": {
+        "field": "provider provided model reasoning"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose provider prepared model output",
+      "pass": true,
+      "detail": {
+        "field": "provider prepared model output"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose provider request settled",
+      "pass": true,
+      "detail": {
+        "field": "provider request settled"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose execution.terminal",
+      "pass": true,
+      "detail": {
+        "field": "execution.terminal"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose execution.settling",
+      "pass": true,
+      "detail": {
+        "field": "execution.settling"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose checkpoint.committed",
+      "pass": true,
+      "detail": {
+        "field": "checkpoint.committed"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose 步骤 27",
+      "pass": true,
+      "detail": {
+        "field": "步骤 27"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c",
+      "pass": true,
+      "detail": {
+        "field": "provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c"
+      }
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM does not expose the raw answer marker",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM retains the real failure",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM shows Chinese model progress",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-child-dashboard complete DOM shows Chinese settlement progress",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-child-dashboard keeps the failed state visible",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-child-dashboard does not show an ordinal step label",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose runtime-task-event",
+      "pass": true,
+      "detail": {
+        "field": "runtime-task-event"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose provider.model",
+      "pass": true,
+      "detail": {
+        "field": "provider.model"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose provider provided model reasoning",
+      "pass": true,
+      "detail": {
+        "field": "provider provided model reasoning"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose provider prepared model output",
+      "pass": true,
+      "detail": {
+        "field": "provider prepared model output"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose provider request settled",
+      "pass": true,
+      "detail": {
+        "field": "provider request settled"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose execution.terminal",
+      "pass": true,
+      "detail": {
+        "field": "execution.terminal"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose execution.settling",
+      "pass": true,
+      "detail": {
+        "field": "execution.settling"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose checkpoint.committed",
+      "pass": true,
+      "detail": {
+        "field": "checkpoint.committed"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose 步骤 27",
+      "pass": true,
+      "detail": {
+        "field": "步骤 27"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c",
+      "pass": true,
+      "detail": {
+        "field": "provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard visible body does not expose the raw answer marker",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard visible body retains the real failure",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard visible body shows Chinese model progress",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard visible body shows Chinese settlement progress",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose runtime-task-event",
+      "pass": true,
+      "detail": {
+        "field": "runtime-task-event"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose provider.model",
+      "pass": true,
+      "detail": {
+        "field": "provider.model"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose provider provided model reasoning",
+      "pass": true,
+      "detail": {
+        "field": "provider provided model reasoning"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose provider prepared model output",
+      "pass": true,
+      "detail": {
+        "field": "provider prepared model output"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose provider request settled",
+      "pass": true,
+      "detail": {
+        "field": "provider request settled"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose execution.terminal",
+      "pass": true,
+      "detail": {
+        "field": "execution.terminal"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose execution.settling",
+      "pass": true,
+      "detail": {
+        "field": "execution.settling"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose checkpoint.committed",
+      "pass": true,
+      "detail": {
+        "field": "checkpoint.committed"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose 步骤 27",
+      "pass": true,
+      "detail": {
+        "field": "步骤 27"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c",
+      "pass": true,
+      "detail": {
+        "field": "provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c"
+      }
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM does not expose the raw answer marker",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM retains the real failure",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM shows Chinese model progress",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard complete DOM shows Chinese settlement progress",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard keeps the failed state visible",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-child-dashboard does not show an ordinal step label",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "real frontend produced no uncaught page error",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "real frontend used the isolated CLI origin",
+      "pass": true,
+      "detail": {
+        "url": "http://127.0.0.1:61737/task-dashboard.html?task=child-process-view-fixture&projectKey=fixture-project&mode=fake#/boards/interaction/live?scope=%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22fixture-project%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%7D&focus=%7B%22kind%22%3A%22interaction%22%2C%22taskRef%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%2C%22scope%22%3A%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22fixture-project%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-process-view-fixture%22%7D%7D%7D",
+        "startupUrl": "http://127.0.0.1:61737"
+      }
+    }
+  ],
+  "observations": [
+    {
+      "name": "startup",
+      "value": {
+        "command": "serve",
+        "provider": "fake",
+        "mode": "fake",
+        "driverRef": "fake",
+        "url": "http://127.0.0.1:61737",
+        "listenAddress": "127.0.0.1",
+        "listenPort": 61737,
+        "bindingId": "fake-default",
+        "providerId": "fake-provider",
+        "endpointRef": "fake:replay",
+        "protocol": "responses",
+        "uiRoot": "/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/dist/app/ui",
+        "checkpointRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/checkpoints/ui-runtime",
+        "memoryRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/memory",
+        "projectKey": "-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace",
+        "eventJournal": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/journal/events.jsonl",
+        "supervisor": {
+          "leasePath": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/daemon/lease.json",
+          "controlEndpoint": {
+            "host": "127.0.0.1",
+            "port": 61737
+          },
+          "readyAt": "2026-11-10T22:23:20.007Z",
+          "stages": [
+            "cordis-host",
+            "serve-runtime",
+            "ui-runtime"
+          ]
+        },
+        "plugins": [
+          "humanagent.harness-kernel",
+          "humanagent.agent-templates",
+          "humanagent.fake-provider",
+          "humanagent.memory",
+          "humanagent.ui"
+        ],
+        "composition": {
+          "ownerId": "humanagent.app.entry-composition",
+          "complete": true,
+          "components": [
+            {
+              "component": "configuration",
+              "state": "composed",
+              "ownerId": "humanagent.config",
+              "message": "configuration and control roots are loaded by the app entry"
+            },
+            {
+              "component": "memory",
+              "state": "composed",
+              "ownerId": "humanagent.app.memory-composition",
+              "message": "memory coordinator, backend, and checkpoint boundary are composed by serve"
+            },
+            {
+              "component": "provider-execution",
+              "state": "composed",
+              "ownerId": "humanagent.provider-adapter",
+              "message": "the selected provider execution port is composed by the explicit mode"
+            },
+            {
+              "component": "ui-runtime",
+              "state": "composed",
+              "ownerId": "humanagent.runtime.ui",
+              "message": "task coordinator, journal, checkpoint store, and loopback server are composed by serve"
+            },
+            {
+              "component": "cordis-host",
+              "state": "composed",
+              "ownerId": "humanagent.app.cordis-host",
+              "message": "CordisHost is composed and exposes the live plugin inventory"
+            },
+            {
+              "component": "fixed-harness-kernel",
+              "state": "composed",
+              "ownerId": "humanagent.harness-kernel",
+              "message": "CordisHost unconditionally loaded the fixed Harness Kernel manifest"
+            },
+            {
+              "component": "fake-plugin",
+              "state": "composed",
+              "ownerId": "humanagent.fake-provider",
+              "message": "the explicit fake execution port is loaded as a Cordis plugin"
+            },
+            {
+              "component": "template-plugin",
+              "state": "composed",
+              "ownerId": "humanagent.agent-templates",
+              "message": "the agent template registry is loaded as a Cordis plugin"
+            },
+            {
+              "component": "memory-plugin",
+              "state": "composed",
+              "ownerId": "humanagent.memory",
+              "message": "memory operations and context injection are loaded as a Cordis plugin"
+            },
+            {
+              "component": "ui-plugin",
+              "state": "composed",
+              "ownerId": "humanagent.ui",
+              "message": "the UI runtime projection is loaded as a Cordis plugin"
+            },
+            {
+              "component": "supervisor-lease-startup-dispose",
+              "state": "composed",
+              "ownerId": "humanagent.app.supervisor",
+              "message": "serve acquires a daemon lease and runs staged startup/dispose with reverse cleanup"
+            },
+            {
+              "component": "rejected-interaction-closure",
+              "state": "composed",
+              "ownerId": "humanagent.runtime.explicit-intake",
+              "message": "serve exposes typed rejection and commits InteractionClosure to the UI runtime journal"
+            }
+          ]
+        },
+        "memoryAnalysisMode": "deterministic"
+      }
+    }
+  ],
+  "consoleMessages": [
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    }
+  ],
+  "network": [
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/runtime/status"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/tasks/child-process-view-fixture/dashboard?projectKey=fixture-project&mode=fake"
+    },
+    {
+      "status": 404,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/tasks/child-process-view-fixture/semantic?projectKey=fixture-project&mode=fake"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/product/session?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/product/relations?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/product/output?taskId=child-process-view-fixture&projectKey=fixture-project&mode=fake"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/product/decision?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/ui/display-preference"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/product/session?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/product/relations?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/product/output?taskId=child-process-view-fixture&projectKey=fixture-project&mode=fake"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:61737/api/product/decision?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+    }
+  ]
+}

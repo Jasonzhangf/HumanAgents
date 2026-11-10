@@ -235,21 +235,25 @@ export async function readEntryQueue(api) {
   return { runtimeStatus, tasks }
 }
 
-import { localizedStepSummary } from './step-labels.js'
+import {
+  localizedStepPhase,
+  localizedStepSummary,
+  sanitizeUserVisibleText,
+} from './step-labels.js'
 
-export { localizedStepSummary } from './step-labels.js'
+export { localizedStepPhase, localizedStepSummary, sanitizeUserVisibleText } from './step-labels.js'
 
 /**
  * The live submit progress banner.
  *
  * While a submission is in flight the status region shows one live block: the
- * shell's existing progress spinner, the current real turn step, the total
- * elapsed time and the current step's elapsed time. The step label starts with
- * the page's own waiting copy; each real `explicit.step` event replaces it with
- * `步骤 <seq>` plus the runtime summary and resets the per-step timer. The
- * timers are observation-only: they start at mount and at the last real step,
- * never recompute time that elapsed before the banner was mounted. The block and
- * its timer are removed on settle.
+ * shell's existing progress spinner, the current semantic execution phase, the
+ * total elapsed time and the current phase's elapsed time. The phase label
+ * starts with the page's own waiting copy; each real runtime event replaces it
+ * with a user-facing Chinese phase and resets the per-step timer. The timers are
+ * observation-only: they start at mount and at the last real event, never
+ * recompute time that elapsed before the banner was mounted. The block and its
+ * timer are removed on settle.
  *
  * Nothing touches the document until the returned methods are called, so the
  * seam stays import-safe in Node.
@@ -355,8 +359,8 @@ export function createSubmitStatusBanner(target, { onOpenDetail } = {}) {
     }
     target.textContent = copy
   }
-  // A real `explicit.step` arrived: show its number and summary and reset the
-  // per-step timer. Number and summary are the runtime's; the page adds none.
+  // A real runtime step arrived: show its semantic phase and readable summary,
+  // then reset the per-step timer.
   const step = (event) => {
     if (!block || !phase) return
     const kind = typeof event?.kind === 'string' ? event.kind : undefined
@@ -377,17 +381,19 @@ export function createSubmitStatusBanner(target, { onOpenDetail } = {}) {
     const ordinal = repeatsPrevious
       ? previous.ordinal
       : Math.min(steps.length + 1, MAX_LIVE_STEPS)
-    const total = Number.isFinite(event?.total) && event.total >= ordinal ? event.total : null
     if (Number.isFinite(seq) || summary !== '') {
-      phase.textContent = total !== null ? `步骤 ${ordinal}/${total}` : `步骤 ${ordinal}`
+      phase.textContent = localizedStepPhase({ kind, state: event?.state, summary })
     }
-    if (humanSummary !== '' && detail) detail.textContent = humanSummary
+    if (humanSummary !== '' && detail) {
+      detail.textContent = sanitizeUserVisibleText(humanSummary)
+    }
     if (event && (Number.isFinite(seq) || summary !== '')) {
       const entry = {
         ordinal,
         seq: Number.isFinite(seq) ? seq : null,
-        summary: humanSummary,
+        summary: sanitizeUserVisibleText(humanSummary),
         kind,
+        state: typeof event.state === 'string' ? event.state : undefined,
         occurredAt: typeof event.occurredAt === 'string' ? event.occurredAt : undefined,
       }
       if (steps.length > 0 && (repeatsPrevious || steps.length >= MAX_LIVE_STEPS)) {
@@ -988,12 +994,13 @@ function openSubmitProgressDetail(trigger) {
       const list = element('ol', undefined, 'progress-step-list')
       for (let idx = 0; idx < steps.length; idx += 1) {
         const step = steps[idx]
-        const ordinal = Number.isFinite(step.ordinal) ? step.ordinal : idx + 1
+        const phaseText = localizedStepPhase(step)
+        const summaryText = sanitizeUserVisibleText(step.summary || '')
         const item = element('li', undefined, 'progress-step')
-        item.append(
-          element('span', `步骤 ${ordinal}`, 'progress-step-seq'),
-          element('span', step.summary || step.kind || '执行事件', 'progress-step-summary'),
-        )
+        item.append(element('span', phaseText, 'progress-step-seq'))
+        if (summaryText !== '' && summaryText !== phaseText) {
+          item.append(element('span', summaryText, 'progress-step-summary'))
+        }
         if (step.occurredAt) item.append(element('time', formatTime(step.occurredAt), 'progress-step-time'))
         list.append(item)
       }

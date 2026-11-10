@@ -1,0 +1,4 @@
+
+> humanagent@0.1.43 build:contracts /Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110
+> tsc -p packages/contracts/tsconfig.json && tsc -p tests/contracts/tsconfig.json
+

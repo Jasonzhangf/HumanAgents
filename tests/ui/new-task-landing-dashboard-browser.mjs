@@ -313,7 +313,9 @@ async function capture(viewport) {
     page.evaluate(() => {
       const block = document.querySelector('.status-banner .progress.progress--live');
       const phase = block?.querySelector('.progress-phase')?.textContent ?? '';
-      return block !== null && /^步骤 \d+$/.test(phase);
+      return block !== null
+        && /[\u4e00-\u9fff]/u.test(phase)
+        && !/^步骤\s*\d+/u.test(phase);
     }).catch(() => false),
   );
   if (!live) {
@@ -343,7 +345,11 @@ async function capture(viewport) {
   const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
   record(`${viewport.width}x${viewport.height} submission stays on the entry index`, url.pathname.endsWith('/index.html'), { url: page.url(), errors: pageErrors.slice(0, 5) });
   record(`${viewport.width}x${viewport.height} entry URL carries NO interaction param`, url.searchParams.get('interaction') === null, url.search);
-  record(`${viewport.width}x${viewport.height} live card shows a real execution step`, /^步骤 \d+$/.test(card.phase ?? ''), card.phase);
+  record(
+    `${viewport.width}x${viewport.height} live card shows a semantic execution phase`,
+    /[\u4e00-\u9fff]/u.test(card.phase ?? '') && !/^步骤\s*\d+/u.test(card.phase ?? ''),
+    card.phase,
+  );
   record(`${viewport.width}x${viewport.height} live card shows the runtime summary`, card.summary === '执行完成' || card.summary === '调用工具：file.read', card.summary);
   record(`${viewport.width}x${viewport.height} live card shows total and per-step timers`, card.timers.length === 2 && card.timers.every((timer) => /总耗时|本步/.test(timer)), card.timers);
   record(`${viewport.width}x${viewport.height} live card is interactive`, card.interactive === true, card.interactive);

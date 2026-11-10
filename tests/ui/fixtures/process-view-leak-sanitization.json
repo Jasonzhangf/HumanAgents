@@ -1,0 +1,299 @@
+{
+  "taskId": {
+    "scope": "task",
+    "value": "child-process-view-fixture"
+  },
+  "scope": {
+    "kind": "task",
+    "projectKey": "fixture-project",
+    "mode": "fake",
+    "taskId": {
+      "scope": "task",
+      "value": "child-process-view-fixture"
+    }
+  },
+  "taskOutput": "已完成。\n\n- 操作：创建文件 demo.txt。\n- 结果：写入成功。\n\n</think>\n证据：provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c",
+  "failureOutput": "回答\n执行失败：真实失败原因\n证据：provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c",
+  "publicOutput": {
+    "state": "committed",
+    "publicCommitWatermark": 7,
+    "commits": [
+      {
+        "commitId": "commit-fixture-7",
+        "journalSeq": 7,
+        "recordDigest": "fixture-digest-7",
+        "text": "回答\n执行失败：真实失败原因\n证据：provider-c649f1a4a7afab07-tool-result-output-provider-tool-result-call-8353380d-f165-4feb-bab8-d7976611ff6c"
+      }
+    ]
+  },
+  "recentEvents": [
+    {
+      "seq": 1,
+      "kind": "provider.model",
+      "state": "running",
+      "summary": "provider provided model reasoning",
+      "occurredAt": "2026-11-10T18:58:00.000Z"
+    },
+    {
+      "seq": 2,
+      "kind": "provider.model",
+      "state": "running",
+      "summary": "provider prepared model output",
+      "occurredAt": "2026-11-10T18:58:01.000Z"
+    },
+    {
+      "seq": 3,
+      "kind": "provider.model",
+      "state": "settling",
+      "summary": "provider request settled",
+      "occurredAt": "2026-11-10T18:58:02.000Z"
+    },
+    {
+      "seq": 4,
+      "kind": "execution.terminal",
+      "state": "failed",
+      "summary": "execution failed: 真实失败原因",
+      "status": "failed",
+      "occurredAt": "2026-11-10T18:58:03.000Z"
+    },
+    {
+      "seq": 5,
+      "kind": "execution.settling",
+      "state": "settling",
+      "summary": "execution settling",
+      "occurredAt": "2026-11-10T18:58:04.000Z"
+    },
+    {
+      "seq": 6,
+      "kind": "checkpoint.committed",
+      "state": "succeeded",
+      "summary": "checkpoint committed",
+      "status": "succeeded",
+      "occurredAt": "2026-11-10T18:58:05.000Z"
+    }
+  ],
+  "messages": [
+    {
+      "ref": {
+        "eventId": "1",
+        "sourceId": "runtime-task-event",
+        "scope": {
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "targetRef": {
+        "kind": "interaction",
+        "taskRef": {
+          "scope": "task",
+          "value": "child-process-view-fixture"
+        },
+        "scope": {
+          "kind": "task",
+          "projectKey": "fixture-project",
+          "mode": "fake",
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "actor": {
+        "kind": "unknown",
+        "sourceKind": "runtime-task-event",
+        "sourceRef": "provider.model"
+      },
+      "occurredAt": "2026-11-10T18:58:00.000Z",
+      "text": "provider provided model reasoning",
+      "evidenceRefs": []
+    },
+    {
+      "ref": {
+        "eventId": "2",
+        "sourceId": "runtime-task-event",
+        "scope": {
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "targetRef": {
+        "kind": "interaction",
+        "taskRef": {
+          "scope": "task",
+          "value": "child-process-view-fixture"
+        },
+        "scope": {
+          "kind": "task",
+          "projectKey": "fixture-project",
+          "mode": "fake",
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "actor": {
+        "kind": "unknown",
+        "sourceKind": "runtime-task-event",
+        "sourceRef": "provider.model"
+      },
+      "occurredAt": "2026-11-10T18:58:01.000Z",
+      "text": "provider prepared model output",
+      "evidenceRefs": []
+    },
+    {
+      "ref": {
+        "eventId": "3",
+        "sourceId": "runtime-task-event",
+        "scope": {
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "targetRef": {
+        "kind": "interaction",
+        "taskRef": {
+          "scope": "task",
+          "value": "child-process-view-fixture"
+        },
+        "scope": {
+          "kind": "task",
+          "projectKey": "fixture-project",
+          "mode": "fake",
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "actor": {
+        "kind": "unknown",
+        "sourceKind": "runtime-task-event",
+        "sourceRef": "provider.model"
+      },
+      "occurredAt": "2026-11-10T18:58:02.000Z",
+      "text": "provider request settled",
+      "evidenceRefs": []
+    },
+    {
+      "ref": {
+        "eventId": "4",
+        "sourceId": "runtime-task-event",
+        "scope": {
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "targetRef": {
+        "kind": "interaction",
+        "taskRef": {
+          "scope": "task",
+          "value": "child-process-view-fixture"
+        },
+        "scope": {
+          "kind": "task",
+          "projectKey": "fixture-project",
+          "mode": "fake",
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "actor": {
+        "kind": "unknown",
+        "sourceKind": "runtime-task-event",
+        "sourceRef": "execution.terminal"
+      },
+      "occurredAt": "2026-11-10T18:58:03.000Z",
+      "text": "execution failed: 真实失败原因",
+      "evidenceRefs": []
+    },
+    {
+      "ref": {
+        "eventId": "5",
+        "sourceId": "runtime-task-event",
+        "scope": {
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "targetRef": {
+        "kind": "interaction",
+        "taskRef": {
+          "scope": "task",
+          "value": "child-process-view-fixture"
+        },
+        "scope": {
+          "kind": "task",
+          "projectKey": "fixture-project",
+          "mode": "fake",
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "actor": {
+        "kind": "unknown",
+        "sourceKind": "runtime-task-event",
+        "sourceRef": "execution.settling"
+      },
+      "occurredAt": "2026-11-10T18:58:04.000Z",
+      "text": "execution settling",
+      "evidenceRefs": []
+    },
+    {
+      "ref": {
+        "eventId": "6",
+        "sourceId": "runtime-task-event",
+        "scope": {
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "targetRef": {
+        "kind": "interaction",
+        "taskRef": {
+          "scope": "task",
+          "value": "child-process-view-fixture"
+        },
+        "scope": {
+          "kind": "task",
+          "projectKey": "fixture-project",
+          "mode": "fake",
+          "taskId": {
+            "scope": "task",
+            "value": "child-process-view-fixture"
+          }
+        }
+      },
+      "actor": {
+        "kind": "unknown",
+        "sourceKind": "runtime-task-event",
+        "sourceRef": "checkpoint.committed"
+      },
+      "occurredAt": "2026-11-10T18:58:05.000Z",
+      "text": "checkpoint committed",
+      "evidenceRefs": []
+    }
+  ],
+  "entryStep": {
+    "seq": 27,
+    "kind": "provider.model",
+    "summary": "provider prepared model output",
+    "occurredAt": "2026-11-10T18:58:02.000Z"
+  }
+}

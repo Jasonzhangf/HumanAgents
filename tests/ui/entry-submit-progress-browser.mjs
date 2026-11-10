@@ -388,16 +388,17 @@ async function runStepProgress(page, pageErrors) {
     setGate('interpret');
     await page.click('#entry-form button[type="submit"]');
 
-    // First real step: the label carries its seq, the summary carries its text.
+    // First real step: the label carries its semantic phase, the summary carries
+    // the runtime's readable detail.
     await page.waitForFunction(
-      () => document.querySelector('.status-banner .progress--live .progress-phase')?.textContent === '步骤 1',
+      () => document.querySelector('.status-banner .progress--live .progress-phase')?.textContent === '正在分派模型请求',
       undefined,
       { timeout: 20_000 },
     );
     const first = await page.evaluate(stepBlockState);
     observe('first explicit.step state', first);
     record('real step summary from explicit.step is rendered', first.detail === STEP_ONE.summary, first.detail);
-    record('step label number comes from seq', first.phase === '步骤 1', first.phase);
+    record('step label uses the semantic phase', first.phase === '正在分派模型请求', first.phase);
     record('progress block shows total and step timers', first.timerCount === 2, first.timerCount);
     record('first step reaches the real EventSource server', server.connections >= 1, server.connections);
 
@@ -415,14 +416,14 @@ async function runStepProgress(page, pageErrors) {
     observe('per-step timer grown', grown);
 
     await page.waitForFunction(
-      () => document.querySelector('.status-banner .progress--live .progress-phase')?.textContent === '步骤 2',
+      () => document.querySelector('.status-banner .progress--live .progress-phase')?.textContent === '已收到模型推理摘要',
       undefined,
       { timeout: 20_000 },
     );
     const second = await page.evaluate(stepBlockState);
     observe('second explicit.step state', second);
     record('second step summary replaces the first', second.detail === STEP_TWO.summary, second.detail);
-    record('second step label number comes from seq', second.phase === '步骤 2', second.phase);
+    record('second step label uses the next semantic phase', second.phase === '已收到模型推理摘要', second.phase);
     record(
       'total elapsed grows across steps',
       second.totalSeconds !== null && grown.totalSeconds !== null && second.totalSeconds > grown.totalSeconds,

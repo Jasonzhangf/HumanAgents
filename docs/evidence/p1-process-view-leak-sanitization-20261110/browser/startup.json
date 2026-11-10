@@ -1,0 +1,124 @@
+{
+  "pid": 29065,
+  "controlRoot": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control",
+  "workspace": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/workspace",
+  "startup": {
+    "command": "serve",
+    "provider": "fake",
+    "mode": "fake",
+    "driverRef": "fake",
+    "url": "http://127.0.0.1:61737",
+    "listenAddress": "127.0.0.1",
+    "listenPort": 61737,
+    "bindingId": "fake-default",
+    "providerId": "fake-provider",
+    "endpointRef": "fake:replay",
+    "protocol": "responses",
+    "uiRoot": "/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/dist/app/ui",
+    "checkpointRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/checkpoints/ui-runtime",
+    "memoryRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/memory",
+    "projectKey": "-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace",
+    "eventJournal": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/journal/events.jsonl",
+    "supervisor": {
+      "leasePath": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/daemon/lease.json",
+      "controlEndpoint": {
+        "host": "127.0.0.1",
+        "port": 61737
+      },
+      "readyAt": "2026-11-10T22:23:20.007Z",
+      "stages": [
+        "cordis-host",
+        "serve-runtime",
+        "ui-runtime"
+      ]
+    },
+    "plugins": [
+      "humanagent.harness-kernel",
+      "humanagent.agent-templates",
+      "humanagent.fake-provider",
+      "humanagent.memory",
+      "humanagent.ui"
+    ],
+    "composition": {
+      "ownerId": "humanagent.app.entry-composition",
+      "complete": true,
+      "components": [
+        {
+          "component": "configuration",
+          "state": "composed",
+          "ownerId": "humanagent.config",
+          "message": "configuration and control roots are loaded by the app entry"
+        },
+        {
+          "component": "memory",
+          "state": "composed",
+          "ownerId": "humanagent.app.memory-composition",
+          "message": "memory coordinator, backend, and checkpoint boundary are composed by serve"
+        },
+        {
+          "component": "provider-execution",
+          "state": "composed",
+          "ownerId": "humanagent.provider-adapter",
+          "message": "the selected provider execution port is composed by the explicit mode"
+        },
+        {
+          "component": "ui-runtime",
+          "state": "composed",
+          "ownerId": "humanagent.runtime.ui",
+          "message": "task coordinator, journal, checkpoint store, and loopback server are composed by serve"
+        },
+        {
+          "component": "cordis-host",
+          "state": "composed",
+          "ownerId": "humanagent.app.cordis-host",
+          "message": "CordisHost is composed and exposes the live plugin inventory"
+        },
+        {
+          "component": "fixed-harness-kernel",
+          "state": "composed",
+          "ownerId": "humanagent.harness-kernel",
+          "message": "CordisHost unconditionally loaded the fixed Harness Kernel manifest"
+        },
+        {
+          "component": "fake-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.fake-provider",
+          "message": "the explicit fake execution port is loaded as a Cordis plugin"
+        },
+        {
+          "component": "template-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.agent-templates",
+          "message": "the agent template registry is loaded as a Cordis plugin"
+        },
+        {
+          "component": "memory-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.memory",
+          "message": "memory operations and context injection are loaded as a Cordis plugin"
+        },
+        {
+          "component": "ui-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.ui",
+          "message": "the UI runtime projection is loaded as a Cordis plugin"
+        },
+        {
+          "component": "supervisor-lease-startup-dispose",
+          "state": "composed",
+          "ownerId": "humanagent.app.supervisor",
+          "message": "serve acquires a daemon lease and runs staged startup/dispose with reverse cleanup"
+        },
+        {
+          "component": "rejected-interaction-closure",
+          "state": "composed",
+          "ownerId": "humanagent.runtime.explicit-intake",
+          "message": "serve exposes typed rejection and commits InteractionClosure to the UI runtime journal"
+        }
+      ]
+    },
+    "memoryAnalysisMode": "deterministic"
+  },
+  "stdout": "{\n  \"command\": \"serve\",\n  \"provider\": \"fake\",\n  \"mode\": \"fake\",\n  \"driverRef\": \"fake\",\n  \"url\": \"http://127.0.0.1:61737\",\n  \"listenAddress\": \"127.0.0.1\",\n  \"listenPort\": 61737,\n  \"bindingId\": \"fake-default\",\n  \"providerId\": \"fake-provider\",\n  \"endpointRef\": \"fake:replay\",\n  \"protocol\": \"responses\",\n  \"uiRoot\": \"/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/dist/app/ui\",\n  \"checkpointRoot\": \"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/checkpoints/ui-runtime\",\n  \"memoryRoot\": \"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/memory\",\n  \"projectKey\": \"-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace\",\n  \"eventJournal\": \"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/journal/events.jsonl\",\n  \"supervisor\": {\n    \"leasePath\": \"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-process-view-D7w5uj/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-process-view-D7w5uj-workspace/daemon/lease.json\",\n    \"controlEndpoint\": {\n      \"host\": \"127.0.0.1\",\n      \"port\": 61737\n    },\n    \"readyAt\": \"2026-11-10T22:23:20.007Z\",\n    \"stages\": [\n      \"cordis-host\",\n      \"serve-runtime\",\n      \"ui-runtime\"\n    ]\n  },\n  \"plugins\": [\n    \"humanagent.harness-kernel\",\n    \"humanagent.agent-templates\",\n    \"humanagent.fake-provider\",\n    \"humanagent.memory\",\n    \"humanagent.ui\"\n  ],\n  \"composition\": {\n    \"ownerId\": \"humanagent.app.entry-composition\",\n    \"complete\": true,\n    \"components\": [\n      {\n        \"component\": \"configuration\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.config\",\n        \"message\": \"configuration and control roots are loaded by the app entry\"\n      },\n      {\n        \"component\": \"memory\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.app.memory-composition\",\n        \"message\": \"memory coordinator, backend, and checkpoint boundary are composed by serve\"\n      },\n      {\n        \"component\": \"provider-execution\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.provider-adapter\",\n        \"message\": \"the selected provider execution port is composed by the explicit mode\"\n      },\n      {\n        \"component\": \"ui-runtime\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.runtime.ui\",\n        \"message\": \"task coordinator, journal, checkpoint store, and loopback server are composed by serve\"\n      },\n      {\n        \"component\": \"cordis-host\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.app.cordis-host\",\n        \"message\": \"CordisHost is composed and exposes the live plugin inventory\"\n      },\n      {\n        \"component\": \"fixed-harness-kernel\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.harness-kernel\",\n        \"message\": \"CordisHost unconditionally loaded the fixed Harness Kernel manifest\"\n      },\n      {\n        \"component\": \"fake-plugin\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.fake-provider\",\n        \"message\": \"the explicit fake execution port is loaded as a Cordis plugin\"\n      },\n      {\n        \"component\": \"template-plugin\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.agent-templates\",\n        \"message\": \"the agent template registry is loaded as a Cordis plugin\"\n      },\n      {\n        \"component\": \"memory-plugin\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.memory\",\n        \"message\": \"memory operations and context injection are loaded as a Cordis plugin\"\n      },\n      {\n        \"component\": \"ui-plugin\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.ui\",\n        \"message\": \"the UI runtime projection is loaded as a Cordis plugin\"\n      },\n      {\n        \"component\": \"supervisor-lease-startup-dispose\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.app.supervisor\",\n        \"message\": \"serve acquires a daemon lease and runs staged startup/dispose with reverse cleanup\"\n      },\n      {\n        \"component\": \"rejected-interaction-closure\",\n        \"state\": \"composed\",\n        \"ownerId\": \"humanagent.runtime.explicit-intake\",\n        \"message\": \"serve exposes typed rejection and commits InteractionClosure to the UI runtime journal\"\n      }\n    ]\n  },\n  \"memoryAnalysisMode\": \"deterministic\"\n}\n",
+  "stderr": ""
+}

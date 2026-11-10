@@ -1,0 +1,10 @@
+{
+  "status": "PASS",
+  "evidenceRoot": "/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/docs/evidence/p1-process-view-leak-sanitization-20261110/browser",
+  "screenshots": [
+    "/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/docs/evidence/p1-process-view-leak-sanitization-20261110/browser/desktop-child-dashboard-1280x720.png",
+    "/Volumes/Intel/playground/humanagent/p1-process-view-leak-sanitization-20261110/docs/evidence/p1-process-view-leak-sanitization-20261110/browser/mobile-child-dashboard-390x844.png"
+  ],
+  "failures": [],
+  "stopResult": "SIGTERM sent to isolated PID 29065"
+}

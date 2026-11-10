@@ -18,7 +18,7 @@
  *      /api/dashboard?scope=system, reads /api/tasks/:id/dashboard to discover
  *      the operation, and subscribes to /api/executions/:id/events.
  *   5. The entry page must stay on index.html and the live progress card must
- *      show the real execution `步骤 <seq>` with total and per-step timers.
+ *      show a real semantic execution phase with total and per-step timers.
  *   6. Clicking the card opens the detail layer with the real execution steps
  *      and closing it returns to the same entry surface. No second confirm.
  *
@@ -396,11 +396,14 @@ async function runStaysProof(page, pageErrors) {
     releaseInterpretGate();
 
     // Post-confirmation: the page must stay on the entry index and the live card
-    // must show a real execution step with two timers.
+    // must show a real semantic execution phase with two timers.
     let stepReady = true;
     try {
       await page.waitForFunction(
-        () => /^步骤 \d+$/.test(document.querySelector('.status-banner .progress--live .progress-phase')?.textContent ?? ''),
+        () => {
+          const phase = document.querySelector('.status-banner .progress--live .progress-phase')?.textContent ?? '';
+          return /[\u4e00-\u9fff]/u.test(phase) && !/^步骤\s*\d+/u.test(phase);
+        },
         undefined,
         { timeout: 25_000 },
       );
@@ -420,7 +423,11 @@ async function runStaysProof(page, pageErrors) {
     observe('post-confirmation live card', card);
     record('confirmed submission stays on the entry index', new URL(url).pathname === '/index.html', url);
     record('live progress card is visible after confirmation', card.hasBlock === true, card.hasBlock);
-    record('live card shows a real execution step', /^步骤 \d+$/.test(card.phase ?? ''), card.phase);
+    record(
+      'live card shows a semantic execution phase',
+      /[\u4e00-\u9fff]/u.test(card.phase ?? '') && !/^步骤\s*\d+/u.test(card.phase ?? ''),
+      card.phase,
+    );
     record('live card shows the real execution summary', card.detail === '调用工具：file.read' || card.detail === '执行完成', card.detail);
     record('live card shows total and per-step timers', card.timerCount === 2 && card.timers.every((timer) => /总耗时|本步/.test(timer)), card.timers);
     record('live card is interactive', card.interactive === true, card.interactive);

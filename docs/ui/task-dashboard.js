@@ -29,7 +29,12 @@ import {
   taskReadScopeFromQuery,
   taskRowTitle,
 } from './runtime-shell.js'
-import { localizedStepSummary } from './step-labels.js'
+import {
+  localizedEventKind,
+  localizedEventState,
+  localizedStepSummary,
+  sanitizeUserVisibleText,
+} from './step-labels.js'
 import {
   sameCheckpointAssetBodyAddress,
 } from './runtime-api.js'
@@ -2883,6 +2888,13 @@ function historyChunks(events) {
   })
 }
 
+function taskEventSummary(event) {
+  if (event.kind === 'provider.output') {
+    return sanitizeUserVisibleText(event.summary) || '模型输出更新'
+  }
+  return sanitizeUserVisibleText(localizedStepSummary(event.summary)) || '执行进度'
+}
+
 function connectionText() {
   const syncedAt = lastSyncAt ? formatPreciseTime(lastSyncAt) : '尚未同步'
   if (explicitScope) return `只读范围 · 最近同步 ${syncedAt}`
@@ -3793,26 +3805,36 @@ function renderExecutionTraceSection(rerender = renderActiveReadingMode) {
         const summary = element('summary')
         summary.append(
           element('time', formatPreciseTime(event.occurredAt)),
-          element('span', `${event.kind} · ${event.state}`, 'event-kind'),
           element(
             'span',
-            event.kind === 'provider.model'
-              ? localizedStepSummary(event.summary)
-              : event.summary,
+            `${localizedEventKind(event.kind)} · ${localizedEventState(event.state)}`,
+            'event-kind',
           ),
-          element('span', `seq=${event.seq}`, 'event-seq'),
+          element('span', taskEventSummary(event)),
         )
         details.append(summary)
         const body = element('dl', undefined, 'event-detail')
         for (const [label, value] of [
           ['精确时间', event.occurredAt],
           ['seq', String(event.seq)],
-          ['callId', event.callId || '不适用'],
-          ['toolId', event.toolId || '不适用'],
+          ['callId', sanitizeUserVisibleText(event.callId) || '不适用'],
+          ['toolId', sanitizeUserVisibleText(event.toolId) || '不适用'],
           ['status', event.status || '不适用'],
-          ['arguments', event.arguments === undefined || event.arguments === null ? '不适用' : JSON.stringify(event.arguments)],
-          ['outputRef', event.outputRef || '不适用'],
-          ['错误', event.error ? `${event.error.code}: ${event.error.message}` : '无'],
+          [
+            'arguments',
+            event.arguments === undefined || event.arguments === null
+              ? '不适用'
+              : sanitizeUserVisibleText(JSON.stringify(event.arguments)) || '不适用',
+          ],
+          ['outputRef', sanitizeUserVisibleText(event.outputRef) || '不适用'],
+          [
+            '错误',
+            event.error
+              ? sanitizeUserVisibleText(
+                `${localizedEventKind(event.error.code)}：${event.error.message}`,
+              ) || '已记录错误'
+              : '无',
+          ],
         ]) {
           const cell = element('div')
           cell.append(element('dt', label), element('dd', value))

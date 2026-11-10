@@ -371,6 +371,28 @@ function isFailed(state: LifecycleState): boolean {
   return state === 'failed' || state === 'cancelled' || state === 'unknown';
 }
 
+const THINKING_TAG_PATTERN = /<\/?think(?:ing)?(?:\s[^>]*)?>/giu;
+const TOOL_RESULT_ID_PATTERN = /\bprovider-[a-z0-9]+-tool-result-output-provider-tool-result-call-[a-z0-9-]+\b/giu;
+const MECHANICAL_STEP_PATTERN = /(?:^|[\s·])步骤\s*\d+(?:\s*\/\s*\d+)?(?:[\s·]*)?/giu;
+const ANSWER_MARKER_LINE_PATTERN = /^[ \t]*回答[ \t]*$/gmu;
+
+function sanitizeUserVisibleOutput(value: string): string {
+  const cleaned = value
+    .replace(THINKING_TAG_PATTERN, '')
+    .replace(TOOL_RESULT_ID_PATTERN, '')
+    .replace(MECHANICAL_STEP_PATTERN, '')
+    .replace(ANSWER_MARKER_LINE_PATTERN, '');
+  const lines = cleaned
+    .split(/\r?\n/u)
+    .map((line) => {
+      const trimmed = line.replace(/[ \t]+$/u, '');
+      return /^证据[：:]\s*$/u.test(trimmed.trim()) ? '' : trimmed;
+    });
+  while (lines[0]?.trim() === '') lines.shift();
+  while (lines.at(-1)?.trim() === '') lines.pop();
+  return lines.join('\n').replace(/\n{3,}/gu, '\n\n').trim();
+}
+
 function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
   return {
     taskId: source.taskId,
@@ -389,7 +411,7 @@ function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
     nextStep: source.nextStep,
     updatedAt: source.updatedAt,
     allowedActions: source.allowedActions,
-    output: source.output,
+    output: sanitizeUserVisibleOutput(source.output),
     ...(source.publicOutput === undefined ? {} : { publicOutput: projectPublicOutputPublication(source.publicOutput) }),
     ...(source.error === undefined ? {} : { error: source.error }),
     ...(source.checkpoint === undefined ? {} : { checkpoint: source.checkpoint }),
@@ -698,7 +720,10 @@ export function projectPublicOutputPublication(
   if (!input) return { state: 'unavailable', commits: [] };
   return {
     state: input.state,
-    commits: [...input.commits],
+    commits: input.commits.map((commit) => ({
+      ...commit,
+      text: sanitizeUserVisibleOutput(commit.text),
+    })),
     ...(input.publicCommitWatermark === undefined ? {} : { publicCommitWatermark: input.publicCommitWatermark }),
   };
 }

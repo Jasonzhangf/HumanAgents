@@ -1,0 +1,62 @@
+[
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/runtime/status"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/tasks/child-process-view-fixture/dashboard?projectKey=fixture-project&mode=fake"
+  },
+  {
+    "status": 404,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/tasks/child-process-view-fixture/semantic?projectKey=fixture-project&mode=fake"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/product/session?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/product/relations?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/product/output?taskId=child-process-view-fixture&projectKey=fixture-project&mode=fake"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/product/decision?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/ui/display-preference"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/product/session?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/product/relations?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/product/output?taskId=child-process-view-fixture&projectKey=fixture-project&mode=fake"
+  },
+  {
+    "status": 200,
+    "method": "GET",
+    "url": "http://127.0.0.1:61737/api/product/decision?projectKey=fixture-project&mode=fake&taskId=child-process-view-fixture"
+  }
+]

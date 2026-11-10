@@ -2208,21 +2208,28 @@ test('interaction card DOM shows a declared lifecycle label after the requiremen
 
 /*
  * 执行轨迹是隐式执行流的技术明细层。失败模式：task-dashboard.js 直接
- * 渲染 provider.model 事件的原始英文 summary（bug 486ddd4）。该层必须复用
- * 与入口进度卡同一份本地化映射；provider.output 是模型输出内容，不属于
- * 内部事件名，保持原文。
+ * 渲染 provider.model 事件的原始英文 summary 和机械 seq（bug 486ddd4）。
+ * 该层必须复用与入口进度卡同一份本地化和脱敏边界；provider.output 是模型
+ * 输出内容，不属于内部事件名，只移除私有标记。
  */
-test('task dashboard execution trace localizes provider model step copy', async () => {
+test('task dashboard execution trace localizes event identity and summary', async () => {
   const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
   const stripped = stripJsComments(source);
   assert.ok(
-    stripped.includes("event.kind === 'provider.model'") && stripped.includes('localizedStepSummary(event.summary)'),
-    '执行轨迹必须对 provider.model 事件使用共享本地化映射',
+    stripped.includes('localizedEventKind(event.kind)')
+      && stripped.includes('localizedEventState(event.state)')
+      && stripped.includes('taskEventSummary(event)'),
+    '执行轨迹必须对事件身份、状态和摘要使用共享语义投影',
   );
   assert.equal(
-    stripped.includes("element('span', event.summary)"),
+    stripped.includes('`${event.kind} · ${event.state}`'),
     false,
-    '执行轨迹不得直接渲染原始 provider summary',
+    '执行轨迹不得直接渲染内部事件 identity',
+  );
+  assert.equal(
+    stripped.includes('`seq=${event.seq}`'),
+    false,
+    '机械 seq 不得出现在主摘要',
   );
 });
 
