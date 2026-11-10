@@ -9479,6 +9479,157 @@ test('service task list keeps root execution facts and exact child claim identit
   }
 });
 
+test('a terminal scheduled child projects through its parent detail, dashboard and list exactly once', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-parent-terminal-projection-'));
+  const workspaceDir = join(root, 'workspace-project');
+  await mkdir(workspaceDir, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: workspaceDir });
+  await ensureControlLayout(paths);
+  const checkpointRoot = join(root, 'checkpoints');
+  const controlJournal = new JsonlOrganJournal(uiRuntimeControlJournalPath(join(checkpointRoot, 'fake')));
+  const identities = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(controlJournal));
+  const subscriptionPath = join(checkpointRoot, 'fake', 'subscriptions.jsonl');
+  const subscriptions = new SubscriptionControlPort(
+    new JsonlOrganJournal(subscriptionPath), { organId }, subscriptionPath,
+  );
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(
+      join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`),
+    ),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    runtimeComposition: { admitExecution: async () => {} },
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: paths.projectKey,
+      roleId: 'execution',
+    },
+    projectKey: paths.projectKey,
+    workspaceRoot: paths.workspaceCwd,
+    runtimePaths: paths,
+    taskIdentity: identities,
+    subscriptionControl: subscriptions,
+  });
+  try {
+    const directive = 'create demo.txt and report the result';
+    const parent = service.createTask({
+      title: 'confirmed complex request',
+      directive,
+    });
+    const child = service.createTask({
+      title: 'planned child execution',
+      directive,
+    });
+    const requirementId = 'requirement-parent-terminal-projection';
+    for (const task of [parent, child]) {
+      await identities.establish({
+        scope: { organId, taskId: task.taskId },
+        source: {
+          requirementId,
+          inputRevision: 1,
+          draftId: 'draft-parent-terminal-projection',
+          draftRevisionVersion: 1,
+          draftRevisionHash: 'hash-parent-terminal-projection',
+          confirmationRef: 'confirmation-parent-terminal-projection',
+        },
+        title: task.title,
+      });
+    }
+
+    const subscriptionId = `subscription:${requirementId}`;
+    const dueAt = '2026-10-24T18:00:00.000Z';
+    const schedule = await subscriptions.create({
+      subscriptionId,
+      goalId: requirementId,
+      scheduleRevision: 1,
+      state: 'active',
+      busyPolicy: 'skip',
+      currentOccurrenceOrdinal: 0,
+    }, {
+      policyId: 'policy-parent-terminal-projection',
+      policyRevision: 1,
+      timezone: 'UTC',
+      canonicalInstant: dueAt,
+      dstMode: 'wall',
+      dstMissedPolicy: 'shift-forward',
+      dstAmbiguousPolicy: 'earlier-offset',
+      latePolicy: 'run-once',
+      busyPolicy: 'skip',
+      executionMode: 'once',
+      dueAt,
+    }, subscriptionId);
+    await subscriptions.schedule({
+      occurrence: {
+        subscriptionId,
+        scheduleRevision: schedule.subscription.scheduleRevision,
+        occurrenceOrdinal: 1,
+        state: 'due',
+        dueAt,
+      },
+      nowAt: dueAt,
+    });
+    const operationId = id('operation', 'parent-terminal-projection-child');
+    await subscriptions.claim({
+      subscriptionId,
+      scheduleRevision: schedule.subscription.scheduleRevision,
+      occurrenceOrdinal: 1,
+      dueAt,
+      taskId: child.taskId,
+      operationId,
+      inputArtifactDigest: 'sha256:parent-terminal-projection-child',
+      schedulerInstanceId: 'parent-terminal-projection-fixture',
+      leaseId: 'parent-terminal-projection-fixture',
+      generation: 1,
+      executionEpoch: 1,
+      nowAt: dueAt,
+      leaseUntil: '2026-10-24T19:00:00.000Z',
+    });
+    await service.startExecution(child.taskId, {
+      prompt: directive,
+    });
+    await waitFor(() => assert.equal(service.taskDashboard(child.taskId).state, 'succeeded'));
+
+    const childDashboard = service.taskDashboard(child.taskId);
+    const parentDashboard = await service.taskDashboardWithPlan(parent.taskId);
+    assert.equal(parentDashboard.state, 'succeeded');
+    assert.equal(parentDashboard.output, childDashboard.output);
+    assert.equal(parentDashboard.nextStep, '查看已提交结果');
+    assert.deepEqual(parentDashboard.allowedActions, []);
+    // The entry live card follows the parent dashboard's operation; the parent
+    // must expose the child's operation so the running step stream keeps
+    // resolving after the projection moves terminal onto the parent.
+    assert.ok(parentDashboard.operationId !== undefined && parentDashboard.operationId !== null);
+    assert.deepEqual(parentDashboard.operationId, childDashboard.operationId);
+
+    const parentDetail = await service.taskDetailWithIdentitySource(parent.taskId);
+    assert.equal(parentDetail.state, 'ready');
+    assert.equal(parentDetail.nextAction, '查看已提交结果');
+
+    const list = await service.listTasksWithIdentitySource();
+    const row = list.completed.find((candidate) => candidate.taskId.value === parent.taskId.value);
+    if (row === undefined) throw new Error('the parent must be completed after its child succeeds');
+    assert.equal(row.state, 'succeeded');
+    assert.equal(row.stateLabel, '已完成');
+    assert.equal(row.executionState, undefined);
+    assert.equal(row.currentExecutionTaskId, undefined);
+    assert.equal(row.executions?.[0]?.taskId.value, child.taskId.value);
+    assert.equal(row.output, childDashboard.output);
+    assert.equal(row.nextStep, '查看已提交结果');
+    assert.deepEqual(row.allowedActions, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('HTTP SSE keeps the first connection open through settling, checkpoint, and final terminal', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-http-sse-lifecycle-'));
   const runtime = await startUiRuntime({

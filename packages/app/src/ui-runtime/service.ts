@@ -2050,6 +2050,155 @@ function toRuntimeTaskSnapshotInput(task: RuntimeTaskSnapshot): RuntimeTaskSnaps
   return { ...task, publicOutput: toPublicOutputProjection(task.publicOutput) };
 }
 
+type ParentExecutionFact = Pick<RuntimeTaskSnapshotInput,
+  'state' | 'currentState' | 'nextStep' | 'updatedAt' | 'output' | 'allowedActions'
+  | 'checkpoint' | 'error' | 'operationId' | 'executionEpoch'
+> & {
+  readonly publicOutput?: {
+    readonly state: string;
+    readonly commits: readonly unknown[];
+  };
+};
+
+function hasOwnExecutionOrFailure(
+  source: Pick<RuntimeTaskSnapshotInput, 'state' | 'operationId' | 'executionEpoch' | 'error'>,
+): boolean {
+  return source.error !== undefined
+    || source.operationId !== undefined
+    || source.executionEpoch !== undefined
+    || (source.state !== 'created' && source.state !== 'admitted' && source.state !== 'waiting');
+}
+
+function isActiveExecutionState(state: LifecycleState): boolean {
+  return state === 'running' || state === 'settling';
+}
+
+function currentChildExecution<T extends Pick<RuntimeTaskSnapshotInput, 'taskId' | 'state' | 'updatedAt'>>(
+  children: readonly T[],
+): T | undefined {
+  let current: T | undefined;
+  for (const child of children) {
+    if (
+      current === undefined
+      || (isActiveExecutionState(child.state) && !isActiveExecutionState(current.state))
+      || (
+        isActiveExecutionState(child.state) === isActiveExecutionState(current.state)
+        && child.updatedAt >= current.updatedAt
+      )
+    ) {
+      current = child;
+    }
+  }
+  return current;
+}
+
+function parentExecutionNextStep(child: ParentExecutionFact): string {
+  if (child.state !== 'succeeded') return child.nextStep;
+  return child.publicOutput?.state === 'committed' && child.publicOutput.commits.length > 0
+    ? '查看已提交结果'
+    : '查看任务详情';
+}
+
+function parentExecutionCorePatch(child: ParentExecutionFact): Pick<ParentExecutionFact,
+  'state' | 'currentState' | 'nextStep' | 'updatedAt' | 'output' | 'allowedActions'
+  | 'checkpoint' | 'error' | 'operationId' | 'executionEpoch'
+> {
+  return {
+    state: child.state,
+    currentState: child.currentState,
+    nextStep: parentExecutionNextStep(child),
+    updatedAt: child.updatedAt,
+    output: child.output,
+    allowedActions: child.state === 'succeeded' ? [] : child.allowedActions,
+    checkpoint: child.checkpoint,
+    error: child.error,
+    operationId: child.operationId,
+    executionEpoch: child.executionEpoch,
+  };
+}
+
+function parentExecutionPatch(
+  child: RuntimeTaskSnapshotInput,
+): Pick<RuntimeTaskSnapshotInput,
+  'state' | 'currentState' | 'nextStep' | 'updatedAt' | 'output' | 'publicOutput'
+  | 'allowedActions' | 'checkpoint' | 'error' | 'operationId' | 'executionEpoch'
+> {
+  return {
+    ...parentExecutionCorePatch(child),
+    publicOutput: child.publicOutput,
+  };
+}
+
+function projectParentExecutions(
+  snapshots: readonly RuntimeTaskSnapshotInput[],
+): readonly RuntimeTaskSnapshotInput[] {
+  const byId = new Map(snapshots.map((snapshot) => [snapshot.taskId.value, snapshot]));
+  const childrenByParent = new Map<string, RuntimeTaskSnapshotInput[]>();
+  for (const snapshot of snapshots) {
+    const parentTaskId = snapshot.executionLineage?.parentTaskId;
+    if (parentTaskId === undefined) continue;
+    const parent = byId.get(parentTaskId.value);
+    if (parent === undefined || parent.executionLineage !== undefined || hasOwnExecutionOrFailure(parent)) {
+      continue;
+    }
+    const children = childrenByParent.get(parentTaskId.value) ?? [];
+    children.push(snapshot);
+    childrenByParent.set(parentTaskId.value, children);
+  }
+  return snapshots.map((snapshot) => {
+    const children = childrenByParent.get(snapshot.taskId.value);
+    if (children === undefined) return snapshot;
+    const child = currentChildExecution(children);
+    return child === undefined ? snapshot : { ...snapshot, ...parentExecutionPatch(child) };
+  });
+}
+
+function projectParentRuntimeSnapshot(
+  parent: RuntimeTaskSnapshot,
+  child: RuntimeTaskSnapshot,
+): RuntimeTaskSnapshot {
+  if (hasOwnExecutionOrFailure(parent)) return parent;
+  const { checkpoint: _projectedCheckpoint, ...executionPatch } = parentExecutionCorePatch(child);
+  return {
+    ...parent,
+    ...executionPatch,
+    checkpoint: child.checkpoint,
+    publicOutput: child.publicOutput,
+    currentNode: child.currentNode,
+    recentEvents: child.recentEvents,
+    events: child.events,
+  };
+}
+
+function executionLineageByChildId(
+  snapshots: readonly RuntimeTaskSnapshotInput[],
+  identities: ReadonlyMap<string, TaskIdentityRecord>,
+  subscriptions: readonly SubscriptionSnapshot[],
+): Map<string, NonNullable<RuntimeTaskSnapshotInput['executionLineage']>> {
+  const childIds = new Set(subscriptions.flatMap((plan) => plan.claims.map((claim) => claim.taskId.value)));
+  const parents = new Map<string, RuntimeTaskSnapshotInput[]>();
+  for (const snapshot of snapshots) {
+    const requirementId = identities.get(snapshot.taskId.value)?.source.requirementId;
+    if (requirementId === undefined || childIds.has(snapshot.taskId.value)) continue;
+    const matches = parents.get(requirementId) ?? [];
+    matches.push(snapshot);
+    parents.set(requirementId, matches);
+  }
+  const lineage = new Map<string, NonNullable<RuntimeTaskSnapshotInput['executionLineage']>>();
+  for (const plan of subscriptions) {
+    const matches = parents.get(plan.subscription.goalId);
+    if (matches?.length !== 1) continue;
+    for (const claim of plan.claims) {
+      lineage.set(claim.taskId.value, {
+        parentTaskId: matches[0]!.taskId,
+        subscriptionId: plan.subscription.subscriptionId,
+        occurrenceId: claim.occurrenceId,
+      });
+    }
+  }
+  return lineage;
+}
+
 /**
  * The current operation/epoch binding for a task, or `undefined` when the task
  * has no active operation. `harnessTurnId` stays absent because this legacy
@@ -4558,6 +4707,27 @@ export class UiRuntimeService {
     }
   }
 
+  private async taskSnapshotWithParentExecution(taskId: TaskId): Promise<RuntimeTaskSnapshot> {
+    const parent = this.coordinatorOrQueuedTaskSnapshot(taskId);
+    if (hasOwnExecutionOrFailure(parent)) return parent;
+    const taskIdentity = this.options.taskIdentity;
+    if (taskIdentity === undefined || this.subscriptionControl === undefined) return parent;
+    const snapshots = this.coordinator.taskSnapshots();
+    const identities = new Map<string, TaskIdentityRecord>();
+    await Promise.all(snapshots.map(async (snapshot) => {
+      const identity = await taskIdentity.read({ organId: this.options.organId, taskId: snapshot.taskId });
+      if (identity !== undefined) identities.set(snapshot.taskId.value, identity);
+    }));
+    const lineage = executionLineageByChildId(
+      snapshots.map((snapshot) => toRuntimeTaskSnapshotInput(snapshot)),
+      identities,
+      await this.subscriptionControl.list(),
+    );
+    const child = currentChildExecution(snapshots.filter((snapshot) =>
+      lineage.get(snapshot.taskId.value)?.parentTaskId.value === taskId.value));
+    return child === undefined ? parent : projectParentRuntimeSnapshot(parent, child);
+  }
+
   listTasks(): RuntimeTaskListProjection {
     return projectRuntimeTaskList({
       mode: this.mode,
@@ -4602,8 +4772,9 @@ export class UiRuntimeService {
           ...(identity.taskFlow === undefined ? {} : { taskFlow: identity.taskFlow }),
         };
     }));
-    return await this.withExecutionReadFacts(enriched, identities,
+    const withExecutionFacts = await this.withExecutionReadFacts(enriched, identities,
       await this.subscriptionControl?.list() ?? [], this.boundProjectSource());
+    return projectParentExecutions(withExecutionFacts);
   }
 
   dashboard(): RuntimeDashboardProjection {
@@ -5017,13 +5188,16 @@ export class UiRuntimeService {
    * callers that only need task state.
    */
   async taskDashboardWithPlan(taskId: TaskId, agentSelection?: DecodedTaskAgentActivitySelectionQuery): Promise<RuntimeTaskDashboardView> {
-    const dashboard = this.taskDashboard(taskId);
+    const task = await this.taskSnapshotWithParentExecution(taskId);
+    const dashboard = runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()));
     const plan = await this.executionPlanForTask(taskId);
     const publicOutput = await this.authoritativePublicOutputForTask(taskId);
     const identity = await this.options.taskIdentity?.read({ organId: this.options.organId, taskId });
     // Re-run the same pure dashboard projection with the authoritative
     // publication so the output/narrative are computed from committed records.
-    const withPublication = publicOutput === undefined ? dashboard : this.taskDashboard(taskId, publicOutput);
+    const withPublication = publicOutput === undefined
+      ? dashboard
+      : runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()), publicOutput);
     return {
       ...withPublication,
       ...(identity?.title === undefined ? {} : { semanticTitle: identity.title }),
@@ -5307,8 +5481,14 @@ export class UiRuntimeService {
 
   taskDetail(taskId: TaskId): TaskDetailProjection {
     try {
-      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
-      return projectTaskDetail({
+      return this.taskDetailProjection(this.coordinatorOrQueuedTaskSnapshot(taskId));
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  private taskDetailProjection(task: RuntimeTaskSnapshot): TaskDetailProjection {
+    return projectTaskDetail({
         source: {
           state: task.state === 'failed' || task.state === 'blocked'
             ? 'error'
@@ -5367,6 +5547,11 @@ export class UiRuntimeService {
           },
         observationRef: `task://${task.taskId.value}/observation`,
       });
+  }
+
+  async taskDetailWithIdentitySource(taskId: TaskId): Promise<TaskDetailProjection> {
+    try {
+      return this.taskDetailProjection(await this.taskSnapshotWithParentExecution(taskId));
     } catch (error) {
       throw apiError(error);
     }
@@ -5561,25 +5746,7 @@ export class UiRuntimeService {
     subscriptions: readonly SubscriptionSnapshot[],
     liveSource?: ConfiguredProjectReadSource,
   ): Promise<readonly RuntimeTaskSnapshotInput[]> {
-    const childIds = new Set(subscriptions.flatMap((plan) => plan.claims.map((claim) => claim.taskId.value)));
-    const parents = new Map<string, RuntimeTaskSnapshotInput[]>();
-    for (const snapshot of snapshots) {
-      const requirementId = identities.get(snapshot.taskId.value)?.source.requirementId;
-      if (requirementId === undefined || childIds.has(snapshot.taskId.value)) continue;
-      const matches = parents.get(requirementId) ?? [];
-      matches.push(snapshot);
-      parents.set(requirementId, matches);
-    }
-    const lineage = new Map<string, NonNullable<RuntimeTaskSnapshotInput['executionLineage']>>();
-    for (const plan of subscriptions) {
-      const matches = parents.get(plan.subscription.goalId);
-      if (matches?.length !== 1) continue;
-      for (const claim of plan.claims) {
-        lineage.set(claim.taskId.value, {
-          parentTaskId: matches[0]!.taskId, subscriptionId: plan.subscription.subscriptionId, occurrenceId: claim.occurrenceId,
-        });
-      }
-    }
+    const lineage = executionLineageByChildId(snapshots, identities, subscriptions);
     return await Promise.all(snapshots.map(async (snapshot) => {
       const relation = lineage.get(snapshot.taskId.value);
       const target = liveSource === undefined ? undefined

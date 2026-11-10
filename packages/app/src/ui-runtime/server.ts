@@ -2070,7 +2070,7 @@ async function handleRequest(
       return;
     }
     if (taskDetail && method === 'GET') {
-      writeJson(response, 200, service.taskDetail(id('task', decodeURIComponent(taskDetail[1]!))));
+      writeJson(response, 200, await service.taskDetailWithIdentitySource(id('task', decodeURIComponent(taskDetail[1]!))));
       return;
     }
     const executionEvents = /^\/api\/executions\/([^/]+)\/events$/.exec(path);
