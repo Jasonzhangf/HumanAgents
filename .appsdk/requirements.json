@@ -566,9 +566,387 @@
         "version": 1
       },
       "version": 21
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "记忆 agent 不可用时主线照常，彼此独立",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：记忆 agent 不可用时主线照常，彼此独立。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "memory-agent-independent-mainline-20261108",
+        "requirement_id": "humanagent-memory-agent-independent-from-mainline",
+        "text": "记忆 agent 与 MVP 主线彼此独立；记忆 agent 不可用时，主线任务照常推进，不阻断交付。记忆 agent 只整理记忆、发现冲突并等待裁决，不替 master 调度、不接产品开发、不接任务派发。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "记忆 agent 不可用时主线照常，彼此独立",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：记忆 agent 不可用时主线照常，彼此独立。"
+        },
+        "requirement_id": "humanagent-memory-agent-independent-from-mainline",
+        "status": "active",
+        "text": "记忆 agent 与 MVP 主线彼此独立；记忆 agent 不可用时，主线任务照常推进，不阻断交付。记忆 agent 只整理记忆、发现冲突并等待裁决，不替 master 调度、不接产品开发、不接任务派发。",
+        "version": 1
+      },
+      "version": 22
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "安装重启不要问我，目前开发阶段，完全没有进入生产，可以你自己处理",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：安装重启不要问我，目前开发阶段，完全没有进入生产，可以你自己处理。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "dev-stage-install-restart-authorized-20261108",
+        "requirement_id": "humanagent-dev-stage-install-restart-authorized",
+        "text": "项目当前处于开发阶段，未进入生产。开发所需的安装、重建与本地实例重启由项目 agent 自行处理，不需要逐次向用户请示；生产环境变更仍须单独授权。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "安装重启不要问我，目前开发阶段，完全没有进入生产，可以你自己处理",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：安装重启不要问我，目前开发阶段，完全没有进入生产，可以你自己处理。"
+        },
+        "requirement_id": "humanagent-dev-stage-install-restart-authorized",
+        "status": "active",
+        "text": "项目当前处于开发阶段，未进入生产。开发所需的安装、重建与本地实例重启由项目 agent 自行处理，不需要逐次向用户请示；生产环境变更仍须单独授权。",
+        "version": 1
+      },
+      "version": 23
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "显式 Brain 只能回答简单问题；对复杂目标，显式 Brain 负责拆解任务并交给隐式 Brain 执行，自己不执行任务。执行中途需要用户输入时，显式 Brain 做 relay：把问题交回用户，并将回答回传以继续执行。新建任务表单的提交本身就是用户对该新任务的确认，不再要求第二次确认；已有任务的目标、范围或处理方式变更仍须单独确认。steer/停止/权限撤销等控制命令不得混入业务需求队列或 task payload。",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决并已落盘 AGENTS.md；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "base_version": 1,
+        "operation": "replace",
+        "project_id": "humanagent",
+        "request_id": "explicit-brain-boundary-relay-20261108",
+        "requirement_id": "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+        "text": "显式 Brain 职责边界：显式 Brain 只能回答简单问题；对复杂目标，显式 Brain 负责拆解任务并交给隐式 Brain 执行，自己不执行任务。执行中途需要用户输入时，显式 Brain 做 relay：把问题交回用户，并将回答回传以继续执行。新建任务表单的提交本身就是用户对该新任务的确认，不再要求第二次确认；已有任务的目标、范围或处理方式变更仍须单独确认。steer/停止/权限撤销等控制命令不得混入业务需求队列或 task payload。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "显式 Brain 只能回答简单问题；对复杂目标，显式 Brain 负责拆解任务并交给隐式 Brain 执行，自己不执行任务。执行中途需要用户输入时，显式 Brain 做 relay：把问题交回用户，并将回答回传以继续执行。新建任务表单的提交本身就是用户对该新任务的确认，不再要求第二次确认；已有任务的目标、范围或处理方式变更仍须单独确认。steer/停止/权限撤销等控制命令不得混入业务需求队列或 task payload。",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决并已落盘 AGENTS.md；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "requirement_id": "humanagent-explicit-brain-simple-answer-or-standard-task-routing",
+        "status": "active",
+        "text": "显式 Brain 职责边界：显式 Brain 只能回答简单问题；对复杂目标，显式 Brain 负责拆解任务并交给隐式 Brain 执行，自己不执行任务。执行中途需要用户输入时，显式 Brain 做 relay：把问题交回用户，并将回答回传以继续执行。新建任务表单的提交本身就是用户对该新任务的确认，不再要求第二次确认；已有任务的目标、范围或处理方式变更仍须单独确认。steer/停止/权限撤销等控制命令不得混入业务需求队列或 task payload。",
+        "version": 2
+      },
+      "version": 24
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "我们现在的要求就是这些任务全过：1. 输入任务是否能执行？2. 显式大脑 UX 能否自己区分简单任务和复杂任务？简单任务是否直接回答，复杂任务是否分解后派发给隐式大脑 3. 任务派发和执行过程是否有动画，有过程，错误和正确的执行是否及时显式？4. 复杂任务在显式大脑派发给隐式大脑执行过程中，反馈是否会透过显式大脑和用户 relay 沟通？5. ux 交互满足最小必要性的流程设计和奥卡姆剃刀原则的消融吗？",
+          "role": "user",
+          "source": "当前 Codex 对话，用户指定 Mia 为测试员并明确 5 条任务必须全过；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "mvp-user-perspective-five-gates-20261108",
+        "requirement_id": "humanagent-mvp-user-perspective-five-gates",
+        "text": "MVP 用户视角交付门禁：必须全部通过 5 条真实前端 gate 才可宣称可交付：1) 输入任务能执行并产生可见进展与最终结果；2) 显式 Brain 自行区分简单/复杂，简单直接回答，复杂拆解后派发隐式 Brain 执行；3) 派发与执行过程可见，正确/错误/等待/恢复及时显式；4) 复杂任务执行中的反馈经显式 Brain relay 给用户，用户回答后继续原任务；5) UX 满足最小必要性并经过奥卡姆消融。证据只认真实前端行为、公开 API 回执、截图、console 与可复现步骤；单测、构建、CI、review、候选分支不替代。测试合同：docs/goals/mia-mvp-user-perspective-tests-20261107.md。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "我们现在的要求就是这些任务全过：1. 输入任务是否能执行？2. 显式大脑 UX 能否自己区分简单任务和复杂任务？简单任务是否直接回答，复杂任务是否分解后派发给隐式大脑 3. 任务派发和执行过程是否有动画，有过程，错误和正确的执行是否及时显式？4. 复杂任务在显式大脑派发给隐式大脑执行过程中，反馈是否会透过显式大脑和用户 relay 沟通？5. ux 交互满足最小必要性的流程设计和奥卡姆剃刀原则的消融吗？",
+          "role": "user",
+          "source": "当前 Codex 对话，用户指定 Mia 为测试员并明确 5 条任务必须全过；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "requirement_id": "humanagent-mvp-user-perspective-five-gates",
+        "status": "active",
+        "text": "MVP 用户视角交付门禁：必须全部通过 5 条真实前端 gate 才可宣称可交付：1) 输入任务能执行并产生可见进展与最终结果；2) 显式 Brain 自行区分简单/复杂，简单直接回答，复杂拆解后派发隐式 Brain 执行；3) 派发与执行过程可见，正确/错误/等待/恢复及时显式；4) 复杂任务执行中的反馈经显式 Brain relay 给用户，用户回答后继续原任务；5) UX 满足最小必要性并经过奥卡姆消融。证据只认真实前端行为、公开 API 回执、截图、console 与可复现步骤；单测、构建、CI、review、候选分支不替代。测试合同：docs/goals/mia-mvp-user-perspective-tests-20261107.md。",
+        "version": 1
+      },
+      "version": 25
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "你区分开开发和项目 runtime，~/.humanagent 是 runtime 的 root（显式 agent）",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "runtime-root-dev-repo-separation-20261108",
+        "requirement_id": "humanagent-runtime-root-separate-from-dev-repo",
+        "text": "开发仓库只承载源码、文档和测试；~/.humanagent 是项目 runtime 的唯一 root（显式 agent）。禁止在 project workspace 中持久化 session、journal、checkpoint、index、artifact、memory、user profile 或 runtime lock。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "你区分开开发和项目 runtime，~/.humanagent 是 runtime 的 root（显式 agent）",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "requirement_id": "humanagent-runtime-root-separate-from-dev-repo",
+        "status": "active",
+        "text": "开发仓库只承载源码、文档和测试；~/.humanagent 是项目 runtime 的唯一 root（显式 agent）。禁止在 project workspace 中持久化 session、journal、checkpoint、index、artifact、memory、user profile 或 runtime lock。",
+        "version": 1
+      },
+      "version": 26
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "layerfs 清理",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "dev-workflow-git-worktree-20261108",
+        "requirement_id": "humanagent-dev-workflow-git-worktree-not-layerfs",
+        "text": "LayerFS 已停用。新项目任务一律使用独占 Git worktree；存量任务在原 worktree 完成，合并后自然关闭。不再以 LayerFS task branch/Workspace 作为新任务前置。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "layerfs 清理",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "requirement_id": "humanagent-dev-workflow-git-worktree-not-layerfs",
+        "status": "active",
+        "text": "LayerFS 已停用。新项目任务一律使用独占 Git worktree；存量任务在原 worktree 完成，合并后自然关闭。不再以 LayerFS task branch/Workspace 作为新任务前置。",
+        "version": 1
+      },
+      "version": 27
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "mvp 实现和 dsh 没关系，dsh peer 和 dsh 的代码兼容没关系",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "mvp-not-dsh-provider-20261108",
+        "requirement_id": "humanagent-mvp-not-dsh-provider",
+        "text": "MVP 实现与 DSH 无关：MVP 不接 DSH provider；DSH peer 的存在与 DSH 代码兼容性无关，不得混用两者作为 MVP 验收依据。DSH 仅是可替换执行后端；DSH 适配未验收前不得宣称 DSH 适配完成。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "mvp 实现和 dsh 没关系，dsh peer 和 dsh 的代码兼容没关系",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "requirement_id": "humanagent-mvp-not-dsh-provider",
+        "status": "active",
+        "text": "MVP 实现与 DSH 无关：MVP 不接 DSH provider；DSH peer 的存在与 DSH 代码兼容性无关，不得混用两者作为 MVP 验收依据。DSH 仅是可替换执行后端；DSH 适配未验收前不得宣称 DSH 适配完成。",
+        "version": 1
+      },
+      "version": 28
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "web search 不是主要路径，mvp 不包含它",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "web-search-not-mvp-20261108",
+        "requirement_id": "humanagent-web-search-not-mvp-mainline",
+        "text": "Web search 不是主要路径，MVP 不包含 web search；仅作为后续旁支优化，不作为 MVP 交付门禁。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "web search 不是主要路径，mvp 不包含它",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "requirement_id": "humanagent-web-search-not-mvp-mainline",
+        "status": "active",
+        "text": "Web search 不是主要路径，MVP 不包含 web search；仅作为后续旁支优化，不作为 MVP 交付门禁。",
+        "version": 1
+      },
+      "version": 29
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "巡检目标三次 missing 就请 Jenny 发消息唤醒，如果无法唤醒就移除",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "patrol-goal-missing-wake-or-remove-20261108",
+        "requirement_id": "humanagent-patrol-goal-missing-wake-or-remove",
+        "text": "巡检目标连续 3 次 missing 时，请 Jenny 发消息唤醒；若无法唤醒，则记录原因并移除该巡检目标。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "巡检目标三次 missing 就请 Jenny 发消息唤醒，如果无法唤醒就移除",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "requirement_id": "humanagent-patrol-goal-missing-wake-or-remove",
+        "status": "active",
+        "text": "巡检目标连续 3 次 missing 时，请 Jenny 发消息唤醒；若无法唤醒，则记录原因并移除该巡检目标。",
+        "version": 1
+      },
+      "version": 30
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "mvp 批准了，没做到那就让 Jenny 做",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "mvp-delivery-master-jenny-20261108",
+        "requirement_id": "humanagent-mvp-approved-not-released-master-delivery",
+        "text": "MVP 已批准但未放行；未达成验收时由项目 master Jenny 负责推进交付，其他角色不替 master 宣称 MVP 完成或可放行。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "mvp 批准了，没做到那就让 Jenny 做",
+          "role": "user",
+          "source": "当前 Codex 对话 2026-11-07 用户裁决；2026-11-08 用户明确要求需求文件写入所有已审批约束。"
+        },
+        "requirement_id": "humanagent-mvp-approved-not-released-master-delivery",
+        "status": "active",
+        "text": "MVP 已批准但未放行；未达成验收时由项目 master Jenny 负责推进交付，其他角色不替 master 宣称 MVP 完成或可放行。",
+        "version": 1
+      },
+      "version": 31
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "偶发 500 要 retry，偶发错误要保持 10 次回退重试",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：偶发 500 要 retry，偶发错误要保持 10 次回退重试。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "retry-10-backoff-20261108",
+        "requirement_id": "humanagent-transient-error-retry-10-backoff",
+        "text": "偶发或暂态错误必须自动重试。单次提交在一个任务内的 transient 错误最多重试 10 次；每次重试之间做退避。10 次后仍失败才向用户显式暴露错误。重试必须保持同一任务语义，不得另起新任务或丢失原任务上下文。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "偶发 500 要 retry，偶发错误要保持 10 次回退重试",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：偶发 500 要 retry，偶发错误要保持 10 次回退重试。"
+        },
+        "requirement_id": "humanagent-transient-error-retry-10-backoff",
+        "status": "active",
+        "text": "偶发或暂态错误必须自动重试。单次提交在一个任务内的 transient 错误最多重试 10 次；每次重试之间做退避。10 次后仍失败才向用户显式暴露错误。重试必须保持同一任务语义，不得另起新任务或丢失原任务上下文。",
+        "version": 1
+      },
+      "version": 32
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "入库任务列表可以放在抽屉里面，可以隐藏",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：入库任务列表可以放在抽屉里面，可以隐藏。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "task-list-drawer-hidden-20261108",
+        "requirement_id": "humanagent-entry-task-list-in-drawer",
+        "text": "入口页的任务列表可放在抽屉中，可以隐藏。任务列表不占用入口主区，不与 Task List 页重复。用户需要时通过抽屉打开；不需要时不显示完整列表。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "入库任务列表可以放在抽屉里面，可以隐藏",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：入库任务列表可以放在抽屉里面，可以隐藏。"
+        },
+        "requirement_id": "humanagent-entry-task-list-in-drawer",
+        "status": "active",
+        "text": "入口页的任务列表可放在抽屉中，可以隐藏。任务列表不占用入口主区，不与 Task List 页重复。用户需要时通过抽屉打开；不需要时不显示完整列表。",
+        "version": 1
+      },
+      "version": 33
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "内部阶段名不显示，显示给用户的是能看得懂的阶段：执行工具等待结果？发出请求等待响应？",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：内部阶段名不显示，显示给用户的是能看得懂的阶段（执行工具等待结果？发出请求等待响应？）。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "human-readable-stage-labels-20261108",
+        "requirement_id": "humanagent-user-facing-semantic-stage-labels",
+        "text": "用户界面不显示内部阶段名、原始英文事件或内部机械标识（如 provider request waiting、步骤 515）。显示给用户的是可理解的语义阶段，例如执行工具等待结果、发出请求等待响应。技术详情只在必要时折叠展示。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "内部阶段名不显示，显示给用户的是能看得懂的阶段：执行工具等待结果？发出请求等待响应？",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：内部阶段名不显示，显示给用户的是能看得懂的阶段（执行工具等待结果？发出请求等待响应？）。"
+        },
+        "requirement_id": "humanagent-user-facing-semantic-stage-labels",
+        "status": "active",
+        "text": "用户界面不显示内部阶段名、原始英文事件或内部机械标识（如 provider request waiting、步骤 515）。显示给用户的是可理解的语义阶段，例如执行工具等待结果、发出请求等待响应。技术详情只在必要时折叠展示。",
+        "version": 1
+      },
+      "version": 34
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "我们所有的交付项目都要前端实测",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：我们所有的交付项目都要前端实测。"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "humanagent",
+        "request_id": "frontend-test-all-deliverables-20261108",
+        "requirement_id": "humanagent-all-deliverables-need-real-frontend-test",
+        "text": "所有交付项目必须经过真实前端实测。真实前端行为证据不可被单元测试、构建、CI、review 或候选分支替代。没有真实前端验收回执的交付不得宣称完成或放行。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "我们所有的交付项目都要前端实测",
+          "role": "user",
+          "source": "当前 Codex 对话，用户明确裁决：我们所有的交付项目都要前端实测。"
+        },
+        "requirement_id": "humanagent-all-deliverables-need-real-frontend-test",
+        "status": "active",
+        "text": "所有交付项目必须经过真实前端实测。真实前端行为证据不可被单元测试、构建、CI、review 或候选分支替代。没有真实前端验收回执的交付不得宣称完成或放行。",
+        "version": 1
+      },
+      "version": 35
     }
   ],
   "project_id": "humanagent",
   "schema_version": 1,
-  "version": 21
+  "version": 35
 }
