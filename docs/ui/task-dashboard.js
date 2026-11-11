@@ -640,16 +640,29 @@ function productDecisionReadScope(scope) {
  */
 function decisionMatchesFocus(decision, focus, scope) {
   if (!decision || typeof decision !== 'object' || Array.isArray(decision)) return false
-  if (decision.kind !== 'task-grant' || decision.state !== 'waiting') return false
-  // A waiting approval must offer the formal continue action. A revoke-only
-  // card is grant management, not a pending decision.
-  if (!Array.isArray(decision.actions) || !decision.actions.includes('grant')) return false
+  const grantDecision = decision.kind === 'task-grant'
+    && decision.state === 'waiting'
+    && Array.isArray(decision.actions)
+    && decision.actions.includes('grant')
+  const inputDecision = decision.kind === 'task-input-request'
+    && decision.state === 'waiting'
+    && Array.isArray(decision.actions)
+    && decision.actions.length === 1
+    && decision.actions[0] === 'answer'
+    && typeof decision.request?.requestId === 'string'
+    && decision.request.requestId !== ''
+    && Number.isSafeInteger(decision.request?.expectedRevision)
+    && decision.request.expectedRevision >= 0
+    && typeof decision.request?.question === 'string'
+    && decision.request.question.trim() !== ''
+  if (!grantDecision && !inputDecision) return false
   const target = decision.target
   if (target?.kind !== 'interaction' || !isExactControllableTarget(target)) return false
   const scopeTaskId = productTaskScopeValue(scope)
   if (scopeTaskId === undefined || target.taskRef?.value !== scopeTaskId) return false
   if (target.scope?.projectKey !== scope.projectKey || target.scope?.mode !== scope.mode) return false
   if (target.scope?.taskId?.value !== scopeTaskId) return false
+  if (inputDecision && decision.request.taskId?.value !== scopeTaskId) return false
   if (productTaskScopeValue(focus?.scope) !== scopeTaskId) return false
   return focus?.taskRef?.value === scopeTaskId
 }
@@ -838,6 +851,13 @@ export function createTaskFocusController({
         return transport.revokeTaskGrant(...args)
       }
       : undefined,
+    answerTaskInputRequest: typeof transport.answerTaskInputRequest === 'function'
+      ? (...args) => {
+        controlWrites += 1
+        state.controlWrites = controlWrites
+        return transport.answerTaskInputRequest(...args)
+      }
+      : undefined,
     stop: typeof transport.stop === 'function'
       ? (...args) => {
         controlWrites += 1
@@ -977,6 +997,26 @@ export function createTaskFocusController({
           element: make,
           host: decisionHost,
           title: '审批执行授权',
+        })
+      },
+      onAnswer: (input) => {
+        if (state.decision !== decision) return
+        const submit = controlTransport.answerTaskInputRequest
+        if (typeof submit !== 'function') {
+          state.decisionFailure = {
+            code: 'product-decision.answer.unavailable',
+            message: '当前运行时未连接回答入口。',
+            nextAction: 'refresh after the runtime reconnects',
+          }
+          renderDecision({ status: 'fulfilled', value: state.decision })
+          return
+        }
+        void submit(input.taskId, input.requestId, {
+          answer: input.answer,
+          expectedRevision: input.expectedRevision,
+        }).then(() => load()).catch((error) => {
+          state.decisionFailure = productFailure(error, 'product-decision.answer.failed')
+          renderDecision({ status: 'fulfilled', value: state.decision })
         })
       },
     })
@@ -1433,6 +1473,12 @@ function pageProductTransport() {
     readTaskGrant: (...args) => api.readTaskGrant(...args),
     grantTaskControl: (...args) => api.grantTaskControl(...args),
     revokeTaskGrant: (...args) => api.revokeTaskGrant(...args),
+    answerTaskInputRequest: (...args) => api.answerTaskInputRequest(...args).then((result) => {
+      // The answer starts a fresh execution cycle of the same task. Re-read the
+      // dashboard so the page follows that new operation to its terminal output.
+      void refresh().catch(setRefreshError)
+      return result
+    }),
     stop: (...args) => api.stop(...args),
   }
 }

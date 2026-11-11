@@ -451,10 +451,10 @@ export function createTaskProductController(options = {}) {
     return controller
   }
 
-  function pendingDecisionOf(sessionRead) {
-    const pending = sessionRead?.pendingDecision
-      ?? state.lastDecision
-      ?? undefined
+  function pendingDecisionOf(source) {
+    const pending = source?.pendingDecision !== undefined
+      ? source.pendingDecision
+      : state.lastDecision ?? undefined
     if (pending === undefined) return undefined
     if (pending === null || typeof pending !== 'object') {
       showError(Object.assign(new Error('待决定对象格式无效。'), {
@@ -479,6 +479,24 @@ export function createTaskProductController(options = {}) {
       element: make,
       onIntent: (_intent, selected) => {
         openDecision(selected ?? pending)
+      },
+      onAnswer: (input) => {
+        if (state.lastDecision !== pending) return
+        const submit = typeof transport?.answerTaskInputRequest === 'function'
+          ? transport.answerTaskInputRequest.bind(transport)
+          : undefined
+        if (!submit) {
+          showError(Object.assign(new Error('当前运行时未连接回答入口。'), {
+            code: 'task.decision.answer.unavailable',
+            ownerId: 'humanagent.ui',
+            nextAction: 'reconnect the runtime and refresh',
+          }))
+          return
+        }
+        void submit(input.taskId, input.requestId, {
+          answer: input.answer,
+          expectedRevision: input.expectedRevision,
+        }).then(() => refresh()).catch((error) => { showError(error) })
       },
     })
   }
@@ -540,6 +558,14 @@ export function createTaskProductController(options = {}) {
     } catch {
       resolvedOutput = undefined
     }
+    let pendingDecision
+    try {
+      pendingDecision = typeof transport.readProductDecision === 'function'
+        ? await transport.readProductDecision(readScope)
+        : await readProductJson('/api/product/decision', query)
+    } catch {
+      pendingDecision = undefined
+    }
     const publication = outputPublication(resolvedOutput)
     renderProductSessionView(sessionHost, {
       messages: sessionRead?.messages ?? [],
@@ -552,7 +578,7 @@ export function createTaskProductController(options = {}) {
         publicOutput: resolvedOutput.publication ?? resolvedOutput,
       }, { element: make })
     }
-    renderDecision(pendingDecisionOf(sessionRead))
+    renderDecision(pendingDecisionOf({ pendingDecision }))
     return { session: sessionRead, output: resolvedOutput }
   }
 

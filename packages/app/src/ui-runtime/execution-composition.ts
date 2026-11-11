@@ -360,6 +360,22 @@ export function createDefaultExecutionComposition(input: {
   readonly now: () => Date;
   readonly currentState: RuntimeTaskCurrentStatePort;
   readonly publishCurrentTurnState: (taskId: RuntimeExecutionAllocation['taskId']) => Promise<unknown>;
+  /**
+   * Opens the one execution-time input request from the accepted standard-turn
+   * end. The composition owns the model fact; the injected callback owns the
+   * Runtime identity, public request id and visible waiting state.
+   */
+  readonly openTaskInputRequest?: (input: {
+    readonly taskId: RuntimeExecutionAllocation['taskId'];
+    readonly question: string;
+    readonly schemaRef: string;
+    readonly reason: string;
+    readonly impact: string;
+    readonly turnId: string;
+    readonly operationId: RuntimeExecutionAllocation['operationId'];
+    readonly executionEpoch: number;
+    readonly expiresAt?: string;
+  }) => import('../../../contracts/src/index.js').TaskInputRequest;
   readonly closedTurnPlannerPool: (taskId: RuntimeExecutionAllocation['taskId']) => AgentRuntimePoolManager;
   readonly taskIdentity: TaskIdentityConsumer;
   readonly i2Journal: import('../../../contracts/src/index.js').I2JournalPort;
@@ -1699,6 +1715,65 @@ export function createDefaultExecutionComposition(input: {
           await liveNative.drainCurrentTurn(boundaryId);
           const settled = liveNative.driver.settlement();
           if (!settled) missing('native drain has no actual Provider settlement');
+          if (acceptedEnd?.outcome === 'input-required') {
+            const modelRequest = acceptedEnd.inputRequest;
+            if (modelRequest === undefined) missing('the accepted input-required end has no input request');
+            if (input.openTaskInputRequest === undefined) missing('the accepted input-required end has no Runtime input-request owner');
+            await input.openTaskInputRequest({
+              taskId: allocation.taskId,
+              question: modelRequest.question,
+              schemaRef: modelRequest.schemaRef,
+              reason: modelRequest.reason,
+              impact: modelRequest.impact,
+              turnId,
+              operationId: allocation.operationId,
+              executionEpoch: allocation.executionEpoch,
+              ...(modelRequest.expiresAt === undefined ? {} : { expiresAt: modelRequest.expiresAt }),
+            });
+            // The input-required end completes this execution cycle. Settle the
+            // parent operation with its terminal result before the canonical
+            // turn close reads closure facts, so the `waiting` checkpoint closes
+            // with no carried unresolved operation. Just like the succeeded
+            // path, the controller result is the accepted end plus produced drain.
+            await publishLifecycle('succeeded', 'operation.completed',
+              [...settled.evidenceRefs, ...(acceptedEnd.resolvedEvidenceRefs ?? [])], {
+                operationId: allocation.operationId,
+                status: 'succeeded' as const,
+                outputRef: currentTurnRef,
+                outputDigest: `sha256:${createHash('sha256').update(canonicalJsonStringify(acceptedEnd)).digest('hex')}`,
+                evidenceRefs: [...settled.evidenceRefs, ...(acceptedEnd.resolvedEvidenceRefs ?? [])],
+                verifier: { name: 'humanagent.standard-turn-controller', version: '1', decision: 'input-required end accepted and execution-time input request opened' },
+                completedAt: input.now().toISOString(),
+              });
+            const contextRef = loop.contextCommitRef();
+            if (!contextRef) missing('canonical turn closure has no actual full-context commit');
+            const facts = await owners!.readClosureFacts(contextRef);
+            if (!facts) missing('canonical turn closure owner facts are unknown');
+            const current = await input.currentState.read({ organId: allocation.scope.organId, taskId: allocation.taskId });
+            if (current.state !== 'known') missing('canonical turn closure has no authoritative current Task');
+            closingInput ??= {
+              summary: projectTurnCloseSummary(acceptedEnd.summary),
+              reviewCommitRefs: acceptedReviewRefs,
+              prepareCheckpointClosure: async (checkpoint) => {
+                if (closingCheckpoint && canonicalJsonStringify(closingCheckpoint) !== canonicalJsonStringify(checkpoint)) {
+                  missing('native preparation changed the frozen closing candidate');
+                }
+                closingCheckpoint = structuredClone(checkpoint);
+                return native.prepareTurnClosure(checkpoint, boundaryId, closingInput!.source);
+              },
+              outcome: 'waiting',
+              source: 'agent-tool',
+              permissionRevoked: facts.permission.revoked,
+              hardBlockers: facts.hardBlockers,
+              recovery: {
+                contextRef: contextRef.commitId,
+                unfinishedRef: admittedTurn.recoveryStateRef,
+                unreturnedCallRefs: [...facts.unreturnedCallRefs],
+                unresolvedOperationRefs: [...facts.unresolvedOperationRefs],
+              },
+            };
+            return { state: 'waiting' as const, evidenceRefs: settled.evidenceRefs };
+          }
           const status = settled.state === 'succeeded' && acceptedEnd ? 'succeeded'
             : settled.state === 'stopped' || settled.state === 'cancelled' ? 'cancelled'
             : settled.state === 'failed' ? 'failed' : 'blocked';

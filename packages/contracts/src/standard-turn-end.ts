@@ -51,8 +51,21 @@ export interface StandardTurnEndCallReference {
   readonly scope: ScopeRef;
 }
 
-export type StandardTurnEndOutcome = 'completed' | 'continue' | 'blocked';
+export type StandardTurnEndOutcome = 'completed' | 'continue' | 'blocked' | 'input-required';
 export type StandardTurnEndResultStatus = 'completed' | 'partial' | 'blocked';
+
+/**
+ * The model-owned semantic fact required to relay a question to the user. The
+ * Runtime still generates the public request id, binds it to the task and the
+ * exact execution, and owns the monotonic answer revision.
+ */
+export interface StandardTurnInputRequest {
+  readonly question: string;
+  readonly schemaRef: string;
+  readonly reason: string;
+  readonly impact: string;
+  readonly expiresAt?: string;
+}
 
 /**
  * The canonical public result. `summary.result.text` is the only canonical
@@ -81,6 +94,8 @@ export interface StandardTurnEndSummary {
 export interface StandardTurnEndPayload {
   readonly outcome: StandardTurnEndOutcome;
   readonly summary: StandardTurnEndSummary;
+  /** Required only for `input-required`; forbidden on every other outcome. */
+  readonly inputRequest?: StandardTurnInputRequest;
   readonly deliveryRefs?: readonly string[];
 }
 
@@ -122,7 +137,7 @@ function requireStringArray(value: unknown, label: string): asserts value is rea
 }
 
 function validateOutcome(outcome: unknown): asserts outcome is StandardTurnEndOutcome {
-  if (outcome !== 'completed' && outcome !== 'continue' && outcome !== 'blocked') {
+  if (outcome !== 'completed' && outcome !== 'continue' && outcome !== 'blocked' && outcome !== 'input-required') {
     throw new ContractError('standard-turn-end.outcome');
   }
 }
@@ -159,6 +174,22 @@ export function validateStandardTurnEndPayload(input: StandardTurnEndPayload): v
   validateResultStatus(summary.result.status);
   if (typeof summary.result.text !== 'string') {
     throw new ContractError('standard-turn-end.summary.result.text');
+  }
+  const hasInputRequest = Object.prototype.hasOwnProperty.call(input, 'inputRequest');
+  const inputRequest = input.inputRequest;
+  if (input.outcome === 'input-required') {
+    if (typeof inputRequest !== 'object' || inputRequest === null || Array.isArray(inputRequest)) {
+      throw new ContractError('standard-turn-end.input-request');
+    }
+    requireNonEmptyString(inputRequest.question, 'standard-turn-end.input-request.question');
+    requireNonEmptyString(inputRequest.schemaRef, 'standard-turn-end.input-request.schema-ref');
+    requireNonEmptyString(inputRequest.reason, 'standard-turn-end.input-request.reason');
+    requireNonEmptyString(inputRequest.impact, 'standard-turn-end.input-request.impact');
+    if (inputRequest.expiresAt !== undefined) {
+      requireNonEmptyString(inputRequest.expiresAt, 'standard-turn-end.input-request.expires-at');
+    }
+  } else if (hasInputRequest) {
+    throw new ContractError('standard-turn-end.input-request-not-allowed');
   }
   if (summary.inspectionOutcome !== undefined) validateInspectionExecutionOutcome(summary.inspectionOutcome);
   const deliveryRefs = input.deliveryRefs;

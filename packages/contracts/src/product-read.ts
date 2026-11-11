@@ -194,17 +194,18 @@ export interface ProductLocation {
   readonly scope: ProductReadScope;
 }
 
-export type ProductPendingDecisionAction = 'grant' | 'revoke';
+export type ProductPendingDecisionAction = 'grant' | 'revoke' | 'answer';
 
 const PRODUCT_PENDING_DECISION_ACTIONS: ReadonlySet<string> = new Set<ProductPendingDecisionAction>([
   'grant',
   'revoke',
+  'answer',
 ]);
 
 /**
- * Only the task-grant branch has a formal, verified continue chain. The other
- * two branches preserve the real O2 state: their facts may exist, but no public
- * disposal route exists. They therefore carry no action and an explicit reason.
+ * The task-grant and task-input-request branches have formal continue chains.
+ * Attention preserves the real O2 state: the fact may exist, but no public
+ * disposal route exists. It therefore carries no action and an explicit reason.
  */
 export type ProductPendingDecision =
   | {
@@ -225,9 +226,8 @@ export type ProductPendingDecision =
       readonly target: Extract<ProductTargetRef, { readonly kind: 'interaction' }>;
       readonly request: TaskInputRequest;
       readonly question: string;
-      readonly actions: readonly [];
-      readonly state: 'unavailable';
-      readonly unavailableReason: string;
+      readonly actions: readonly ['answer'];
+      readonly state: 'waiting' | 'resolved' | 'expired' | 'unknown';
       readonly recoveryOwner: string;
     }
   | {
@@ -568,7 +568,8 @@ function validateTaskInputRequest(request: TaskInputRequest, target: ProductTarg
   record(request, 'product pending decision request');
   onlyKeys(
     request,
-    ['requestId', 'taskId', 'schemaRef', 'reason', 'impact', 'expiresAt'],
+    ['requestId', 'taskId', 'schemaRef', 'reason', 'impact', 'question', 'turnId', 'operationId',
+      'executionEpoch', 'expectedRevision', 'expiresAt'],
     'product pending decision request',
   );
   text(request.requestId, 'product pending decision requestId');
@@ -576,6 +577,11 @@ function validateTaskInputRequest(request: TaskInputRequest, target: ProductTarg
   text(request.schemaRef, 'product pending decision schemaRef');
   text(request.reason, 'product pending decision reason');
   text(request.impact, 'product pending decision impact');
+  text(request.question, 'product pending decision request question');
+  text(request.turnId, 'product pending decision request turnId');
+  assertScope(request.operationId, 'operation');
+  nonNegativeInteger(request.executionEpoch, 'product pending decision request executionEpoch');
+  nonNegativeInteger(request.expectedRevision, 'product pending decision request expectedRevision');
   optionalText(request.expiresAt, 'product pending decision expiresAt');
   const taskId = targetTaskId(target);
   if (taskId === undefined || !sameTaskId(taskId, request.taskId)) {
@@ -659,17 +665,19 @@ export function validateProductPendingDecision(decision: ProductPendingDecision)
   if (decision.kind === 'task-input-request') {
     onlyKeys(
       decision,
-      ['kind', 'target', 'request', 'question', 'actions', 'state', 'unavailableReason', 'recoveryOwner'],
+      ['kind', 'target', 'request', 'question', 'actions', 'state', 'recoveryOwner'],
       'task input request pending decision',
     );
     validateProductTargetRef(decision.target);
     if (decision.target.kind !== 'interaction') {
       throw new ContractError('task input request pending decision requires an interaction target');
     }
-    if (decision.state !== 'unavailable' || decision.actions.length !== 0) {
-      throw new ContractError('task input request pending decision cannot offer a formal action');
+    if (decision.state !== 'waiting') {
+      throw new ContractError('task input request pending decision state is invalid');
     }
-    text(decision.unavailableReason, 'task input request pending decision unavailableReason');
+    if (decision.actions.length !== 1 || decision.actions[0] !== 'answer') {
+      throw new ContractError('task input request pending decision requires exactly one answer action');
+    }
     validateTaskInputRequest(decision.request, decision.target);
     return;
   }

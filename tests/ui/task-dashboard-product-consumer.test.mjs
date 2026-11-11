@@ -216,6 +216,29 @@ function pendingDecision(target = interactionRef, state = 'waiting') {
   }
 }
 
+function pendingInputDecision(target = interactionRef, state = 'waiting') {
+  return {
+    kind: 'task-input-request',
+    target,
+    request: {
+      requestId: 'request-task-1',
+      taskId,
+      schemaRef: 'humanagent://input/text/v1',
+      reason: '任务缺少部署目标。',
+      impact: '当前执行等待用户回答。',
+      question: '请补充部署目标。',
+      turnId: 'turn-task-1',
+      operationId: { scope: 'operation', value: 'operation-task-1' },
+      executionEpoch: 1,
+      expectedRevision: 3,
+    },
+    question: '请补充部署目标。',
+    actions: ['answer'],
+    state,
+    recoveryOwner: 'humanagent.runtime',
+  }
+}
+
 // The page module has a browser bootstrap. A single explicit test flag swaps
 // only that bootstrap for inert hosts; every controller and renderer below is
 // the same production code the page uses.
@@ -318,6 +341,7 @@ function harness({
   writeLocation,
   closeRelationLayer,
   grantTaskControl,
+  answerTaskInputRequest,
   stopControl,
   onSessionRendered,
 } = {}) {
@@ -344,6 +368,7 @@ function harness({
     grantTaskControl: grantTaskControl ?? (async () => {
       throw new Error('the consumer must not grant from a read or close')
     }),
+    ...(answerTaskInputRequest === undefined ? {} : { answerTaskInputRequest }),
     revokeTaskGrant: async () => {
       throw new Error('the consumer must not revoke from a read or close')
     },
@@ -937,6 +962,38 @@ test('a non-waiting decision fact is never shown as a waiting approval', async (
     walk(centerHost).filter((node) => node.getAttribute?.('data-product-pending-decision')).length,
     0,
   )
+})
+
+test('an execution-time input request renders and answers the exact task revision', async () => {
+  const answers = []
+  const { controller, centerHost } = harness({
+    decisionRead: async () => pendingInputDecision(),
+    answerTaskInputRequest: async (...args) => {
+      answers.push(args)
+      return { taskId, requestId: 'request-task-1', inputRevision: 3 }
+    },
+  })
+  await controller.load()
+  const card = walk(centerHost).find(
+    (node) => node.getAttribute?.('data-product-pending-decision') === 'task-input-request',
+  )
+  assert.ok(card, 'the waiting execution-time input request must be visible')
+  const field = walk(card).find(
+    (node) => node.getAttribute?.('data-product-role') === 'task-input-answer',
+  )
+  const submit = walk(card).find(
+    (node) => node.getAttribute?.('data-product-control-action') === 'answer',
+  )
+  assert.ok(field)
+  assert.ok(submit)
+  field.value = '生产环境'
+  submit.click()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(answers, [[
+    'task-1',
+    'request-task-1',
+    { answer: '生产环境', expectedRevision: 3 },
+  ]])
 })
 
 test('a revoke-only decision fact is not an approval and writes nothing', async () => {

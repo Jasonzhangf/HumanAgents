@@ -79,17 +79,29 @@ export const INSPECTION_OUTCOME_SCHEMA: BusinessPayload = {
  */
 export const STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
   toolId: STANDARD_TURN_END_TOOL_ID,
-  description: 'humanagent.turn.end: End the current task turn when this phase has sufficient results and evidence. Provide outcome (completed when the task is done, continue when more turns are needed, blocked when it cannot proceed) and the four-part summary goal/actions/result/nextStep; result.text is the user-facing answer. deliveryRefs only cite committed file writes or inspection results. The independent Planner decides continue, complete, or failed after closure.',
+  description: 'humanagent.turn.end: End the current task turn when this phase has sufficient results and evidence. Provide outcome; use input-required only when execution cannot continue without an exact user fact, and then provide inputRequest question/schemaRef/reason/impact. Provide the four-part summary goal/actions/result/nextStep; result.text is the user-facing answer. deliveryRefs only cite committed file writes or inspection results. The independent Planner decides continue, complete, or failed after ordinary closure.',
   inputSchema: {
     type: 'object',
     properties: {
-      outcome: { type: 'string', enum: ['completed', 'continue', 'blocked'] },
+      outcome: { type: 'string', enum: ['completed', 'continue', 'blocked', 'input-required'] },
       summary: {
         ...STANDARD_TURN_END_SUMMARY_SCHEMA,
         properties: {
           ...(STANDARD_TURN_END_SUMMARY_SCHEMA.properties as Record<string, BusinessPayload>),
           inspectionOutcome: INSPECTION_OUTCOME_SCHEMA,
         },
+      },
+      inputRequest: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', minLength: 1 },
+          schemaRef: { type: 'string', minLength: 1 },
+          reason: { type: 'string', minLength: 1 },
+          impact: { type: 'string', minLength: 1 },
+          expiresAt: { type: 'string', minLength: 1 },
+        },
+        required: ['question', 'schemaRef', 'reason', 'impact'],
+        additionalProperties: false,
       },
       deliveryRefs: { type: 'array', items: { type: 'string' }, description: 'Scoped references to delivery artifacts that can actually be committed to the turn: a file.write output or an inspection result. Never cite goal/todo/bash/edit results here; they carry no delivery material. A text-only delivery leaves this array empty.' },
     },
@@ -332,6 +344,7 @@ export function createStandardTurnEndExecutor(input: StandardTurnEndControlInput
         identity,
         outcome: parsed.outcome,
         summary: parsed.summary,
+        ...(parsed.inputRequest === undefined ? {} : { inputRequest: parsed.inputRequest }),
         ...(requestId === undefined ? {} : {
           acceptedEndCall: {
             requestId,

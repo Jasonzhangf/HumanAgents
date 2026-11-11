@@ -503,6 +503,7 @@ type ServiceExecutionPorts = Pick<
 type ServiceCoordinatorCallbacks = Pick<
   RuntimeTaskCoordinator,
   'publishCurrentTurnState' | 'closedTurnPlannerPool' | 'recordProviderRequestIdentity'
+  | 'openTaskInputRequest'
 >;
 
 /**
@@ -2439,7 +2440,9 @@ function apiError(error: unknown): UiRuntimeApiError {
     );
   }
   if (error instanceof RuntimeTaskControlError) {
-    const status = error.code.endsWith('.not.found') ? 404 : error.code === 'execution.input.required' ? 400 : 409;
+    const status = error.code.endsWith('.not.found') || error.code === 'task-input-request.not-found'
+      ? 404
+      : error.code === 'execution.input.required' ? 400 : 409;
     return new UiRuntimeApiError(error.code, error.ownerId, error.message, error.nextAction, status);
   }
   if (error instanceof AppLifecycleError) {
@@ -3299,6 +3302,7 @@ export class UiRuntimeService {
       publishCurrentTurnState: (taskId) => this.coordinator.publishCurrentTurnState(taskId),
       closedTurnPlannerPool: (taskId) => this.coordinator.closedTurnPlannerPool(taskId),
       recordProviderRequestIdentity: (event) => this.coordinator.recordProviderRequestIdentity(event),
+      openTaskInputRequest: (input) => this.coordinator.openTaskInputRequest(input),
     });
     this.resolveColdExecutionResumeRequest = executionPorts?.resolveColdExecutionResumeRequest;
     this.contextCorrectionPort = executionPorts?.executeConfirmedTaskContextCorrection;
@@ -5078,6 +5082,36 @@ export class UiRuntimeService {
 
   async productPendingDecision(scope: ProductReadRequestScope): Promise<ProductPendingDecision | null> {
     const selection = this.productSelectionForRequest(scope);
+    // The execution-time input request is the first pending decision: the task
+    // settled into a visible waiting state and the user must answer it before
+    // the same task can continue. It is read from the Runtime's own open
+    // request, never re-derived from a log or an internal identifier.
+    for (const task of this.coordinator.taskSnapshots()) {
+      if (selection.taskId !== undefined && task.taskId.value !== selection.taskId.value) continue;
+      const request = task.inputRequest;
+      if (request === undefined) continue;
+      const target = {
+        kind: 'interaction' as const,
+        taskRef: task.taskId,
+        scope: {
+          kind: 'task' as const,
+          projectKey: selection.projectKey,
+          mode: selection.mode,
+          taskId: task.taskId,
+        },
+      };
+      const decision: ProductPendingDecision = {
+        kind: 'task-input-request',
+        target,
+        request,
+        question: request.question,
+        actions: ['answer'],
+        state: 'waiting',
+        recoveryOwner: 'humanagent.runtime',
+      };
+      validateProductPendingDecision(decision);
+      return decision;
+    }
     const port = this.options.taskGrantPort;
     // Without the durable grant readback no task can be proven grant-blocked.
     if (port === undefined) return null;
@@ -6658,6 +6692,81 @@ export class UiRuntimeService {
       await this.coordinator.releaseExecution(taskId, allocation.operationId);
       this.watchExecutionForImplicitWakeup(allocation.operationId);
       return { operationId: allocation.operationId, executionEpoch: allocation.executionEpoch };
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * Open the one execution-time input request for this task.
+   *
+   * The implicit execution supplies only the model-owned semantic fact; this
+   * facade binds it to the exact task and execution identity, lets the Runtime
+   * mint the public request id and expected answer revision, and settles the
+   * task into a visible waiting state. The request is the only public fact the
+   * Dashboard and Task Detail read to render the answer control.
+   */
+  openTaskInputRequest(input: {
+    readonly taskId: TaskId;
+    readonly question: string;
+    readonly schemaRef: string;
+    readonly reason: string;
+    readonly impact: string;
+    readonly turnId: string;
+    readonly operationId: string;
+    readonly executionEpoch: number;
+    readonly expiresAt?: string;
+  }): import('../../../contracts/src/index.js').TaskInputRequest {
+    try {
+      return this.coordinator.openTaskInputRequest({
+        taskId: input.taskId,
+        question: input.question,
+        schemaRef: input.schemaRef,
+        reason: input.reason,
+        impact: input.impact,
+        turnId: input.turnId,
+        operationId: id('operation', input.operationId),
+        executionEpoch: input.executionEpoch,
+        ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+      });
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * Consume the exact answer for this task's open input request and continue
+   * the same task with its next execution cycle. A foreign task, unknown or
+   * already-consumed request, stale expected revision or empty answer is a
+   * typed refusal; it never creates a task or starts a second continuation.
+   */
+  async answerTaskInputRequest(input: {
+    readonly taskId: TaskId;
+    readonly requestId: string;
+    readonly answer: string;
+    readonly expectedRevision: number;
+  }): Promise<{
+    readonly taskId: TaskId;
+    readonly requestId: string;
+    readonly inputRevision: number;
+    readonly continuation: { readonly operationId: OperationId; readonly executionEpoch: number };
+  }> {
+    try {
+      const result = await this.coordinator.answerTaskInputRequest({
+        taskId: input.taskId,
+        requestId: input.requestId,
+        answer: input.answer,
+        expectedRevision: input.expectedRevision,
+      });
+      return {
+        taskId: result.taskId,
+        requestId: input.requestId,
+        inputRevision: result.inputRevision,
+        continuation: {
+          operationId: result.operationId,
+          executionEpoch: result.executionEpoch,
+        },
+      };
     } catch (error) {
       throw apiError(error);
     }

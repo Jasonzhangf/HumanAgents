@@ -300,6 +300,12 @@ export function createRuntimeApi(options = {}) {
         body: JSON.stringify(input),
       },
     ),
+    answerTaskInputRequest: (taskId, requestId, input) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/input-requests/${encodeURIComponent(requestId)}/answer`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
     // Formal intervention surface. The UI labels these actions 批准/拒绝, but
     // only the existing grant/revoke/stop routes exist; no approve/reject
     // server action is invented. The exact scope is mandatory.

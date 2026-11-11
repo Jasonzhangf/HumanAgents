@@ -1412,6 +1412,26 @@ async function handleRequest(
       writeJson(response, 201, created);
       return;
     }
+    // Public execution-time input relay. The user answers the exact open input
+    // request of one task; the Runtime consumes the request and continues the
+    // same task. The client supplies only the answer and the exact expected
+    // revision; it can never supply the authoritative task, request or epoch
+    // identity, which always come from the path and the Runtime's own request.
+    const taskInputAnswer = /^\/api\/tasks\/([^/]+)\/input-requests\/([^/]+)\/answer$/.exec(path);
+    if (taskInputAnswer !== null && method === 'POST') {
+      const taskId = id('task', decodeURIComponent(taskInputAnswer[1]!));
+      const requestId = decodeURIComponent(taskInputAnswer[2]!);
+      const body = await readBody(request);
+      const answer = requireString(body, 'answer');
+      const expectedRevision = requireNonNegativeInteger(body, 'expectedRevision');
+      writeJson(response, 200, await service.answerTaskInputRequest({
+        taskId,
+        requestId,
+        answer,
+        expectedRevision,
+      }));
+      return;
+    }
     if (path === '/api/tasks/bulk' && method === 'POST') {
       const body = await readBody(request);
       const action = requireString(body, 'action');

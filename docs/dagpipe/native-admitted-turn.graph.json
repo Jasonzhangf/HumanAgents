@@ -6,6 +6,7 @@
     "baseline": "f410f134aba33e73c1c783a843389d7fdc8f9d37",
     "status": "DESIGN-PLANNED",
     "scope": "一个已接受 WorkAssignment、一个 native child、一个 turn；不派发下一 turn，不展开 turn 内模型/工具循环或全局多 child DAG",
+    "inputRequiredBinding": "一个 turn 可以以 typed input-required 收口：模型只提供 question/schemaRef/reason/impact 语义事实，Runtime 把它绑定到精确 task、turn、operation 与 executionEpoch，并拥有 public requestId 与单调 expectedRevision。回答幂等消费该 request 后，同一 task 在下一个 execution cycle 继续；不新造 Task，也不静默等待。",
     "routingContract": "Edges are unconditional ARC dependencies; this installed DAGpipe grammar has no conditional-edge field. The fork is logical target topology: success projection and recovery-hold projection both run as pure envelope projections, exactly one is active, and the unique Z node joins both. No runtime conditional-routing evidence is claimed."
   },
   "inputs": [

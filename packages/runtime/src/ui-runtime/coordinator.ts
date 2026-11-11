@@ -42,6 +42,7 @@ import {
   type ScopeRef,
   type Task,
   type TaskId,
+  type TaskInputRequest,
   type RequirementEnvelope,
   type WorkAssignment,
   type WorkResult,
@@ -246,6 +247,8 @@ export interface RuntimeTaskSnapshot {
   readonly executionRelease?: 'prepared' | 'releasing' | 'released';
   readonly executionEpoch?: number;
   readonly cycleId?: string;
+  /** The one open input request that blocks continuation of this task, if any. */
+  readonly inputRequest?: TaskInputRequest;
   /** Rebuildable committed public-output projection for the current operation/epoch. */
   readonly publicOutput?: PublicOutputPublication;
   readonly orchestrated: boolean;
@@ -943,6 +946,13 @@ export interface TaskRecord {
    */
   inputRevisionState?: TaskRevisionState;
   consumedInputRevision?: number;
+  /**
+   * The one open execution-time input request for this task. The Runtime owns
+   * the request identity and the monotonic answer revision; answering it starts
+   * the next execution cycle of the same task. There is at most one open
+   * request per task, and it is consumed idempotently by its exact answer.
+   */
+  inputRequest?: TaskInputRequest;
   allowedActions: string[];
   runtime?: AgentRuntime;
   driver?: RuntimeExecutionDriver;
@@ -3789,6 +3799,193 @@ export class RuntimeTaskCoordinator {
     return record.inputRevisionState?.revisions.find((revision) => revision.inputRevision > consumed);
   }
 
+  /**
+   * Opens the one execution-time input request for this task. The caller
+   * supplies the model-owned semantic fact (question/schema/reason/impact) and
+   * the exact current execution identity; the Runtime owns the durable public
+   * request identity and the monotonic expected answer revision. The task
+   * settles into `waiting` with this exact request; it never keeps running
+   * silently and never becomes a generic blocked state.
+   */
+  openTaskInputRequest(input: {
+    readonly taskId: TaskId;
+    readonly question: string;
+    readonly schemaRef: string;
+    readonly reason: string;
+    readonly impact: string;
+    readonly turnId: string;
+    readonly operationId: OperationId;
+    readonly executionEpoch: number;
+    readonly expiresAt?: string;
+  }): TaskInputRequest {
+    const record = this.requireTask(input.taskId);
+    if (record.inputRequest !== undefined) {
+      throw new RuntimeTaskControlError(
+        'task-input-request.already-open',
+        RUNTIME_OWNER,
+        `task ${input.taskId.value} already has an open input request`,
+        `answer the open request ${record.inputRequest.requestId} first`,
+      );
+    }
+    for (const field of ['question', 'schemaRef', 'reason', 'impact', 'turnId'] as const) {
+      if (!input[field] || !input[field].trim()) {
+        throw new RuntimeTaskControlError(
+          'task-input-request.input-required',
+          RUNTIME_OWNER,
+          `task input request requires a non-empty ${field}`,
+          `provide the exact ${field} for this execution-time request`,
+        );
+      }
+    }
+    if (!Number.isSafeInteger(input.executionEpoch) || input.executionEpoch < 1) {
+      throw new RuntimeTaskControlError(
+        'task-input-request.execution-epoch',
+        RUNTIME_OWNER,
+        'task input request requires the exact current execution epoch',
+        'bind the request to the current execution identity',
+      );
+    }
+    const expectedRevision = (record.inputRevisionState?.revisions.at(-1)?.inputRevision
+      ?? record.consumedInputRevision
+      ?? 0) + 1;
+    const request: TaskInputRequest = {
+      requestId: `ui-input-request-${input.taskId.value}-${input.turnId}`,
+      taskId: record.taskId,
+      schemaRef: input.schemaRef,
+      reason: input.reason,
+      impact: input.impact,
+      question: input.question,
+      turnId: input.turnId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      expectedRevision,
+      ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+    };
+    record.inputRequest = request;
+    record.executionEpoch = input.executionEpoch;
+    record.state = 'waiting';
+    record.running = false;
+    record.stopping = false;
+    record.currentState = '等待补充信息';
+    record.nextStep = '回答后继续同一任务';
+    record.allowedActions = ['start'];
+    record.updatedAt = this.now().toISOString();
+    return structuredClone(request);
+  }
+
+  /** The one open input request of this task, or `undefined` when none. */
+  pendingTaskInputRequest(taskId: TaskId): TaskInputRequest | undefined {
+    const record = this.requireTask(taskId);
+    return record.inputRequest === undefined ? undefined : structuredClone(record.inputRequest);
+  }
+
+  /**
+   * Consumes the exact answer for this task's open input request.
+   *
+   * The answer is appended to the same task's monotonic input mailbox that the
+   * next execution cycle consumes FIFO, the request is consumed exactly once,
+   * and the continuation is the *next* execution cycle of the same task. A
+   * foreign task, an unknown request id, an already-consumed request or a
+   * stale expected revision is a typed error; it never starts a different
+   * task, a new task or a second continuation.
+   */
+  async answerTaskInputRequest(input: {
+    readonly taskId: TaskId;
+    readonly requestId: string;
+    readonly answer: string;
+    readonly expectedRevision: number;
+  }): Promise<{
+    readonly taskId: TaskId;
+    readonly inputRevision: number;
+    readonly operationId: OperationId;
+    readonly executionEpoch: number;
+  }> {
+    const record = this.requireTask(input.taskId);
+    const request = record.inputRequest;
+    if (request === undefined || request.requestId !== input.requestId) {
+      throw new RuntimeTaskControlError(
+        'task-input-request.not-found',
+        RUNTIME_OWNER,
+        `task ${input.taskId.value} has no open input request ${input.requestId}`,
+        'answer the exact open input request of this task',
+      );
+    }
+    if (request.taskId.value !== record.taskId.value) {
+      throw new RuntimeTaskControlError(
+        'task-input-request.task-mismatch',
+        RUNTIME_OWNER,
+        'the open input request belongs to a different task',
+        `answer the request through task ${request.taskId.value}`,
+      );
+    }
+    if (request.expectedRevision !== input.expectedRevision) {
+      throw new RuntimeTaskControlError(
+        'task-input-request.stale-revision',
+        RUNTIME_OWNER,
+        `expected answer revision ${request.expectedRevision}, got ${input.expectedRevision}`,
+        `resubmit the answer with expectedRevision ${request.expectedRevision}`,
+      );
+    }
+    const answer = input.answer.trim();
+    if (!answer) {
+      throw new RuntimeTaskControlError(
+        'task-input-request.answer-required',
+        RUNTIME_OWNER,
+        'the task input answer cannot be empty',
+        'provide the exact fact the question asked for',
+      );
+    }
+    const inputRevision = request.expectedRevision;
+    const envelope: RequirementEnvelope = {
+      requirementId: `input-answer:${request.requestId}`,
+      draftId: `input-answer-draft:${request.requestId}`,
+      inputRevision,
+      intent: 'append',
+      taskRef: record.taskId,
+      normalizedInput: answer,
+      confirmedBy: 'human.user',
+      confirmedAt: this.now().toISOString(),
+      fifoSeq: inputRevision,
+      payloadRef: `task-input-answer://${record.taskId.value}/${request.requestId}`,
+    };
+    const decision = appendTaskRevision({
+      ...(record.inputRevisionState === undefined ? {} : { task: record.inputRevisionState }),
+      envelope,
+      ownerId: RUNTIME_OWNER,
+    });
+    if (decision.status !== 'updated') {
+      throw new RuntimeTaskControlError(
+        decision.condition ?? 'task-input-request.answer-blocked',
+        decision.ownerId,
+        decision.reason,
+        `${decision.nextAction.kind}${decision.nextAction.ref ? `:${decision.nextAction.ref}` : ''}`,
+      );
+    }
+    record.inputRevisionState = decision.task;
+    record.inputRequest = undefined;
+    // The answer is consumed by the continuation cycle itself, so a second
+    // answer or a queued append cannot replay the same revision.
+    record.consumedInputRevision = inputRevision;
+    const previousOperation = record.operationId === undefined
+      ? undefined
+      : this.operations.get(record.operationId.value);
+    const previousAllocation = previousOperation?.allocation;
+    const allocation = this.prepareExecution(record.taskId, {
+      prompt: answer,
+      orchestrate: previousOperation?.orchestrated === true,
+      ...(previousAllocation?.role === undefined ? {} : { role: previousAllocation.role }),
+      ...(previousAllocation?.configuredAgentId === undefined
+        ? {} : { configuredAgentId: previousAllocation.configuredAgentId }),
+    });
+    await this.releaseExecution(record.taskId, allocation.operationId);
+    return {
+      taskId: record.taskId,
+      inputRevision,
+      operationId: allocation.operationId,
+      executionEpoch: allocation.executionEpoch,
+    };
+  }
+
   consumeTaskInput(taskId: TaskId, inputRevision: number): void {
     const record = this.requireTask(taskId);
     if (inputRevision < (record.consumedInputRevision ?? 0)) return;
@@ -6187,9 +6384,11 @@ export class RuntimeTaskCoordinator {
       if (record.postCommitRecoveryPending || !closure) return;
       const settledClosure = closure;
       record.running = false;
-      record.currentState = '收拢中';
-      record.nextStep = '等待 checkpoint';
-      record.allowedActions = [];
+      if (record.inputRequest === undefined) {
+        record.currentState = '收拢中';
+        record.nextStep = '等待 checkpoint';
+        record.allowedActions = [];
+      }
       const closeDriver = driver ?? record.driver;
       if (!closeDriver) {
         throw new RuntimeTaskControlError(
@@ -6213,6 +6412,31 @@ export class RuntimeTaskCoordinator {
         }
         return this.closeForExecution(operation.operationId, closeDriver, settledClosure.evidenceRefs);
       };
+      if (record.inputRequest !== undefined) {
+        const closed = await closeProvider();
+        if (closed.state !== 'closed') {
+          throw new RuntimeTaskControlError('provider.close.failed', closed.ownerId ?? RUNTIME_OWNER,
+            `provider close is ${closed.state}`, toNextActionText(closed.nextAction) ?? 'inspect provider close evidence');
+        }
+        this.pushEvent(
+          record,
+          operation,
+          'execution.terminal',
+          'waiting',
+          '等待用户补充信息',
+          [...settledClosure.evidenceRefs, ...closed.evidenceRefs],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'final',
+        );
+        this.finalize(record, 'waiting');
+        record.currentState = '等待补充信息';
+        record.nextStep = '回答后继续同一任务';
+        record.allowedActions = ['start'];
+        return;
+      }
       if (closeDriver.standardTurn) {
         // The same canonical tail the cold resumed lane runs: adopt the real
         // closing checkpoint, close the owned Provider, align, then apply the
@@ -7818,6 +8042,7 @@ export class RuntimeTaskCoordinator {
           : record.release?.state === 'prepared' ? 'prepared' : undefined,
       executionEpoch: record.executionEpoch,
       cycleId: record.cycleId?.value,
+      ...(record.inputRequest === undefined ? {} : { inputRequest: structuredClone(record.inputRequest) }),
       publicOutput: record.publicOutput,
       orchestrated: record.orchestrated,
       ...(record.planRevision === undefined ? {} : { planRevision: record.planRevision }),

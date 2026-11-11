@@ -765,7 +765,19 @@ export interface MemoryComparisonView {
 
 export interface OrganHealthSnapshot { readonly organId: OrganId; readonly checkedAt: string; readonly expiresAt: string; readonly overall: HealthState; readonly functions: readonly { readonly functionId: string; readonly status: 'healthy' | 'degraded' | 'failed' | 'unknown'; readonly measurements: readonly { readonly name: string; readonly value: string | number; readonly unit?: string }[]; readonly evidenceRefs: readonly EvidenceRef[] }[]; }
 export interface Attention { readonly attentionId: string; readonly scope: ScopeRef; readonly severity: 'info' | 'attention' | 'blocker'; readonly state: 'open' | 'recovering' | 'resolved'; readonly message: string; readonly evidenceRefs: readonly EvidenceRef[]; readonly ownerId?: string; readonly nextAction?: NextAction; readonly relatedAttentionId?: string; }
-export interface TaskInputRequest { readonly requestId: string; readonly taskId: TaskId; readonly schemaRef: string; readonly reason: string; readonly impact: string; readonly expiresAt?: string; }
+export interface TaskInputRequest {
+  readonly requestId: string;
+  readonly taskId: TaskId;
+  readonly schemaRef: string;
+  readonly reason: string;
+  readonly impact: string;
+  readonly question: string;
+  readonly turnId: string;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly expectedRevision: number;
+  readonly expiresAt?: string;
+}
 export interface TaskInput { readonly taskId: TaskId; readonly inputRevision: number; readonly payload: BusinessPayload; readonly source: 'human' | 'notification' | 'agent'; }
 export interface TaskOutput { readonly taskId: TaskId; readonly state: 'partial' | 'succeeded' | 'failed' | 'waiting'; readonly summary: string; readonly result: BusinessPayload; readonly artifactRefs: readonly string[]; readonly evidenceRefs: readonly EvidenceRef[]; }
 export interface TaskInteraction { readonly taskId: TaskId; readonly input?: TaskInput; readonly inputRequest?: TaskInputRequest; readonly output?: TaskOutput; }

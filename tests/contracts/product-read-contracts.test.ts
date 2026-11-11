@@ -378,15 +378,19 @@ test('pending decisions match the O2 control facts and never fake unavailable ap
     request: {
       requestId: 'request-a',
       taskId: taskA,
-      schemaRef: 'schema-a',
+      schemaRef: 'humanagent://input/text/v1',
       reason: 'A field is missing.',
       impact: 'The task cannot continue.',
+      question: '请补充缺失字段。',
+      turnId: 'turn-a',
+      operationId: id('operation', 'operation-a'),
+      executionEpoch: 1,
+      expectedRevision: 0,
     },
-    question: 'The task input request type has no producer or route.',
-    actions: [],
-    state: 'unavailable',
-    unavailableReason: 'TaskInputRequest is a dead type with no producer, route or consumer.',
-    recoveryOwner: 'humanagent.runtime.explicit-brain',
+    question: '请补充缺失字段。',
+    actions: ['answer'],
+    state: 'waiting',
+    recoveryOwner: 'humanagent.runtime',
   };
   assert.doesNotThrow(() => validateProductPendingDecision(inputDecision));
   assert.throws(

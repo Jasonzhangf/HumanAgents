@@ -6,10 +6,11 @@
  * or a second decision store:
  *
  *  - `renderPendingDecision(host, decision, handlers)` renders one C-contract
- *    `ProductPendingDecision`. Only the `task-grant` branch carries a formal
- *    action. The `task-input-request` and `attention-decision` branches have no
- *    public disposal route, so they render their real unavailable reason and
- *    never grow an approve/reject button.
+ *    `ProductPendingDecision`. The `task-grant` branch carries grant/revoke and
+ *    the `task-input-request` branch carries the formal answer control. The
+ *    `attention-decision` branch still has no public disposal route, so it
+ *    renders its real unavailable reason and never grows an approve/reject
+ *    button.
  *  - `openDecisionModal(...)` opens the approval surface. A close (or a
  *    navigation away that drops the modal) writes nothing. Only an explicit
  *    approve/reject calls the injected transport, and approve/reject are just
@@ -396,6 +397,43 @@ function actionControls(make, decision, handlers) {
  * caller supplies `handlers.onIntent(intent, decision)` and owns the modal or
  * the formal call. No transport is touched here.
  */
+function taskInputRequestControls(make, decision, handlers) {
+  const container = make('div', undefined, 'product-control-input-request')
+  const target = decision?.target
+  const request = decision?.request
+  const taskRef = target?.kind === 'interaction' ? target.taskRef : undefined
+  const taskId = nonEmptyText(taskRef?.value) ? taskRef.value : undefined
+  const requestId = nonEmptyText(request?.requestId) ? request.requestId : undefined
+  const expectedRevision = Number.isSafeInteger(request?.expectedRevision) ? request.expectedRevision : undefined
+  if (nonEmptyText(request?.reason)) {
+    container.append(make('p', request.reason, 'product-control-decision-reason'))
+  }
+  if (nonEmptyText(request?.impact)) {
+    container.append(make('p', request.impact, 'muted'))
+  }
+  const field = make('input')
+  field.type = 'text'
+  field.setAttribute('type', 'text')
+  field.setAttribute('data-product-role', 'task-input-answer')
+  field.setAttribute('placeholder', '输入补充信息')
+  field.setAttribute('aria-label', '补充信息')
+  container.append(field)
+  const canSubmit = taskId !== undefined && requestId !== undefined
+    && expectedRevision !== undefined && typeof handlers?.onAnswer === 'function'
+  const button = makeButton(make, '提交回答', !canSubmit, 'task-input-answer-submit', 'answer')
+  button.addEventListener('click', () => {
+    if (button.disabled) return
+    const answer = typeof field.value === 'string' ? field.value.trim() : ''
+    if (answer.length === 0) {
+      field.setAttribute('aria-invalid', 'true')
+      return
+    }
+    handlers.onAnswer({ taskId, requestId, expectedRevision, answer })
+  })
+  container.append(button)
+  return container
+}
+
 export function renderPendingDecision(host, decision, handlers = {}) {
   requireHost(host)
   const make = resolveElementFactory(host, handlers)
@@ -418,6 +456,8 @@ export function renderPendingDecision(host, decision, handlers = {}) {
     root.append(targetNode(make, decision.target))
     root.append(readbackNode(make, readbackState(decision.readback)))
     root.append(actionControls(make, decision, handlers))
+  } else if (decision?.kind === 'task-input-request') {
+    root.append(taskInputRequestControls(make, decision, handlers))
   } else {
     if (nonEmptyText(decision?.unavailableReason)) {
       root.append(make('p', decision.unavailableReason, 'product-control-unavailable'))

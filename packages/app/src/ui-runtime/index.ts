@@ -595,6 +595,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           now: executionNow,
           currentState,
           publishCurrentTurnState: (taskId) => coordinator.publishCurrentTurnState(taskId),
+          openTaskInputRequest: (input) => coordinator.openTaskInputRequest(input),
           closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
           taskIdentity,
           i2Journal,
