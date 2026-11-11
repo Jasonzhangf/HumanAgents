@@ -156,3 +156,49 @@ test('runtime projection sanitizes raw output while retaining the real failure',
   assertNoInternalFields(JSON.stringify(row.publicOutput), 'projected public output')
   assert.match(JSON.stringify(row.publicOutput), /执行失败：真实失败原因/u)
 })
+
+test('runtime projection preserves significant output whitespace while removing hidden markers', async () => {
+  const { projectRuntimeTaskList } = await import('../../dist/app/ui/projection/runtime.js')
+  const rawOutput = [
+    '  leading content',
+    '',
+    '保留的失败原因：真实失败原因',
+    '<thinking>hidden</thinking>',
+    providerResultId,
+    '回答',
+    '证据：',
+    '   ',
+    'trailing content  ',
+  ].join('\n')
+  const expectedOutput = [
+    '  leading content',
+    '',
+    '保留的失败原因：真实失败原因',
+    'hidden',
+    '',
+    '   ',
+    'trailing content  ',
+  ].join('\n')
+  const row = projectRuntimeTaskList({
+    mode: 'fake',
+    tasks: [{
+      taskId: fixture.taskId,
+      title: '输出空白保留',
+      state: 'failed',
+      currentState: 'failed',
+      nextStep: '查看失败原因',
+      updatedAt: '2026-11-10T18:58:05.000Z',
+      input: '检查空白保留',
+      output: rawOutput,
+      currentNode: 'execution.terminal',
+      allowedActions: [],
+      recentEvents: [],
+      publicOutput: { state: 'unavailable', commits: [] },
+    }],
+  }).failed[0]
+
+  assert.equal(row.output, expectedOutput)
+  assert.doesNotMatch(row.output, /<thinking>/u)
+  assertNoInternalFields(row.output, 'whitespace-preserving projected task output')
+  assert.match(row.output, /保留的失败原因：真实失败原因/u)
+})
