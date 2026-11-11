@@ -3954,8 +3954,6 @@ async function refresh() {
       return
     }
     if (explicitScope) {
-      closeStream()
-      subscribedOperationId = undefined
       stopObserving()
       const read = await scopedTaskRead.refresh({ ...explicitScope, ...(agentQuery ? { agentQuery } : {}) })
       if (pageDisposed) return
@@ -4102,12 +4100,31 @@ async function revokeTaskGrantControl() {
 
 let streamRefreshInFlight = false
 let streamRefreshQueued = false
+let streamRefreshTimer
+let lastStreamRefreshAt = 0
+
+// Streamed provider activity can arrive far faster than the page needs to
+// redraw. Keep at most one stream-triggered read in flight and space the reads
+// out, so a long streaming request no longer turns every event into a read.
+const STREAM_REFRESH_MIN_INTERVAL_MS = 500
+
 function scheduleStreamRefresh() {
+  if (pageDisposed) return
   if (streamRefreshInFlight) {
     streamRefreshQueued = true
     return
   }
+  if (streamRefreshTimer) return
+  const wait = STREAM_REFRESH_MIN_INTERVAL_MS - (Date.now() - lastStreamRefreshAt)
+  if (wait > 0) {
+    streamRefreshTimer = setTimeout(() => {
+      streamRefreshTimer = undefined
+      scheduleStreamRefresh()
+    }, wait)
+    return
+  }
   streamRefreshInFlight = true
+  lastStreamRefreshAt = Date.now()
   void refresh()
     .catch(setRefreshError)
     .finally(() => {
@@ -4121,10 +4138,16 @@ function scheduleStreamRefresh() {
 
 function subscribe(operationId) {
   if (subscribedOperationId === operationId && stream && stream.readyState !== EventSource.CLOSED && connectionState !== 'disconnected') return
+  const continuingSameOperation = subscribedOperationId === operationId
   closeStream()
   subscribedOperationId = undefined
-  lastSeenSeq = 0
-  seenEventIds.clear()
+  // A reconnect to the same operation must keep the replay watermark so the
+  // server's full-history replay is deduplicated instead of being treated as
+  // fresh events. Only a real operation change starts sequencing over.
+  if (!continuingSameOperation) {
+    lastSeenSeq = 0
+    seenEventIds.clear()
+  }
   closingStream = false
   stream = new EventSource(api.eventsUrl(operationId))
   for (const kind of [
@@ -4234,6 +4257,10 @@ function disposePage(event) {
   window.removeEventListener('offline', handleOffline)
   window.removeEventListener('online', handleOnline)
   refreshButton.removeEventListener('click', refreshPage)
+  if (streamRefreshTimer) {
+    clearTimeout(streamRefreshTimer)
+    streamRefreshTimer = undefined
+  }
   stopObserving()
   closeStream()
   closeAgentDetail()
