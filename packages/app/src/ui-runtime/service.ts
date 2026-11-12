@@ -5082,40 +5082,36 @@ export class UiRuntimeService {
 
   async productPendingDecision(scope: ProductReadRequestScope): Promise<ProductPendingDecision | null> {
     const selection = this.productSelectionForRequest(scope);
+    const runtimeTasks = this.coordinator.taskSnapshots();
     // The execution-time input request is the first pending decision: the task
     // settled into a visible waiting state and the user must answer it before
     // the same task can continue. It is read from the Runtime's own open
     // request, never re-derived from a log or an internal identifier.
-    for (const task of this.coordinator.taskSnapshots()) {
+    for (const task of runtimeTasks) {
       if (selection.taskId !== undefined && task.taskId.value !== selection.taskId.value) continue;
       const request = task.inputRequest;
       if (request === undefined) continue;
-      const target = {
-        kind: 'interaction' as const,
-        taskRef: task.taskId,
-        scope: {
-          kind: 'task' as const,
-          projectKey: selection.projectKey,
-          mode: selection.mode,
-          taskId: task.taskId,
-        },
-      };
-      const decision: ProductPendingDecision = {
-        kind: 'task-input-request',
-        target,
-        request,
-        question: request.question,
-        actions: ['answer'],
-        state: 'waiting',
-        recoveryOwner: 'humanagent.runtime',
-      };
-      validateProductPendingDecision(decision);
-      return decision;
+      return this.taskInputRequestDecision(task.taskId, request, selection);
+    }
+    // The new-task flow surfaces a user-facing parent Task and executes a child
+    // occurrence. The Runtime opens the request on that child, so the parent
+    // detail page must still receive the exact same typed request under its own
+    // identity; the answer facade resolves the child that owns the request.
+    if (selection.taskId !== undefined) {
+      const snapshots = await this.snapshotsWithIdentitySource();
+      const childIds = new Set(snapshots
+        .filter((snapshot) => snapshot.executionLineage?.parentTaskId.value === selection.taskId!.value)
+        .map((snapshot) => snapshot.taskId.value));
+      const child = runtimeTasks.find((task) =>
+        childIds.has(task.taskId.value) && task.inputRequest !== undefined);
+      if (child?.inputRequest !== undefined) {
+        return this.taskInputRequestDecision(selection.taskId, child.inputRequest, selection);
+      }
     }
     const port = this.options.taskGrantPort;
     // Without the durable grant readback no task can be proven grant-blocked.
     if (port === undefined) return null;
-    for (const task of this.coordinator.taskSnapshots()) {
+    for (const task of runtimeTasks) {
       if (selection.taskId !== undefined && task.taskId.value !== selection.taskId.value) continue;
       // A retained prepared operation is the real admission wait. A waiting
       // row without that custody, or with any recorded grant fact, is not a
@@ -5146,6 +5142,62 @@ export class UiRuntimeService {
       return decision;
     }
     return null;
+  }
+
+  /**
+   * A public input-request decision bound to the exact task identity the reader
+   * selected. When the open request lives on a child occurrence, the request is
+   * presented under the user-facing task; the answer facade resolves the child.
+   */
+  private taskInputRequestDecision(
+    facingTaskId: TaskId,
+    request: Extract<ProductPendingDecision, { readonly kind: 'task-input-request' }>['request'],
+    selection: ProductReadSelection,
+  ): ProductPendingDecision {
+    const target = {
+      kind: 'interaction' as const,
+      taskRef: facingTaskId,
+      scope: {
+        kind: 'task' as const,
+        projectKey: selection.projectKey,
+        mode: selection.mode,
+        taskId: facingTaskId,
+      },
+    };
+    const projectedRequest = request.taskId.value === facingTaskId.value
+      ? request
+      : { ...request, taskId: facingTaskId };
+    const decision: ProductPendingDecision = {
+      kind: 'task-input-request',
+      target,
+      request: projectedRequest,
+      question: request.question,
+      actions: ['answer'],
+      state: 'waiting',
+      recoveryOwner: 'humanagent.runtime',
+    };
+    validateProductPendingDecision(decision);
+    return decision;
+  }
+
+  /**
+   * The runtime task that owns an open input request. A user-facing parent Task
+   * resolves to its current child occurrence; every other Task is its own owner.
+   * Only an exact committed lineage edge or a direct match counts, so an
+   * unrelated request can never be answered through this task.
+   */
+  private async taskInputRequestRuntimeOwner(taskId: TaskId, requestId: string): Promise<TaskId> {
+    const runtimeTasks = this.coordinator.taskSnapshots();
+    const direct = runtimeTasks.find((task) =>
+      task.taskId.value === taskId.value && task.inputRequest?.requestId === requestId);
+    if (direct !== undefined) return taskId;
+    const snapshots = await this.snapshotsWithIdentitySource();
+    const owner = runtimeTasks.find((task) =>
+      task.inputRequest?.requestId === requestId
+      && snapshots.some((snapshot) =>
+        snapshot.taskId.value === task.taskId.value
+        && snapshot.executionLineage?.parentTaskId.value === taskId.value));
+    return owner?.taskId ?? taskId;
   }
 
   /**
@@ -6752,8 +6804,12 @@ export class UiRuntimeService {
     readonly continuation: { readonly operationId: OperationId; readonly executionEpoch: number };
   }> {
     try {
+      // A user-facing parent Task receives its child's relayed request. Resolve
+      // the exact runtime owner before consuming the answer, so the typed
+      // decision always continues the task that opened the request.
+      const runtimeTaskId = await this.taskInputRequestRuntimeOwner(input.taskId, input.requestId);
       const result = await this.coordinator.answerTaskInputRequest({
-        taskId: input.taskId,
+        taskId: runtimeTaskId,
         requestId: input.requestId,
         answer: input.answer,
         expectedRevision: input.expectedRevision,
