@@ -758,10 +758,12 @@ function clearEntryError() {
   setEntryError(null)
 }
 
-function renderStatus(summary, rows) {
+function renderStatus(summary, tasks) {
   const section = template.hosts.primary.querySelector('#entry-live')
   if (!section) return
   clearNode(section)
+  const rows = taskRows(tasks)
+  const activeRows = activeTaskRows(tasks)
   const head = element('header', undefined, 'section-head')
   head.append(element('h2', '队列与任务状态'), element('span', `${rows.length} 项`, 'section-meta'))
   section.append(head)
@@ -791,18 +793,19 @@ function renderStatus(summary, rows) {
   }
   section.append(stats)
 
-  // The entry main column keeps only the compact status summary. The full task
-  // list is not duplicated here: it lives in the shared drawer, opened only
-  // when the human asks for it.
+  // The entry main column keeps only the compact status summary. The Task List
+  // page is the single full list surface. The shared drawer only previews the
+  // active attention subset (draft, waiting, running) and links to that full
+  // list, so the two surfaces never present the same full list.
   if (rows.length === 0) {
     section.append(element('p', confirmation ? '需求已提交，等待隐式队列创建任务。' : '尚未提交任务。', 'empty'))
   }
-  const trigger = element('button', '任务列表', 'button button--quiet')
+  const trigger = element('button', '当前任务', 'button button--quiet')
   trigger.type = 'button'
   trigger.dataset.taskListDrawerTrigger = 'true'
   trigger.setAttribute('aria-haspopup', 'dialog')
-  trigger.setAttribute('aria-label', `打开任务列表（${rows.length} 项）`)
-  trigger.addEventListener('click', () => openTaskListDrawer(rows, trigger))
+  trigger.setAttribute('aria-label', `查看当前任务（${activeRows.length} 项）`)
+  trigger.addEventListener('click', () => openActiveTasksDrawer(activeRows, trigger))
   section.append(trigger)
 }
 
@@ -846,20 +849,34 @@ function taskListEntries(rows) {
   return fragment
 }
 
-// The entry task list drawer. It reuses the shared shell-layer frame through
+// The entry attention drawer. It reuses the shared shell-layer frame through
 // openTechnicalDetail, so it is the same desktop side panel / mobile bottom
 // drawer as the rest of the product and never a second overlay primitive.
-function openTaskListDrawer(rows, trigger) {
+// It intentionally shows only the active subset; the Task List page owns the
+// complete index and is reachable from the drawer's "查看全部任务" link.
+function openActiveTasksDrawer(activeRows, trigger) {
   const body = element('div', undefined, 'panel stack entry-task-list-drawer')
   body.dataset.taskListDrawer = 'true'
-  body.append(taskListEntries(rows))
-  if (rows.length === 0) body.append(element('p', '当前没有任务。', 'empty'))
+  if (activeRows.length === 0) body.append(element('p', '当前没有进行中或待处理任务。', 'empty'))
+  else body.append(taskListEntries(activeRows))
+  const allTasks = element('a', '查看全部任务', 'button button--quiet')
+  allTasks.href = './tasks.html'
+  allTasks.dataset.entryAllTasks = 'true'
+  body.append(allTasks)
   openTechnicalDetail({
-    eyebrow: '任务列表',
-    title: rows.length === 0 ? '当前任务' : `当前任务（${rows.length}）`,
+    eyebrow: '进行中与待处理',
+    title: `当前任务（${activeRows.length}）`,
     content: body,
     trigger,
   })
+}
+
+function activeTaskRows(tasks) {
+  return [
+    ...(tasks?.draft ?? []),
+    ...(tasks?.waiting ?? []),
+    ...(tasks?.running ?? []),
+  ]
 }
 
 function taskRows(tasks) {
@@ -879,7 +896,7 @@ async function refreshQueue() {
     const { runtimeStatus, tasks } = await readEntryQueue(api)
     if (pageLeaving) return
     latestRuntimeStatus = runtimeStatus
-    renderStatus(runtimeStatus, taskRows(tasks))
+    renderStatus(runtimeStatus, tasks)
   } catch (error) {
     if (pageLeaving) return
     const panel = template.hosts.primary.querySelector('#entry-live')

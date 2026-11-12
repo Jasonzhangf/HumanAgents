@@ -2,7 +2,7 @@
 
 /**
  * Real-browser proof for the entry task-list drawer (requirement v35
- * `humanagent-entry-task-list-in-drawer`).
+ * `humanagent-entry-task-list-in-drawer`) and the Gate5 dedup contract.
  *
  * The proof starts a test-only static server for this worktree's docs/ui and
  * proxies /api/* to the live runtime. It reads /api/tasks from that runtime
@@ -75,6 +75,14 @@ function listedTasks(tasks) {
   ]
 }
 
+function activeTasks(tasks) {
+  return [
+    ...(tasks?.draft ?? []),
+    ...(tasks?.waiting ?? []),
+    ...(tasks?.running ?? []),
+  ]
+}
+
 function sourceTitle(task) {
   return typeof task?.semanticTitle === 'string' && task.semanticTitle.trim() !== ''
     ? task.semanticTitle.trim()
@@ -92,24 +100,33 @@ function sameArray(left, right) {
 function readMainColumn() {
   const section = document.querySelector('#entry-live')
   const trigger = section?.querySelector('button[data-task-list-drawer-trigger="true"]') ?? null
+  const navLinks = [...document.querySelectorAll('.topnav a')].map((link) => ({
+    label: (link.textContent || '').trim(),
+    href: link.getAttribute('href'),
+  }))
   return {
     inlineRows: section ? section.querySelectorAll('a.task-row-link').length : -1,
     hasTrigger: Boolean(trigger),
     triggerLabel: (trigger?.textContent || '').trim(),
     triggerHaspopup: trigger?.getAttribute('aria-haspopup') ?? null,
     summaryText: (section?.textContent || '').replace(/\s+/g, ' ').trim(),
+    navLinks,
+    newTaskLinks: navLinks.filter((link) => link.label === '新建 Task'),
   }
 }
 
-function readDrawerRows() {
+function readDrawer() {
   const body = document.querySelector('dialog[data-technical-detail="true"][open] [data-task-list-drawer="true"]')
   if (!body) return null
-  return [...body.querySelectorAll('a.task-row-link')].map((link) => ({
-    taskId: link.dataset.taskId,
-    status: link.dataset.taskStatus,
-    heading: (link.querySelector('h3')?.textContent || '').trim(),
-    href: link.getAttribute('href'),
-  }))
+  return {
+    rows: [...body.querySelectorAll('a.task-row-link')].map((link) => ({
+      taskId: link.dataset.taskId,
+      status: link.dataset.taskStatus,
+      heading: (link.querySelector('h3')?.textContent || '').trim(),
+      href: link.getAttribute('href'),
+    })),
+    allTasksHref: body.querySelector('a[data-entry-all-tasks="true"]')?.getAttribute('href') ?? null,
+  }
 }
 
 await mkdir(evidenceRoot, { recursive: true })
@@ -126,6 +143,10 @@ try {
   const expectedIds = expectedTasks.map((task) => taskIdValue(task.taskId))
   const expectedStatuses = expectedTasks.map(sourceStatus)
   const expectedTitles = expectedTasks.map(sourceTitle)
+  const expectedActiveTasks = activeTasks(api.body)
+  const expectedActiveIds = expectedActiveTasks.map((task) => taskIdValue(task.taskId))
+  const expectedActiveStatuses = expectedActiveTasks.map(sourceStatus)
+  const expectedActiveTitles = expectedActiveTasks.map(sourceTitle)
   const taskSource = {
     url: `${server.runtimeBase}/api/tasks`,
     status: api.status,
@@ -135,6 +156,7 @@ try {
     mode: api.body.mode,
     counts: api.body.counts,
     taskIds: expectedIds,
+    activeTaskIds: expectedActiveIds,
     stateLabels: [...new Set(expectedStatuses)],
     titles: expectedTitles,
   }
@@ -144,7 +166,7 @@ try {
   record('live /api/tasks observation records every task id', sameArray(taskSource.taskIds, expectedIds), taskSource.taskIds)
 
   const VIEWPORTS = [
-    { label: 'desktop-1440', viewport: { width: 1440, height: 1000 } },
+    { label: 'desktop-1280', viewport: { width: 1280, height: 720 } },
     { label: 'mobile-390', viewport: { width: 390, height: 844 } },
   ]
 
@@ -174,6 +196,7 @@ try {
       observe(`${label} entry main column`, main)
       record(`${label} entry main column exposes the task-list trigger`, main.hasTrigger === true, main)
       record(`${label} entry main column does not render the inline task list rows`, main.inlineRows === 0, main.inlineRows)
+      record(`${label} entry topbar omits the duplicate new-task link`, main.newTaskLinks.length === 0, main.navLinks)
       record(
         `${label} entry main column keeps the live task count`,
         main.summaryText.includes('任务数量') && main.summaryText.includes(String(expectedTasks.length)),
@@ -186,28 +209,34 @@ try {
         .locator('dialog[data-technical-detail="true"][open] [data-task-list-drawer="true"]')
         .first()
         .waitFor({ state: 'visible', timeout: 5_000 })
-      const rows = await page.evaluate(readDrawerRows)
-      observe(`${label} drawer rows`, rows)
-      record(`${label} the drawer opens with the live task list`, Array.isArray(rows) && rows.length === expectedTasks.length, rows)
+      const drawer = await page.evaluate(readDrawer)
+      const rows = drawer?.rows
+      observe(`${label} drawer`, drawer)
+      record(`${label} the drawer opens with the live active-task preview`, Array.isArray(rows) && rows.length === expectedActiveTasks.length, rows)
       record(
         `${label} drawer rows carry the live task ids`,
-        sameArray((rows ?? []).map((row) => row.taskId), expectedIds),
-        { expected: expectedIds, actual: (rows ?? []).map((row) => row.taskId) },
+        sameArray((rows ?? []).map((row) => row.taskId), expectedActiveIds),
+        { expected: expectedActiveIds, actual: (rows ?? []).map((row) => row.taskId) },
       )
       record(
         `${label} drawer rows carry the live task states`,
-        sameArray((rows ?? []).map((row) => row.status), expectedStatuses),
-        { expected: expectedStatuses, actual: (rows ?? []).map((row) => row.status) },
+        sameArray((rows ?? []).map((row) => row.status), expectedActiveStatuses),
+        { expected: expectedActiveStatuses, actual: (rows ?? []).map((row) => row.status) },
       )
       record(
         `${label} drawer rows carry the live semantic titles`,
-        sameArray((rows ?? []).map((row) => row.heading), expectedTitles),
-        { expected: expectedTitles, actual: (rows ?? []).map((row) => row.heading) },
+        sameArray((rows ?? []).map((row) => row.heading), expectedActiveTitles),
+        { expected: expectedActiveTitles, actual: (rows ?? []).map((row) => row.heading) },
       )
       record(
         `${label} drawer rows link to the task dashboard`,
         (rows ?? []).every((row) => typeof row.href === 'string' && row.href.includes('task-dashboard.html')),
         (rows ?? []).map((row) => row.href),
+      )
+      record(
+        `${label} the active-task preview links to the full Task List page`,
+        drawer?.allTasksHref === './tasks.html',
+        drawer?.allTasksHref,
       )
 
       const overflow = await page.evaluate(() => {
@@ -269,7 +298,7 @@ try {
           'dialog[data-technical-detail="true"][open] [data-task-list-drawer="true"] a.task-row-link',
         ).length,
       )
-      record(`${label} the drawer reopens with the same live task list`, reopened === expectedTasks.length, reopened)
+      record(`${label} the drawer reopens with the same live active-task preview`, reopened === expectedActiveTasks.length, reopened)
       await page.keyboard.press('Escape')
       await page.locator('dialog[data-technical-detail="true"]').first().waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => {})
       record(

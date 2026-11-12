@@ -273,6 +273,11 @@ function classed(element, className) {
   return element.className.split(/\s+/).includes(className)
 }
 
+function topbarLinks(topbar) {
+  const nav = topbar.children.find((child) => child.tagName === 'NAV' && classed(child, 'topnav'))
+  return nav?.children.filter((child) => child.tagName === 'A') ?? []
+}
+
 test('a root row with its own blocked facts keeps its own task link while listing one child execution', () => {
   const rootTaskId = { value: 'task-shell-root' }
   const childTaskId = { value: 'task-shell-child' }
@@ -354,6 +359,23 @@ test('mountProductShell exposes stable board, center, relation, drawer and confi
 
   product.dispose()
   assert.equal(root.children.length, 0)
+})
+
+test('the topbar keeps one new-task entry without duplicating the entry form', () => {
+  const entryLinks = topbarLinks(runtimeShell.makeTopbar('新建 Task'))
+  assert.deepEqual(entryLinks.map((link) => link.textContent), ['Dashboard', 'Task List', 'Memory'])
+  assert.equal(entryLinks.some((link) => link.href === './index.html'), false)
+
+  const dashboardLinks = topbarLinks(runtimeShell.makeTopbar('Dashboard'))
+  assert.deepEqual(dashboardLinks.map((link) => link.textContent), [
+    'Dashboard',
+    'Task List',
+    '新建 Task',
+    'Memory',
+  ])
+  const newTask = dashboardLinks.find((link) => link.textContent === '新建 Task')
+  assert.equal(newTask?.href, './index.html')
+  assert.equal(dashboardLinks.find((link) => link.textContent === 'Dashboard')?.getAttribute('aria-current'), 'page')
 })
 
 test('board navigation and relation share one drawer and restore hosts on close', () => {

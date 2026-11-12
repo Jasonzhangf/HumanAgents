@@ -1,0 +1,536 @@
+{
+  "uiRoot": "/Volumes/Intel/playground/humanagent/p1-mvp-gate5-entry-dedup-fix-20261112/docs/ui",
+  "rccBaseUrl": "http://127.0.0.1:4444",
+  "rccModel": "goaichat.glm-5.3",
+  "checks": [
+    {
+      "name": "defectA feedback is readable in the read-only region",
+      "pass": true,
+      "detail": "意图create规范化输入整理这条需求并生成草稿 (规范化)已知事实用户提供了一条业务输入；显式大脑已完成整理建议提交后执行：整理这条需求并生成草稿 (规范化)"
+    },
+    {
+      "name": "defectA no editable normalizedInput control exists",
+      "pass": true,
+      "detail": false
+    },
+    {
+      "name": "defectA feedback text never appears in an editable value",
+      "pass": true,
+      "detail": [
+        "manual",
+        "auto",
+        "ui:interaction",
+        "1",
+        "整理这条需求并生成草稿",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "[]",
+        "提交后执行整理好的需求",
+        "",
+        "draft-interaction-1",
+        "1",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "defectA interaction page has no page errors",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "desktop no second confirmation button exists",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "desktop one submit stays on the entry index",
+      "pass": true,
+      "detail": "http://humanagent.entry-flow.test/index.html"
+    },
+    {
+      "name": "desktop one submit renders the exact committed task id",
+      "pass": true,
+      "detail": {
+        "taskId": "ui-task-1",
+        "expectedTaskId": "ui-task-1"
+      }
+    },
+    {
+      "name": "desktop one submit task row links to the task dashboard",
+      "pass": true,
+      "detail": "./task-dashboard.html?task=ui-task-1"
+    },
+    {
+      "name": "desktop one submit task row shows in-place waiting progress",
+      "pass": true,
+      "detail": {
+        "progress": "排队中",
+        "stateChip": "排队中"
+      }
+    },
+    {
+      "name": "desktop one submit task row uses the controlled semanticTitle",
+      "pass": true,
+      "detail": "读取 README 并汇报"
+    },
+    {
+      "name": "desktop one submit issues exactly one receive",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "desktop one submit issues exactly one confirmation",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "desktop entry page has no page errors",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "mobile no second confirmation button exists",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "mobile one submit stays on the entry index",
+      "pass": true,
+      "detail": "http://humanagent.entry-flow.test/index.html"
+    },
+    {
+      "name": "mobile one submit renders the exact committed task id",
+      "pass": true,
+      "detail": {
+        "taskId": "ui-task-2",
+        "expectedTaskId": "ui-task-2"
+      }
+    },
+    {
+      "name": "mobile one submit task row links to the task dashboard",
+      "pass": true,
+      "detail": "./task-dashboard.html?task=ui-task-2"
+    },
+    {
+      "name": "mobile one submit task row shows in-place waiting progress",
+      "pass": true,
+      "detail": {
+        "progress": "排队中",
+        "stateChip": "排队中"
+      }
+    },
+    {
+      "name": "mobile one submit task row uses the controlled semanticTitle",
+      "pass": true,
+      "detail": "读取 README 并汇报"
+    },
+    {
+      "name": "mobile one submit issues exactly one receive",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "mobile one submit issues exactly one confirmation",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "mobile entry page has no page errors",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "reduced-motion no second confirmation button exists",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "reduced-motion one submit stays on the entry index",
+      "pass": true,
+      "detail": "http://humanagent.entry-flow.test/index.html"
+    },
+    {
+      "name": "reduced-motion one submit renders the exact committed task id",
+      "pass": true,
+      "detail": {
+        "taskId": "ui-task-3",
+        "expectedTaskId": "ui-task-3"
+      }
+    },
+    {
+      "name": "reduced-motion one submit task row links to the task dashboard",
+      "pass": true,
+      "detail": "./task-dashboard.html?task=ui-task-3"
+    },
+    {
+      "name": "reduced-motion one submit task row shows in-place waiting progress",
+      "pass": true,
+      "detail": {
+        "progress": "排队中",
+        "stateChip": "排队中"
+      }
+    },
+    {
+      "name": "reduced-motion one submit task row uses the controlled semanticTitle",
+      "pass": true,
+      "detail": "读取 README 并汇报"
+    },
+    {
+      "name": "reduced-motion one submit issues exactly one receive",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "reduced-motion one submit issues exactly one confirmation",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "reduced-motion entry page has no page errors",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "clarification without options does not fabricate option buttons",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "clarification question is rendered before authorization",
+      "pass": true,
+      "detail": "请补充验收范围。澄清回答并继续"
+    },
+    {
+      "name": "clarification answer renders the committed task row on the entry index",
+      "pass": true,
+      "detail": {
+        "row": {
+          "taskId": "ui-task-4",
+          "href": "./task-dashboard.html?task=ui-task-4",
+          "heading": "处理这份需求",
+          "progress": "排队中",
+          "stateChip": "排队中"
+        },
+        "url": "http://humanagent.entry-flow.test/index.html"
+      }
+    },
+    {
+      "name": "desktop clarification renders candidate option buttons",
+      "pass": true,
+      "detail": [
+        "仅检查 README 前 10 行",
+        "检查整个 docs 目录"
+      ]
+    },
+    {
+      "name": "desktop clicking a clarification option submits immediately and renders the committed task row",
+      "pass": true,
+      "detail": {
+        "row": {
+          "taskId": "ui-task-5",
+          "href": "./task-dashboard.html?task=ui-task-5",
+          "heading": "_OPTIONS 处理这份需求 (desktop)",
+          "progress": "排队中",
+          "stateChip": "排队中"
+        },
+        "clarificationDelta": 1,
+        "url": "http://humanagent.entry-flow.test/index.html"
+      }
+    },
+    {
+      "name": "mobile clarification renders candidate option buttons",
+      "pass": true,
+      "detail": [
+        "仅检查 README 前 10 行",
+        "检查整个 docs 目录"
+      ]
+    },
+    {
+      "name": "mobile clicking a clarification option submits immediately and renders the committed task row",
+      "pass": true,
+      "detail": {
+        "row": {
+          "taskId": "ui-task-6",
+          "href": "./task-dashboard.html?task=ui-task-6",
+          "heading": "_OPTIONS 处理这份需求 (mobile)",
+          "progress": "排队中",
+          "stateChip": "排队中"
+        },
+        "clarificationDelta": 1,
+        "url": "http://humanagent.entry-flow.test/index.html"
+      }
+    },
+    {
+      "name": "reduced-motion clarification renders candidate option buttons",
+      "pass": true,
+      "detail": [
+        "仅检查 README 前 10 行",
+        "检查整个 docs 目录"
+      ]
+    },
+    {
+      "name": "reduced-motion clicking a clarification option submits immediately and renders the committed task row",
+      "pass": true,
+      "detail": {
+        "row": {
+          "taskId": "ui-task-7",
+          "href": "./task-dashboard.html?task=ui-task-7",
+          "heading": "_OPTIONS 处理这份需求 (reduced-motion)",
+          "progress": "排队中",
+          "stateChip": "排队中"
+        },
+        "clarificationDelta": 1,
+        "url": "http://humanagent.entry-flow.test/index.html"
+      }
+    },
+    {
+      "name": "plain failed submit surfaces the real danger status",
+      "pass": true,
+      "detail": "danger"
+    },
+    {
+      "name": "plain failed submit reports the real reason through the technical detail",
+      "pass": true,
+      "detail": {
+        "message": "final submit rejected by the scripted runtime",
+        "code": "explicit-brain.final-submit-rejected"
+      }
+    },
+    {
+      "name": "plain failed submit keeps the original goal text",
+      "pass": true,
+      "detail": "这条提交会被运行时拒绝"
+    },
+    {
+      "name": "plain failed submit keeps the goal text read-only",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "plain failed submit leaves a visible retry on the main action",
+      "pass": true,
+      "detail": [
+        "重试本次提交"
+      ]
+    },
+    {
+      "name": "plain retry reuses the same interaction and does not resend the input",
+      "pass": true,
+      "detail": {
+        "totalReceiveDelta": 1,
+        "retryReceiveDelta": 0
+      }
+    },
+    {
+      "name": "plain retry does not resend the clarification answer",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "plain retry confirms the same submission exactly once",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "plain retry renders the committed task row on the entry index",
+      "pass": true,
+      "detail": {
+        "row": {
+          "taskId": "ui-task-8",
+          "href": "./task-dashboard.html?task=ui-task-8",
+          "heading": "这条提交会被运行时拒绝",
+          "progress": "排队中",
+          "stateChip": "排队中"
+        },
+        "url": "http://humanagent.entry-flow.test/index.html"
+      }
+    },
+    {
+      "name": "clarification failed submit surfaces the real danger status",
+      "pass": true,
+      "detail": "danger"
+    },
+    {
+      "name": "clarification failed submit reports the real reason through the technical detail",
+      "pass": true,
+      "detail": {
+        "message": "final submit rejected by the scripted runtime",
+        "code": "explicit-brain.final-submit-rejected"
+      }
+    },
+    {
+      "name": "clarification failed submit keeps the original goal text",
+      "pass": true,
+      "detail": "CLARIFY 这条提交会被运行时拒绝"
+    },
+    {
+      "name": "clarification failed submit keeps the goal text read-only",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "clarification failed submit leaves a visible retry on the main action",
+      "pass": true,
+      "detail": [
+        "提交任务"
+      ]
+    },
+    {
+      "name": "clarification retry reuses the same interaction and does not resend the input",
+      "pass": true,
+      "detail": {
+        "totalReceiveDelta": 1,
+        "retryReceiveDelta": 0
+      }
+    },
+    {
+      "name": "clarification retry does not resend the clarification answer",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "clarification retry confirms the same submission exactly once",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "clarification retry renders the committed task row on the entry index",
+      "pass": true,
+      "detail": {
+        "row": {
+          "taskId": "ui-task-9",
+          "href": "./task-dashboard.html?task=ui-task-9",
+          "heading": "这条提交会被运行时拒绝",
+          "progress": "排队中",
+          "stateChip": "排队中"
+        },
+        "url": "http://humanagent.entry-flow.test/index.html"
+      }
+    },
+    {
+      "name": "rapid double click issues exactly one explicit input",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "rapid double click issues exactly one confirmation",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "rapid double click creates exactly one task",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "rapid double click renders the single committed task row on the entry index",
+      "pass": true,
+      "detail": {
+        "row": {
+          "taskId": "ui-task-10",
+          "href": "./task-dashboard.html?task=ui-task-10",
+          "heading": "只允许创建一次的任务",
+          "progress": "排队中",
+          "stateChip": "排队中"
+        },
+        "url": "http://humanagent.entry-flow.test/index.html"
+      }
+    }
+  ],
+  "observations": [
+    {
+      "name": "defectA feedback text",
+      "value": "意图create规范化输入整理这条需求并生成草稿 (规范化)已知事实用户提供了一条业务输入；显式大脑已完成整理建议提交后执行：整理这条需求并生成草稿 (规范化)"
+    },
+    {
+      "name": "defectA editable values",
+      "value": [
+        "manual",
+        "auto",
+        "ui:interaction",
+        "1",
+        "整理这条需求并生成草稿",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "[]",
+        "提交后执行整理好的需求",
+        "",
+        "draft-interaction-1",
+        "1",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "plain failure surface",
+      "value": {
+        "tone": "danger",
+        "text": "输入已接收，本次处理未完成。输入已接收；保留已返回内容，继续本次处理。 技术详情保留原始诊断。技术详情",
+        "inputValue": "这条提交会被运行时拒绝",
+        "inputReadOnly": true,
+        "retryLabel": [
+          "重试本次提交"
+        ],
+        "hasVisibleRetry": true
+      }
+    },
+    {
+      "name": "plain technical detail",
+      "value": {
+        "message": "final submit rejected by the scripted runtime",
+        "code": "explicit-brain.final-submit-rejected"
+      }
+    },
+    {
+      "name": "clarification failure surface",
+      "value": {
+        "tone": "danger",
+        "text": "输入已接收，本次处理未完成。输入已接收；保留已返回内容，继续本次处理。 技术详情保留原始诊断。技术详情",
+        "inputValue": "CLARIFY 这条提交会被运行时拒绝",
+        "inputReadOnly": true,
+        "retryLabel": [
+          "提交任务"
+        ],
+        "hasVisibleRetry": true
+      }
+    },
+    {
+      "name": "clarification technical detail",
+      "value": {
+        "message": "final submit rejected by the scripted runtime",
+        "code": "explicit-brain.final-submit-rejected"
+      }
+    },
+    {
+      "name": "clarification advisory: retry affordance keeps the generic submit label",
+      "value": "After a failed confirmation in the clarification variant, the removed clarification button cannot be relabelled; the main submit button remains visible and usable as the retry. This is a UX label advisory, not a duplicate-submission defect."
+    },
+    {
+      "name": "rcc",
+      "value": "skipped via T22C_SKIP_RCC=1"
+    }
+  ]
+}

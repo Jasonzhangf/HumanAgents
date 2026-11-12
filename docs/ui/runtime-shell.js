@@ -130,7 +130,7 @@ export function makeTopbar(active) {
   const links = [
     ['dashboard.html', 'Dashboard'],
     ['tasks.html', 'Task List'],
-    ['./index.html', '新建 Task'],
+    ...(active === '新建 Task' ? [] : [['./index.html', '新建 Task']]),
     ['memory.html', 'Memory'],
   ]
   for (const [href, label] of links) {
