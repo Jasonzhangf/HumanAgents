@@ -1,0 +1,631 @@
+{
+  "evidence": {
+    "servingCommand": "ENTRY_DRAWER_UI_ROOT=\"/Volumes/Intel/playground/humanagent/mvp-gate5-candidate-integration-20261116/docs/ui\" ENTRY_DRAWER_EVIDENCE=\"/Volumes/Intel/playground/humanagent/mvp-gate5-candidate-integration-20261116/docs/verification/mvp-gate5-candidate-integration-20261116/entry-drawer\" ENTRY_DRAWER_RUNTIME=\"http://127.0.0.1:61048\" /opt/homebrew/Cellar/node@22/22.22.2_2/bin/node /Volumes/Intel/playground/humanagent/mvp-gate5-candidate-integration-20261116/tests/ui/entry-task-list-drawer-browser.mjs",
+    "staticRoot": "/Volumes/Intel/playground/humanagent/mvp-gate5-candidate-integration-20261116/docs/ui",
+    "apiProxyBase": "http://127.0.0.1:61048",
+    "entryUrl": "http://127.0.0.1:65353/index.html",
+    "taskSource": {
+      "url": "http://127.0.0.1:61048/api/tasks",
+      "status": 200,
+      "contentType": "application/json; charset=utf-8",
+      "responseFile": "real-api-tasks.json",
+      "surface": "runtime-task-list",
+      "mode": "fake",
+      "counts": {
+        "running": 0,
+        "waiting": 0,
+        "completed": 1,
+        "stopped": 0,
+        "draft": 1,
+        "failed": 0,
+        "total": 2
+      },
+      "taskIds": [
+        "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1",
+        "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-2"
+      ],
+      "activeTaskIds": [
+        "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+      ],
+      "stateLabels": [
+        "已创建",
+        "已完成"
+      ],
+      "titles": [
+        "未整理名称的任务",
+        "未整理名称的任务"
+      ]
+    },
+    "browserRun": {
+      "command": "ENTRY_DRAWER_UI_ROOT=\"/Volumes/Intel/playground/humanagent/mvp-gate5-candidate-integration-20261116/docs/ui\" ENTRY_DRAWER_EVIDENCE=\"/Volumes/Intel/playground/humanagent/mvp-gate5-candidate-integration-20261116/docs/verification/mvp-gate5-candidate-integration-20261116/entry-drawer\" ENTRY_DRAWER_RUNTIME=\"http://127.0.0.1:61048\" /opt/homebrew/Cellar/node@22/22.22.2_2/bin/node /Volumes/Intel/playground/humanagent/mvp-gate5-candidate-integration-20261116/tests/ui/entry-task-list-drawer-browser.mjs",
+      "startedAt": "2026-11-16T04:50:44.330Z",
+      "finishedAt": "2026-11-16T04:50:45.567Z",
+      "viewports": [
+        {
+          "label": "desktop-1280",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "label": "mobile-390",
+          "viewport": {
+            "width": 390,
+            "height": 844
+          }
+        }
+      ],
+      "passes": true
+    }
+  },
+  "checks": [
+    {
+      "name": "live /api/tasks responds 200",
+      "pass": true,
+      "detail": 200
+    },
+    {
+      "name": "live /api/tasks returns real task rows",
+      "pass": true,
+      "detail": 2
+    },
+    {
+      "name": "live /api/tasks observation records every task id",
+      "pass": true,
+      "detail": [
+        "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1",
+        "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-2"
+      ]
+    },
+    {
+      "name": "desktop-1280 entry main column exposes the task-list trigger",
+      "pass": true,
+      "detail": {
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "当前任务",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2当前任务",
+        "navLinks": [
+          {
+            "label": "Dashboard",
+            "href": "dashboard.html"
+          },
+          {
+            "label": "Task List",
+            "href": "tasks.html"
+          },
+          {
+            "label": "Memory",
+            "href": "memory.html"
+          }
+        ],
+        "newTaskLinks": []
+      }
+    },
+    {
+      "name": "desktop-1280 entry main column does not render the inline task list rows",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "desktop-1280 entry topbar omits the duplicate new-task link",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Dashboard",
+          "href": "dashboard.html"
+        },
+        {
+          "label": "Task List",
+          "href": "tasks.html"
+        },
+        {
+          "label": "Memory",
+          "href": "memory.html"
+        }
+      ]
+    },
+    {
+      "name": "desktop-1280 entry main column keeps the live task count",
+      "pass": true,
+      "detail": "队列与任务状态2 项任务数量2当前任务"
+    },
+    {
+      "name": "desktop-1280 the task-list trigger advertises a dialog",
+      "pass": true,
+      "detail": "dialog"
+    },
+    {
+      "name": "desktop-1280 the drawer opens with the live active-task preview",
+      "pass": true,
+      "detail": [
+        {
+          "taskId": "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1",
+          "status": "已创建",
+          "heading": "未整理名称的任务",
+          "href": "./task-dashboard.html?task=ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+        }
+      ]
+    },
+    {
+      "name": "desktop-1280 drawer rows carry the live task ids",
+      "pass": true,
+      "detail": {
+        "expected": [
+          "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+        ],
+        "actual": [
+          "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+        ]
+      }
+    },
+    {
+      "name": "desktop-1280 drawer rows carry the live task states",
+      "pass": true,
+      "detail": {
+        "expected": [
+          "已创建"
+        ],
+        "actual": [
+          "已创建"
+        ]
+      }
+    },
+    {
+      "name": "desktop-1280 drawer rows carry the live semantic titles",
+      "pass": true,
+      "detail": {
+        "expected": [
+          "未整理名称的任务"
+        ],
+        "actual": [
+          "未整理名称的任务"
+        ]
+      }
+    },
+    {
+      "name": "desktop-1280 drawer rows link to the task dashboard",
+      "pass": true,
+      "detail": [
+        "./task-dashboard.html?task=ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+      ]
+    },
+    {
+      "name": "desktop-1280 the active-task preview links to the full Task List page",
+      "pass": true,
+      "detail": "./tasks.html"
+    },
+    {
+      "name": "desktop-1280 drawer content has no horizontal overflow",
+      "pass": true,
+      "detail": {
+        "scrollWidth": 456,
+        "clientWidth": 456,
+        "overflowX": false
+      }
+    },
+    {
+      "name": "desktop-1280 closing the drawer hides it again",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "desktop-1280 the task-list trigger remains on the entry page",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "desktop-1280 the entry form stays available after the drawer closes",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "desktop-1280 closing the drawer does not navigate away",
+      "pass": true,
+      "detail": "http://127.0.0.1:65353/index.html"
+    },
+    {
+      "name": "desktop-1280 empty entry after close shows the real validation without mutation",
+      "pass": true,
+      "detail": {
+        "message": "request.invalid-field请先填写任务输入。技术详情",
+        "formPresent": true,
+        "path": "/index.html",
+        "mutatingApiRequests": []
+      }
+    },
+    {
+      "name": "desktop-1280 the drawer reopens with the same live active-task preview",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "desktop-1280 Escape closes the drawer back to the entry page",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "desktop-1280 entry page produced no runtime errors",
+      "pass": true,
+      "detail": []
+    },
+    {
+      "name": "mobile-390 entry main column exposes the task-list trigger",
+      "pass": true,
+      "detail": {
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "当前任务",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2当前任务",
+        "navLinks": [
+          {
+            "label": "Dashboard",
+            "href": "dashboard.html"
+          },
+          {
+            "label": "Task List",
+            "href": "tasks.html"
+          },
+          {
+            "label": "Memory",
+            "href": "memory.html"
+          }
+        ],
+        "newTaskLinks": []
+      }
+    },
+    {
+      "name": "mobile-390 entry main column does not render the inline task list rows",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "mobile-390 entry topbar omits the duplicate new-task link",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Dashboard",
+          "href": "dashboard.html"
+        },
+        {
+          "label": "Task List",
+          "href": "tasks.html"
+        },
+        {
+          "label": "Memory",
+          "href": "memory.html"
+        }
+      ]
+    },
+    {
+      "name": "mobile-390 entry main column keeps the live task count",
+      "pass": true,
+      "detail": "队列与任务状态2 项任务数量2当前任务"
+    },
+    {
+      "name": "mobile-390 the task-list trigger advertises a dialog",
+      "pass": true,
+      "detail": "dialog"
+    },
+    {
+      "name": "mobile-390 the drawer opens with the live active-task preview",
+      "pass": true,
+      "detail": [
+        {
+          "taskId": "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1",
+          "status": "已创建",
+          "heading": "未整理名称的任务",
+          "href": "./task-dashboard.html?task=ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+        }
+      ]
+    },
+    {
+      "name": "mobile-390 drawer rows carry the live task ids",
+      "pass": true,
+      "detail": {
+        "expected": [
+          "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+        ],
+        "actual": [
+          "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+        ]
+      }
+    },
+    {
+      "name": "mobile-390 drawer rows carry the live task states",
+      "pass": true,
+      "detail": {
+        "expected": [
+          "已创建"
+        ],
+        "actual": [
+          "已创建"
+        ]
+      }
+    },
+    {
+      "name": "mobile-390 drawer rows carry the live semantic titles",
+      "pass": true,
+      "detail": {
+        "expected": [
+          "未整理名称的任务"
+        ],
+        "actual": [
+          "未整理名称的任务"
+        ]
+      }
+    },
+    {
+      "name": "mobile-390 drawer rows link to the task dashboard",
+      "pass": true,
+      "detail": [
+        "./task-dashboard.html?task=ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+      ]
+    },
+    {
+      "name": "mobile-390 the active-task preview links to the full Task List page",
+      "pass": true,
+      "detail": "./tasks.html"
+    },
+    {
+      "name": "mobile-390 drawer content has no horizontal overflow",
+      "pass": true,
+      "detail": {
+        "scrollWidth": 346,
+        "clientWidth": 346,
+        "overflowX": false
+      }
+    },
+    {
+      "name": "mobile-390 closing the drawer hides it again",
+      "pass": true,
+      "detail": 0
+    },
+    {
+      "name": "mobile-390 the task-list trigger remains on the entry page",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "mobile-390 the entry form stays available after the drawer closes",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "mobile-390 closing the drawer does not navigate away",
+      "pass": true,
+      "detail": "http://127.0.0.1:65353/index.html"
+    },
+    {
+      "name": "mobile-390 empty entry after close shows the real validation without mutation",
+      "pass": true,
+      "detail": {
+        "message": "request.invalid-field请先填写任务输入。技术详情",
+        "formPresent": true,
+        "path": "/index.html",
+        "mutatingApiRequests": []
+      }
+    },
+    {
+      "name": "mobile-390 the drawer reopens with the same live active-task preview",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "mobile-390 Escape closes the drawer back to the entry page",
+      "pass": true,
+      "detail": null
+    },
+    {
+      "name": "mobile-390 entry page produced no runtime errors",
+      "pass": true,
+      "detail": []
+    }
+  ],
+  "observations": [
+    {
+      "name": "live /api/tasks response",
+      "value": {
+        "url": "http://127.0.0.1:61048/api/tasks",
+        "status": 200,
+        "contentType": "application/json; charset=utf-8",
+        "responseFile": "real-api-tasks.json",
+        "surface": "runtime-task-list",
+        "mode": "fake",
+        "counts": {
+          "running": 0,
+          "waiting": 0,
+          "completed": 1,
+          "stopped": 0,
+          "draft": 1,
+          "failed": 0,
+          "total": 2
+        },
+        "taskIds": [
+          "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1",
+          "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-2"
+        ],
+        "activeTaskIds": [
+          "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+        ],
+        "stateLabels": [
+          "已创建",
+          "已完成"
+        ],
+        "titles": [
+          "未整理名称的任务",
+          "未整理名称的任务"
+        ]
+      }
+    },
+    {
+      "name": "desktop-1280 entry main column",
+      "value": {
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "当前任务",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2当前任务",
+        "navLinks": [
+          {
+            "label": "Dashboard",
+            "href": "dashboard.html"
+          },
+          {
+            "label": "Task List",
+            "href": "tasks.html"
+          },
+          {
+            "label": "Memory",
+            "href": "memory.html"
+          }
+        ],
+        "newTaskLinks": []
+      }
+    },
+    {
+      "name": "desktop-1280 drawer",
+      "value": {
+        "rows": [
+          {
+            "taskId": "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1",
+            "status": "已创建",
+            "heading": "未整理名称的任务",
+            "href": "./task-dashboard.html?task=ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+          }
+        ],
+        "allTasksHref": "./tasks.html"
+      }
+    },
+    {
+      "name": "desktop-1280 drawer overflow",
+      "value": {
+        "scrollWidth": 456,
+        "clientWidth": 456,
+        "overflowX": false
+      }
+    },
+    {
+      "name": "desktop-1280 after close",
+      "value": {
+        "openDrawers": 0,
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "当前任务",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2当前任务",
+        "navLinks": [
+          {
+            "label": "Dashboard",
+            "href": "dashboard.html"
+          },
+          {
+            "label": "Task List",
+            "href": "tasks.html"
+          },
+          {
+            "label": "Memory",
+            "href": "memory.html"
+          }
+        ],
+        "newTaskLinks": [],
+        "inputPresent": true
+      }
+    },
+    {
+      "name": "desktop-1280 post-close form validation",
+      "value": {
+        "message": "request.invalid-field请先填写任务输入。技术详情",
+        "formPresent": true,
+        "path": "/index.html",
+        "mutatingApiRequests": []
+      }
+    },
+    {
+      "name": "mobile-390 entry main column",
+      "value": {
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "当前任务",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2当前任务",
+        "navLinks": [
+          {
+            "label": "Dashboard",
+            "href": "dashboard.html"
+          },
+          {
+            "label": "Task List",
+            "href": "tasks.html"
+          },
+          {
+            "label": "Memory",
+            "href": "memory.html"
+          }
+        ],
+        "newTaskLinks": []
+      }
+    },
+    {
+      "name": "mobile-390 drawer",
+      "value": {
+        "rows": [
+          {
+            "taskId": "ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1",
+            "status": "已创建",
+            "heading": "未整理名称的任务",
+            "href": "./task-dashboard.html?task=ui-task-4204f390-221e-4d3c-89b1-2a4850b899b8-1"
+          }
+        ],
+        "allTasksHref": "./tasks.html"
+      }
+    },
+    {
+      "name": "mobile-390 drawer overflow",
+      "value": {
+        "scrollWidth": 346,
+        "clientWidth": 346,
+        "overflowX": false
+      }
+    },
+    {
+      "name": "mobile-390 after close",
+      "value": {
+        "openDrawers": 0,
+        "inlineRows": 0,
+        "hasTrigger": true,
+        "triggerLabel": "当前任务",
+        "triggerHaspopup": "dialog",
+        "summaryText": "队列与任务状态2 项任务数量2当前任务",
+        "navLinks": [
+          {
+            "label": "Dashboard",
+            "href": "dashboard.html"
+          },
+          {
+            "label": "Task List",
+            "href": "tasks.html"
+          },
+          {
+            "label": "Memory",
+            "href": "memory.html"
+          }
+        ],
+        "newTaskLinks": [],
+        "inputPresent": true
+      }
+    },
+    {
+      "name": "mobile-390 post-close form validation",
+      "value": {
+        "message": "request.invalid-field请先填写任务输入。技术详情",
+        "formPresent": true,
+        "path": "/index.html",
+        "mutatingApiRequests": []
+      }
+    }
+  ]
+}
