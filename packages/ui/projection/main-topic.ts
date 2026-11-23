@@ -1,4 +1,19 @@
 import type { TaskId, TaskInputRequest } from '../../contracts/src/index.js'
+import type { RuntimeSseEvent, ExplicitInteractionStepProjection } from '../contracts/runtime.js'
+
+export interface ConversationStatusFacts {
+  readonly state: string
+  readonly events?: readonly ConversationStatusEvent[]
+  readonly steps?: readonly ExplicitInteractionStepProjection[]
+  readonly waitingForUser?: boolean
+  readonly error?: MainTopicTaskInput['error']
+}
+
+export interface ConversationStatusEvent extends Pick<RuntimeSseEvent,
+  'seq' | 'occurredAt' | 'taskId' | 'operationId' | 'executionEpoch' | 'kind' | 'state' | 'callId' | 'status' | 'error' | 'terminalPhase'> {
+  readonly requestId?: string
+  readonly turnId?: string
+}
 
 export type MainTopicTurnRole = 'user' | 'jenny'
 export type MainTopicTurnKind =
@@ -17,6 +32,7 @@ export interface MainTopicClarification {
 }
 
 export interface MainTopicInteractionInput {
+  readonly steps?: readonly ExplicitInteractionStepProjection[]
   readonly interactionId: string
   readonly rawInput: string
   readonly occurredAt?: string
@@ -28,6 +44,8 @@ export interface MainTopicInteractionInput {
 }
 
 export interface MainTopicTaskInput {
+  readonly detailReadError?: { readonly message: string }
+  readonly events?: readonly (RuntimeSseEvent & { readonly requestId?: string; readonly turnId?: string })[]
   readonly taskId: TaskId
   readonly parentTaskId?: TaskId
   readonly title: string
@@ -53,6 +71,9 @@ export interface MainTopicTaskInput {
 }
 
 export interface MainTopicTurn {
+  readonly detailReadError?: MainTopicTaskInput['detailReadError']
+  readonly toolEvents?: readonly RuntimeSseEvent[]
+  readonly statusFacts?: ConversationStatusFacts
   readonly turnId: string
   readonly role: MainTopicTurnRole
   readonly kind: MainTopicTurnKind
@@ -67,6 +88,7 @@ export interface MainTopicTurn {
 }
 
 export interface MainTopicTaskView {
+  readonly detailReadError?: MainTopicTaskInput['detailReadError']
   readonly taskId: TaskId
   readonly title: string
   readonly state: string
@@ -300,6 +322,7 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
       }
     })
   const tasks = visibleTaskInputs.map((task): MainTopicTaskView => ({
+    ...(task.detailReadError === undefined ? {} : { detailReadError: task.detailReadError }),
     taskId: task.taskId,
     title: task.title,
     state: task.state,
@@ -327,8 +350,17 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
   const interactions = [...input.interactions].sort((left, right) =>
     (left.occurredAt ?? '').localeCompare(right.occurredAt ?? ''))
   for (const interaction of interactions) {
-    turns.push(...interactionTurns(interaction))
+    const explicitTurns = interactionTurns(interaction)
     const task = tasksByInteraction.get(interaction.interactionId)
+    if (task === undefined) {
+      const response = [...explicitTurns].reverse().find((turn) => turn.role === 'jenny')
+      const statusFacts = { state: interaction.state, steps: interaction.steps ?? [], waitingForUser: interaction.state === 'awaiting-clarification' }
+      if (response) {
+        const index = explicitTurns.indexOf(response)
+        explicitTurns[index] = { ...response, statusFacts }
+      } else explicitTurns.push({ turnId: `explicit-status:${interaction.interactionId}`, role: 'jenny', kind: 'status', text: '正在处理你的请求', interactionId: interaction.interactionId, statusFacts })
+    }
+    turns.push(...explicitTurns)
     if (task !== undefined) turns.push(...taskTurns(task, interaction.rawInput))
   }
   // A Task without an interaction join keeps its own answered questions, but it
@@ -339,6 +371,34 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
     // Completed unlinked work keeps its own answered questions. It is still
     // never attributed to a guessed chat turn.
     turns.push(...(ACTIVE_TASK_STATES.has(task.state) ? taskTurns(task) : consumedRequestTurns(task)))
+  }
+
+  // Decorate only the current task card. Historical questions keep their own
+  // answer lifecycle and never inherit the task's subsequent live phase.
+  for (const task of visibleTaskInputs) {
+    const last = [...turns].reverse().find((turn) => turn.taskId?.value === task.taskId.value && turn.role === 'jenny'
+      && (turn.kind !== 'input-request' || (turn.requestId === task.inputRequest?.requestId
+        && turn.expectedRevision === task.inputRequest?.expectedRevision)))
+    const index = last === undefined ? -1 : turns.indexOf(last)
+    if (index < 0) continue
+    turns[index] = { ...turns[index]!,
+      toolEvents: (task.events ?? []).filter((event) => event.kind === 'provider.tool' || event.kind === 'provider.tool-result'),
+      statusFacts: {
+      state: task.state,
+      events: (task.events ?? []).map(({ seq, occurredAt, taskId, operationId, executionEpoch, kind, state,
+        requestId, turnId, callId, status, error, terminalPhase }) => ({ seq, occurredAt, taskId, operationId,
+        executionEpoch, kind, state, requestId, turnId, callId, status, error, terminalPhase })),
+      waitingForUser: task.inputRequest !== undefined,
+      ...(task.error === undefined ? {} : { error: task.error }),
+    } }
+  }
+
+  for (const task of visibleTaskInputs) {
+    if (task.detailReadError !== undefined) turns.push({
+      turnId: `detail-read-error:${task.taskId.value}`,
+      role: 'jenny', kind: 'status', text: '执行详情读取失败',
+      taskId: task.taskId, quote: task.title, detailReadError: task.detailReadError,
+    })
   }
 
   const waiting = visibleTaskInputs

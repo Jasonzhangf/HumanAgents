@@ -275,6 +275,8 @@ export function createRuntimeApi(options = {}) {
     readProductRelations: (scope) => request(`/api/product/relations${productReadScopeQuery(scope)}`),
     readProductOutput: (taskId) => request(`/api/product/output${productOutputQuery(taskId)}`),
     listTasks: () => request('/api/tasks'),
+    readToolOutput: ({ taskId, operationId, executionEpoch, seq }) => request(
+      `/api/tasks/${encodeURIComponent(taskId.value)}/operations/${encodeURIComponent(operationId)}/executions/${executionEpoch}/events/${seq}/tool-output`),
     updateTask: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}`, {
       method: 'PATCH',
       body: JSON.stringify(input),

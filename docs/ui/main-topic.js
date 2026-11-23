@@ -1,4 +1,6 @@
 import { api, clearNode, element, formatTime } from './runtime-shell.js'
+import { conversationStatus, createConversationStatusClock } from './conversation-status.js'
+import { renderToolBody } from './tool-presentation.js'
 
 const KIND_LABELS = Object.freeze({
   message: '回答',
@@ -138,13 +140,40 @@ function renderAnswerControls(request, onAnswer, host, topicState) {
   return { form, update }
 }
 
-function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, topicState) {
+function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, topicState, bindings) {
   article.className = turnClass(turn)
   article.dataset.turnId = turn.turnId
   const header = turnHeader(turn, project.agentName)
   const previousHeader = article.querySelector('.mt-turn-head')
   if (previousHeader) previousHeader.replaceWith(header)
   else article.append(header)
+  const previousStatus = article.querySelector('.conversation-status')
+  if (turn.statusFacts) {
+    const status = element('div', undefined, 'conversation-status')
+    status.setAttribute('aria-label', '执行阶段与计时')
+    for (const row of conversationStatus(turn.statusFacts)) {
+      const line = element('div', undefined, 'conversation-status-row')
+      line.dataset.phase = row.phase
+      line.dataset.tone = row.tone
+      line.dataset.running = String(row.running)
+      const mark = element('span', row.tone === 'danger' ? '!' : row.tone === 'success' ? '✓' : '●', 'conversation-status-mark')
+      mark.setAttribute('aria-hidden', 'true')
+      line.append(mark, element('span', row.label))
+      const time = element('span', '', 'conversation-status-time')
+      line.append(time)
+      bindings.push({ row, node: time })
+      if (row.error) line.append(element('span', `${row.error.code || ''} ${row.error.message || ''}`.trim(), 'conversation-status-error'))
+      status.append(line)
+    }
+    if (typeof topicState.onOpenDetail === 'function') {
+      const detail = element('button', '详情', 'conversation-status-detail')
+      detail.type = 'button'
+      detail.addEventListener('click', () => topicState.onOpenDetail(detail, turn))
+      status.append(detail)
+    }
+    if (previousStatus) previousStatus.replaceWith(status)
+    else header.after(status)
+  } else previousStatus?.remove()
   let bubble = article.querySelector('.mt-bubble')
   if (!bubble) {
     bubble = element('div', undefined, 'mt-bubble')
@@ -158,6 +187,22 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
   else if (quote) bubble.prepend(quote)
   const text = bubble.querySelector('.mt-text')
   if (text.textContent !== turn.text) text.textContent = turn.text
+  let detailReadError = bubble.querySelector('.mt-detail-read-error')
+  if (turn.detailReadError) {
+    if (!detailReadError) {
+      detailReadError = element('p', '', 'mt-detail-read-error conversation-status-error')
+      bubble.append(detailReadError)
+    }
+    detailReadError.textContent = turn.detailReadError.message
+  } else detailReadError?.remove()
+  let tools = bubble.querySelector('.tool-body')
+  if (turn.toolEvents?.length) {
+    if (!tools) {
+      tools = element('div', undefined, 'tool-body')
+      bubble.append(tools)
+    }
+    renderToolBody(tools, turn.toolEvents, api.readToolOutput)
+  } else tools?.remove()
   let control = answerControls.get(article)
   const key = requestKey(turn)
   if (turn.kind === 'input-request' && turn.requestId && turn.taskId
@@ -203,16 +248,24 @@ function renderActiveTask(task) {
   return row
 }
 
-export function renderMainTopic(host, projection, { onAnswer } = {}) {
+export function disposeMainTopic(host) {
+  topicStates.get(host)?.clock.dispose()
+  topicStates.delete(host)
+}
+
+export function renderMainTopic(host, projection, { onAnswer, onOpenDetail } = {}) {
   if (!(host instanceof HTMLElement)) throw new Error('main topic requires a host element')
   const activeControl = host.contains(document.activeElement) ? document.activeElement : undefined
   const scope = JSON.stringify([projection.projectKey, projection.mode, projection.workspaceCwd])
   let topicState = topicStates.get(host)
   if (topicState?.scope !== scope) {
+    topicState?.clock.dispose()
     clearNode(host)
-    topicState = { scope }
+    topicState = { scope, clock: createConversationStatusClock(host) }
     topicStates.set(host, topicState)
   }
+  if (onOpenDetail !== undefined) topicState.onOpenDetail = onOpenDetail
+  const bindings = []
   const previousTurns = new Map(
     [...host.querySelectorAll('.mt-turn[data-turn-id]')].map((turn) => [turn.dataset.turnId, turn]),
   )
@@ -273,13 +326,14 @@ export function renderMainTopic(host, projection, { onAnswer } = {}) {
     let cursor = stream.firstElementChild
     for (const turn of turns) {
       const current = updateTurn(previousTurns.get(turn.turnId) || element('article'),
-        turn, projection, onAnswer, host, answeredRequestIds, topicState)
+        turn, projection, onAnswer, host, answeredRequestIds, topicState, bindings)
       retained.add(current)
       if (current === cursor) cursor = cursor.nextElementSibling
       else stream.insertBefore(current, cursor)
     }
     for (const child of [...stream.children]) if (!retained.has(child)) child.remove()
   }
+  topicState.clock.update(bindings)
   if (activeControl?.isConnected && document.activeElement !== activeControl) activeControl.focus({ preventScroll: true })
   const last = stream.lastElementChild
   if (last && typeof last.scrollIntoView === 'function') last.scrollIntoView({ block: 'nearest' })

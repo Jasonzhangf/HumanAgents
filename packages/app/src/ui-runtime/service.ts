@@ -4800,10 +4800,19 @@ export class UiRuntimeService {
     }
     const interactionFacts = interactions.map((interaction) => {
       const taskId = taskRefs.get(interaction.interactionId);
+      const firstResponses = new Set<string>();
       return {
         interactionId: interaction.interactionId,
         rawInput: interaction.rawInput,
         state: interaction.state,
+        steps: interaction.steps.filter((step) => {
+          if (!['response.reasoning', 'response.streaming'].includes(step.kind)) return true;
+          const key = JSON.stringify([step.kind, step.requestId, step.turnId]);
+          if (firstResponses.has(key)) return false;
+          firstResponses.add(key);
+          return true;
+        })
+          .map(({ seq, kind, occurredAt, requestId, turnId }) => ({ seq, kind, occurredAt, requestId, turnId, summary: '' })),
         ...(interaction.occurredAt === undefined ? {} : { occurredAt: interaction.occurredAt }),
         ...(interaction.reply === undefined ? {} : { reply: interaction.reply }),
         ...(interaction.clarifications === undefined ? {} : { clarifications: interaction.clarifications }),
@@ -4812,23 +4821,56 @@ export class UiRuntimeService {
       };
     });
     const taskFacts = await Promise.all(snapshots.map(async (snapshot) => {
-      const dashboard = await this.taskDashboardWithPlan(snapshot.taskId).catch(() => undefined);
+      let execution: RuntimeTaskSnapshot | undefined;
+      let dashboard: ReturnType<typeof projectRuntimeTaskDashboard>;
+      let detailReadError: { message: string } | undefined;
+      try {
+        execution = await this.taskSnapshotWithParentExecution(snapshot.taskId);
+        dashboard = await this.taskDashboardWithPublication(snapshot.taskId, execution);
+      } catch (error) {
+        dashboard = projectRuntimeTaskDashboard(snapshot, this.mode);
+        detailReadError = { message: error instanceof Error ? error.message : String(error) };
+      }
       const durable = coordinatorSnapshots.get(snapshot.taskId.value);
       const sources = interactions.filter((interaction) => taskRefs.get(interaction.interactionId)?.value === snapshot.taskId.value);
       const sourceInteraction = sources.length === 1 ? sources[0] : undefined;
-      const events = dashboard?.recentEvents ?? snapshot.recentEvents;
+      const firstOutputs = new Set<string>();
+      const events = (detailReadError === undefined ? execution?.events ?? [] : []).filter((event) => {
+        if (!['execution.started', 'execution.terminal', 'execution.retry', 'provider.model',
+          'provider.output', 'provider.tool', 'provider.tool-result', 'provider.error'].includes(event.kind)) return false;
+        if (event.kind !== 'provider.output') return true;
+        const key = JSON.stringify([event.taskId, event.operationId, event.executionEpoch, event.requestId, event.turnId]);
+        if (firstOutputs.has(key)) return false;
+        firstOutputs.add(key);
+        return true;
+      }).map((event) => ({
+        eventId: event.eventId, seq: event.seq, occurredAt: event.occurredAt,
+        taskId: event.taskId, operationId: event.operationId, executionEpoch: event.executionEpoch,
+        kind: event.kind, state: event.state, summary: '', evidenceRefs: event.evidenceRefs,
+        ...(event.requestId === undefined ? {} : { requestId: event.requestId }),
+        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+        ...(event.callId === undefined ? {} : { callId: event.callId }),
+        ...(event.toolId === undefined ? {} : { toolId: event.toolId }),
+        ...(event.arguments === undefined ? {} : { arguments: event.arguments }),
+        ...(event.outputRef === undefined ? {} : { outputRef: event.outputRef }),
+        ...(event.outputDigest === undefined ? {} : { outputDigest: event.outputDigest }),
+        ...(event.status === undefined ? {} : { status: event.status }),
+        ...(event.error === undefined ? {} : { error: event.error }),
+        ...(event.terminalPhase === undefined ? {} : { terminalPhase: event.terminalPhase }),
+      }));
       return {
         taskId: snapshot.taskId,
         ...(snapshot.executionLineage === undefined ? {} : { parentTaskId: snapshot.executionLineage.parentTaskId }),
-        title: dashboard?.taskTitle ?? snapshot.semanticTitle ?? snapshot.title,
-        state: dashboard?.state ?? snapshot.state,
-        stateLabel: dashboard?.stateLabel ?? snapshot.currentState,
-        currentNode: dashboard?.currentNode ?? snapshot.currentNode,
-        nextStep: dashboard?.nextStep ?? snapshot.nextStep,
-        output: dashboard?.output ?? snapshot.output,
+        title: dashboard.taskTitle,
+        state: dashboard.state,
+        stateLabel: dashboard.stateLabel,
+        currentNode: dashboard.currentNode,
+        nextStep: dashboard.nextStep,
+        output: dashboard.output,
         updatedAt: snapshot.updatedAt,
-        ...(events[0]?.occurredAt === undefined ? {} : { startedAt: events[0].occurredAt }),
-        ...(dashboard?.error === undefined ? {} : { error: dashboard.error }),
+        events,
+        ...(detailReadError === undefined ? {} : { detailReadError }),
+        ...(dashboard.error === undefined ? {} : { error: dashboard.error }),
         ...(durable?.inputRequest === undefined ? {} : { inputRequest: durable.inputRequest }),
         ...(durable?.consumedInputRequests === undefined ? {} : { consumedInputRequests: durable.consumedInputRequests }),
         ...(sourceInteraction === undefined ? {} : { sourceInteractionId: sourceInteraction.interactionId }),
@@ -5363,15 +5405,9 @@ export class UiRuntimeService {
    */
   async taskDashboardWithPlan(taskId: TaskId, agentSelection?: DecodedTaskAgentActivitySelectionQuery): Promise<RuntimeTaskDashboardView> {
     const task = await this.taskSnapshotWithParentExecution(taskId);
-    const dashboard = runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()));
+    const withPublication = await this.taskDashboardWithPublication(taskId, task);
     const plan = await this.executionPlanForTask(taskId);
-    const publicOutput = await this.authoritativePublicOutputForTask(taskId);
     const identity = await this.options.taskIdentity?.read({ organId: this.options.organId, taskId });
-    // Re-run the same pure dashboard projection with the authoritative
-    // publication so the output/narrative are computed from committed records.
-    const withPublication = publicOutput === undefined
-      ? dashboard
-      : runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()), publicOutput);
     return {
       ...withPublication,
       ...(identity?.title === undefined ? {} : { semanticTitle: identity.title }),
@@ -5379,6 +5415,13 @@ export class UiRuntimeService {
       taskPlanHistory: await this.boundTaskPlanHistory(taskId),
       agentActivity: await this.taskAgentActivityFor(this.boundProjectSource(), this.mode, taskId, agentSelection),
     };
+  }
+
+  // Main Topic needs published output and state, not plan/activity reads. Both
+  // consumers project the same scoped execution snapshot with public output.
+  private async taskDashboardWithPublication(taskId: TaskId, task: RuntimeTaskSnapshot): Promise<RuntimeTaskDashboardView> {
+    const publicOutput = await this.authoritativePublicOutputForTask(taskId);
+    return runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()), publicOutput);
   }
 
   private async taskAgentActivityFor(

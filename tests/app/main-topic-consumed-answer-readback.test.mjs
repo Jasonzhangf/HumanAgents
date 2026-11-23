@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -52,6 +52,39 @@ function openService(root) {
     explicitBrainInterpreter: { async interpret() { throw new Error('unused') } },
   })
 }
+
+test('main-topic reuses one scoped snapshot and projects first-response facts without token text', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'main-topic-read-facts-'))
+  try {
+    const service = openService(root)
+    const task = service.createTask({ title: '公开读取', directive: '读取状态' })
+    const read = service.taskSnapshotWithParentExecution.bind(service)
+    let reads = 0
+    service.taskSnapshotWithParentExecution = async (taskId) => {
+      reads++
+      const snapshot = await read(taskId)
+      const base = { taskId, operationId: 'actual-operation', executionEpoch: 2, state: 'running', evidenceRefs: [], requestId: 'same-request', turnId: 'same-turn' }
+      return { ...snapshot, events: [
+        ...snapshot.events,
+        ...[1, 2, 3].map((seq) => ({ ...base, eventId: `output-${seq}`, seq: 100 + seq, kind: 'provider.output', summary: `PRIVATE-TOKEN-${seq}`, occurredAt: `2026-11-22T10:00:0${seq}.000Z` })),
+      ] }
+    }
+    const topic = await service.readMainTopic()
+    assert.equal(reads, 1, 'dashboard/status/tools must reuse the same scoped snapshot')
+    const facts = topic.turns.find((turn) => turn.taskId?.value === task.taskId.value)?.statusFacts
+    const first = facts.events.filter((event) => event.kind === 'provider.output')
+    assert.equal(first.length, 1)
+    assert.equal(first[0].occurredAt, '2026-11-22T10:00:01.000Z')
+    assert.equal(first[0].operationId, 'actual-operation')
+    assert.equal(JSON.stringify(topic).includes('PRIVATE-TOKEN'), false)
+    service.taskSnapshotWithParentExecution = async () => { throw new Error('controlled snapshot failure') }
+    const unavailable = await service.readMainTopic()
+    assert.equal(unavailable.tasks[0].detailReadError.message, 'controlled snapshot failure')
+    assert.equal(unavailable.tasks[0].state, topic.tasks[0].state)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('an execution-composition question and its exact answer survive a fresh client read once', async () => {
   const root = await mkdtemp(join(tmpdir(), 'main-topic-consumed-answer-'))
@@ -154,6 +187,37 @@ test('an execution-composition question and its exact answer survive a fresh cli
     assert.equal(freshSecondAnswers[0].text, '同规格的报价')
     assert.equal(after.openInputRequest, undefined)
 
+    // Each Task is an independent read boundary. A detail read cannot erase
+    // the other conversation or the already durable question/answer pair.
+    const readSnapshot = fresh.taskSnapshotWithParentExecution.bind(fresh)
+    const readPublication = fresh.authoritativePublicOutputForTask.bind(fresh)
+    for (const boundary of ['snapshot', 'publication']) {
+      fresh.taskSnapshotWithParentExecution = async (taskId) => {
+        if (boundary === 'snapshot' && taskId.value === task.taskId.value) throw new Error('controlled snapshot failure')
+        return readSnapshot(taskId)
+      }
+      fresh.authoritativePublicOutputForTask = async (taskId) => {
+        if (boundary === 'publication' && taskId.value === task.taskId.value) throw new Error('controlled publication failure')
+        return readPublication(taskId)
+      }
+      const isolated = await fresh.readMainTopic()
+      assert.deepEqual(isolated.turns.filter((turn) => turn.taskId?.value === secondTask.taskId.value),
+        after.turns.filter((turn) => turn.taskId?.value === secondTask.taskId.value))
+      const affected = isolated.tasks.find((row) => row.taskId.value === task.taskId.value)
+      assert.equal(affected.state, after.tasks.find((row) => row.taskId.value === task.taskId.value).state)
+      assert.equal(affected.detailReadError.message, `controlled ${boundary} failure`)
+      assert.equal(isolated.turns.find((turn) => turn.turnId === `input-answer:${request.requestId}`).text, '含税价')
+      assert.equal(isolated.turns.find((turn) => turn.turnId === `input-request:${request.requestId}`).text, '按含税价还是未税价比较？')
+      assert.ok(isolated.turns.some((turn) => turn.taskId?.value === task.taskId.value
+        && turn.detailReadError?.message === `controlled ${boundary} failure`))
+      if (process.env.TOPIC_ISOLATION_EVIDENCE) {
+        await mkdir(process.env.TOPIC_ISOLATION_EVIDENCE, { recursive: true })
+        await writeFile(join(process.env.TOPIC_ISOLATION_EVIDENCE, `${boundary}.json`), JSON.stringify({ before: after, after: isolated }, null, 2))
+      }
+    }
+    fresh.snapshotsWithIdentitySource = async () => { throw new Error('controlled global identity failure') }
+    await assert.rejects(fresh.readMainTopic(), /controlled global identity failure/)
+
     // Exactly one durable consumed record exists for this request.
     const journalText = await readFile(join(root, 'ui-runtime-journal.jsonl'), 'utf8')
     const consumedRecords = journalText.split('\n').filter((line) => line.includes('"task.input-answered"'))
@@ -163,4 +227,33 @@ test('an execution-composition question and its exact answer survive a fresh cli
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('a local detail failure retains both open questions for the real page', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'main-topic-local-read-'))
+  try {
+    const service = openService(root)
+    const tasks = ['甲消息：比较报价', '乙消息：核对规格'].map((title) => service.createTask({ title, directive: title }))
+    for (const [index, task] of tasks.entries()) service.coordinator.openTaskInputRequest({
+      taskId: task.taskId, question: index === 0 ? '按含税价还是未税价比较？' : '是否要求同规格？',
+      schemaRef: 'humanagent://input/text/v1', reason: '等待口径', impact: '等待回答',
+      turnId: `local-turn-${index}`, operationId: id('operation', `local-operation-${index}`), executionEpoch: 1,
+    })
+    const before = await service.readMainTopic()
+    const read = service.taskSnapshotWithParentExecution.bind(service)
+    service.taskSnapshotWithParentExecution = async (taskId) => {
+      if (taskId.value === tasks[0].taskId.value) throw new Error('CONTROLLED_SNAPSHOT_READ: detail storage unavailable')
+      return read(taskId)
+    }
+    const after = await service.readMainTopic()
+    assert.deepEqual(after.turns.filter((turn) => turn.taskId?.value === tasks[1].taskId.value),
+      before.turns.filter((turn) => turn.taskId?.value === tasks[1].taskId.value))
+    for (const task of tasks) assert.deepEqual(
+      after.turns.find((turn) => turn.taskId?.value === task.taskId.value && turn.kind === 'input-request'),
+      before.turns.find((turn) => turn.taskId?.value === task.taskId.value && turn.kind === 'input-request'))
+    if (process.env.TOPIC_ISOLATION_EVIDENCE) {
+      await mkdir(process.env.TOPIC_ISOLATION_EVIDENCE, { recursive: true })
+      await writeFile(join(process.env.TOPIC_ISOLATION_EVIDENCE, 'page-projections.json'), JSON.stringify({ before, after }, null, 2))
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

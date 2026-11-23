@@ -19,7 +19,8 @@ import {
   technicalDetailTrigger,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
-import { renderMainTopic } from './main-topic.js'
+import { renderMainTopic, disposeMainTopic } from './main-topic.js'
+import { conversationStatus, elapsedSeconds } from './conversation-status.js'
 import {
   projectInteractionCardFromEntries,
   projectInteractionCardFromSnapshot,
@@ -263,7 +264,7 @@ export { localizedStepPhase, localizedStepSummary, sanitizeUserVisibleText } fro
 // unusually long task must keep a bounded, readable step list (bug 486ddd4).
 const MAX_LIVE_STEPS = 50
 
-export function createSubmitStatusBanner(target, { onOpenDetail } = {}) {
+export function createSubmitStatusBanner(target, { onOpenDetail, clock = true } = {}) {
   let block = null
   let phase = null
   let detail = null
@@ -295,6 +296,7 @@ export function createSubmitStatusBanner(target, { onOpenDetail } = {}) {
     stepTimer.textContent = `本步 ${formatElapsed(now - stepStartedAt)}`
   }
   const startTimer = () => {
+    if (!clock) return
     if (tick !== null) return
     paintTimers()
     tick = setInterval(paintTimers, 1000)
@@ -438,7 +440,9 @@ const template = mountPageTemplate(pageRoot, {
   title: '任务输入',
 })
 const { status } = template.hosts
-const submitBanner = createSubmitStatusBanner(status, { onOpenDetail: openSubmitProgressDetail })
+// The main Topic owns visible clocks. Keep the legacy submission consumer,
+// but do not run its hidden heading clock alongside the message cards.
+const submitBanner = createSubmitStatusBanner(status, { onOpenDetail: openSubmitProgressDetail, clock: false })
 let pageLeaving = false
 const submissionGate = createSubmissionGate()
 const mainTopicHost = element('div', undefined, 'main-topic-host')
@@ -449,6 +453,7 @@ let mainTopicRefreshing = null
 // interface. While this handle exists the submit banner stays on the page and
 // mirrors the runtime's real execution steps; otherwise it settles normally.
 let liveTaskProgress = null
+let explicitStepStop = null
 
 /**
  * Keep this attempt's user input in a page-owning history state so browser
@@ -488,6 +493,10 @@ function disposeEntryPage(event) {
   if (!shouldDisposeEntryPage(event)) return
   if (pageLeaving) return
   pageLeaving = true
+  disposeMainTopic(mainTopicHost)
+  submitBanner.clear()
+  explicitStepStop?.()
+  stopLiveTaskProgress()
   if (mainTopicPoll !== null) clearTimeout(mainTopicPoll)
   mainTopicPoll = null
   template.dispose()
@@ -506,7 +515,8 @@ async function answerMainTopicRequest(request, answer) {
     const stillOpen = projection.openInputRequest?.requestId === request.requestId
       && projection.openInputRequest?.taskId?.value === taskId
     if (stillOpen) throw error
-    renderMainTopic(mainTopicHost, projection, { onAnswer: answerMainTopicRequest })
+    renderMainTopic(mainTopicHost, projection, { onAnswer: answerMainTopicRequest,
+      onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, projection) })
     scheduleMainTopicPoll(projection)
     return projection
   }
@@ -516,7 +526,8 @@ async function answerMainTopicRequest(request, answer) {
 function scheduleMainTopicPoll(projection) {
   if (mainTopicPoll !== null) clearTimeout(mainTopicPoll)
   mainTopicPoll = null
-  if (pageLeaving || !projection?.activeTask) return
+  if (pageLeaving || (!projection?.activeTask && !projection?.turns?.some((turn) =>
+    turn.statusFacts?.steps !== undefined && ['received', 'matching'].includes(turn.statusFacts.state)))) return
   mainTopicPoll = setTimeout(() => {
     mainTopicPoll = null
     void refreshMainTopic()
@@ -532,11 +543,13 @@ async function refreshMainTopic() {
       if (pageLeaving) return projection
       latestMainTopic = projection
       const pending = projection.openInputRequest
-      renderMainTopic(mainTopicHost, projection, { onAnswer: answerMainTopicRequest })
+      renderMainTopic(mainTopicHost, projection, { onAnswer: answerMainTopicRequest,
+        onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, projection) })
       scheduleMainTopicPoll(projection)
       return projection
     } catch (error) {
       if (pageLeaving) return undefined
+      disposeMainTopic(mainTopicHost)
       clearNode(mainTopicHost)
       const panel = element('section', undefined, 'section mt-unavailable')
       panel.append(
@@ -1116,6 +1129,40 @@ function openSubmitProgressDetail(trigger) {
   openTechnicalDetail({ title: '任务执行进度', eyebrow: '实时进度', content, trigger })
 }
 
+function openMainTopicProgressDetail(trigger, turn, scope) {
+  const content = element('div', undefined, 'stack progress-detail-body')
+  const identity = element('dl', undefined, 'draft-receipt')
+  for (const [label, value] of [['消息', turn.turnId], ['会话', turn.interactionId], ['任务', turn.taskId?.value]]) {
+    if (!value) continue
+    const row = element('div')
+    row.append(element('dt', label), element('dd', value))
+    identity.append(row)
+  }
+  content.append(identity)
+  const list = element('ol', undefined, 'progress-step-list')
+  for (const row of conversationStatus(turn.statusFacts)) {
+    const item = element('li', undefined, 'progress-step')
+    item.append(element('span', row.label))
+    const seconds = elapsedSeconds(row)
+    if (seconds !== undefined) item.append(element('span', `${seconds} 秒`))
+    if (row.error) item.append(element('span', sanitizeUserVisibleText([row.error.code, row.error.message].filter(Boolean).join('：'))))
+    if (row.startedAt) item.append(element('time', formatTime(row.startedAt)))
+    list.append(item)
+  }
+  content.append(list)
+  if (turn.taskId) {
+    const link = element('a', '打开完整任务看板', 'button button--sm')
+    link.href = taskDashboardHref(turn.taskId.value, { kind: 'task', projectKey: scope.projectKey, mode: scope.mode })
+    content.append(link)
+  }
+  openTechnicalDetail({ title: '执行进度详情', content, trigger, onClose: () => {
+    // A normal poll may replace the clicked button while this layer is open.
+    if (!trigger.isConnected) {
+      mainTopicHost.querySelector(`[data-turn-id="${CSS.escape(turn.turnId)}"] .conversation-status-detail`)?.focus()
+    }
+  } })
+}
+
 /**
  * Keep a confirmed new-task submission on the single entry interface. Refresh
  * the committed task row in place, read the task's real dashboard to discover
@@ -1550,6 +1597,7 @@ function subscribeExplicitStepStream(activeId) {
     return () => {}
   }
   stream.addEventListener('explicit.step', (event) => {
+    if (pageLeaving) return
     try {
       const payload = JSON.parse(event.data || '{}')
       const step = payload?.step ?? payload
@@ -1561,15 +1609,19 @@ function subscribeExplicitStepStream(activeId) {
         status.dataset.tone = 'warning'
         // Show the real step number and summary in the live banner and reset
         // its per-step timer; the progress block survives each step update.
-        submitBanner.step({ seq: step.seq, summary: step.summary })
+        submitBanner.step(step)
+        void refreshMainTopic()
       }
     } catch {
       // Ignore malformed step event payloads
     }
   })
-  return () => {
+  const stop = () => {
     try { stream.close() } catch {}
+    if (explicitStepStop === stop) explicitStepStop = null
   }
+  explicitStepStop = stop
+  return stop
 }
 
 /**

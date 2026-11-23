@@ -135,6 +135,36 @@
   padding: 0 4px;
 }
 
+.conversation-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: var(--surface-soft);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.conversation-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  color: var(--warning);
+}
+.conversation-status-row[data-tone="active"] { color: var(--accent); }
+.conversation-status-row[data-tone="success"] { color: var(--success); }
+.conversation-status-row[data-tone="danger"] { color: var(--danger); }
+.conversation-status-time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.conversation-status-detail { padding: 2px 5px; font: inherit; color: var(--accent); background: none; border: 0; cursor: pointer; }
+.conversation-status-row[data-running="true"] .conversation-status-mark { animation: conversation-pulse 1.5s ease-in-out infinite; }
+@keyframes conversation-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .conversation-status-row[data-running="true"] .conversation-status-mark { animation: none; }
+}
+
 .mt-turn--user .mt-turn-head {
   justify-content: end;
 }
@@ -280,6 +310,20 @@
 .mt-answer-status[data-tone="warning"] {
   color: var(--warning);
 }
+
+.tool-body { display: grid; gap: 12px; margin-top: 16px; min-width: 0; }
+.tool-card { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.tool-card p { margin: 8px 0; }
+.tool-path, .tool-error, .tool-read-feedback { overflow-wrap: anywhere; }
+.tool-card[data-status="failed"] .tool-state,
+.tool-card[data-status="blocked"] .tool-state,
+.tool-error { color: var(--danger); }
+.tool-card[data-status="succeeded"] .tool-state { color: var(--success); }
+.tool-facts { margin-block: 10px; }
+.tool-facts summary { cursor: pointer; }
+.tool-card pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; font-size: .85rem; }
+.tool-output { max-height: 65vh; overflow-y: auto; padding: 10px; border: 1px solid var(--line); }
+.tool-read-output { cursor: pointer; padding: 7px 12px; }
 
 @media (max-width: 720px) {
   .mt-head,
