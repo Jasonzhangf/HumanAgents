@@ -29,6 +29,7 @@ export interface ResponsesWireTool {
 export type ResponsesWireEvent =
   | { readonly protocol: 'responses'; readonly type: 'response.created'; readonly response: { readonly id: string; readonly model?: string } }
   | { readonly protocol: 'responses'; readonly type: 'response.in_progress'; readonly response: { readonly id: string } }
+  | { readonly protocol: 'responses'; readonly type: 'response.metadata'; readonly response_id?: string; readonly sequence_number?: number; readonly metadata: Readonly<Record<string, unknown>> }
   | { readonly protocol: 'responses'; readonly type: 'response.output_item.added'; readonly output_index: number; readonly item: ResponsesWireOutputItem }
   // RCC omits item_id on a late delta that repeats a completed unit's suffix.
   | { readonly protocol: 'responses'; readonly type: 'response.output_text.delta'; readonly item_id?: string; readonly output_index?: number; readonly content_index?: number; readonly delta: string }

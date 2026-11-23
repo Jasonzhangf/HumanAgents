@@ -85,6 +85,7 @@ function harnessToolSurfaceInstructions(
     : [
       'You are executing one turn of a HumanAgent task.',
       'When the requirement is satisfied, reply with your final answer as plain text and call no further tool: an external checker validates the result, so do not re-verify a completed deliverable by rewriting or re-reading it.',
+      'Preserve source values and units with their original field meanings in user-facing results. Do not infer missing specifications or convert an unstated unit; check the final answer against the accepted raw tool results.',
     ];
   return [
     ...framing,
@@ -1316,6 +1317,10 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     }
     const record = asRecord(raw);
     switch (raw.type) {
+      case 'response.metadata':
+        // RCC forwards this provider extension. It has no delivery or
+        // completion authority; the following output/terminal frames do.
+        return { events: [] };
       case 'response.created':
       case 'response.in_progress': {
         const response = requireObject(record, 'response', context.execution, raw.type);

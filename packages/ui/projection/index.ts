@@ -1164,6 +1164,7 @@ export function projectMemoryInteraction(input: MemoryInteractionSurfaceInput): 
 }
 
 export * from './runtime.js';
+export * from './main-topic.js';
 export * from './interaction-work-card.js';
 export * from './agent-activity.js';
 export * from './agent-debug-inspection.js';

@@ -306,6 +306,7 @@ export function createRuntimeApi(options = {}) {
         body: JSON.stringify(input),
       },
     ),
+    readMainTopic: () => request('/api/main-topic'),
     // Formal intervention surface. The UI labels these actions 批准/拒绝, but
     // only the existing grant/revoke/stop routes exist; no approve/reject
     // server action is invented. The exact scope is mandatory.

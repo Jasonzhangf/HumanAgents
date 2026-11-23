@@ -271,6 +271,7 @@ import {
   projectRuntimeTaskList,
   runtimeTaskStateLabel,
 } from '../../../ui/projection/runtime.js';
+import { projectMainTopic, type MainTopicProjection } from '../../../ui/projection/main-topic.js';
 import {
   projectMemoryInteraction,
   projectPipelineObservation,
@@ -4757,6 +4758,93 @@ export class UiRuntimeService {
     return projectRuntimeTaskList({ mode: this.mode, tasks: await this.snapshotsWithIdentitySource() });
   }
 
+  /** Rebuild the Jenny conversation from persisted interactions and task facts. */
+  async readMainTopic(): Promise<MainTopicProjection> {
+    const snapshots = await this.snapshotsWithIdentitySource();
+    const coordinatorSnapshots = new Map(this.coordinator.taskSnapshots().map((snapshot) => [snapshot.taskId.value, snapshot]));
+    const interactions = this.explicitIntake.exportState().interactions;
+    const finalReceipts = this.requirementSubmissions.finalReceipts();
+    const taskRefs = new Map<string, TaskId>();
+    for (const interaction of interactions) {
+      const direct = this.explicitInteractionTaskRef(interaction);
+      const revision = interaction.revision;
+      const receipts = revision === undefined ? [] : finalReceipts.filter(({ requestIdentity, requirement }) =>
+        requestIdentity === 'new-task-create'
+        && requirement.draftId === revision.draftId
+        && requirement.inputRevision === revision.inputRevision
+        && requirement.draftRevisionVersion === revision.revisionVersion
+        && requirement.draftRevisionHash === revision.revisionHash
+        && interaction.confirmations?.some((confirmation) =>
+          confirmation.interactionId === interaction.interactionId
+          && confirmation.draftId === requirement.draftId
+          && confirmation.draftRevisionVersion === requirement.draftRevisionVersion
+          && confirmation.draftRevisionHash === requirement.draftRevisionHash
+          && confirmation.confirmationRef === requirement.confirmationRef
+          && confirmation.payloadRef === requirement.payloadRef));
+      const parents = snapshots.filter((snapshot) => snapshot.executionLineage === undefined
+        && receipts.some(({ requirement }) => {
+          const source = snapshot.identitySource;
+          return source !== undefined
+            && source.requirementId === requirement.requirementId
+            && source.draftId === requirement.draftId
+            && source.inputRevision === requirement.inputRevision
+            && source.draftRevisionVersion === requirement.draftRevisionVersion
+            && source.draftRevisionHash === requirement.draftRevisionHash
+            && source.confirmationRef === requirement.confirmationRef;
+        }));
+      if (receipts.length > 1 || parents.length > 1) continue;
+      const submitted = parents[0]?.taskId;
+      if (direct !== undefined && submitted !== undefined && direct.value !== submitted.value) continue;
+      const taskId = submitted ?? direct;
+      if (taskId !== undefined) taskRefs.set(interaction.interactionId, taskId);
+    }
+    const interactionFacts = interactions.map((interaction) => {
+      const taskId = taskRefs.get(interaction.interactionId);
+      return {
+        interactionId: interaction.interactionId,
+        rawInput: interaction.rawInput,
+        state: interaction.state,
+        ...(interaction.occurredAt === undefined ? {} : { occurredAt: interaction.occurredAt }),
+        ...(interaction.reply === undefined ? {} : { reply: interaction.reply }),
+        ...(interaction.clarifications === undefined ? {} : { clarifications: interaction.clarifications }),
+        ...(interaction.draft?.proposal === undefined ? {} : { draftProposal: interaction.draft.proposal }),
+        ...(taskId === undefined ? {} : { taskId }),
+      };
+    });
+    const taskFacts = await Promise.all(snapshots.map(async (snapshot) => {
+      const dashboard = await this.taskDashboardWithPlan(snapshot.taskId).catch(() => undefined);
+      const durable = coordinatorSnapshots.get(snapshot.taskId.value);
+      const sources = interactions.filter((interaction) => taskRefs.get(interaction.interactionId)?.value === snapshot.taskId.value);
+      const sourceInteraction = sources.length === 1 ? sources[0] : undefined;
+      const events = dashboard?.recentEvents ?? snapshot.recentEvents;
+      return {
+        taskId: snapshot.taskId,
+        ...(snapshot.executionLineage === undefined ? {} : { parentTaskId: snapshot.executionLineage.parentTaskId }),
+        title: dashboard?.taskTitle ?? snapshot.semanticTitle ?? snapshot.title,
+        state: dashboard?.state ?? snapshot.state,
+        stateLabel: dashboard?.stateLabel ?? snapshot.currentState,
+        currentNode: dashboard?.currentNode ?? snapshot.currentNode,
+        nextStep: dashboard?.nextStep ?? snapshot.nextStep,
+        output: dashboard?.output ?? snapshot.output,
+        updatedAt: snapshot.updatedAt,
+        ...(events[0]?.occurredAt === undefined ? {} : { startedAt: events[0].occurredAt }),
+        ...(dashboard?.error === undefined ? {} : { error: dashboard.error }),
+        ...(durable?.inputRequest === undefined ? {} : { inputRequest: durable.inputRequest }),
+        ...(durable?.consumedInputRequests === undefined ? {} : { consumedInputRequests: durable.consumedInputRequests }),
+        ...(sourceInteraction === undefined ? {} : { sourceInteractionId: sourceInteraction.interactionId }),
+      };
+    }));
+    const workspaceCwd = this.options.workspaceRoot ?? this.options.runtimePaths?.workspaceCwd ?? '';
+    return projectMainTopic({
+      projectKey: this.options.projectKey ?? 'project',
+      projectName: basename(workspaceCwd) || this.options.projectKey || 'project',
+      workspaceCwd,
+      mode: this.mode,
+      interactions: interactionFacts,
+      tasks: taskFacts,
+    });
+  }
+
   private async snapshotsWithIdentitySource(): Promise<readonly RuntimeTaskSnapshotInput[]> {
     const snapshots = this.taskListSnapshots();
     const taskIdentity = this.options.taskIdentity;
@@ -6764,6 +6852,7 @@ export class UiRuntimeService {
     readonly schemaRef: string;
     readonly reason: string;
     readonly impact: string;
+    readonly options?: readonly string[];
     readonly turnId: string;
     readonly operationId: string;
     readonly executionEpoch: number;
@@ -6776,6 +6865,7 @@ export class UiRuntimeService {
         schemaRef: input.schemaRef,
         reason: input.reason,
         impact: input.impact,
+        ...(input.options === undefined ? {} : { options: input.options }),
         turnId: input.turnId,
         operationId: id('operation', input.operationId),
         executionEpoch: input.executionEpoch,

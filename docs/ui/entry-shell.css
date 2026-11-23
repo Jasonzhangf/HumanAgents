@@ -1,0 +1,273 @@
+/* Jenny's entry is a conversation surface. Keep runtime-owned nodes intact;
+   this sheet only changes their page-level placement and emphasis. */
+#page-root > .topbar {
+  min-height: 54px;
+  padding-inline: max(20px, calc((100vw - 1120px) / 2));
+}
+
+#page-root > .page[data-page-layout="work"] {
+  width: min(1120px, calc(100% - 32px));
+  min-height: calc(100dvh - 54px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0;
+  padding: 20px 64px 0;
+}
+
+#page-root .page-heading {
+  display: none;
+}
+
+#page-root .page-primary {
+  grid-column: 1 / -1;
+  min-height: 0;
+  min-width: 0;
+}
+
+#page-root .page-primary > .main-topic-host,
+#page-root .page-composer,
+#page-root .page-composer > .section,
+#page-root #entry-form > label:first-child,
+#page-root #entry-form > label:first-child textarea {
+  min-width: 0;
+}
+
+#page-root .main-topic-host {
+  margin: 0;
+}
+
+#page-root .mt-shell {
+  display: flex;
+  min-height: min(66dvh, 720px);
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+#page-root .mt-head {
+  padding: 12px 18px;
+  background: var(--surface);
+}
+
+#page-root .mt-agent {
+  font-size: 1.1rem;
+}
+
+#page-root .mt-meta {
+  justify-content: end;
+}
+
+#page-root .mt-active {
+  padding: 8px 18px;
+}
+
+#page-root .mt-stream {
+  flex: 1;
+  align-content: start;
+  max-height: min(66dvh, 720px);
+  padding: 20px 22px;
+}
+
+#page-root .page-primary > #entry-live {
+  margin: 10px 0 0;
+}
+
+#page-root #entry-live > .section-head,
+#page-root #entry-live > .stats,
+#page-root #entry-live > .empty {
+  display: none;
+}
+
+#page-root #entry-live > [data-task-list-drawer-trigger] {
+  min-height: 34px;
+  padding: 5px 10px;
+  font-size: 13px;
+}
+
+#page-root .mt-empty {
+  border: 0;
+  padding: 16px 0;
+  text-align: left;
+}
+
+#page-root .mt-bubble {
+  padding: 10px 13px;
+  border-radius: 10px;
+}
+
+#page-root .page-support {
+  display: none;
+}
+
+#page-root .page-composer {
+  position: sticky;
+  z-index: 4;
+  bottom: 0;
+  grid-column: 1 / -1;
+  width: calc(100% + 128px);
+  margin-inline: -64px;
+  padding: 12px 64px 18px;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+}
+
+#page-root .page-composer > .section {
+  width: min(100%, 1240px);
+  margin: 0 auto;
+}
+
+#page-root .page-composer .section-head {
+  display: none;
+}
+
+#page-root .page-composer .panel {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+#page-root #entry-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  width: 100%;
+  align-items: end;
+  gap: 8px;
+}
+
+#page-root #entry-form > label:first-child {
+  grid-column: 1;
+  min-width: 0;
+}
+
+#page-root #entry-form > label:first-child,
+#page-root #entry-form > label:first-child textarea {
+  margin: 0;
+}
+
+#page-root #entry-form > label:first-child textarea {
+  min-height: 52px;
+  max-height: 160px;
+  resize: vertical;
+}
+
+#page-root #entry-form > label:has(select[name="executionMode"]) {
+  grid-column: 1;
+  grid-row: 2;
+  width: max-content;
+  grid-template-columns: auto minmax(110px, 170px);
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+#page-root #entry-form > label:has(select[name="executionMode"]) select {
+  min-height: 34px;
+  padding-block: 5px;
+}
+
+#page-root #entry-form > .actions {
+  grid-column: 2;
+  grid-row: 1 / 3;
+  align-self: end;
+}
+
+#page-root #entry-form > .actions button {
+  min-width: 112px;
+}
+
+#page-root #entry-form > [data-execution-field] {
+  grid-column: 1 / -1;
+}
+
+#page-root #entry-form > #entry-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 8px 10px;
+}
+
+@media (max-width: 780px) {
+  #page-root > .topbar {
+    min-height: 48px;
+    padding-inline: 16px;
+  }
+
+  #page-root > .page[data-page-layout="work"] {
+    width: 100%;
+    min-height: calc(100dvh - 48px);
+    padding: 10px 12px 0;
+  }
+
+  #page-root .mt-shell {
+    min-height: min(64dvh, 680px);
+  }
+
+  #page-root .mt-head {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  #page-root .mt-meta {
+    gap: 5px;
+  }
+
+  #page-root .mt-stream {
+    max-height: 64dvh;
+    padding: 14px 12px;
+  }
+
+  #page-root .page-composer {
+    width: calc(100% + 24px);
+    margin-inline: -12px;
+    padding: 9px 12px max(12px, env(safe-area-inset-bottom));
+  }
+
+  #page-root .page-composer > .section {
+    width: 100%;
+  }
+
+  #page-root #entry-form {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 7px;
+  }
+
+  #page-root #entry-form > label:first-child textarea {
+    min-height: 48px;
+    padding: 9px 10px;
+  }
+
+  #page-root #entry-form > label:has(select[name="executionMode"]) {
+    grid-template-columns: auto minmax(105px, 150px);
+  }
+
+  #page-root #entry-form > .actions button {
+    min-width: 0;
+    padding-inline: 12px;
+  }
+}
+
+@media (max-width: 390px) {
+  #page-root > .page[data-page-layout="work"] {
+    padding-inline: 8px;
+  }
+
+  #page-root .mt-head {
+    align-items: start;
+  }
+
+  #page-root .mt-meta {
+    justify-content: end;
+  }
+
+  #page-root .page-composer {
+    width: calc(100% + 16px);
+    margin-inline: -8px;
+    padding-inline: 8px;
+  }
+
+  #page-root #entry-form > .actions button {
+    padding-inline: 9px;
+    font-size: 13px;
+  }
+}

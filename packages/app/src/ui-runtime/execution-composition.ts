@@ -371,6 +371,7 @@ export function createDefaultExecutionComposition(input: {
     readonly schemaRef: string;
     readonly reason: string;
     readonly impact: string;
+    readonly options?: readonly string[];
     readonly turnId: string;
     readonly operationId: RuntimeExecutionAllocation['operationId'];
     readonly executionEpoch: number;
@@ -1725,6 +1726,7 @@ export function createDefaultExecutionComposition(input: {
               schemaRef: modelRequest.schemaRef,
               reason: modelRequest.reason,
               impact: modelRequest.impact,
+              ...(modelRequest.options === undefined ? {} : { options: modelRequest.options }),
               turnId,
               operationId: allocation.operationId,
               executionEpoch: allocation.executionEpoch,

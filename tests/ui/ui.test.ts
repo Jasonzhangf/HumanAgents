@@ -2295,6 +2295,9 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     'async function waitForTask() { return "task-1"; }',
     'function observationHref(taskId) { return "./task.html?task=" + taskId; }',
     'async function refreshQueue() {}',
+    // Main-topic readback belongs to the page closure outside this source slice.
+    'async function refreshMainTopic() {}',
+    'const mainTopicHost = { dataset: {} };',
     // executeSubmission lands on the submitted task through this helper, which
     // is defined outside the sliced confirmation block, so the harness supplies
     // a minimal mirror of the real call chain.
@@ -2564,7 +2567,7 @@ test('entry page presents an answered snapshot as a success result instead of fa
   assert.equal(harness.state(), 'answered');
   assert.deepEqual(harness.draftedStates, ['answered']);
   assert.equal(harness.status.dataset.tone, 'success');
-  assert.equal(harness.status.textContent, '本次请求已直接回答');
+  assert.equal(harness.status.textContent, 'Jenny 已直接回答；本次没有创建任务');
   assert.equal(harness.directAnswers.length, 1);
   assert.equal(harness.directAnswers[0]?.text, '13 加 14 等于 27。');
 });
