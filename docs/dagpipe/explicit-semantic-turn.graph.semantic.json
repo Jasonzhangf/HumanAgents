@@ -1,6 +1,6 @@
 {
   "graph": "humanagent-explicit-semantic-turn",
-  "requirements_version": 19,
+  "requirements_version": 35,
   "labels": {
     "assemble": "装配显式交互轮次与前序语义检查点",
     "route": "物化完整当前上下文并由显式大脑推理任务类型",
@@ -23,6 +23,7 @@
     "identityBoundary": "父轮次使用中立 interaction-parent execution identity（runtimeId、organId、operationId、executionEpoch、interactionTurn）；不伪造 taskId 或 cycleId，也不把身份镜像到业务 payload 或 metadata。",
     "dispatchReturnBoundary": "显式产品解释器不广告也不执行 dispatch_helper/accept_helper，不启动新 helper。旧 helper 的 dispatch-accepted、returned 与 owner-accepted 事实继续由既有 Journal 精确读取和恢复，返回结论不自动采纳。",
     "iterationBoundary": "initial、tool-call、tool-result、continuation 由外部 ProviderAgentDriver 按真实请求循环驱动；本 DAG 保持无环，不在图内表达工具请求环。",
+    "resultReadBoundary": "assemble 固定候选，不预载结果或序列化权限函数。route 仅在宿主绑定时提供 task.read_result，唯一参数 taskId：复用当前项目 service 读取权、Task identity/subscription lineage 和精确执行 binding 的 canonical publication reader；多 occurrence 返回歧义，不择最新。pending/unknown 保留状态，不回退 task.output。参数错误或无此任务按原 callId 返回可纠正工具错误，同轮继续；权限、publication 与持久化错误仍沿既有错误/partial 返回终点。history 通过既有 driver 写入当前 requestId/callId 配对事实，冷读复用已提交正文及来源，不重写旧 checkpoint、不新增执行。",
     "helperBoundary": "显式产品解释器不再派发任何 helper；helper 执行与 owner 接受只属于隐式大脑及旧 helper 的既有恢复路径。",
     "historyBoundary": "历史语义只取前序已提交 InteractionSemanticCheckpoint；当前轮次完整上下文由当前原文 RawAsset 与本轮 accepted raw facts 单独物化，二者不混用，也不形成隐藏的前次响应链。",
     "settlementEvidence": "Provider adapter 拥有 settlement 语义；原 typed 成功 Provider settlement receipt 经现有 interaction-parent Journal 的单一 provider-settlement 控制记录持久化，关联同一 interactionId、inputRevision 与真实 terminal request。除既有 continue owner-reconciliation 分支外，physical close 后只新增允许该控制记录追加，request 与 raw fact 仍冻结。独立只读 control GET 精确消费该记录；缺失、未就绪或完整性失败显式报错，不伪造、不从业务字段重建、不重放请求。explicit-brain.state、trace、非空 reply、resource-close 或任务 payload 均不能替代该凭证。已完成 answer 的旧历史无 receipt 仍可读取；强制 receipt 仅适用于需要 settlement 证据的 incomplete recovery。",
@@ -31,6 +32,9 @@
     "semanticTitleBoundary": "structuredProposal.title 是可读业务名称；objective 与 normalizedInput 继续承载完整执行目的和输入。title 不能由截断、前缀或 JSON 字符串派生，也不能替换 directive。",
     "plannedOwnerBoundary": "interaction-parent-turn-raw.ts（Runtime raw owner）与 interaction-parent-turn-journal.ts（JSONL journal）已存在；现有 ownerPath 是真实责任入口，不声明 Operator 注册或整体已验收。closed Provider epoch 不等于 logical turn complete；零 acceptedFacts 的 failed 请求在 physical epoch 真实 closed 后，可在同一 turn/interaction/revision 以新 epoch 重入，原记录只追加不改写。",
     "statusBoundary": "implementationStatus 仍为 UNVERIFIED；本图不声明 receipt 记录、control GET、Operator 注册、运行执行或验收已完成。独立只读 control GET 是否另需持久图仍是 design Review 问题；当前不创建新图。"
+    ,"explicitEndBoundary": "新协议轮使用 explicit-turn-end 结束工具：outer kind 只有 simple/complex，inner decision 保持既有 intake kinds；requirement 必须 complex 且带 capsule，simple 禁止 capsule。普通尾部文本无结束工具时只续推，不发布成功结果。"
+    ,"partialHistoryBoundary": "typed partial 是独立 outcome，不进入 answer/requirement normal 分支，也不写 semantic checkpoint。history 只保存失败尝试与恢复责任；继续通过 resumePartialRef 读取最近有效 checkpoint 和三次错误，保持原 interaction/inputRevision，不重复 FIFO 或 Task。"
+    ,"turnEndGates": "有效结束 call 是 checkpoint 资格；真实 drain/settle/close 是成功发布资格；partial/无效结束/失败探索禁止主路径 checkpoint。"
   },
   "implementationStatus": "UNVERIFIED"
 }

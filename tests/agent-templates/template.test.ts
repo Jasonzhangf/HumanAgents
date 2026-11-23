@@ -17,6 +17,8 @@ import {
   loadBuiltinPromptRegistry,
   loadBuiltinPromptSegments,
   loadAgentPromptSegments,
+  loadRegisteredSkills,
+  loadSelectedSkillContent,
   validateAgentTemplate,
   validateConfiguredAgentBinding,
   type AgentRole,
@@ -293,6 +295,38 @@ test('prompt loader rejects missing and empty markdown files', async () => {
     () => loadAgentPromptSegments(compiled, createFilePromptSource(root)),
     /prompt segment is empty/,
   );
+});
+
+test('selected Skill loads declared rule references inside its own directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-skills-'));
+  await mkdir(join(root, 'interaction', 'skills', 'communication', 'rules'), { recursive: true });
+  await writeFile(join(root, 'interaction', 'skills', 'communication', 'SKILL.md'), [
+    '---', 'name: communication', 'description: send messages', 'references:', '  - rules/timing.md', '  - rules/timing.md', '---',
+    '', '## Work', 'Use the selected communication rules.',
+  ].join('\n'), 'utf8');
+  await writeFile(join(root, 'interaction', 'skills', 'communication', 'rules', 'timing.md'), '# Timing\nSend now when blocked.\n', 'utf8');
+  const source = createFilePromptSource(root);
+  const [skill] = await loadRegisteredSkills(source, ['interaction/skills/communication/SKILL.md']);
+  assert.deepEqual(skill.referenceRefs, ['rules/timing.md']);
+  const content = await loadSelectedSkillContent(source, skill);
+  assert.match(content, /## Work/);
+  assert.match(content, /# Skill rule reference: rules\/timing\.md/);
+  assert.match(content, /Send now when blocked/);
+  await mkdir(join(root, 'interaction', 'skills', 'other'), { recursive: true });
+  await writeFile(join(root, 'interaction', 'skills', 'other', 'SKILL.md'), 'outside\n', 'utf8');
+  await assert.rejects(
+    () => source.read('interaction/skills/communication/../other/SKILL.md', { within: 'interaction/skills/communication' }),
+    /outside the template root/,
+  );
+  assert.equal(content.split('# Skill rule reference: rules/timing.md').length - 1, 1);
+  await writeFile(join(root, 'interaction', 'skills', 'communication', 'SKILL.md'), [
+    '---', 'name: communication', 'description: send messages', 'references:', '  - ../other/SKILL.md', '---',
+  ].join('\n'), 'utf8');
+  await assert.rejects(
+    () => loadRegisteredSkills(source, ['interaction/skills/communication/SKILL.md']),
+    /must stay inside its Skill directory/,
+  );
+  execFileSync('/bin/rm', ['-rf', root]);
 });
 
 test('builtin roles resolve all external markdown prompt segments', async () => {

@@ -102,8 +102,8 @@ export const RESPONSES_BASH_TOOL: ProviderToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      command: { type: 'string' },
-      description: { type: 'string' },
+      command: { type: 'string', minLength: 1 },
+      description: { type: 'string', minLength: 1 },
       timeoutMs: { type: 'integer', minimum: 1, maximum: 120000 },
       workdir: { type: 'string' },
     },
@@ -926,11 +926,22 @@ export function createResponsesFileToolExecutor(input: {
           const output = pending.get(intent.operationId.value)?.result;
           if (result.status === 'failed' && output?.status === 'failed') return output;
           if (result.status !== 'succeeded' || !output) throw new Error(result.failure?.message ?? result.reconcile?.reason ?? `provider tool ended in ${result.status}`);
+          const outputRef = output.outputRef ?? result.result?.outputRef ?? result.observation?.outputRef;
+          const outputDigest = output.outputDigest ?? result.result?.outputDigest ?? result.observation?.outputDigest;
+          if ((outputRef === undefined) !== (outputDigest === undefined)) {
+            throw new Error('provider tool gateway returned an incomplete output descriptor');
+          }
           // The gateway operation completed succeeded; the result envelope must
           // carry that typed terminal status like every sibling executor
           // (standard-turn-end, child producer, web.search) instead of leaving
           // the optional field unset.
-          return { ...output, status: 'succeeded' };
+          return {
+            ...output,
+            status: 'succeeded',
+            ...(outputRef !== undefined && outputDigest !== undefined
+              ? { outputRef, outputDigest, outputRefs: [outputRef] }
+              : {}),
+          };
         } finally {
           request.signal.removeEventListener('abort', abort);
           pending.delete(intent.operationId.value);
@@ -1296,12 +1307,17 @@ async function executeFileEdit(request: ToolExecRequest, params: { readonly work
 async function executeBash(request: ToolExecRequest, params: { readonly workspaceRoot: string }): Promise<ToolExecResult> {
   if (request.signal.aborted) throw Object.assign(new Error('bash was stopped before admission'), { name: 'AbortError' });
   const args = request.call.arguments;
-  if (typeof args.command !== 'string' || args.command.trim() === '') throw new Error('bash requires a non-empty command');
-  if (typeof args.description !== 'string' || args.description.trim() === '') throw new Error('bash requires a non-empty description');
-  const timeoutMs = typeof args.timeoutMs === 'number' && Number.isInteger(args.timeoutMs) && args.timeoutMs > 0
-    ? Math.min(args.timeoutMs, 120000)
-    : 30000;
-  const workdir = await resolveWorkspacePath(params.workspaceRoot, typeof args.workdir === 'string' && args.workdir.trim() !== '' ? args.workdir : '.');
+  const allowed = new Set(Object.keys(RESPONSES_BASH_TOOL.inputSchema.properties as Record<string, unknown>));
+  const extra = Object.keys(args).find((key) => !allowed.has(key));
+  if (extra !== undefined) return invalidToolArguments(request, 'bash', `bash does not accept argument ${extra}`);
+  if (typeof args.command !== 'string' || args.command.trim() === '') return invalidToolArguments(request, 'bash', 'bash requires a non-empty command');
+  if (typeof args.description !== 'string' || args.description.trim() === '') return invalidToolArguments(request, 'bash', 'bash requires a non-empty description');
+  if (args.timeoutMs !== undefined && (typeof args.timeoutMs !== 'number' || !Number.isInteger(args.timeoutMs) || args.timeoutMs < 1 || args.timeoutMs > 120000)) {
+    return invalidToolArguments(request, 'bash', 'bash timeoutMs must be an integer from 1 to 120000');
+  }
+  if (args.workdir !== undefined && typeof args.workdir !== 'string') return invalidToolArguments(request, 'bash', 'bash workdir must be a string');
+  const timeoutMs = args.timeoutMs ?? 30000;
+  const workdir = await resolveWorkspacePath(params.workspaceRoot, args.workdir ?? '.');
   const command = args.command;
   const result = await new Promise<{ exitCode: number | null; signal: string | null; timedOut: boolean; aborted: boolean; stdout: { text: string; truncated: boolean }; stderr: { text: string; truncated: boolean } }>((resolve, reject) => {
     const child = spawn('bash', ['-c', command], { cwd: workdir, env: process.env });

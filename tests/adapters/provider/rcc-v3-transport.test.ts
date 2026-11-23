@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   id,
   type EvidenceRef,
   type ProviderBinding,
   type ScopeRef,
+  type ProviderRawFact,
 } from '../../../packages/contracts/src/index.js';
 import type { ProviderRequestContext } from '../../../packages/contracts/src/provider-request-context.js';
 import {
@@ -56,6 +58,51 @@ function evidence(label: string): EvidenceRef {
     scope,
   };
 }
+
+test('interaction-5 recorded drain accepts only diagnostic extensions without completing the request', async () => {
+  // Real accepted turn_end drain failed on frame 86. Keep the original order;
+  // only credential-bearing metadata headers are removed from this fixture.
+  const frames = (await readFile('tests/adapters/provider/fixtures/responses-interaction-5-drain.jsonl', 'utf8'))
+    .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  const diagnostics = new Set(['codex.rate_limits', 'codex.response.metadata', 'responsesapi.websocket_timing']);
+  assert.equal(frames[86].type, 'codex.rate_limits');
+  const run = async (sequence: readonly Record<string, unknown>[]) => {
+    const built = adapter(async () => response(chunks(sequence.map((frame) => `data: ${JSON.stringify(frame)}\n\n`))));
+    // Keep the logical turn's explicit end-tool surface. A missing provider
+    // terminal must fail instead of taking the single-round message shortcut.
+    await built.adapter.start({ ...startInput(), tools: [{ toolId: 'humanagent_turn_end', description: 'end turn', inputSchema: { type: 'object' } }] });
+    const facts: ProviderRawFact[] = [];
+    const events = [];
+    for await (const event of built.adapter.observe({ ...execution, onRawFacts: async (batch) => { facts.push(...batch); } })) {
+      events.push({ kind: event.kind, summary: event.summary, terminalState: event.terminalState });
+    }
+    return { facts, events, settlement: await built.adapter.settle(execution) };
+  };
+  const actual = await run(frames);
+  const baseline = await run(frames.filter((frame) => !diagnostics.has(String(frame.type))));
+  assert.deepEqual(actual.events, baseline.events);
+  const semanticFacts = (facts: readonly ProviderRawFact[]) => facts.map((fact) => {
+    if (fact.kind !== 'usage') return fact;
+    const { timing: _timing, ...usage } = fact;
+    return usage;
+  });
+  assert.deepEqual(semanticFacts(actual.facts), semanticFacts(baseline.facts));
+  assert.equal(actual.settlement.state, 'succeeded');
+  assert.deepEqual(actual.facts.filter((fact) => fact.kind === 'request-complete').map((fact) => fact.terminal), ['completed']);
+  assert.ok(actual.events.some((event) => event.summary?.includes('42')));
+
+  await assert.rejects(run([...frames.slice(0, 86), { type: 'codex.unregistered' }, ...frames.slice(86)]),
+    (error: unknown) => (error as ProviderAdapterError).providerError?.code === 'unknown.event');
+  await assert.rejects(run(frames.slice(0, -1)),
+    (error: unknown) => (error as ProviderAdapterError).providerError?.code === 'stream.missing-terminal');
+  const failed = await run([...frames.slice(0, -1), {
+    type: 'response.failed', response: { id: 'interaction-5-negative', error: { code: 'server_error', message: 'explicit provider failure' } },
+  }]);
+  assert.equal(failed.settlement.state, 'failed');
+  const terminal = failed.facts.find((fact) => fact.kind === 'request-complete');
+  assert.equal(terminal?.terminal, 'failed');
+  assert.equal(terminal?.error?.code, 'server_error');
+});
 
 test('RCC v3 transport recovers a harness servertool shell call as the owned web.search function call', async () => {
   // The backend harness answers a server-side tool request with its own shell
@@ -538,11 +585,11 @@ test('RCC v3 anthropic typed submit sends the continuation to Messages', async (
       'event: message_stop\ndata: {"type":"message_stop"}\n\n',
     ]),
     chunks([
-      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-native-2","model":"provider.model","role":"assistant"}}\n\n',
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-native-2","model":"provider.model","role":"assistant","usage":{"input_tokens":8,"cache_creation_input_tokens":0,"cache_read_input_tokens":31,"output_tokens":1}}}\n\n',
       'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
       'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ANTHROPIC_CONTINUATION_OK"}}\n\n',
       'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
-      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}\n\n',
       'event: message_stop\ndata: {"type":"message_stop"}\n\n',
     ]),
   ];
@@ -566,7 +613,13 @@ test('RCC v3 anthropic typed submit sends the continuation to Messages', async (
   });
   assert.equal(submitted.status, 'accepted');
   const roundTwo = [];
-  for await (const event of built.adapter.observe(execution)) roundTwo.push(event);
+  const counters: Array<ReadonlyArray<number | undefined>> = [];
+  for await (const event of built.adapter.observe({ ...execution, onRawFacts: async facts => {
+    for (const fact of facts) {
+      if (fact.kind === 'usage') counters.push([fact.inputTokens, fact.cacheCreationInputTokens, fact.cacheReadInputTokens, fact.outputTokens]);
+    }
+  } })) roundTwo.push(event);
+  assert.deepEqual(counters, [[8, 0, 31, 7]]);
   assert.equal(roundTwo.some((event) => event.kind === 'output' && event.summary === 'ANTHROPIC_CONTINUATION_OK'), true);
   assert.equal((await built.adapter.settle(execution)).state, 'succeeded');
 
@@ -1085,6 +1138,7 @@ test('RCC v3 openai entry sends Chat Completions and settles on [DONE]', async (
   const built = openAIAdapter(fetchStub(chunks([
     'data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"RCC_PROXY_ENTRY_OK"},"finish_reason":null}]}\n\n',
     'data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+    'data: {"id":"chat-1","object":"chat.completion.chunk","model":"reported-model","choices":[],"usage":{"prompt_tokens":80,"completion_tokens":11,"prompt_tokens_details":{"cached_tokens":0}}}\n\n',
     'data: [DONE]\n\n',
   ]), calls));
 
@@ -1097,11 +1151,18 @@ test('RCC v3 openai entry sends Chat Completions and settles on [DONE]', async (
     messages: [
       { role: 'user', content: JSON.stringify({ prompt: 'summarize the failing build log' }) },
     ],
+    stream_options: { include_usage: true },
     stream: true,
   });
 
   const observed = [];
-  for await (const event of built.adapter.observe(execution)) observed.push(event);
+  const usage: Array<[string | null, number | undefined, number | undefined, number | undefined]> = [];
+  for await (const event of built.adapter.observe({ ...execution, onRawFacts: async facts => {
+    for (const fact of facts) {
+      if (fact.kind === 'usage') usage.push([fact.responseModel, fact.inputTokens, fact.outputTokens, fact.cacheReadInputTokens]);
+    }
+  } })) observed.push(event);
+  assert.deepEqual(usage, [['reported-model', 80, 11, 0]]);
   assert.deepEqual(observed.map((event) => event.kind), ['output', 'terminal']);
   assert.equal(observed[0].summary, 'RCC_PROXY_ENTRY_OK');
   assert.equal(observed[1].terminalState, 'succeeded');

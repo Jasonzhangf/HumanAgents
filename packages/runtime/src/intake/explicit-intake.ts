@@ -7,6 +7,7 @@ import type {
   DraftRevision,
   DraftRevisionInput,
   ExecutionPolicyDefinition,
+  ExplicitTurnPartialResult,
   InteractionRequestKind,
   ProductMessageActor,
   RequirementIntent,
@@ -19,6 +20,7 @@ import {
   validateDraftPreviewReceipt,
   validateDraftRejectClosure,
   validateProductMessageActor,
+  validateExplicitTurnPartialResult,
 } from '../../../contracts/src/index.js';
 import {
   assertDraftRevisionCurrent,
@@ -69,6 +71,7 @@ export type ExplicitInteractionState =
   | 'dispatched'
   | 'answered'
   | 'status-only'
+  | 'partial'
   | 'rejected';
 
 const TERMINAL_INTERACTION_STATES: ReadonlySet<ExplicitInteractionState> = new Set([
@@ -187,6 +190,7 @@ export interface ExplicitInteractionSnapshot {
   readonly nextAction: string;
   readonly condition?: string;
   readonly reason?: string;
+  readonly partial?: ExplicitInteractionPartial;
   readonly reply?: string;
   readonly clarifications?: readonly ClarificationExchange[];
   readonly draft?: RequirementDraft;
@@ -241,6 +245,11 @@ export interface StatusQueryReceipt {
   readonly nextAction: 'present-status';
 }
 
+/** A typed, durable recovery handle for an explicit turn that exhausted format correction. */
+export interface ExplicitInteractionPartial extends ExplicitTurnPartialResult {
+  readonly resumed?: boolean;
+}
+
 export interface ExplicitIntakeState {
   readonly nextInteractionSeq: number;
   readonly nextDraftSeq: number;
@@ -263,6 +272,7 @@ interface ExplicitInteractionRecordState {
   readonly nextAction: string;
   readonly condition?: string;
   readonly reason?: string;
+  readonly partial?: ExplicitInteractionPartial;
   readonly reply?: string;
   readonly clarifications?: readonly ClarificationExchange[];
   readonly draft?: RequirementDraft;
@@ -291,6 +301,7 @@ interface InteractionRecord {
   nextAction: string;
   condition?: string;
   reason?: string;
+  partial?: ExplicitInteractionPartial;
   reply?: string;
   clarifications?: ClarificationExchange[];
   draft?: RequirementDraft;
@@ -513,6 +524,7 @@ export class ExplicitIntake {
       nextAction: interaction.nextAction,
       condition: interaction.condition,
       reason: interaction.reason,
+      partial: interaction.partial,
       reply: interaction.reply,
       clarifications: interaction.clarifications,
       draft: interaction.draft,
@@ -616,6 +628,50 @@ export class ExplicitIntake {
       candidate.reply = answer;
       this.assignRequestNumberFor(candidate);
     });
+  }
+
+  recordPartial(input: InteractionId, partial: ExplicitInteractionPartial): void {
+    const interaction = this.requireState(input, ['matching'], 'record partial turn');
+    validateExplicitTurnPartialResult(partial);
+    if (partial.interactionId !== interaction.interactionId || partial.inputRevision !== interaction.inputRevision) {
+      throw this.invalidState('record partial turn', 'partial belongs to a different interaction revision', 'provide-typed-partial-fact');
+    }
+    this.transition(interaction, 'partial', 'explicit-intake', 'continue-partial-turn', 'partial-turn-recovery-available', (candidate) => {
+      candidate.partial = structuredClone(partial);
+      candidate.reply = undefined;
+    });
+  }
+
+  resumePartial(input: InteractionId, partialRef: string): boolean {
+    const interaction = this.requireInteraction(input);
+    const partial = interaction.partial;
+    if (interaction.state === 'matching' && partial?.partialRef === partialRef && partial.resumed) return false;
+    if (interaction.state !== 'partial' || partial === undefined || partial.partialRef !== partialRef) {
+      throw this.invalidState('resume partial turn', 'the partial reference is not the current resumable result', 'inspect-the-current-partial-reference');
+    }
+    this.persistMutation(() => {
+      interaction.partial = { ...partial, resumed: true };
+      interaction.state = 'matching';
+      interaction.owner = 'explicit-intake';
+      interaction.nextAction = 'resume-explicit-turn';
+      interaction.condition = 'partial-resume-requested';
+      interaction.history.push('matching');
+    });
+    return true;
+  }
+
+  abortPartialResume(input: InteractionId): boolean {
+    const interaction = this.requireInteraction(input);
+    if (interaction.state !== 'matching' || interaction.partial?.resumed !== true) return false;
+    this.persistMutation(() => {
+      interaction.state = 'partial';
+      interaction.partial = { ...interaction.partial!, resumed: false };
+      interaction.owner = 'explicit-intake';
+      interaction.nextAction = 'continue-partial-turn';
+      interaction.condition = 'partial-resume-failed';
+      interaction.history.push('partial');
+    });
+    return true;
   }
 
   /**

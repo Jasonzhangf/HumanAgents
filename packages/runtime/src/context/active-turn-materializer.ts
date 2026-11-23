@@ -374,6 +374,9 @@ export async function foldActiveTurn<
     }
 
     switch (fact.kind) {
+      case 'usage':
+        // Metering shares the request journal but contributes no model input.
+        break;
       case 'content': {
         const key = unitKey(request, fact.channel, fact.contentUnitId);
         let unit = unitByKey.get(key);

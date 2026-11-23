@@ -1,5 +1,6 @@
 import {
   canonicalJsonStringify,
+  isStandardTurnEndToolId,
   id,
   type AnyProviderExecutionIdentityRef,
   type BusinessPayload,
@@ -8,6 +9,7 @@ import {
   type InteractionParentProviderExecutionIdentityRef,
   type NextAction,
   type ProviderBinding,
+  type ProviderCallCapacity,
   type ProviderError,
   type ProviderEvent,
   type ProviderExecutionIdentityRef,
@@ -28,7 +30,8 @@ import type {
   RequestToolSurfaceUse,
 } from '../../../contracts/src/provider-request-context.js';
 import { ProviderAdapterError } from './errors.js';
-import { invalidRawArguments, markInvalidToolArguments } from './tool-arguments.js';
+import type { ProviderModelCapacitySource } from './model-capacity.js';
+import { invalidRawArguments, markInvalidToolArguments, type InvalidToolArguments } from './tool-arguments.js';
 import type { ProviderEvidenceSink } from './evidence.js';
 import { mapOpenAIFinishReason } from './openai-finish-reason.js';
 import type {
@@ -80,11 +83,12 @@ function harnessToolSurfaceInstructions(
   const framing = use === 'intake-decision'
     ? [
       'This request is one intake decision, not one turn of task execution: produce exactly one decision object for the current input and claim no task execution.',
-      'Dispatch a helper only when the decision itself needs one, and never restate the request instructions as a requirement.',
     ]
     : [
       'You are executing one turn of a HumanAgent task.',
-      'When the requirement is satisfied, reply with your final answer as plain text and call no further tool: an external checker validates the result, so do not re-verify a completed deliverable by rewriting or re-reading it.',
+      tools.some((tool) => isStandardTurnEndToolId(tool.toolId))
+        ? 'When the work is complete, submit the result and its evidence through humanagent_turn_end.'
+        : 'When the work is complete, return the final answer.',
       'Preserve source values and units with their original field meanings in user-facing results. Do not infer missing specifications or convert an unstated unit; check the final answer against the accepted raw tool results.',
     ];
   return [
@@ -162,7 +166,7 @@ function responsesContextInput(context: ProviderRequestContext): readonly Respon
           type: 'function_call',
           call_id: unit.callId,
           name: responsesWireToolName(unit.toolId),
-          arguments: JSON.stringify(unit.arguments),
+          arguments: invalidRawArguments(unit.arguments) ?? JSON.stringify(unit.arguments),
         };
       case 'tool-result':
         return { type: 'function_call_output', call_id: unit.callId, output: wireToolResultOutput(unit.output, unit.evidenceRefs) };
@@ -233,7 +237,7 @@ function openaiChatContextMessages(context: ProviderRequestContext): readonly Op
         pendingToolCalls.push({
           id: unit.callId,
           type: 'function',
-          function: { name: responsesWireToolName(unit.toolId), arguments: JSON.stringify(unit.arguments) },
+          function: { name: responsesWireToolName(unit.toolId), arguments: invalidRawArguments(unit.arguments) ?? JSON.stringify(unit.arguments) },
         });
         break;
       case 'tool-result':
@@ -309,6 +313,7 @@ function businessText(
 }
 
 const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
+  ['task.read_result', 'task_read_result'],
   ['file.read', 'file_read'],
   ['file.list', 'file_list'],
   ['file.search', 'file_search'],
@@ -324,8 +329,10 @@ const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
   ['child.call', 'child_call'],
   ['child.adopt', 'child_adopt'],
   ['child.not_select', 'child_not_select'],
+  ['interaction.select_skills', 'interaction_select_skills'],
 ]);
 const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
+  ['task_read_result', 'task.read_result'],
   ['file_read', 'file.read'],
   ['file_list', 'file.list'],
   ['file_search', 'file.search'],
@@ -341,6 +348,7 @@ const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
   ['child_call', 'child.call'],
   ['child_adopt', 'child.adopt'],
   ['child_not_select', 'child.not_select'],
+  ['interaction_select_skills', 'interaction.select_skills'],
 ]);
 
 /** Server-side tools the backend harness may invoke on the model's behalf. */
@@ -375,6 +383,37 @@ export interface DecodeContext<
    *  Responses request owns exactly one model round as its terminal output;
    *  rounds RCC opens by itself come from instructions the client never sent. */
   readonly responsesStreamRound: { count: number };
+  /**
+   * Per-request call metering. The adapter opens it when observation starts so
+   * one usage fact can carry measured instants and the live capacity of the
+   * response model. Absent for contexts that do not meter (unit fixtures).
+   */
+  readonly callCapture?: ProviderCallCapture;
+}
+
+/**
+ * Request-local metering state. `responseModel` is what the provider reports
+ * for this response and is the only capacity match key; `emitted` keeps one
+ * usage fact per observed request so a repeated terminal frame cannot be
+ * counted twice.
+ */
+export interface ProviderCallCapture {
+  readonly startedAt: Date;
+  readonly now: () => Date;
+  readonly catalog?: ProviderModelCapacitySource;
+  readonly signal?: AbortSignal;
+  responseModel?: string;
+  /** OpenAI chat delivers usage in a trailing chunk after finish_reason. */
+  chatUsage?: ProviderCallUsageCounters;
+  emitted: boolean;
+}
+
+/** Protocol-normalised token counters; an absent key means "not reported". */
+export interface ProviderCallUsageCounters {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cacheReadInputTokens?: number;
+  readonly cacheCreationInputTokens?: number;
 }
 
 const REQUEST_START_SUMMARY = 'provider requested model work';
@@ -546,7 +585,7 @@ function rawAsset(ref: EvidenceRef, view: RawAssetView): RawAsset {
  */
 type ProviderRawFactContent = Extract<
   ProviderRawFact<AnyProviderExecutionIdentityRef>,
-  { kind: 'content' | 'content-complete' | 'tool-call' | 'request-complete' }
+  { kind: 'content' | 'content-complete' | 'tool-call' | 'request-complete' | 'usage' }
 >;
 
 function contentFact(input: {
@@ -577,6 +616,101 @@ function requestCompleteFact(
   error?: ProviderError,
 ): ProviderRawFactContent {
   return { kind: 'request-complete', terminal, ...(error === undefined ? {} : { error }) };
+}
+
+function nonNegativeCounter(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function nestedRecord(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = record[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function openAIUsage(record: Record<string, unknown>): ProviderCallUsageCounters | undefined {
+  const usage = nestedRecord(record, 'usage');
+  if (usage === undefined) return undefined;
+  const promptDetails = nestedRecord(usage, 'prompt_tokens_details');
+  const inputTokens = nonNegativeCounter(usage, 'prompt_tokens');
+  const outputTokens = nonNegativeCounter(usage, 'completion_tokens');
+  const cacheReadInputTokens = promptDetails === undefined ? undefined : nonNegativeCounter(promptDetails, 'cached_tokens');
+  if (inputTokens === undefined && outputTokens === undefined && cacheReadInputTokens === undefined) return undefined;
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(cacheReadInputTokens === undefined ? {} : { cacheReadInputTokens }),
+  };
+}
+
+function responsesUsage(record: Record<string, unknown>): ProviderCallUsageCounters | undefined {
+  const response = nestedRecord(record, 'response');
+  const usage = response === undefined ? nestedRecord(record, 'usage') : nestedRecord(response, 'usage');
+  if (usage === undefined) return undefined;
+  const inputTokens = nonNegativeCounter(usage, 'input_tokens');
+  const outputTokens = nonNegativeCounter(usage, 'output_tokens');
+  const inputDetails = nestedRecord(usage, 'input_tokens_details');
+  const cacheReadInputTokens = inputDetails === undefined ? undefined : nonNegativeCounter(inputDetails, 'cached_tokens');
+  if (inputTokens === undefined && outputTokens === undefined && cacheReadInputTokens === undefined) return undefined;
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(cacheReadInputTokens === undefined ? {} : { cacheReadInputTokens }),
+  };
+}
+
+function anthropicUsage(record: Record<string, unknown>): ProviderCallUsageCounters | undefined {
+  const message = nestedRecord(record, 'message');
+  const usage = message === undefined ? nestedRecord(record, 'usage') : nestedRecord(message, 'usage');
+  if (usage === undefined) return undefined;
+  const inputTokens = nonNegativeCounter(usage, 'input_tokens');
+  const outputTokens = nonNegativeCounter(usage, 'output_tokens');
+  const cacheReadInputTokens = nonNegativeCounter(usage, 'cache_read_input_tokens');
+  const cacheCreationInputTokens = nonNegativeCounter(usage, 'cache_creation_input_tokens');
+  if (inputTokens === undefined && outputTokens === undefined && cacheReadInputTokens === undefined && cacheCreationInputTokens === undefined) return undefined;
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(cacheReadInputTokens === undefined ? {} : { cacheReadInputTokens }),
+    ...(cacheCreationInputTokens === undefined ? {} : { cacheCreationInputTokens }),
+  };
+}
+
+async function usageFact(
+  context: Pick<DecodeContext, 'callCapture'>,
+  protocol: 'responses' | 'openai' | 'anthropic',
+  usage: ProviderCallUsageCounters | undefined,
+  responseModel?: string,
+): Promise<ProviderRawFactContent | undefined> {
+  const capture = context.callCapture;
+  if (capture === undefined || capture.emitted) return undefined;
+  const endedAt = capture.now();
+  const model = responseModel ?? capture.responseModel ?? null;
+  let capacity: ProviderCallCapacity = { state: 'unknown', reason: 'no-capacity-source' };
+  if (model === null) {
+    capacity = { state: 'unknown', reason: 'no-response-model' };
+  } else if (capture.catalog !== undefined) {
+    // A capacity lookup is diagnostic only: its failure never fails the call.
+    try {
+      capacity = await capture.catalog.capacityFor(model, capture.signal);
+    } catch {
+      capacity = { state: 'unknown', reason: 'catalog-unavailable' };
+    }
+  }
+  capture.emitted = true;
+  return {
+    kind: 'usage', protocol, responseModel: model,
+    ...(usage?.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage?.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage?.cacheReadInputTokens === undefined ? {} : { cacheReadInputTokens: usage.cacheReadInputTokens }),
+    ...(usage?.cacheCreationInputTokens === undefined ? {} : { cacheCreationInputTokens: usage.cacheCreationInputTokens }),
+    capacity,
+    timing: {
+      startedAt: capture.startedAt.toISOString(),
+      endedAt: endedAt.toISOString(),
+      scope: 'stream-observe-to-terminal',
+    },
+  };
 }
 
 function toolCallFact(contentUnitId: string, call: ProviderToolCall, rawArguments: RawAsset): ProviderRawFactContent {
@@ -1325,6 +1459,9 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'response.in_progress': {
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireStringOrGenerated(response, 'id', context.execution, raw.type, `rcc-response-${context.execution.executionEpoch}`);
+        if (context.callCapture !== undefined && typeof response.model === 'string' && response.model.trim().length > 0) {
+          context.callCapture.responseModel = response.model;
+        }
         if (raw.type === 'response.created') {
           context.responsesStreamRound.count += 1;
           this.clearToolArguments(context);
@@ -1841,6 +1978,10 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'response.incomplete': {
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireStringOrGenerated(response, 'id', context.execution, raw.type, `rcc-response-${context.execution.executionEpoch}`);
+        if (context.callCapture !== undefined && typeof response.model === 'string' && response.model.trim().length > 0) {
+          context.callCapture.responseModel = response.model;
+        }
+        const usage = await usageFact(context, 'responses', responsesUsage(record), context.callCapture?.responseModel);
         const incompleteDetails = raw.type === 'response.incomplete'
           ? requireObject(response, 'incomplete_details', context.execution, raw.type)
           : undefined;
@@ -1867,13 +2008,17 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
               { terminalState: raw.type === 'response.incomplete' || waitingForTool ? 'waiting' : 'succeeded', evidenceRefs, externalResponseId: responseId },
             ),
           ],
-          rawFacts: [requestCompleteFact(raw.type === 'response.incomplete' ? 'incomplete' : 'completed')],
+          rawFacts: [...(usage === undefined ? [] : [usage]), requestCompleteFact(raw.type === 'response.incomplete' ? 'incomplete' : 'completed')],
         };
       }
       case 'response.failed': {
         this.clearToolArguments(context);
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireString(response, 'id', context.execution, raw.type);
+        if (context.callCapture !== undefined && typeof response.model === 'string' && response.model.trim().length > 0) {
+          context.callCapture.responseModel = response.model;
+        }
+        const usage = await usageFact(context, 'responses', responsesUsage(record), context.callCapture?.responseModel);
         const errorRecord = requireObject(response, 'error', context.execution, raw.type);
         const code = requireString(errorRecord, 'code', context.execution, raw.type);
         const message = requireString(errorRecord, 'message', context.execution, raw.type);
@@ -1884,7 +2029,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${responseId}`), `error-${responseId}`, { kind: 'recover', ref: OWNER }, { error }),
             ownedEvent(context.execution, context.scope, 'terminal', raw.type, eventId(context, raw.type, `terminal/${responseId}`), `terminal-${responseId}`, { kind: 'recover', ref: OWNER }, { terminalState: 'failed' }),
           ],
-          rawFacts: [requestCompleteFact('failed', error)],
+          rawFacts: [...(usage === undefined ? [] : [usage]), requestCompleteFact('failed', error)],
         };
       }
       case 'error': {
@@ -2010,7 +2155,16 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
             scope: context.execution,
           });
         }
-        if (choices.length === 0) return { events: [], rawFacts: [] };
+        const usage = openAIUsage(record);
+        if (usage !== undefined && context.callCapture !== undefined) context.callCapture.chatUsage = usage;
+        const chatModel = typeof record.model === 'string' && record.model.trim().length > 0 ? record.model : undefined;
+        if (choices.length === 0) {
+          // OpenAI streams usage in a trailing chunk with empty choices. It is
+          // the usage fact of this request when finish_reason carried none.
+          if (usage === undefined) return { events: [], rawFacts: [] };
+          const trailing = await usageFact(context, 'openai', usage, chatModel);
+          return { events: [], rawFacts: trailing === undefined ? [] : [trailing] };
+        }
         const events: ProviderEvent<TIdentity>[] = [];
         const rawFacts: ProviderRawFact<TIdentity>[] = [];
         for (const candidate of choices) {
@@ -2233,6 +2387,9 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
               mapping.nextAction,
               { terminalState: mapping.terminalState, evidenceRefs },
             ));
+            const pendingUsage = context.callCapture?.chatUsage ?? usage;
+            const metered = pendingUsage === undefined ? undefined : await usageFact(context, 'openai', pendingUsage, chatModel);
+            rawFacts.push(...(metered === undefined ? [] : [metered]));
             rawFacts.push(requestCompleteFact(openAIFinishTerminal(finishReason), error));
           }
         }
@@ -2376,6 +2533,10 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
       {
         const message = requireObject(record, 'message', context.execution, raw.type);
         const messageId = requireString(message, 'id', context.execution, raw.type);
+        if (context.callCapture !== undefined && typeof message.model === 'string' && message.model.trim().length > 0) {
+          context.callCapture.responseModel = message.model;
+        }
+        if (context.callCapture !== undefined) context.callCapture.chatUsage = anthropicUsage(record);
         this.messageIds.set(this.stopReasonKey(context.execution), messageId);
         const evidenceRefs = [await captureEvidence(context, raw.type, `message/${messageId}`)];
         return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `message/${messageId}`), evidenceRefs, 'provider requested model work', messageId)] };
@@ -2565,8 +2726,19 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
               });
             }
             const argumentsJson = block.argumentsDelta.length > 0 ? block.argumentsDelta : block.startArgumentsJson ?? '';
-            const parsed = parseToolArguments(argumentsJson, context.execution);
             const toolId = responsesToolId(block.toolId);
+            let parsed: BusinessPayload;
+            let invalid: InvalidToolArguments | undefined;
+            try {
+              parsed = parseToolArguments(argumentsJson, context.execution);
+            } catch (cause) {
+              if (!(cause instanceof ProviderAdapterError)
+                || cause.providerError.code !== 'tool.arguments.invalid-json') {
+                throw cause;
+              }
+              parsed = {};
+              invalid = markInvalidToolArguments(parsed, argumentsJson, cause.providerError.message);
+            }
             const argumentsEvidence = await captureEvidence(context, raw.type, `tool/${block.callId}/arguments`, { arguments: argumentsJson });
             rawFacts.push(toolCallFact(
               unitId('anthropic', 'tool-arguments', String(index)),
@@ -2580,11 +2752,11 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
               raw.type,
               eventId(context, raw.type, `tool/${block.callId}/typed`),
               `tool-${block.callId}`,
-              { kind: 'continue' },
+              invalid === undefined ? { kind: 'continue' } : { kind: 'continue', ref: 'anthropic-tool-use' },
               {
                 outputRefs: [artifactRef(raw.type, `tool/${block.callId}/typed`, argumentsEvidence.digest)],
                 evidenceRefs: [argumentsEvidence],
-                summary: `调用工具：${toolId}`,
+                summary: invalid === undefined ? `调用工具：${toolId}` : `调用工具参数无效：${toolId}`,
                 toolCall: { callId: block.callId, toolId, arguments: parsed, continuationRef },
               },
             ));
@@ -2600,6 +2772,12 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         const delta = requireObject(record, 'delta', context.execution, raw.type);
         const stopReason = typeof delta.stop_reason === 'string' ? delta.stop_reason : undefined;
         if (stopReason) this.stopReasons.set(this.stopReasonKey(context.execution), stopReason);
+        const deltaUsage = anthropicUsage(record);
+        if (deltaUsage !== undefined && context.callCapture !== undefined) {
+          // message_delta usage is a cumulative snapshot, so present keys
+          // replace the earlier value; they are never added to it.
+          context.callCapture.chatUsage = { ...context.callCapture.chatUsage, ...deltaUsage };
+        }
         return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `delta/${stopReason ?? 'none'}`), [await captureEvidence(context, raw.type, `delta/${stopReason ?? 'none'}`)], 'provider completed model turn details')] };
       }
       case 'message_stop': {
@@ -2607,6 +2785,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         this.stopReasons.delete(this.stopReasonKey(context.execution));
         this.messageIds.delete(this.stopReasonKey(context.execution));
         const mapped = mapAnthropicStopReason(stopReason);
+        const usage = await usageFact(context, 'anthropic', context.callCapture?.chatUsage ?? anthropicUsage(record));
         const evidenceRefs = [await captureEvidence(context, raw.type, `stop/${stopReason ?? 'unknown'}`, stopReason)];
         return {
           events: [
@@ -2621,7 +2800,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
               { terminalState: mapped.state, evidenceRefs },
             ),
           ],
-          rawFacts: [requestCompleteFact(anthropicTerminal(stopReason))],
+          rawFacts: [...(usage === undefined ? [] : [usage]), requestCompleteFact(anthropicTerminal(stopReason))],
         };
       }
       case 'ping': {
@@ -2634,9 +2813,10 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         const message = requireString(errorRecord, 'message', context.execution, raw.type);
         const errorEvidence = await captureEvidence(context, raw.type, `error/${code}`, errorRecord);
         const error = providerError(context.execution, context.scope, code, message, 'provider', [errorEvidence]);
+        const usage = await usageFact(context, 'anthropic', context.callCapture?.chatUsage);
         return {
           events: [ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${code}`), `error-${code}`, { kind: 'recover', ref: OWNER }, { error })],
-          rawFacts: [requestCompleteFact('failed', error)],
+          rawFacts: [...(usage === undefined ? [] : [usage]), requestCompleteFact('failed', error)],
         };
       }
       default:

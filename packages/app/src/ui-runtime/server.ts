@@ -225,7 +225,7 @@ function requireBoundProductBoardScope(url: URL, service: UiRuntimeService): Pro
   return productBoardReadScope(url, projectKey, mode);
 }
 
-function optionalProductReadId(url: URL, field: 'taskId' | 'sessionId'): string | undefined {
+function optionalProductReadId(url: URL, field: 'taskId' | 'sessionId' | 'roleId' | 'configuredAgentId'): string | undefined {
   const raw = url.searchParams.get(field);
   if (raw === null) return undefined;
   const value = raw.trim();
@@ -239,6 +239,21 @@ function optionalProductReadId(url: URL, field: 'taskId' | 'sessionId'): string 
     );
   }
   return value;
+}
+
+function productSessionDebugRequest(url: URL): boolean {
+  const values = url.searchParams.getAll('debug');
+  if (values.length === 0) return false;
+  if (values.length > 1 || values[0] !== 'request') {
+    throw new UiRuntimeApiError(
+      'product-session.debug-invalid',
+      APP_OWNER,
+      'product session debug must be omitted or set to request',
+      'send debug=request or omit the debug parameter',
+      400,
+    );
+  }
+  return true;
 }
 
 function requireBoundProductSessionScope(
@@ -1369,7 +1384,19 @@ async function handleRequest(
     }
     if (path === '/api/product/session' && method === 'GET') {
       const scope = requireBoundProductSessionScope(url, service);
-      writeJson(response, 200, await readProduct(() => service.productSessionRead(scope)));
+      const debugRequest = productSessionDebugRequest(url);
+      for (const key of ['roleId', 'configuredAgentId']) {
+        if (url.searchParams.getAll(key).length > 1) {
+          throw new UiRuntimeApiError('read.scope.invalid', APP_OWNER,
+            `repeated tool selection: ${key}`, 'send each role/member field once', 400);
+        }
+      }
+      const roleId = optionalProductReadId(url, 'roleId');
+      const configuredAgentId = optionalProductReadId(url, 'configuredAgentId');
+      writeJson(response, 200, await readProduct(() => service.productSessionRead(scope, {
+        debugRequest, ...(roleId === undefined ? {} : { roleId }),
+        ...(configuredAgentId === undefined ? {} : { configuredAgentId }),
+      })));
       return;
     }
     if (path === '/api/product/relations' && method === 'GET') {
@@ -1503,6 +1530,15 @@ async function handleRequest(
     if (explicitInterpretation && method === 'POST') {
       writeJson(response, 200, await service.interpretExplicitInput({
         interactionId: decodeURIComponent(explicitInterpretation[1]!),
+      }));
+      return;
+    }
+    const explicitContinue = /^\/api\/explicit\/interactions\/([^/]+)\/continue$/.exec(path);
+    if (explicitContinue && method === 'POST') {
+      const body = await readBody(request);
+      writeJson(response, 200, await service.continueExplicitPartial({
+        interactionId: decodeURIComponent(explicitContinue[1]!),
+        partialRef: requireString(body, 'partialRef'),
       }));
       return;
     }
@@ -2129,11 +2165,25 @@ async function handleRequest(
     }
     const taskToolOutput = /^\/api\/tasks\/([^/]+)\/operations\/([^/]+)\/executions\/(\d+)\/events\/(\d+)\/tool-output$/.exec(path);
     if (taskToolOutput && method === 'GET') {
+      const allowed = new Set(['projectKey', 'mode', 'roleId', 'configuredAgentId']);
+      for (const key of url.searchParams.keys()) {
+        if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+          throw new UiRuntimeApiError('tool-output.query-invalid', APP_OWNER,
+            `unsupported or repeated tool output query key: ${key}`, 'send each scope field once; do not send paths or tokens', 400);
+        }
+      }
+      const scope = url.searchParams.size === 0 ? undefined : requireReadScope(url);
+      const roleId = optionalProductReadId(url, 'roleId');
+      const configuredAgentId = optionalProductReadId(url, 'configuredAgentId');
       const report = await service.toolOutput(
         id('task', decodeURIComponent(taskToolOutput[1]!)),
         id('operation', decodeURIComponent(taskToolOutput[2]!)),
         Number(taskToolOutput[3]!),
         Number(taskToolOutput[4]!),
+        scope === undefined ? undefined : { ...scope,
+          ...(roleId === undefined ? {} : { roleId }),
+          ...(configuredAgentId === undefined ? {} : { configuredAgentId }),
+        },
       );
       writeJson(response, 200, report);
       return;

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import {
   EXPLICIT_BRAIN_MODEL_TOOLS,
   EXPLICIT_BRAIN_TEMPLATE_REF,
@@ -20,13 +21,33 @@ import {
   type TaskFlowKind,
   TASK_FLOW_DEFINITION_VERSION,
   TASK_FLOW_KINDS,
+  type ProviderToolDefinition,
+  STANDARD_TURN_END_WIRE_TOOL_ID,
+  type ExplicitTurnEndAcceptedResult,
+  type ExplicitTurnPartialResult,
 } from '../../contracts/src/index.js';
-import { ProviderAgentDriver, type ProviderAgentEvent } from '../../adapters/provider/src/index.js';
+import {
+  ProviderAgentDriver,
+  type ProviderAgentEvent,
+  type ProviderToolExecutionResult,
+} from '../../adapters/provider/src/index.js';
 import { BudgetedProviderObservations, DEFAULT_UI_EXECUTION_EVENT_BUDGET } from '../../runtime/src/ui-runtime/execution-budget.js';
+import { RuntimeTaskControlError } from '../../runtime/src/ui-runtime/coordinator.js';
 import type { AgentIoEventBudget } from '../../runtime/src/agent-io/types.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
 import { prepareScopeSemanticHistory } from '../../runtime/src/context/interaction-semantic-context.js';
-import { loadBuiltinPromptSegments, type AgentPromptSegment } from '../../agent-templates/src/index.js';
+import {
+  createFilePromptSource,
+  loadBuiltinPromptSegments,
+  loadRegisteredSkills,
+  loadSelectedSkillContent,
+  managementRoleForAgent,
+  MANAGEMENT_PROMPT_REFS,
+  type ManagementRole,
+  renderSkillDirectory,
+  type AgentPromptSegment,
+  type RegisteredSkill,
+} from '../../agent-templates/src/index.js';
 import { WorkspaceCodeSearchFunctions } from '../../adapters/operations/src/index.js';
 import {
   ExplicitBrainDecisionExecutor,
@@ -35,6 +56,7 @@ import {
   ExplicitTurnHelperSession,
   createInteractionParentTurnRawOwner,
   readInteractionProviderSettlement,
+  publishInteractionProviderSettlement,
   type ExplicitTurnHelperFactory,
   type InteractionHelperJournalPort,
   type InteractionHelperTurnReadPort,
@@ -42,6 +64,7 @@ import {
   type InteractionParentTurnRawJournalPort,
   type InteractionParentOpenedTurnScopeReadPort,
   type InteractionSemanticCheckpointJournalPort,
+  type ExplicitTurnInterpretedOutcome,
   type InteractionParentTurnRawOwner,
   createExplicitBrainToolRegistry,
   type ExplicitBrainAgentToolPort,
@@ -50,6 +73,12 @@ import {
   type ExplicitBrainWorkspaceToolPort,
 } from '../../runtime/src/explicit-brain/index.js';
 import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
+import {
+  beginExplicitEndAttempt,
+  submitExplicitTurnEnd,
+  readExplicitEndOutcome,
+  type ExplicitEndSubmission,
+} from '../../runtime/src/explicit-brain/explicit-turn-end.js';
 import type { ExplicitInteractionStepInput } from '../../runtime/src/intake/explicit-intake.js';
 import { closeAgentProvider, type AgentProviderComposition } from './agent-driver-composition.js';
 import { readSupervisorTerminationReceipts, type SupervisorLease } from './supervisor/supervisor.js';
@@ -57,8 +86,9 @@ import { readSupervisorTerminationReceipts, type SupervisorLease } from './super
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
 /**
- * The bounded intake call uses the identity and control-boundary segments of
- * the full `interaction` role. It never dispatches helpers or executes work.
+ * The bounded intake call uses the stable identity, control boundaries, and Skill catalog
+ * of the full `interaction` role. It loads only Skills selected by the current input and
+ * never dispatches helpers or executes work.
  * The remaining segments of the same verified template require a nested
  * decision envelope, selected actions, typed tool intents, and a
  * submit-only-after-confirmation path that this intake contract does not
@@ -69,9 +99,129 @@ const INTAKE_PROMPT_SEGMENT_REFS = [
   'interaction/profiles/explicit-brain/identity.md',
 ] as const;
 
-function selectIntakePromptSegments(segments: readonly AgentPromptSegment[]): readonly string[] {
+const INTAKE_SKILL_REFS = {
+  'task-intake': 'interaction/skills/task-intake/SKILL.md',
+  'project-management': 'interaction/skills/project-management/SKILL.md',
+  'agent-addressing': 'interaction/skills/agent-addressing/SKILL.md',
+  'agent-communication': 'interaction/skills/agent-communication/SKILL.md',
+} as const;
+type IntakeSkillId = keyof typeof INTAKE_SKILL_REFS;
+const INTAKE_SKILL_IDS = Object.keys(INTAKE_SKILL_REFS) as readonly IntakeSkillId[];
+
+const SKILL_SELECTION_TOOL: ProviderToolDefinition = {
+  toolId: 'interaction.select_skills',
+  description: 'Select registered standard Skills whose guidance is needed for the current request.',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['skillIds'],
+    properties: {
+      skillIds: {
+        type: 'array',
+        minItems: 1,
+        uniqueItems: true,
+        items: { type: 'string', enum: [...INTAKE_SKILL_IDS] },
+      },
+    },
+  },
+};
+
+const NONEMPTY_STRING_SCHEMA = { type: 'string', minLength: 1 };
+const TASK_RESULT_READ_TOOL: ProviderToolDefinition = {
+  toolId: 'task.read_result',
+  description: 'Read an existing task public result in the host-authorized project using only taskId. No filesystem access or new execution. Ambiguous execution requires clarification; unavailable or partial publication is not a completed result.',
+  inputSchema: { type: 'object', additionalProperties: false, required: ['taskId'],
+    properties: { taskId: NONEMPTY_STRING_SCHEMA } },
+};
+const STRING_LIST_SCHEMA = { type: 'array', items: NONEMPTY_STRING_SCHEMA, uniqueItems: true };
+const EXPLICIT_END_TOOL: ProviderToolDefinition = {
+  toolId: STANDARD_TURN_END_WIRE_TOOL_ID,
+  description: 'Finish explicit intake with a validated simple decision or a complex requirement and semantic capsule. This does not execute a task.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['kind', 'decision', 'checkpointRecord'],
+    properties: {
+      kind: { type: 'string', enum: ['simple', 'complex'] },
+      checkpointRecord: {
+        type: 'object', additionalProperties: false, required: ['index'],
+        properties: {
+          index: {
+            type: 'object', additionalProperties: false, required: ['action', 'result'],
+            properties: { action: NONEMPTY_STRING_SCHEMA, result: NONEMPTY_STRING_SCHEMA },
+          },
+        },
+      },
+      decision: {
+        type: 'object', additionalProperties: false,
+        required: ['kind', 'normalizedInput', 'knownFacts', 'decisionRefs'],
+        properties: {
+          kind: { type: 'string', enum: ['answer', 'status-query', 'clarification', 'requirement'] },
+          normalizedInput: NONEMPTY_STRING_SCHEMA, knownFacts: STRING_LIST_SCHEMA, decisionRefs: STRING_LIST_SCHEMA,
+          answer: NONEMPTY_STRING_SCHEMA, question: NONEMPTY_STRING_SCHEMA, options: STRING_LIST_SCHEMA,
+          matchedTaskId: NONEMPTY_STRING_SCHEMA,
+          taskFlow: {
+            type: 'object', additionalProperties: false, required: ['kind', 'definitionVersion'],
+            properties: { kind: { type: 'string', enum: [...TASK_FLOW_KINDS] }, definitionVersion: { type: 'integer', const: TASK_FLOW_DEFINITION_VERSION } },
+          },
+          proposal: {
+            type: 'object', additionalProperties: false,
+            required: ['revision', 'intent', 'title', 'objective', 'deliverable', 'deliveryConditions', 'evidenceRefs', 'blockingGaps'],
+            properties: {
+              revision: { type: 'integer', minimum: 0 }, intent: { type: 'string', enum: ['create', 'append', 'change'] },
+              title: NONEMPTY_STRING_SCHEMA, objective: NONEMPTY_STRING_SCHEMA, deliverable: NONEMPTY_STRING_SCHEMA,
+              deliveryConditions: STRING_LIST_SCHEMA, evidenceRefs: STRING_LIST_SCHEMA, blockingGaps: STRING_LIST_SCHEMA,
+            },
+          },
+        },
+      },
+      capsule: {
+        type: 'object', additionalProperties: false, required: ['summary', 'goal', 'process', 'findings', 'nextStep'],
+        properties: {
+          summary: NONEMPTY_STRING_SCHEMA, goal: NONEMPTY_STRING_SCHEMA, process: STRING_LIST_SCHEMA,
+          findings: STRING_LIST_SCHEMA, nextStep: NONEMPTY_STRING_SCHEMA, detailRefs: STRING_LIST_SCHEMA,
+        },
+      },
+    },
+  },
+};
+
+const REGISTERED_TOOL_SURFACE = [
+  '# Registered tools',
+  'This request provides interaction.select_skills and humanagent_turn_end. When the host also registers task.read_result, pass only taskId to read existing published task results before answering follow-up questions. Correct invalid arguments or an unknown task using the paired tool error in this same turn. Skill selection loads guidance. The end tool validates and records your decision; it never executes business work.',
+  'Other role tool names are capability metadata. They are not executable in this bounded intake request; business execution stays behind the confirmed task flow.',
+].join('\n');
+
+const INTAKE_OUTPUT_PROTOCOL = [
+  '# Explicit intake decision output',
+  'This is one intake decision, not one turn of task execution. Produce exactly one decision object for the current input and claim no task execution.',
+  'For a simple question you can answer from the supplied context, call humanagent_turn_end with kind=simple and your structured decision.',
+  'For a request that needs registered Skill guidance, call interaction.select_skills once with every relevant registered Skill ID. The tool only loads prompt guidance; it does not perform project, agent, or communication operations.',
+  'After any Skill result, call humanagent_turn_end. Do not dispatch helpers or execute business work. Text alone cannot finish this turn.',
+  'The end arguments contain kind=simple or complex, a decision object, and checkpointRecord.index with one-sentence action and result. decision.kind must be requirement, status-query, clarification, or answer. A requirement uses complex and must include capsule with summary, goal, process (string array), findings (string array), nextStep and optional detailRefs. All other decisions use simple with no capsule; the answer is its detail.',
+  'Inside decision, always include kind, normalizedInput, knownFacts (string array), and decisionRefs (string array). Add proposal, optional taskFlow and matchedTaskId for requirement; answer for status-query and answer; or question and optional options (string array) for clarification. Proposal fields belong only inside proposal.',
+  'Put the complete decision under decision in the end tool arguments. Do not put control state, selected actions, tool intents or user-input flags in it.',
+  'Never echo the input envelope back as output fields: interactionId, inputRevision, sourceRef, rawInput, clarifications, and taskCandidates are input only.',
+  'The committed rawInput is the only request in this turn. Use relevant prior checkpoints to answer follow-up questions and carry forward confirmed facts, constraints, and corrections. Use taskCandidates to identify a status-query or an explicitly requested change. A historical task status alone does not authorize new work.',
+  'Submit one end decision. If its validation fails, repair the arguments in this same turn. The third valid attempt is accepted normally; three failed attempts produce a recoverable partial. Do not repeat business work.',
+  'Classify by the requested outcome, not by whether intake can execute a requested tool. A concrete request to perform work and deliver a result is a requirement; when it asks for new work, use proposal.intent=create even if taskCandidates is empty.',
+  'If rawInput is addressed to an execution runtime but still states a concrete deliverable, preserve that deliverable as a requirement. Do not ask the user to decide whether the interaction entry should execute the runtime mechanics; it does not.',
+  'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
+  'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
+  `For requirement, put taskFlow inside decision with definitionVersion as the JSON integer ${TASK_FLOW_DEFINITION_VERSION} (never a quoted string), and kind chosen from semantic task shape only: one-shot for one bounded deliverable; inspection for recurring check-and-report work; long-running for an open-ended goal. Omit taskFlow only when genuinely ambiguous, and clarify when that blocks a decision.`,
+  'Simple end example: {"kind":"simple","decision":{"kind":"answer","normalizedInput":"hello","knownFacts":[],"decisionRefs":[],"answer":"Hello."},"checkpointRecord":{"index":{"action":"answered the question","result":"answered"}}}',
+  `Complex end shape: {"kind":"complex","decision":{"kind":"requirement","normalizedInput":"requested work","knownFacts":[],"decisionRefs":[],"proposal":{"revision":CURRENT_INPUT_REVISION,"intent":"create","title":"task title","objective":"goal","deliverable":"deliverable","deliveryConditions":["acceptance"],"evidenceRefs":[],"blockingGaps":[]},"taskFlow":{"kind":"one-shot","definitionVersion":${TASK_FLOW_DEFINITION_VERSION}}},"checkpointRecord":{"index":{"action":"accepted the requirement","result":"ready for execution"}},"capsule":{"summary":"intake result","goal":"user goal","process":["intake steps"],"findings":[],"nextStep":"implicit brain executes"}}. Replace CURRENT_INPUT_REVISION with the actual integer inputRevision.`,
+  'Submitting the new-task form is already the user confirmation. For proposal.intent=create, do not write a second-confirmation blocker into objective, deliveryConditions, or blockingGaps.',
+  'Do not choose a task execution owner, worker, provider, or runtime in the intake decision.',
+  'Use answer for a question you can answer from current input, provided context or host-authorized task.read_result results, with no new execution, exploration, external retrieval, or deliverable. Reading this system published results is not new business work. Respect publication state: pending/unknown with confirmed commits is partial evidence, never complete success; ambiguous execution requires clarification. Put the reply in answer; do not carry matchedTaskId, proposal, or intent. A request to perform new work, explore, retrieve externally, or deliver a result is a requirement, never an answer.',
+  'For status-query use matchedTaskId when one task is selected. For answer, put the reply in answer and omit matchedTaskId, proposal, and intent.',
+  'For clarification, ask one concrete question, include options (an array of 2 to 4 concrete selectable option strings) when candidate choices exist, and do not invent a task match.',
+  'Use answered clarifications in the committed user input as facts for this request. Ask only for information that is still missing.',
+].join('\n\n');
+
+function selectIntakePromptSegments(segments: readonly AgentPromptSegment[], management?: ManagementRole): readonly string[] {
   const byRef = new Map(segments.map((segment) => [segment.ref, segment.content]));
-  return INTAKE_PROMPT_SEGMENT_REFS.map((ref) => {
+  const refs = management === undefined ? INTAKE_PROMPT_SEGMENT_REFS
+    : [...INTAKE_PROMPT_SEGMENT_REFS, 'common/management-role.md', MANAGEMENT_PROMPT_REFS[management]];
+  return refs.map((ref) => {
     const content = byRef.get(ref);
     if (content === undefined) {
       throw new ExplicitBrainOperationalToolError(
@@ -155,6 +305,8 @@ export interface ExplicitBrainInterpretationInput {
     readonly answer?: string;
   }[];
   readonly taskCandidates: readonly ExplicitBrainTaskCandidate[];
+  /** Host-bound service read authority. Never serialized into business input. */
+  readonly readTaskResult?: (taskId: string) => Promise<unknown>;
   /**
    * Conversation project target carried by the input. When present the explicit
    * brain treats this absolute project directory as the project context of the
@@ -169,6 +321,7 @@ export interface ExplicitBrainInterpretationInput {
    * progress look alive.
    */
   readonly onStep?: (step: ExplicitInteractionStepInput) => void;
+  readonly resumePartialRef?: string;
 }
 
 export type ExplicitBrainInterpretation =
@@ -208,7 +361,7 @@ export type ExplicitBrainInterpretation =
     };
 
 export interface ExplicitBrainInputInterpreter {
-  interpret(input: ExplicitBrainInterpretationInput): Promise<ExplicitBrainInterpretation>;
+  interpret(input: ExplicitBrainInterpretationInput): Promise<ExplicitBrainInterpretation | ExplicitTurnPartialResult>;
 }
 
 const STRUCTURED_REQUIREMENT_PROPOSAL_FIELDS = [
@@ -246,45 +399,24 @@ function structuredProposalContract(inputRevision: number): string {
   });
 }
 
-function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegments: readonly string[]): string {
+function interpreterPrompt(
+  input: ExplicitBrainInterpretationInput,
+  promptSegments: readonly string[],
+  skillDirectory: string,
+  selectedSkills: readonly { readonly id: IntakeSkillId; readonly content: string }[],
+): string {
   const projectContext = input.workspaceCwd === undefined || input.projectKey === undefined
     ? []
     : [`# Conversation project directory\nThe conversation targets the project directory ${input.workspaceCwd} (projectKey ${input.projectKey}). Treat that directory as the project context of this input.`];
-  const answeredClarifications = input.clarifications
-    .filter((clarification) => clarification.answer !== undefined)
-    .map((clarification, index) => `${index + 1}. Question: ${clarification.question}\n   Answer: ${clarification.answer}`);
-  const clarificationContext = answeredClarifications.length === 0
-    ? []
-    : [
-      '# Authoritative answered clarifications',
-      'The following clarification questions were already answered by the user. Treat each answer as an authoritative fact of this input. Do not ask these answered clarification questions again, and do not turn an answer into a new question.',
-      ...answeredClarifications,
-      'When those answers make the next allowed action determinable, return exactly one non-clarification decision. Work remains a requirement so the implicit brain can execute it.',
-    ];
+  const [controlBoundaries, ...rolePrompts] = promptSegments;
   return [
-    ...promptSegments,
+    controlBoundaries,
+    INTAKE_OUTPUT_PROTOCOL,
+    ...rolePrompts,
+    REGISTERED_TOOL_SURFACE,
+    skillDirectory,
+    ...selectedSkills.map((skill) => `# Selected Skill: ${skill.id}\n\n${skill.content}`),
     ...projectContext,
-    ...clarificationContext,
-    '# Explicit intake decision output',
-    'This is one intake decision, not one turn of task execution. Produce exactly one decision object for the current input and claim no task execution.',
-    'Return one final JSON object only. You must not dispatch helpers, call tools that execute work, or otherwise run business work.',
-    'The object is flat at the top level. kind must be requirement, status-query, clarification, or answer.',
-    'Every variant carries normalizedInput, knownFacts (string array), and decisionRefs (string array) at the top level, plus the fields for its own kind: proposal, taskFlowKind for a semantically clear requirement shape, and the optional matchedTaskId for requirement; answer for status-query and answer; and question plus optional options (string array) for clarification.',
-    'Never nest a decision wrapper, and never emit a selected-action, summary, user-input flag, tool-result flag, or tool-intents field.',
-    'Never echo the input envelope back as output fields: interactionId, inputRevision, sourceRef, rawInput, clarifications, and taskCandidates are input only.',
-    'The committed rawInput is the only request in this turn. taskCandidates and the prior turn checkpoints are reference history: read them only to match a status-query or an append/change target. A candidate status such as created, blocked, stopped, or waiting is never a user request, so never propose continuing, resuming, or finishing candidate tasks unless rawInput itself asks for that.',
-    'The whole reply is exactly one decision object and one assistant message. Never emit a second decision object, a second message item, a preface, or a closing note.',
-    'Classify by the requested outcome, not by whether intake can execute a requested tool. A concrete request to perform work and deliver a result is a requirement; when it asks for new work, use proposal.intent=create even if taskCandidates is empty.',
-    'If rawInput is addressed to an execution runtime but still states a concrete deliverable, preserve that deliverable as a requirement. Do not ask the user to decide whether the interaction entry should execute the runtime mechanics; it does not.',
-    'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
-    'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
-    'For requirement, put taskFlowKind at the top level and choose it from semantic task shape only: one-shot for one bounded deliverable, including a deliverable that entails create, read, or return steps regardless of tool-step count; inspection for recurring check-and-report work; long-running for an open-ended goal requiring continued turns. Omit taskFlowKind only when the task shape is genuinely ambiguous, and use the clarification path when that ambiguity blocks a decision.',
-    'Submitting the new-task form is already the user confirmation. For proposal.intent=create, do not write a second-confirmation blocker into objective, deliveryConditions, or blockingGaps.',
-    'Do not choose a task execution owner, worker, provider, or runtime in the intake decision.',
-    'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
-    'Use answer only for a general question you can answer directly from the current input and provided context, with no execution, exploration, external retrieval, or deliverable. Put the reply in answer; do not carry matchedTaskId, proposal, or intent. A request to perform work, explore, retrieve externally, or deliver a result is a requirement, never an answer.',
-    'For clarification, ask one concrete question, include options (an array of 2 to 4 concrete selectable option strings) when candidate choices exist, and do not invent a task match.',
-    'A clarification must not repeat a question that already has an answer in Authoritative answered clarifications; use that answer as an authoritative fact instead.',
     `Requirement proposal must be exactly this object shape: ${structuredProposalContract(input.inputRevision)}`,
     'Requirement intent exists only at proposal.intent; do not add a top-level intent field. Do not select an owner. Status-query requires answer. Answer requires a non-empty answer. Clarification requires question and optional options.',
   ].join('\n\n');
@@ -577,17 +709,44 @@ function parseDecisionRecord(record: Record<string, unknown>, input: ExplicitBra
   }
   const taskFlowKind = parseTaskFlowKind(record.taskFlowKind);
   const proposal = parseStructuredRequirementProposal(record.proposal, input.inputRevision);
+  const taskDocument = renderBusinessProposal(proposal);
   return {
     kind,
     ...common,
+    normalizedInput: [taskDocument, '需求详情：', common.normalizedInput].join('\n'),
     ...(matchedTaskId === undefined ? {} : { matchedTaskId }),
     intent: proposal.intent,
     ...(taskFlowKind === undefined
       ? {}
       : { taskFlow: { kind: taskFlowKind, definitionVersion: TASK_FLOW_DEFINITION_VERSION } }),
-    proposal: renderBusinessProposal(proposal),
+    proposal: taskDocument,
     structuredProposal: proposal,
   };
+}
+
+/** New calls consume only the runtime's accepted structured decision. The
+ * terminal text parser above remains exclusively for pre-protocol Journal reads.
+ */
+function interpretationFromAcceptedEnd(
+  accepted: ExplicitTurnEndAcceptedResult,
+  _input: ExplicitBrainInterpretationInput,
+): ExplicitBrainInterpretation {
+  const decision = accepted.decision;
+  if (decision.kind !== 'requirement') return decision;
+  const taskDocument = renderBusinessProposal(decision.proposal);
+  return {
+    ...decision,
+    normalizedInput: [taskDocument, '需求详情：', decision.normalizedInput].join('\n'),
+    intent: decision.proposal.intent,
+    proposal: taskDocument,
+    structuredProposal: decision.proposal,
+  };
+}
+
+function semanticOutcomeFromAcceptedEnd(accepted: ExplicitTurnEndAcceptedResult): ExplicitTurnInterpretedOutcome {
+  if (accepted.decision.kind !== 'requirement') return accepted.decision;
+  const { proposal, taskFlow: _taskFlow, ...decision } = accepted.decision;
+  return { ...decision, structuredProposal: proposal };
 }
 
 /**
@@ -658,6 +817,7 @@ export function createProviderExplicitBrainInterpreter(input: {
   readonly clock: { now(): string };
   readonly binding: ProviderBinding;
   readonly templateRoot: string;
+  readonly agentRoster?: readonly Pick<import('../../config/src/index.js').AgentConfig, 'agentId' | 'roleId' | 'managementRole'>[];
   readonly prepareAgentProvider?: (input: {
     readonly roleId: import('../../config/src/index.js').AgentRole;
     readonly configuredAgentId?: string;
@@ -671,13 +831,21 @@ export function createProviderExplicitBrainInterpreter(input: {
     receipt: InteractionProviderSettlementReceipt,
   ) => void | Promise<void>;
 }): ExplicitBrainInputInterpreter {
-  let promptSegments: Promise<readonly string[]> | undefined;
-  const loadPromptSegments = (): Promise<readonly string[]> => {
-    if (promptSegments !== undefined) return promptSegments;
+  const loadPromptSegments = (configuredAgentId?: string): Promise<readonly string[]> => {
+    const agent = input.agentRoster?.find(entry => entry.agentId === configuredAgentId && entry.roleId === 'interaction');
     const version = EXPLICIT_BRAIN_TEMPLATE_REF.slice('builtin/interaction@'.length);
-    promptSegments = loadBuiltinPromptSegments('interaction', input.templateRoot, version)
-      .then((loaded) => selectIntakePromptSegments(loaded.segments));
-    return promptSegments;
+    return loadBuiltinPromptSegments('interaction', input.templateRoot, version)
+      .then((loaded) => selectIntakePromptSegments(loaded.segments, agent && managementRoleForAgent(agent)));
+  };
+  const loadSkillCatalog = async (): Promise<readonly RegisteredSkill[]> => {
+    const source = createFilePromptSource(join(input.templateRoot, 'builtin'));
+    const skills = await loadRegisteredSkills(source, Object.values(INTAKE_SKILL_REFS));
+    for (const skill of skills) {
+      if (!INTAKE_SKILL_IDS.includes(skill.id as IntakeSkillId)) {
+        throw new ExplicitBrainOperationalToolError('unsupported-tool', `unregistered standard Skill id: ${skill.id}`);
+      }
+    }
+    return skills;
   };
   const requireColdAnswerSettlement = async (
     finalParentOutput: InteractionParentFinalTurnOutput,
@@ -747,12 +915,22 @@ export function createProviderExplicitBrainInterpreter(input: {
         closedAt: input.clock.now(),
       });
     }
+    const endResult = await readExplicitEndOutcome({ journal: input.parentJournal, turn: live.owner.turn });
+    if (endResult?.kind === 'partial') {
+      retained = undefined;
+      return endResult;
+    }
     const finalParentOutput = live.reconciled
       ? await live.owner.readReconciledTurnOutput()
       : await live.owner.readFinalTurnOutput();
     let interpretation: ExplicitBrainInterpretation;
     try {
-      interpretation = parseInterpreterOutput(
+      if (finalParentOutput.turnInput.fact.endProtocol !== undefined && endResult?.kind !== 'accepted') {
+        throw new Error('explicit end protocol requires its durable accepted decision');
+      }
+      interpretation = endResult?.kind === 'accepted'
+        ? interpretationFromAcceptedEnd(endResult, request)
+        : parseInterpreterOutput(
         finalParentOutput.assistantText,
         request,
         finalParentOutput.assistantContentRefs,
@@ -781,7 +959,12 @@ export function createProviderExplicitBrainInterpreter(input: {
         : live.closed === undefined
         ? finalParentOutput
         : await live.owner.readClosedTurnOutput();
-      await live.helpers.closeTurnSemanticCheckpoint({ finalParentOutput: checkpointOutput, outcome: interpretation });
+      await live.helpers.closeTurnSemanticCheckpoint({ finalParentOutput: checkpointOutput,
+        // Only a prepared composition belongs to this interpreter. A borrowed
+        // port still proves request drain and settlement, never physical close.
+        providerOwnership: live.closed === undefined ? 'borrowed' : 'owned',
+        outcome: endResult?.kind === 'accepted' ? semanticOutcomeFromAcceptedEnd(endResult) : interpretation,
+        ...(endResult?.kind === 'accepted' ? { acceptedEnd: endResult } : {}) });
     } catch (error) {
       if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
         live.publishOnRetry = true;
@@ -804,12 +987,14 @@ export function createProviderExplicitBrainInterpreter(input: {
   const interpretOnce = async (
     request: ExplicitBrainInterpretationInput,
     attempt: InterpretAttempt,
-  ): Promise<ExplicitBrainInterpretation | ReanswerNeeded> => {
+  ): Promise<ExplicitBrainInterpretation | ExplicitTurnPartialResult | ReanswerNeeded> => {
       const activeLease = typeof input.lease === 'function' ? input.lease() : input.lease;
       let continuation: {
         readonly fact: NonNullable<Awaited<ReturnType<typeof input.parentJournal.readTurnSnapshot>>['turnInput']>['fact'];
         readonly executionEpoch: number;
         readonly executionOwner: OccurrenceExecutionOwner;
+        readonly acceptedEnd?: import('../../contracts/src/index.js').ExplicitTurnEndAcceptedResult;
+        readonly partialDrain?: ExplicitTurnPartialResult;
       } | undefined;
       const scopeKey = { organId: input.organId, interactionScopeId: input.interactionScopeId };
       const readPendingTurn = async () => {
@@ -978,7 +1163,7 @@ export function createProviderExplicitBrainInterpreter(input: {
       while (pending !== undefined) {
         const original = await input.rawContent.read({ scope: pending.fact.scope, content: pending.fact.initialInput });
         const committedText = new TextDecoder('utf-8', { fatal: true }).decode(original);
-        if (committedText === JSON.stringify(effectiveRequest)) break;
+        if (committedText === JSON.stringify({ ...effectiveRequest, resumePartialRef: undefined })) break;
         let committed: unknown;
         try {
           committed = JSON.parse(committedText);
@@ -1019,7 +1204,7 @@ export function createProviderExplicitBrainInterpreter(input: {
         const restored = Array.isArray(committedRecord.taskCandidates)
           ? { ...effectiveRequest, taskCandidates: committedRecord.taskCandidates as readonly ExplicitBrainTaskCandidate[] }
           : undefined;
-        if (restored !== undefined && JSON.stringify(restored) === committedText) {
+        if (restored !== undefined && JSON.stringify({ ...restored, resumePartialRef: undefined }) === committedText) {
           effectiveRequest = restored;
           break;
         }
@@ -1053,8 +1238,14 @@ export function createProviderExplicitBrainInterpreter(input: {
             checkpointJournal: input.checkpointJournal,
             rawContent: input.rawContent,
             turnHelperJournal: input.turnHelperJournal,
+            endJournal: input.parentJournal,
           });
           const snapshot = await input.parentJournal.readTurnSnapshot(pending.fact.turn);
+          const durableEnd = await readExplicitEndOutcome({ journal: input.parentJournal, turn: pending.fact.turn });
+          if (durableEnd?.kind === 'partial' && effectiveRequest.resumePartialRef === undefined) return durableEnd;
+          if (durableEnd?.kind === 'partial' && effectiveRequest.resumePartialRef !== durableEnd.partialRef) {
+            throw new Error('resume requires the current partial recovery reference');
+          }
           // A closed turn only delivers its already-settled output when the
           // Runtime owner decides it is a terminal output. A closed failed
           // epoch with zero accepted facts decides `continue` instead, so it
@@ -1065,7 +1256,10 @@ export function createProviderExplicitBrainInterpreter(input: {
             const finalParentOutput = await coldOwner.readClosedTurnOutput();
             let interpretation: ExplicitBrainInterpretation;
             try {
-              interpretation = parseInterpreterOutput(
+              if (pending.fact.endProtocol !== undefined && durableEnd?.kind !== 'accepted') {
+                throw new Error('explicit end recovery requires its durable accepted decision');
+              }
+              interpretation = durableEnd?.kind === 'accepted' ? interpretationFromAcceptedEnd(durableEnd, effectiveRequest) : parseInterpreterOutput(
                 finalParentOutput.assistantText,
                 effectiveRequest,
                 finalParentOutput.assistantContentRefs,
@@ -1076,7 +1270,9 @@ export function createProviderExplicitBrainInterpreter(input: {
               return await closeUnparseableTurn(coldOwner, parseError);
             }
             await requireColdAnswerSettlement(finalParentOutput, interpretation);
-            await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
+            await helpers.closeTurnSemanticCheckpoint({ finalParentOutput,
+              outcome: durableEnd?.kind === 'accepted' ? semanticOutcomeFromAcceptedEnd(durableEnd) : interpretation,
+              ...(durableEnd?.kind === 'accepted' ? { acceptedEnd: durableEnd } : {}) });
             effectiveRequest.onStep?.({ kind: 'turn.completed', summary: '显式整理回合已完成', turnId: pending.fact.turn.turnId });
             return interpretation;
           }
@@ -1107,7 +1303,10 @@ export function createProviderExplicitBrainInterpreter(input: {
             const finalParentOutput = await coldOwner.readReconciledTurnOutput();
             let interpretation: ExplicitBrainInterpretation;
             try {
-              interpretation = parseInterpreterOutput(
+              if (pending.fact.endProtocol !== undefined && durableEnd?.kind !== 'accepted') {
+                throw new Error('explicit end recovery requires its durable accepted decision');
+              }
+              interpretation = durableEnd?.kind === 'accepted' ? interpretationFromAcceptedEnd(durableEnd, effectiveRequest) : parseInterpreterOutput(
                 finalParentOutput.assistantText,
                 effectiveRequest,
                 finalParentOutput.assistantContentRefs,
@@ -1116,7 +1315,9 @@ export function createProviderExplicitBrainInterpreter(input: {
               return await closeUnparseableTurn(coldOwner, parseError);
             }
             await requireColdAnswerSettlement(finalParentOutput, interpretation);
-            await helpers.closeTurnSemanticCheckpoint({ finalParentOutput, outcome: interpretation });
+            await helpers.closeTurnSemanticCheckpoint({ finalParentOutput,
+              outcome: durableEnd?.kind === 'accepted' ? semanticOutcomeFromAcceptedEnd(durableEnd) : interpretation,
+              ...(durableEnd?.kind === 'accepted' ? { acceptedEnd: durableEnd } : {}) });
             effectiveRequest.onStep?.({ kind: 'turn.completed', summary: '显式整理回合已完成', turnId: pending.fact.turn.turnId });
             return interpretation;
           }
@@ -1124,7 +1325,11 @@ export function createProviderExplicitBrainInterpreter(input: {
             throw new Error('interaction parent continuation requires an owned provider preparer');
           }
           continuation = { fact: pending.fact, executionEpoch: reconciliation.fact.effectiveExecutionEpoch,
-            executionOwner: reconciliation.fact.replacementOwner };
+            executionOwner: reconciliation.fact.replacementOwner,
+            ...(durableEnd?.kind === 'partial' && !snapshot.providerSettlements.some(entry =>
+              entry.fact.settlement.executionEpoch === (priorReconciliation?.fact.effectiveExecutionEpoch ?? pending.fact.execution.executionEpoch)
+              && entry.fact.settlement.state === 'succeeded') ? { partialDrain: durableEnd } : {}),
+            ...(durableEnd?.kind === 'accepted' ? { acceptedEnd: durableEnd } : {}) };
         } else {
           await prepareScopeSemanticHistory({ activeTurn: pending.fact.turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
           return finish(retained, effectiveRequest);
@@ -1173,7 +1378,8 @@ export function createProviderExplicitBrainInterpreter(input: {
        * ambiguous shape the public `interpret` may re-answer once.
        */
       let freshMultipleIntakeDecisions = false;
-      let interpretation: ExplicitBrainInterpretation;
+      let endResult: ExplicitEndSubmission | undefined = continuation?.acceptedEnd ?? continuation?.partialDrain;
+      let selectedSkillIds: readonly IntakeSkillId[] = [];
       let live: NonNullable<typeof retained>;
       try {
         if (continuation !== undefined && (owned === undefined
@@ -1189,13 +1395,39 @@ export function createProviderExplicitBrainInterpreter(input: {
         const openOwner = async (executionOwner?: OccurrenceExecutionOwner) => {
           const createdOwner = createInteractionParentTurnRawOwner({
             turn, execution, scope, initialInput, providerBinding: turnProviderBinding,
+            ...(continuation === undefined || continuation.fact.endProtocol === 'explicit-end-v1'
+              ? { endProtocol: 'explicit-end-v1' as const } : {}),
             ...(executionOwner === undefined ? {} : { executionOwner }),
             journal: input.parentJournal, rawContent: input.rawContent, priorCheckpoints,
-            instructions: async () => {
-              const text = interpreterPrompt(effectiveRequest, await loadPromptSegments());
+            instructions: async (hookInput) => {
+              if (continuation?.acceptedEnd !== undefined || continuation?.partialDrain !== undefined) {
+                return { text: 'The end outcome and all tool results are already committed. Consume the committed results and finish this transport request. Do not repeat tools or business work.' };
+              }
+              const [promptSegments, catalog] = await Promise.all([
+                loadPromptSegments(owned?.configuredAgentId),
+                loadSkillCatalog(),
+              ]);
+              const source = createFilePromptSource(join(input.templateRoot, 'builtin'));
+              const selectedSkills = hookInput.phase === 'initial' ? [] : await Promise.all(
+                selectedSkillIds.map(async (skillId) => ({
+                  id: skillId,
+                  content: await loadSelectedSkillContent(source, catalog.find((skill) => skill.id === skillId)!),
+                })),
+              );
+              if (continuation !== undefined && continuation.fact.endProtocol !== 'explicit-end-v1') {
+                return { text: [...promptSegments, renderSkillDirectory(catalog), ...selectedSkills.map(skill => skill.content),
+                  'Resume the existing intake turn. Return one decision object in the assistant response using kind, normalizedInput, knownFacts and decisionRefs. Include the answer, clarification question or requirement proposal appropriate to its kind.',
+                  structuredProposalContract(effectiveRequest.inputRevision)].join('\n\n'), toolSurface: 'intake-decision' };
+              }
+              const text = interpreterPrompt(
+                effectiveRequest,
+                promptSegments,
+                renderSkillDirectory(catalog),
+                selectedSkills,
+              );
               if (!attempt.repair) return { text, toolSurface: 'intake-decision' };
               return {
-                text: `${text}\n\nThe preceding generation was rejected because it emitted multiple intake decisions. Re-answer the same committed input from scratch. Return exactly one complete decision object in one assistant message. Do not continue or summarize either rejected decision.`,
+                text: `${text}\n\nThe preceding generation contained multiple decisions. Submit one corrected decision for the committed input through the end tool.`,
                 toolSurface: 'intake-decision',
               };
             },
@@ -1210,6 +1442,11 @@ export function createProviderExplicitBrainInterpreter(input: {
           ? await openOwner(continuation.executionOwner)
           : activeLease === undefined ? await openOwner()
             : await activeLease.withCurrentLeaseOwner((authenticatedCaller) => openOwner(authenticatedCaller));
+        const useEndProtocol = continuation === undefined || continuation.fact.endProtocol === 'explicit-end-v1';
+        const endAttempt = !useEndProtocol || continuation?.acceptedEnd !== undefined || continuation?.partialDrain !== undefined ? undefined : await beginExplicitEndAttempt({
+          journal: input.parentJournal, turn, execution,
+          ...(effectiveRequest.resumePartialRef === undefined ? {} : { resumePartialRef: effectiveRequest.resumePartialRef }),
+        });
         // A continued turn anchors its first epoch request to the settled
         // parent leaf so the recovered Provider run is not a second root.
         const parentRequest = continuation === undefined
@@ -1220,6 +1457,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           journal: input.helperJournal, clock: input.clock, factory: input.helperFactory,
           checkpointJournal: input.checkpointJournal, rawContent: input.rawContent,
           turnHelperJournal: input.turnHelperJournal,
+          endJournal: input.parentJournal,
         });
         const port = owned?.port ?? input.port;
         if (port === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction parent provider is not configured');
@@ -1269,16 +1507,81 @@ export function createProviderExplicitBrainInterpreter(input: {
               });
             }
           },
-          // The explicit interpreter advertises an empty tool surface: it may
-          // answer, structure a requirement, or ask a clarification, but it
-          // must never dispatch or accept helper work. Keeping the surface
-          // declared (empty) lets a stray model tool call return the driver's
-          // typed `tool.not.owned` result instead of a fatal missing-executor
-          // error. The inert executor is never reached because no tool is
-          // declared; it exists only to keep that typed path active.
-          tools: [],
+          ...(continuation?.acceptedEnd !== undefined || continuation?.partialDrain !== undefined ? {} : { tools: [SKILL_SELECTION_TOOL, ...(useEndProtocol ? [EXPLICIT_END_TOOL] : []),
+            ...(request.readTaskResult === undefined ? [] : [TASK_RESULT_READ_TOOL])] }),
+          ...(!useEndProtocol ? {} : { completeRequest: async ({ requestId, tools }: {
+            readonly requestId: string;
+            readonly tools: readonly { readonly call: import('../../contracts/src/index.js').ProviderToolCall; readonly result: ProviderToolExecutionResult }[];
+          }): Promise<'complete' | 'continue' | 'drain'> => {
+            for (const { call, result } of tools) {
+              // Malformed JSON is paired and rejected by the driver before
+              // executor dispatch. Count that real committed call in Runtime.
+              if (endAttempt !== undefined && call.toolId === EXPLICIT_END_TOOL.toolId && result.error?.code === 'tool.arguments.invalid-json') {
+                endResult = await submitExplicitTurnEnd({ journal: input.parentJournal, attempt: endAttempt,
+                  requestId, callId: call.callId, arguments: call.arguments });
+              }
+            }
+            // The HTTP transport must consume the paired tool result before
+            // settlement. Its final text is transport drain, never a decision.
+            if (endResult?.kind === 'accepted' || endResult?.kind === 'partial') return tools.length === 0 ? 'complete' : 'drain';
+            return 'continue';
+          } }),
           executeTool: {
-            async execute({ call }) {
+            async execute({ call, requestId }): Promise<ProviderToolExecutionResult> {
+              if (call.toolId === TASK_RESULT_READ_TOOL.toolId && request.readTaskResult !== undefined) {
+                const args = call.arguments;
+                const rejected = (code: string, message: string): ProviderToolExecutionResult => ({
+                  output: JSON.stringify({ status: 'failed', code, callId: call.callId, toolId: call.toolId, message, recoverable: true }),
+                  outputRefs: [], evidenceRefs: [], status: 'failed',
+                  error: { errorId: `${code}:${call.callId}`, code, message, category: 'validation', phase: 'tool',
+                    ownerId: 'humanagent.app', retryable: 'retryable', attention: 'foreground', evidenceRefs: [],
+                    nextAction: { kind: 'continue', ref: 'task.read_result' } },
+                });
+                if (args === null || typeof args !== 'object' || Array.isArray(args)
+                  || Object.keys(args).length !== 1 || !('taskId' in args)
+                  || typeof args.taskId !== 'string' || args.taskId.trim().length === 0) {
+                  return rejected('task.read_result.invalid-arguments', 'task.read_result requires only a non-empty taskId');
+                }
+                try {
+                  return { output: JSON.stringify(await request.readTaskResult(args.taskId)),
+                    outputRefs: [], evidenceRefs: [], status: 'succeeded' };
+                } catch (error) {
+                  if (error instanceof RuntimeTaskControlError && error.code === 'task.not.found') {
+                    return rejected('task.read_result.task-not-found', 'No such task in the current host scope; select an available taskId or ask for clarification');
+                  }
+                  throw error;
+                }
+              }
+              if (call.toolId === EXPLICIT_END_TOOL.toolId) {
+                if (endAttempt === undefined) throw new Error('legacy explicit turn has no end attempt');
+                if (requestId === undefined) throw new Error('explicit end requires its registered provider request');
+                endResult = await submitExplicitTurnEnd({
+                  journal: input.parentJournal, attempt: endAttempt, requestId,
+                  callId: call.callId, arguments: call.arguments,
+                });
+                return { output: JSON.stringify(endResult), outputRefs: [], evidenceRefs: [],
+                  status: endResult.kind === 'rejected' ? 'failed' : 'succeeded' };
+              }
+              if (call.toolId === SKILL_SELECTION_TOOL.toolId) {
+                const args = call.arguments as { readonly skillIds?: unknown };
+                if (!Array.isArray(args.skillIds)
+                  || args.skillIds.length === 0
+                  || !args.skillIds.every((skillId): skillId is IntakeSkillId =>
+                    typeof skillId === 'string' && INTAKE_SKILL_IDS.includes(skillId as IntakeSkillId))
+                  || new Set(args.skillIds).size !== args.skillIds.length) {
+                  throw new ExplicitBrainOperationalToolError(
+                    'unsupported-tool',
+                    'Skill selection must contain unique registered stable IDs',
+                  );
+                }
+                selectedSkillIds = args.skillIds;
+                return {
+                  output: JSON.stringify({ selectedSkillIds }),
+                  outputRefs: [],
+                  evidenceRefs: [],
+                  status: 'succeeded',
+                };
+              }
               throw new ExplicitBrainOperationalToolError(
                 'unsupported-tool',
                 `explicit interpreter has no executable tool ${call.toolId}`,
@@ -1330,36 +1633,23 @@ export function createProviderExplicitBrainInterpreter(input: {
         if (closure.state !== 'succeeded') {
           throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
         }
-        if (continuation === undefined) {
+        const settledEnd = endResult as ExplicitEndSubmission | undefined;
+        if (settledEnd?.kind === 'accepted' || settledEnd?.kind === 'partial') {
           const finalParentOutput = await createdOwner.readFinalTurnOutput();
-          try {
-            interpretation = parseInterpreterOutput(
-              finalParentOutput.assistantText,
-              effectiveRequest,
-              finalParentOutput.assistantContentRefs,
-            );
-          } catch (parseError) {
-            // The terminal output is durable and unusable. Mark the shape so the
-            // catch below can close the turn honestly after the provider close,
-            // instead of leaving it pending forever.
-            unparseableOutput = true;
-            unparseableOutputFailure = parseError;
-            freshMultipleIntakeDecisions = parseError instanceof MultipleIntakeDecisionsError;
-            throw parseError;
-          }
-          // Only the simple-answer path carries the authoritative settlement receipt;
-          // complex requirement routing keeps its existing behavior.
-          if (interpretation.kind === 'answer' && input.publishProviderSettlement !== undefined) {
+          // Both accepted and partial require real settlement for recovery.
+          {
             const settlement = driver.settlement();
             if (settlement === undefined) {
               throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent settled without a provider settlement');
             }
-            await input.publishProviderSettlement({
+            const receipt: InteractionProviderSettlementReceipt = {
               interactionId: effectiveRequest.interactionId,
               inputRevision: effectiveRequest.inputRevision,
               request: finalParentOutput.terminalRequest.request,
               settlement,
-            });
+            };
+            await publishInteractionProviderSettlement({ journal: input.parentJournal, receipt });
+            if (settledEnd.kind === 'accepted' && settledEnd.decision.kind === 'answer') await input.publishProviderSettlement?.(receipt);
           }
         }
         live = {

@@ -101,7 +101,14 @@ export interface AgentPromptSegment {
 }
 
 export interface AgentPromptSource {
-  read(ref: string): Promise<string>;
+  read(ref: string, options?: { readonly within?: string }): Promise<string>;
+}
+
+export interface RegisteredSkill {
+  readonly id: string;
+  readonly description: string;
+  readonly ref: string;
+  readonly referenceRefs: readonly string[];
 }
 
 export interface LoadedAgentPromptSegments {

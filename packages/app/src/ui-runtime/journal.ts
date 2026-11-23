@@ -443,6 +443,22 @@ function validateJournalRecord(
     requireRecordString(record, 'answeredAt', filePath, line);
     return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
+  if (kind === 'task.reassigned') {
+    requireScopedId(record, 'taskId', 'task', filePath, line);
+    requireRecordString(record, 'occurredAt', filePath, line);
+    requireRecordObject(record, 'to', filePath, line);
+    const owner = (value: Record<string, unknown>, label: string): void => {
+      const scope = requireRecordString(value, 'scope', filePath, line);
+      requireRecordString(value, 'actorId', filePath, line);
+      if (scope === 'project') requireRecordString(value, 'projectId', filePath, line);
+      else if (scope !== 'ceo' || value.projectId !== undefined) {
+        throw new Error(`corrupt UI runtime journal ${filePath}:${line}: invalid ${label}`);
+      }
+    };
+    if (record.from !== undefined) owner(requireRecordObject(record, 'from', filePath, line), 'from owner');
+    owner(requireRecordObject(record, 'to', filePath, line), 'to owner');
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
+  }
   if (kind === 'operation.prepared') {
     validateExecutionAllocation(record.allocation, filePath, line);
     const prepared = record as Extract<UiRuntimeJournalRecord, { readonly kind: 'operation.prepared' }>;

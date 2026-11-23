@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { validateExplicitEndControl, type ExplicitEndControl } from '../../../runtime/src/explicit-brain/explicit-turn-end.js';
 import { canonicalJsonStringify } from '../../../contracts/src/explicit-brain.js';
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 import {
@@ -62,6 +63,13 @@ const REQUEST_PHASES: readonly RuntimeRequestLifecyclePhase[] = [
 ];
 
 type ParentRawPayload =
+  | {
+      readonly kind: typeof INTERACTION_PARENT_RAW_RECORD_TYPE;
+      readonly discriminant: 'explicit-end-control';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: ExplicitEndControl;
+    }
   | {
       readonly kind: typeof INTERACTION_PARENT_RAW_RECORD_TYPE;
       readonly discriminant: 'turn-input';
@@ -236,6 +244,7 @@ function assertTurnInputFact(fact: InteractionParentTurnInputFact): void {
     throw new JournalIntegrityError('interaction parent turn input fact is invalid');
   }
   assertTurn(fact.turn);
+  if (fact.endProtocol !== undefined && fact.endProtocol !== 'explicit-end-v1') throw new JournalIntegrityError('invalid explicit end protocol');
   assertInteractionParentExecution(fact.execution, fact.turn);
   assertParentScope(fact.scope, fact.turn, fact.execution);
   if (fact.executionOwner !== undefined) validateOccurrenceExecutionOwner(fact.executionOwner);
@@ -409,7 +418,7 @@ function assertParseFailureFact(
 /**
  * Validate one durable failure-closing of a physical epoch.
  *
- * It says only that this exact epoch failed before any terminal output, so it
+ * It says only that this exact epoch failed before a business turn conclusion, so it
  * may never carry a success, an answer, a close, a settlement or an abandonment
  * claim. The epoch it names must be a real epoch of the committed turn input.
  */
@@ -460,6 +469,19 @@ function readParentRawPayload(record: JournalRecord): ParentRawPayload | null {
   const payload = record.payload;
   if (payload === undefined || payload.kind !== INTERACTION_PARENT_RAW_RECORD_TYPE) return null;
   const discriminant = payload.discriminant;
+  if (discriminant === 'explicit-end-control') {
+    const turn = payload.turn as InteractionTurnIdentity;
+    const execution = payload.execution as InteractionParentProviderExecutionIdentityRef;
+    const fact = payload.fact as ExplicitEndControl;
+    assertTurn(turn);
+    assertInteractionParentExecution(execution, turn);
+    validateExplicitEndControl(fact);
+    if (!sameTurnIdentity(turn, fact.attempt.turn)
+      || canonicalJsonStringify(execution) !== canonicalJsonStringify(fact.attempt.execution)) {
+      throw new JournalIntegrityError('explicit end control identity mismatch');
+    }
+    return { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant, turn, execution, fact };
+  }
   if (discriminant === 'turn-input') {
     const fact = payload.fact as InteractionParentTurnInputFact;
     assertTurnInputFact(fact);
@@ -583,6 +605,7 @@ function assertRecordScope(
 }
 
 function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIdentity): InteractionParentTurnSnapshot {
+  const endControls: InteractionParentCommittedFact<ExplicitEndControl>[] = [];
   let turnInput: InteractionParentCommittedFact<InteractionParentTurnInputFact> | null = null;
   const requests: InteractionParentCommittedRequest[] = [];
   const acceptedFacts: InteractionParentCommittedFact<
@@ -621,6 +644,13 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       throw new JournalIntegrityError('interaction parent raw append follows the committed epoch failure');
     }
     const commit = commitRef(record);
+    if (payload.discriminant === 'explicit-end-control') {
+      if (turnInput === null || turnInput.fact.endProtocol !== 'explicit-end-v1') {
+        throw new JournalIntegrityError('explicit end control requires an opened v1 turn');
+      }
+      endControls.push({ fact: payload.fact, commit });
+      continue;
+    }
     if (payload.discriminant === 'turn-input') {
       if (turnInput !== null) {
         throw new JournalIntegrityError('interaction parent turn has more than one committed turn input');
@@ -845,20 +875,23 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
       // exactly the shape this fact records. This decoder cannot tell the
       // reconciliation modes apart by fact shape alone, and it does not try:
       // keeping a `terminal-output` epoch away from a failure fact is the
-      // runtime eligibility boundary's job. What this decoder enforces is the
-      // narrower shape rule below, which holds for every mode: an epoch that
-      // already carries a terminal output of its own (request-complete, or a
-      // complete assistant-text) must never be recorded as failed.
+      // runtime eligibility boundary's job. Under explicit-end-v1, intermediate
+      // requests may complete before a continuation fails; only a non-rejected
+      // typed end concludes the business turn. Legacy turns retain their raw
+      // terminal-output protection.
       if (providerSettlements.length > 0) {
         throw new JournalIntegrityError(
           'interaction parent epoch failure requires a turn without a provider settlement',
         );
       }
-      if (acceptedFacts.some((committed) =>
-        committed.fact.envelope.fact.kind === 'request-complete'
-        || (committed.fact.envelope.fact.kind === 'content'
-          && committed.fact.envelope.fact.channel === 'assistant-text'
-          && committed.fact.envelope.fact.complete))) {
+      const hasTerminalOutput = turnInput.fact.endProtocol === 'explicit-end-v1'
+        ? endControls.some(({ fact }) => fact.kind === 'submission' && fact.result.kind !== 'rejected')
+        : acceptedFacts.some((committed) =>
+          committed.fact.envelope.fact.kind === 'request-complete'
+          || (committed.fact.envelope.fact.kind === 'content'
+            && committed.fact.envelope.fact.channel === 'assistant-text'
+            && committed.fact.envelope.fact.complete));
+      if (hasTerminalOutput) {
         throw new JournalIntegrityError(
           'interaction parent epoch failure requires an epoch without a terminal output',
         );
@@ -906,12 +939,25 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
   }
 
   return {
+    endControls,
     turnInput, requests, acceptedFacts, ownerReconciliations, providerSettlements,
     resourceClose, abandonment, parseFailure, executionFailure,
   };
 }
 
 function toAppendInput(append: InteractionParentTurnAppend): JournalAppendInput {
+  if (append.kind === 'explicit-end-control') {
+    validateExplicitEndControl(append.fact);
+    const fact = append.fact;
+    const key = fact.kind === 'attempt' ? `${fact.attempt.attemptRef}:epoch:${fact.attempt.execution.executionEpoch}`
+      : `${fact.attempt.attemptRef}:${fact.requestId}:${fact.callId}`;
+    return {
+      commitId: parentRawCommitId(append.turn, `explicit-end:${key}`),
+      kind: 'event', scope: parentScope(append.turn, append.execution),
+      payload: { kind: INTERACTION_PARENT_RAW_RECORD_TYPE, discriminant: append.kind,
+        turn: append.turn, execution: append.execution, fact },
+    };
+  }
   if (append.kind === 'turn-input') {
     const fact = append.fact;
     return {
@@ -1100,6 +1146,36 @@ export class JsonlInteractionParentTurnJournal
   async readTurnSnapshot(turn: InteractionTurnIdentity): Promise<InteractionParentTurnSnapshot> {
     validateInteractionTurnIdentity(turn);
     return decodeTurn(await this.journal.replay(), turn);
+  }
+
+  /** Accounting reads facts, not eligibility for lifecycle recovery. */
+  async readInteractionUsage(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+    readonly interactionId: string;
+  }): Promise<Pick<InteractionParentTurnSnapshot, 'requests' | 'acceptedFacts'>> {
+    const requests: InteractionParentCommittedRequest[] = [];
+    const acceptedFacts: InteractionParentTurnSnapshot['acceptedFacts'][number][] = [];
+    for (const record of await this.journal.replay()) {
+      const raw = record.payload;
+      if (raw?.kind !== INTERACTION_PARENT_RAW_RECORD_TYPE) continue;
+      if (raw.discriminant !== 'request' && raw.discriminant !== 'accepted-fact') continue;
+      const turn = raw.turn as InteractionTurnIdentity | undefined;
+      if (turn?.organId?.scope !== scope.organId.scope || turn.organId.value !== scope.organId.value
+        || turn.interactionScopeId !== scope.interactionScopeId || turn.interactionId !== scope.interactionId) continue;
+      // Non-usage provider output is not an accounting dependency either.
+      if (raw.discriminant === 'accepted-fact'
+        && (raw.entry as AcceptedRawFact<InteractionParentProviderExecutionIdentityRef> | undefined)?.envelope?.fact?.kind !== 'usage') continue;
+      const payload = readParentRawPayload(record);
+      if (payload === null || (payload.discriminant !== 'request' && payload.discriminant !== 'accepted-fact')) continue;
+      assertRecordScope(record, payload.turn, payload.execution);
+      if (payload.discriminant === 'request') {
+        requests.push({ fact: payload.record, commit: commitRef(record), execution: payload.execution });
+      } else {
+        acceptedFacts.push({ fact: payload.entry, commit: commitRef(record) });
+      }
+    }
+    return { requests, acceptedFacts };
   }
 
   async readScopeOpenedTurns(scope: {

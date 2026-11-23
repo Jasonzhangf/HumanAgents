@@ -26,6 +26,7 @@ import {
   type ReviewResult,
 } from './review-data.js';
 import { ContractError } from './errors.js';
+import { isCanonicalInstant } from './time.js';
 import type { CompletionReadInput } from './operation-completion.js';
 import type { RecoveryHoldFacts } from './native-reasoning.js';
 import {
@@ -91,6 +92,30 @@ export interface RawContentReadPort {
   }): Promise<Uint8Array>;
 }
 
+/**
+ * Context capacity for one model call. `known` comes from the live model
+ * catalog entry matched by the provider-reported response model. An unmatched
+ * model stays explicitly unknown; it never borrows a default or list-first
+ * entry, and it never falls back to a marketing upper bound.
+ */
+export type ProviderCallCapacity =
+  | {
+      readonly state: 'known';
+      readonly source: 'rcc-models';
+      readonly contextWindow: number;
+      readonly maxContextTokens?: number;
+      readonly effectiveContextWindowPercent?: number;
+    }
+  | {
+      readonly state: 'unknown';
+      readonly reason:
+        | 'no-capacity-source'
+        | 'no-response-model'
+        | 'model-not-in-catalog'
+        | 'catalog-unavailable'
+        | 'entry-without-capacity';
+    };
+
 export type ProviderRawFact<
   TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
 > =
@@ -122,6 +147,30 @@ export type ProviderRawFact<
       readonly result: ProviderToolResult<TIdentity>;
       readonly rawOutput: RawAsset;
       readonly complete: true;
+    }
+  | {
+      readonly kind: 'usage';
+      readonly protocol: 'responses' | 'openai' | 'anthropic';
+      /** Provider-reported response model; the only key used to match capacity. */
+      readonly responseModel: string | null;
+      /**
+       * Protocol-normalised counters. An absent key means the protocol did not
+       * report that counter; 0 is an explicit reported zero. Responses and
+       * OpenAI inputTokens include cached input. Anthropic inputTokens is the
+       * uncached part: total input = inputTokens + cacheCreationInputTokens +
+       * cacheReadInputTokens.
+       */
+      readonly inputTokens?: number;
+      readonly outputTokens?: number;
+      readonly cacheReadInputTokens?: number;
+      readonly cacheCreationInputTokens?: number;
+      readonly capacity: ProviderCallCapacity;
+      /** Measured instant window the call duration describes. */
+      readonly timing: {
+        readonly startedAt: string;
+        readonly endedAt: string;
+        readonly scope: 'stream-observe-to-terminal';
+      };
     }
   | {
       readonly kind: 'request-complete';
@@ -444,6 +493,46 @@ const CONTENT_CHANNELS: readonly ContentUnitChannel[] = [
 function validateRawFact(fact: unknown, label: string): asserts fact is ProviderRawFact<AnyProviderExecutionIdentityRef> {
   assertPlainObject(fact, label);
   switch (fact.kind) {
+    case 'usage': {
+      if (fact.protocol !== 'responses' && fact.protocol !== 'openai' && fact.protocol !== 'anthropic') {
+        throw new ContractError(`${label} protocol is invalid`);
+      }
+      if (fact.responseModel !== null) assertNonEmptyString(fact.responseModel, `${label} responseModel`);
+      for (const key of ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'] as const) {
+        const value = fact[key];
+        if (value !== undefined) assertNonNegativeSafeInteger(value, `${label} ${key}`);
+      }
+      const capacity = fact.capacity;
+      assertPlainObject(capacity, `${label} capacity`);
+      if (capacity.state === 'known') {
+        if (capacity.source !== 'rcc-models') throw new ContractError(`${label} capacity source is invalid`);
+        if (typeof capacity.contextWindow !== 'number' || !Number.isSafeInteger(capacity.contextWindow) || capacity.contextWindow <= 0) {
+          throw new ContractError(`${label} contextWindow must be a positive safe integer`);
+        }
+        for (const key of ['maxContextTokens', 'effectiveContextWindowPercent'] as const) {
+          const value = capacity[key];
+          if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
+            throw new ContractError(`${label} capacity ${key} must be a positive number`);
+          }
+        }
+        if (typeof capacity.effectiveContextWindowPercent === 'number' && capacity.effectiveContextWindowPercent > 100) {
+          throw new ContractError(`${label} effectiveContextWindowPercent cannot exceed 100`);
+        }
+      } else if (capacity.state === 'unknown') {
+        if (typeof capacity.reason !== 'string' || !['no-capacity-source', 'no-response-model', 'model-not-in-catalog', 'catalog-unavailable', 'entry-without-capacity'].includes(capacity.reason)) {
+          throw new ContractError(`${label} capacity reason is invalid`);
+        }
+      } else {
+        throw new ContractError(`${label} capacity state is invalid`);
+      }
+      const timing = fact.timing;
+      assertPlainObject(timing, `${label} timing`);
+      if (timing.scope !== 'stream-observe-to-terminal') throw new ContractError(`${label} timing scope is invalid`);
+      for (const key of ['startedAt', 'endedAt'] as const) {
+        if (!isCanonicalInstant(timing[key])) throw new ContractError(`${label} timing ${key} must be a canonical instant`);
+      }
+      return;
+    }
     case 'content': {
       assertNonEmptyString(fact.contentUnitId, `${label} contentUnitId`);
       if (!CONTENT_CHANNELS.includes(fact.channel as ContentUnitChannel)) throw new ContractError(`${label} channel is invalid`);

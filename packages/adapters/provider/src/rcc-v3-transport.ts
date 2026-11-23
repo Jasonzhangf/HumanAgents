@@ -795,6 +795,7 @@ function openAIChatPayload(request: OpenAIChatWireRequest): Record<string, unkno
     messages: request.messages,
     ...(request.tools ? { tools: request.tools } : {}),
     stream: true,
+    stream_options: { include_usage: true },
   };
 }
 
@@ -1141,6 +1142,15 @@ export class RccV3ProviderTransport<
               ? 'error'
               : frame.event;
         if (!type) throw new ProviderAdapterError({ code: 'protocol.missing-event-type', category: 'protocol', phase: 'observe', message: 'RCC v3 SSE event has no type', scope: input });
+        // Live Responses streams also carry account, header and timing
+        // diagnostics. They have no content or completion authority. Keep
+        // these exact transport frames out of the domain codec; unknown
+        // events and actual provider failures still follow the normal path.
+        if (active.protocol === 'responses' && (
+          type === 'codex.rate_limits'
+          || type === 'codex.response.metadata'
+          || type === 'responsesapi.websocket_timing'
+        )) continue;
         if (active.protocol === 'responses' && type === 'response.done') continue;
         if (active.protocol === 'openai' && type !== 'openai.chat.completion' && type !== 'error') continue;
         const normalized = active.protocol === 'responses' && type === 'response.output_item.done'

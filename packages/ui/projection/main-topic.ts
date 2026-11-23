@@ -1,4 +1,4 @@
-import type { TaskId, TaskInputRequest } from '../../contracts/src/index.js'
+import type { ExplicitTurnPartialResult, TaskId, TaskInputRequest } from '../../contracts/src/index.js'
 import type { RuntimeSseEvent, ExplicitInteractionStepProjection } from '../contracts/runtime.js'
 
 export interface ConversationStatusFacts {
@@ -15,6 +15,8 @@ export interface ConversationStatusEvent extends Pick<RuntimeSseEvent,
   readonly turnId?: string
 }
 
+type ExplicitInteractionPartial = ExplicitTurnPartialResult & { readonly resumed?: boolean }
+
 export type MainTopicTurnRole = 'user' | 'jenny'
 export type MainTopicTurnKind =
   | 'message'
@@ -23,6 +25,7 @@ export type MainTopicTurnKind =
   | 'input-request'
   | 'status'
   | 'result'
+  | 'partial'
   | 'error'
 
 export interface MainTopicClarification {
@@ -38,6 +41,7 @@ export interface MainTopicInteractionInput {
   readonly occurredAt?: string
   readonly state: string
   readonly reply?: string
+  readonly partial?: ExplicitInteractionPartial
   readonly clarifications?: readonly MainTopicClarification[]
   readonly draftProposal?: string
   readonly taskId?: TaskId
@@ -85,6 +89,7 @@ export interface MainTopicTurn {
   readonly expectedRevision?: number
   readonly quote?: string
   readonly options?: readonly string[]
+  readonly partial?: ExplicitInteractionPartial
 }
 
 export interface MainTopicTaskView {
@@ -224,6 +229,16 @@ function interactionTurns(interaction: MainTopicInteractionInput): MainTopicTurn
       interactionId: interaction.interactionId,
       quote: interaction.rawInput,
       ...(interaction.taskId === undefined ? {} : { taskId: interaction.taskId }),
+    })
+  } else if ((interaction.state === 'partial' || interaction.state === 'matching') && interaction.partial) {
+    turns.push({
+      turnId: `partial:${interaction.interactionId}:${interaction.partial.partialRef}`,
+      role: 'jenny',
+      kind: 'partial',
+      text: interaction.partial.userMessage,
+      interactionId: interaction.interactionId,
+      quote: interaction.rawInput,
+      partial: interaction.partial,
     })
   }
   return turns

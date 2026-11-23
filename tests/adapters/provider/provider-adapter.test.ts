@@ -42,6 +42,8 @@ import {
   type ResponsesWireTool,
 } from '../../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../../packages/adapters/provider/src/evidence.js';
+import type { ProviderRequestContext } from '../../../packages/contracts/src/provider-request-context.js';
+import { invalidToolArguments } from '../../../packages/adapters/provider/src/tool-arguments.js';
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
@@ -495,6 +497,55 @@ test('responses codec keeps an extra provider model round out of the request ter
   assert.deepEqual(facts.filter((fact) => fact.kind === 'content').map((fact) => fact.contentUnitId), ['responses:assistant-text:item-answer']);
   // The request outcome still lands on the terminal event of the extra round.
   assert.equal(facts.some((fact) => fact.kind === 'request-complete'), true);
+});
+
+// A dotted domain tool needs an explicit mapping on OpenAI wires. Without the
+// inverse mapping its call cannot reach the registered executor. Reuse codec
+// fixtures to cover declaration, continuation and decode on each native protocol.
+test('task.read_result round trips native protocol declarations calls and results', async () => {
+  const tools = [{ toolId: 'task.read_result', description: 'read published result', inputSchema: { type: 'object' } }];
+  const toolContinuations = [{ callId: 'read-1', toolId: 'task.read_result', arguments: { taskId: 'published-parent' },
+    continuationRef: 'read-response', output: 'published result' }];
+  const requestContext: ProviderRequestContext = { units: [
+    { kind: 'tool-call', callId: 'read-1', toolId: 'task.read_result', arguments: { taskId: 'published-parent' } },
+    { kind: 'tool-result', callId: 'read-1', toolId: 'task.read_result', output: 'published result', status: 'succeeded' },
+  ] };
+  const responses = new ResponsesProviderCodec();
+  assert.equal(responses.encodeStart(startInput({ tools }), ccBinding, 'cc-route').tools?.[0]?.name, 'task_read_result');
+  const submitted = responses.encodeSubmit(submitInput({ tools, toolContinuations }), ccBinding, 'cc-route');
+  assert.ok(JSON.stringify(submitted.input).includes('"name":"task_read_result"'));
+  assert.ok(JSON.stringify(submitted.input).includes('"call_id":"read-1","output":"published result"'));
+  const responseContext = codecContext();
+  await responses.decodeEvent({ protocol: 'responses', type: 'response.created', response: { id: 'read-response' } }, responseContext);
+  const decoded = await responses.decodeEvent({ protocol: 'responses', type: 'response.output_item.done', output_index: 0,
+    item: { type: 'function_call', id: 'read-item', call_id: 'read-1', name: 'task_read_result', arguments: '{"taskId":"published-parent"}' } }, responseContext);
+  assert.equal(decoded.events.find(event => event.toolCall)?.toolCall?.toolId, 'task.read_result');
+
+  const openai = new OpenAIChatProviderCodec();
+  assert.equal(openai.encodeStart(startInput({ tools, requestContext: { units: [] } }), openAIBinding, 'openai-route').tools?.[0]?.function.name, 'task_read_result');
+  const chatSubmit = openai.encodeSubmit(submitInput({ tools, requestContext }), openAIBinding, 'openai-route');
+  assert.ok(JSON.stringify(chatSubmit.messages).includes('"name":"task_read_result"'));
+  assert.ok(JSON.stringify(chatSubmit.messages).includes('"tool_call_id":"read-1"'));
+  const chatContext = codecContext();
+  await openai.decodeEvent({ protocol: 'openai', type: 'openai.chat.completion', id: 'read-chat',
+    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'read-1', function: { name: 'task_read_result', arguments: '{"taskId":"published-parent"}' } }] }, finish_reason: null }] }, chatContext);
+  const chatEnd = await openai.decodeEvent({ protocol: 'openai', type: 'openai.chat.completion', id: 'read-chat',
+    choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }, chatContext);
+  assert.equal(chatEnd.events.find(event => event.toolCall)?.toolCall?.toolId, 'task.read_result');
+
+  const anthropic = new AnthropicProviderCodec(4096);
+  assert.equal(anthropic.encodeStart(startInput({ tools }), goaichatBinding, 'goaichat-route').tools?.[0]?.name, 'task.read_result');
+  const anthSubmit = anthropic.encodeSubmit(submitInput({ tools, requestContext }), goaichatBinding, 'goaichat-route');
+  assert.ok(JSON.stringify(anthSubmit.messages).includes('"name":"task.read_result"'));
+  assert.ok(JSON.stringify(anthSubmit.messages).includes('"tool_use_id":"read-1"'));
+  const anthContext = codecContext();
+  await anthropic.decodeEvent({ protocol: 'anthropic', type: 'message_start', message: { id: 'read-anth', model: 'm', role: 'assistant' } }, anthContext);
+  await anthropic.decodeEvent({ protocol: 'anthropic', type: 'content_block_start', index: 0,
+    content_block: { type: 'tool_use', id: 'read-1', name: 'task.read_result', input: {} } }, anthContext);
+  await anthropic.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 0,
+    delta: { type: 'input_json_delta', partial_json: '{"taskId":"published-parent"}' } }, anthContext);
+  const anthEnd = await anthropic.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 0 }, anthContext);
+  assert.equal(anthEnd.events.find(event => event.toolCall)?.toolCall?.toolId, 'task.read_result');
 });
 
 test('responses codec keeps tool control typed and encodes a call-bound continuation', () => {
@@ -1699,15 +1750,35 @@ test('anthropic codec emits one executable typed tool call with a legal phase on
   assert.equal(rawCall.call.continuationRef, 'msg-typed');
 });
 
-test('anthropic codec fails closed on incomplete tool arguments at block stop', async () => {
+test('anthropic codec keeps a malformed call correctable at block stop instead of failing the request', async () => {
   const codec = new AnthropicProviderCodec(4096);
   const context = codecContext();
   await codec.decodeEvent({ protocol: 'anthropic', type: 'message_start', message: { id: 'msg-bad', model: 'm', role: 'assistant' } }, context);
   await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call-bad', name: 'file_read', input: {} } }, context);
   await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":' } }, context);
+  const stop = await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 0 }, context);
+  const correctable = stop.events.filter((event) => event.toolCall !== undefined);
+  assert.equal(correctable.length, 1);
+  assert.equal(correctable[0]?.summary, '调用工具参数无效：file.read');
+  assert.equal(correctable[0]?.nextAction?.kind, 'continue');
+  assert.deepEqual(correctable[0]?.toolCall, { callId: 'call-bad', toolId: 'file.read', arguments: {}, continuationRef: 'msg-bad' });
+  assert.deepEqual(invalidToolArguments(correctable[0]?.toolCall?.arguments), {
+    code: 'tool.arguments.invalid-json',
+    rawArguments: '{"path":',
+    message: 'provider tool arguments are invalid JSON: {"path":',
+  });
+  for (const event of stop.events) validateProviderEvent(event);
+  const rawCall = stop.rawFacts.find((candidate): candidate is Extract<ProviderRawFact, { kind: 'tool-call' }> => candidate.kind === 'tool-call');
+  assert.ok(rawCall, 'expected a typed tool-call raw fact');
+  assert.equal(rawCall.call.callId, 'call-bad');
+  assert.deepEqual(rawCall.call.arguments, {});
+
+  // Valid JSON that is not an object stays a protocol failure rather than a correctable call.
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'call-shape', name: 'file_read', input: {} } }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '[1,2]' } }, context);
   await assert.rejects(
-    () => codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 0 }, context),
-    (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'tool.arguments.invalid-json',
+    () => codec.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 1 }, context),
+    (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'tool.arguments.invalid-shape',
   );
 });
 

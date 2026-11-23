@@ -77,6 +77,10 @@ const ROLE_CAPABILITIES: Readonly<Record<AgentRole, readonly string[]>> = {
 
 const INTERACTION_1_0_SKILLS = ['input-normalization', 'task-matching', 'status-explanation', 'confirmation'] as const;
 const INTERACTION_1_1_SKILLS = [
+  'task-intake',
+  'project-management',
+  'agent-addressing',
+  'agent-communication',
   'input-normalization',
   'channel-routing',
   'task-matching',

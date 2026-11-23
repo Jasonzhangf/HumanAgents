@@ -3734,6 +3734,17 @@ test('confirmed requirement is HTTP-observable as queued before the implicit con
     assert.equal(tasks.counts.total, 1);
     const queuedRow = queuedDraftRow(tasks, 'draft-1');
     assert.equal(queuedRow.requirementAdmission, 'queued');
+    const jenny = {
+      scope: 'project',
+      projectId: 'project-ui-queued-http-window',
+      actorId: 'Jenny',
+    } as const;
+    const projectBoard = runtime.service.taskBoard(jenny);
+    assert.equal(projectBoard.current.some((entry) => entry.task.taskId.value === queuedRow.taskId.value), true);
+    assert.equal(projectBoard.current.every((entry) => entry.owner.actorId === 'Jenny'), true);
+    assert.equal(runtime.service.taskBoard({ scope: 'ceo', actorId: 'Alex' }).current.some(
+      (entry) => entry.task.taskId.value === queuedRow.taskId.value,
+    ), false);
 
     const detailResponse = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(queuedRow.taskId.value)}`);
     assert.equal(detailResponse.status, 200);
@@ -4530,6 +4541,60 @@ test('task dashboard retains current bound public output commits on read failure
   assert.deepEqual(after.publicOutput?.commits, before.publicOutput?.commits);
   assert.equal(after.publicOutput?.publicCommitWatermark, before.publicOutput?.publicCommitWatermark);
   assert.equal(after.output, before.output);
+});
+
+// The live follow-up failed despite completed work. This test targets the
+// service port shared by interpretation and regeneration. Cost: one fake
+// execution and local Journal reads; no business execution during reads.
+test('explicit result port keeps pending and unknown publications honest in interpret and regeneration', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-result-publication-'));
+  const store = new FileCheckpointStore(join(root, 'publication.jsonl'));
+  const journal = new UiRuntimeJournal(join(root, 'runtime.jsonl'));
+  let readResult: ((taskId: string) => Promise<unknown>) | undefined;
+  let interpretations = 0;
+  const service = new UiRuntimeService({ mode: 'fake', organId, binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: () => store, journal, closurePort: journal,
+    attentionPort: attentionPort(), providerState: 'ready', memory: testMemory('project-ui-test'),
+    runtimeComposition: { admitExecution: async () => {} },
+    explicitBrainInterpreter: { async interpret(input) {
+      interpretations++;
+      readResult = input.readTaskResult;
+      assert.ok(readResult, 'both formal entry points must bind the same read capability');
+      return { kind: 'requirement', normalizedInput: input.rawInput, knownFacts: [], intent: 'create',
+        proposal: input.rawInput, decisionRefs: [], structuredProposal: { revision: input.inputRevision,
+          intent: 'create', title: 'new work', objective: input.rawInput, deliverable: 'report',
+          deliveryConditions: [], evidenceRefs: [], blockingGaps: [] } };
+    } },
+  });
+  try {
+    const task = service.createTask({ title: 'existing published result' });
+    await service.startExecution(task.taskId, { prompt: 'existing published result' });
+    await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+    const interactionId = await service.receiveExplicitInput({ sourceRef: 'test:result-port', rawInput: 'new work', channel: 'business' });
+    await service.interpretExplicitInput({ interactionId });
+    const before = await readResult!(task.taskId.value) as any;
+    assert.ok(before.commits.length > 0);
+    const readPublication = store.readPublicOutputs.bind(store);
+    store.readPublicOutputs = async () => ({ state: 'pending', commits: [] });
+    const pending = await readResult!(task.taskId.value) as any;
+    assert.equal(pending.status, 'succeeded');
+    assert.equal(pending.publicationState, 'pending');
+    assert.deepEqual(pending.commits, [], 'internal task.output must not replace unpublished body');
+    store.readPublicOutputs = async () => { throw new Error('controlled publication outage'); };
+    const unknown = await readResult!(task.taskId.value) as any;
+    assert.equal(unknown.publicationState, 'unknown');
+    assert.deepEqual(unknown.commits, before.commits, 'confirmed partial evidence stays available without false completion');
+    store.readPublicOutputs = readPublication;
+    await service.regenerateExplicitDraft(interactionId);
+    assert.equal(interpretations, 2);
+    const regenerated = await readResult!(task.taskId.value) as any;
+    assert.deepEqual(regenerated, before);
+    assert.equal(service.listTasks().completed.length, 1, 'read and regeneration must not start another task');
+  } finally {
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('unchanged control journal is not re-read on warm task dashboard calls', async () => {
@@ -6809,7 +6874,6 @@ test('explicit brain persists a live-shaped structured provider proposal after s
     inputRevision: 1,
     sourceRef: 'ui:live-shaped',
     kind: 'requirement',
-    matchedTaskId: null,
     selectedAction: 'draft-requirement-and-hold-for-confirmation',
     normalizedInput: '创建需求：梳理项目集成状态并等待确认。',
     summary: '输入归一为一条待确认的需求草稿。',
@@ -6832,6 +6896,7 @@ test('explicit brain persists a live-shaped structured provider proposal after s
   const rawEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(parentRoot, 'assets')));
   const parentJournal = new JsonlOrganJournal(join(parentRoot, 'parent.jsonl'));
   const helperJournal = new JsonlInteractionHelperJournal(parentJournal);
+  let providerRequests = 0;
   const transport = new V3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
     binding,
     baseUrl: 'http://recorded.test',
@@ -6841,9 +6906,22 @@ test('explicit brain persists a live-shaped structured provider proposal after s
       status: 200,
       headers: new Headers({ 'content-type': 'text/event-stream' }),
       body: (async function* () {
+        const round = providerRequests++;
+        assert.ok(round < 3, 'the proposal fixture must finish after Skill selection, end submission and drain');
+        const tool = round === 0 ? {
+          type: 'function_call', call_id: 'proposal-select-skills', name: 'interaction_select_skills',
+          arguments: JSON.stringify({ skillIds: ['task-intake'] }),
+        } : {
+          type: 'function_call', call_id: 'proposal-explicit-end', name: 'humanagent_turn_end',
+          arguments: JSON.stringify({ kind: 'complex', decision: JSON.parse(providerOutput),
+            checkpointRecord: { index: { action: '整理项目集成需求', result: '需求已整理' } },
+            capsule: { summary: '已整理项目集成需求', goal: '梳理项目集成状态',
+              process: ['整理用户需求'], findings: [], nextStep: '交给隐式大脑执行' },
+          }),
+        };
         const frames = [
           { type: 'response.created', response: { id: 'live-proposal' } },
-          { type: 'response.output_text.done', item_id: 'proposal', text: providerOutput },
+          ...(round === 2 ? [] : [{ type: 'response.output_item.done', output_index: 0, item: tool }]),
           { type: 'response.completed', response: { id: 'live-proposal' } },
         ];
         yield new TextEncoder().encode(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
@@ -6872,6 +6950,10 @@ test('explicit brain persists a live-shaped structured provider proposal after s
     port,
     organId,
     interactionScopeId: 'runtime:ui-live-proposal',
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef },
+    }),
     parentJournal: new JsonlInteractionParentTurnJournal(parentJournal),
     helperJournal,
     checkpointJournal: helperJournal,
@@ -6898,6 +6980,7 @@ test('explicit brain persists a live-shaped structured provider proposal after s
   });
 
   const interpreted = await service.interpretExplicitInput({ interactionId });
+  assert.equal(providerRequests, 3);
   assert.equal(port.settleCalls, 1);
   assert.equal(interpreted.state, 'awaiting-confirmation');
   assert.match(interpreted.draft?.proposal ?? '', /项目集成状态梳理/);
@@ -8170,6 +8253,8 @@ test('restart restores a failed task error owner and next action from the app jo
 test('restart projects an orphaned running execution as blocked instead of pretending it still has a live handle', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-orphan-'));
   const base = new FakeReplayExecutionRuntimePort({ binding });
+  let releaseObservation!: () => void;
+  const observationGate = new Promise<void>(resolve => { releaseObservation = resolve; });
   const hanging: ExecutionRuntimePort = {
     kind: 'humanagent.execution-runtime-port',
     probe: (value) => base.probe(value),
@@ -8177,8 +8262,9 @@ test('restart projects an orphaned running execution as blocked instead of prete
     start: (value) => base.start(value),
     resume: (input) => base.resume(input),
     submit: (input) => base.submit(input),
-    observe: async function* observe() {
-      await new Promise<void>(() => {});
+    observe: async function* observe(input) {
+      await observationGate;
+      yield* base.observe(input);
     },
     requestStop: (input) => base.requestStop(input),
     settle: (input) => base.settle(input),
@@ -8187,17 +8273,26 @@ test('restart projects an orphaned running execution as blocked instead of prete
   const first = serviceFor(root, hanging);
   const task = first.createTask({ title: 'orphaned execution' });
   const started = await first.startExecution(task.taskId, { prompt: 'leave this running' });
-  assert.equal(first.taskDashboard(task.taskId).state, 'running');
-  assert.equal(first.eventsSince(started.operationId).length, 1);
+  try {
+    assert.equal(first.taskDashboard(task.taskId).state, 'running');
+    assert.equal(first.eventsSince(started.operationId).length, 1);
 
-  const restarted = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
-  await restarted.hydrate();
-  const dashboard = restarted.taskDashboard(task.taskId);
-  assert.equal(dashboard.state, 'blocked');
-  assert.deepEqual(dashboard.allowedActions, []);
-  const waiting = restarted.listTasks().waiting.find((row) => row.taskId.value === task.taskId.value);
-  assert.ok(waiting?.currentState.match(/进程已重启或缺少终态 checkpoint/));
-  assert.deepEqual(restarted.eventsSince(started.operationId).map((event) => event.kind), ['execution.started']);
+    const restarted = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+    await restarted.hydrate();
+    const dashboard = restarted.taskDashboard(task.taskId);
+    assert.equal(dashboard.state, 'blocked');
+    assert.deepEqual(dashboard.allowedActions, []);
+    const waiting = restarted.listTasks().waiting.find((row) => row.taskId.value === task.taskId.value);
+    assert.ok(waiting?.currentState.match(/进程已重启或缺少终态 checkpoint/));
+    assert.deepEqual(restarted.eventsSince(started.operationId).map((event) => event.kind), ['execution.started']);
+  } finally {
+    // The restarted reader must see the orphan before the old test-only
+    // observer is released. Then drain that observer instead of leaking its
+    // request-budget deadline into the rest of the suite.
+    releaseObservation();
+    await waitFor(() => assert.equal(first.taskDashboard(task.taskId).state, 'succeeded'));
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('one completed task does not close the shared provider while another task is running', async () => {
@@ -9493,6 +9588,7 @@ test('a terminal scheduled child projects through its parent detail, dashboard a
     new JsonlOrganJournal(subscriptionPath), { organId }, subscriptionPath,
   );
   const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  let readResult: ((taskId: string) => Promise<unknown>) | undefined;
   const service = new UiRuntimeService({
     mode: 'fake',
     organId,
@@ -9503,7 +9599,11 @@ test('a terminal scheduled child projects through its parent detail, dashboard a
     ),
     attentionPort: attentionPort(),
     providerState: 'ready',
-    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    explicitBrainInterpreter: { async interpret(input) {
+      readResult = input.readTaskResult;
+      assert.ok(readResult, 'formal service interpretation must bind the result reader');
+      return { kind: 'answer', normalizedInput: input.rawInput, answer: 'read-ready', knownFacts: [], decisionRefs: [] };
+    } },
     journal: runtimeJournal,
     closurePort: runtimeJournal,
     runtimeComposition: { admitExecution: async () => {} },
@@ -9625,6 +9725,43 @@ test('a terminal scheduled child projects through its parent detail, dashboard a
     assert.equal(row.output, childDashboard.output);
     assert.equal(row.nextStep, '查看已提交结果');
     assert.deepEqual(row.allowedActions, []);
+    const interactionId = await service.receiveExplicitInput({ sourceRef: 'test:result-followup',
+      rawInput: '刚才任务的结果是什么？', channel: 'business' });
+    await service.interpretExplicitInput({ interactionId });
+    assert.ok(readResult);
+    const result = await readResult!(parent.taskId.value) as any;
+    assert.equal(result.taskId, parent.taskId.value);
+    assert.equal(result.executionTaskId, child.taskId.value);
+    assert.equal(result.binding.scope.taskId.value, child.taskId.value);
+    assert.equal(result.binding.scope.operationId.value, childDashboard.operationId);
+    assert.equal(result.publicationState, 'committed');
+    assert.deepEqual(result.commits, (await service.productPublicOutput(child.taskId)).commits);
+    assert.ok(result.commits.length > 0);
+    await assert.rejects(() => readResult!('foreign-task'), /unknown task/i);
+    const unrelated = service.createTask({ title: 'unrelated task' });
+    const empty = await readResult!(unrelated.taskId.value) as any;
+    assert.equal(empty.publicationState, 'unavailable');
+    assert.deepEqual(empty.commits, []);
+    assert.equal((await service.listTasksWithIdentitySource()).completed.filter(task => task.taskId.value === parent.taskId.value).length, 1);
+    await identities.establish({ scope: { organId, taskId: unrelated.taskId },
+      source: { requirementId, inputRevision: 1, draftId: 'draft-parent-terminal-projection',
+        draftRevisionVersion: 1, draftRevisionHash: 'hash-parent-terminal-projection',
+        confirmationRef: 'confirmation-parent-terminal-projection' }, title: unrelated.title });
+    const otherId = `${subscriptionId}:second`;
+    const other = await subscriptions.create({ ...schedule.subscription, subscriptionId: otherId },
+      { ...schedule.policy, policyId: `${schedule.policy.policyId}:second` }, otherId);
+    await subscriptions.schedule({ occurrence: { subscriptionId: otherId,
+      scheduleRevision: other.subscription.scheduleRevision, occurrenceOrdinal: 1, state: 'due', dueAt }, nowAt: dueAt });
+    await subscriptions.claim({ subscriptionId: otherId, scheduleRevision: other.subscription.scheduleRevision,
+      occurrenceOrdinal: 1, dueAt, taskId: unrelated.taskId, operationId: id('operation', 'second-child'),
+      inputArtifactDigest: 'sha256:second-child-fixture', schedulerInstanceId: 'parent-terminal-projection-fixture',
+      leaseId: 'parent-terminal-projection-fixture', generation: 1, executionEpoch: 1,
+      nowAt: dueAt, leaseUntil: '2026-10-24T19:00:00.000Z' });
+    const ambiguous = await readResult!(parent.taskId.value) as any;
+    assert.equal(ambiguous.publicationState, 'ambiguous', 'multiple occurrences must never select latest');
+    assert.deepEqual(ambiguous.commits, []);
+    assert.deepEqual(ambiguous.executionTaskIds.sort(), [child.taskId.value, unrelated.taskId.value].sort());
+    console.log(JSON.stringify({ exactParentRead: result, ambiguousParentRead: ambiguous }));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -9908,6 +10045,7 @@ test('provider failures are projected with owner, retryability, and next action'
 test('startExecution rejects a task that is not allowed to start after stop-control failure', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-start-guard-'));
   const base = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 600 });
+  let cleanup = false;
   const failingStop: ExecutionRuntimePort = {
     kind: 'humanagent.execution-runtime-port',
     probe: (value) => base.probe(value),
@@ -9916,7 +10054,8 @@ test('startExecution rejects a task that is not allowed to start after stop-cont
     resume: (input) => base.resume(input),
     submit: (input) => base.submit(input),
     observe: (input) => base.observe(input),
-    requestStop: async () => {
+    requestStop: async (input) => {
+      if (cleanup) return base.requestStop(input);
       throw new ProviderAdapterError({
         code: 'stop.failed',
         category: 'runtime',
@@ -9931,21 +10070,28 @@ test('startExecution rejects a task that is not allowed to start after stop-cont
   const service = serviceFor(root, failingStop);
   const task = service.createTask({ title: 'start guard' });
   await service.startExecution(task.taskId, { prompt: 'start guard' });
-  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
-  const stopResult = await service.stop(task.taskId);
-  assert.equal(stopResult.state, 'settling');
-  assert.equal(service.taskDashboard(task.taskId).state, 'settling');
-  assert.deepEqual(service.taskDashboard(task.taskId).allowedActions, ['retry-stop']);
-  const retryResult = await service.retryStop(task.taskId);
-  assert.equal(retryResult.state, 'settling');
-  await assert.rejects(
-    () => service.deleteTask(task.taskId),
-    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
-  );
-  await assert.rejects(
-    () => service.startExecution(task.taskId, { prompt: 'should reject' }),
-    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
-  );
+  try {
+    await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
+    const stopResult = await service.stop(task.taskId);
+    assert.equal(stopResult.state, 'settling');
+    assert.equal(service.taskDashboard(task.taskId).state, 'settling');
+    assert.deepEqual(service.taskDashboard(task.taskId).allowedActions, ['retry-stop']);
+    const retryResult = await service.retryStop(task.taskId);
+    assert.equal(retryResult.state, 'settling');
+    await assert.rejects(
+      () => service.deleteTask(task.taskId),
+      (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
+    );
+    await assert.rejects(
+      () => service.startExecution(task.taskId, { prompt: 'should reject' }),
+      (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
+    );
+  } finally {
+    cleanup = true;
+    const stopped = await service.retryStop(task.taskId);
+    assert.equal(stopped.state, 'stopped');
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('stop control rejects a second stop and preserves the original operation identity', async () => {
@@ -11305,6 +11451,9 @@ test('public tool readback fails closed for a mismatched persisted fact and pres
   ): UiRuntimeService {
     const service = new UiRuntimeService({
       mode: 'fake',
+      projectKey: 'project-ui-test',
+      projectCatalog: async () => ({ projects: [{ projectKey: 'project-ui-test', workspaceCwd: root,
+        projectRoot: root, checkpointsRoot: join(root, 'checkpoints') }], failures: [] }),
       organId,
       binding,
       port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
@@ -11401,6 +11550,101 @@ test('public tool readback fails closed for a mismatched persisted fact and pres
     });
     assert.deepEqual(await service.toolOutput(taskId, operationId, 1, 1), report);
     assert.equal(legacyReads, 1);
+    // Current failure mode: the old reader ignored project/mode and could read
+    // the bound report despite a foreign scope. These must fail before I/O.
+    await assert.rejects(() => service.toolOutput(taskId, operationId, 1, 1,
+      { projectKey: 'another-project', mode: 'fake' }), (error: unknown) =>
+      error instanceof UiRuntimeApiError && error.code === 'project.unknown');
+    await assert.rejects(() => service.toolOutput(taskId, operationId, 1, 1,
+      { projectKey: 'project-ui-test', mode: 'fake', roleId: 'execution' }), (error: unknown) =>
+      error instanceof UiRuntimeApiError && error.code === 'tool-output.binding-unavailable');
+    assert.equal(legacyReads, 1);
+
+    const allocation = {
+      runtimeId: 'runtime-reader-execution', taskId, operationId, executionEpoch: 1,
+      assignmentId: 'assignment-reader-execution', scope: { organId, taskId, operationId },
+      inputRefs: [], ownerId: 'runtime-reader', directiveRevision: 1, inputRevision: 1,
+      orchestrated: false, role: 'execution' as const, configuredAgentId: 'reader-agent',
+    };
+    const preparedRecords: RuntimeTaskJournalRecord[] = records({ ...event(undefined), seq: 2 });
+    preparedRecords.splice(1, 0, {
+      kind: 'operation.prepared', allocation, input: 'fact readback', operationCounter: 1, cycleCounter: 1,
+    });
+    preparedRecords.splice(3, 0, { kind: 'operation.event', operationId, event: {
+      eventId: 'event-tool-call', seq: 1, occurredAt: '2026-10-06T08:00:00.000Z', taskId,
+      operationId: operationId.value, executionEpoch: 1, kind: 'provider.tool', state: 'tool',
+      summary: 'file.search called', evidenceRefs: [], callId: 'call-fact-readback',
+      toolId: 'file.search', requestId: 'request-fact-readback', arguments: { query: 'reader contract' },
+    } });
+    preparedRecords.push({ kind: 'operation.event', operationId, event: {
+      ...event(undefined), eventId: 'event-tool-failure', seq: 3,
+      callId: 'call-failed', status: 'failed', summary: 'file.search failed',
+      outputRef: undefined, outputDigest: undefined,
+    } });
+    const scoped = buildReadbackServiceWithJournal(legacyRoot,
+      new PreparedReplayJournal(preparedRecords, join(legacyRoot, 'prepared-reader.jsonl')), async () => {
+        legacyReads += 1;
+        return report;
+      });
+    const scope = { projectKey: 'project-ui-test', mode: 'fake' as const, roleId: 'execution', configuredAgentId: 'reader-agent' };
+    assert.deepEqual(await scoped.toolOutput(taskId, operationId, 1, 2, scope), report);
+    for (const selection of [{ ...scope, roleId: 'review' }, { ...scope, configuredAgentId: 'another-agent' }]) {
+      await assert.rejects(() => scoped.toolOutput(taskId, operationId, 1, 2, selection), (error: unknown) =>
+        error instanceof UiRuntimeApiError && error.code === 'tool-output.scope-mismatch');
+    }
+    assert.equal(legacyReads, 2);
+    const session = await scoped.productSessionRead({ projectKey: scope.projectKey, mode: scope.mode, taskId: taskId.value }, scope);
+    assert.equal(session.toolEvents?.length, 3);
+    assert.deepEqual(session.toolEvents?.[0]?.arguments, { query: 'reader contract' });
+    assert.equal(session.toolEvents?.[1]?.status, 'succeeded');
+    assert.equal(session.toolEvents?.[2]?.status, 'failed');
+    await assert.rejects(() => scoped.toolOutput(taskId, operationId, 1, 3, scope),
+      (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'tool-output.not-available');
+    assert.equal(session.toolEvents?.[0]?.operationId, operationId.value);
+    assert.equal(session.toolEvents?.[0]?.execution?.configuredAgentId, 'reader-agent');
+    assert.deepEqual(session.messages.find(message => message.toolEvent)?.toolEvent, session.toolEvents?.[0]);
+    const otherRole = await scoped.productSessionRead({ projectKey: scope.projectKey, mode: scope.mode, taskId: taskId.value }, { roleId: 'review' });
+    assert.deepEqual(otherRole.toolEvents, []);
+    assert.equal(otherRole.messages.some(message => message.toolEvent !== undefined), false);
+    await assert.rejects(() => scoped.productSessionRead({ projectKey: 'another-project', mode: 'fake', taskId: taskId.value }),
+      (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'product-read.scope-not-bound');
+    const accessControl = await AccessControlService.open({ credentialPath: join(legacyRoot, 'reader-auth.json'), create: true });
+    const server = await startUiRuntimeServer({ service: scoped, accessControl,
+      productRoot: legacyRoot, uiRoot: join(process.cwd(), 'packages/ui/static'), port: 0 });
+    try {
+      const outputPath = `/api/tasks/${taskId.value}/operations/${operationId.value}/executions/1/events/2/tool-output`;
+      const query = new URLSearchParams(scope).toString();
+      const response = await fetch(`${server.url}${outputPath}?${query}`);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), report);
+      const sessionResponse = await fetch(`${server.url}/api/product/session?${query}&taskId=${taskId.value}`);
+      assert.equal(sessionResponse.status, 200);
+      const body = await sessionResponse.json() as { toolEvents: unknown[] };
+      assert.deepEqual(body.toolEvents, session.toolEvents);
+      for (const [suffix, status] of [
+        ['?projectKey=another-project&mode=fake', 404],
+        ['?projectKey=project-ui-test', 400],
+        ['?projectKey=project-ui-test&mode=rcc', 404],
+        ['?projectKey=project-ui-test&mode=fake&roleId=review', 404],
+        ['?projectKey=project-ui-test&mode=fake&configuredAgentId=other', 404],
+        ['?projectKey=project-ui-test&mode=fake&mode=rcc', 400],
+        ['?outputRef=asset://another-task', 400],
+        ['?token=another-task', 400],
+      ] as const) {
+        const rejected = await fetch(`${server.url}${outputPath}${suffix}`);
+        assert.equal(rejected.status, status, suffix);
+      }
+      const wrongTask = await fetch(`${server.url}${outputPath.replace(taskId.value, 'other-task')}?${query}`);
+      assert.ok(wrongTask.status !== 200);
+      const wrongEpoch = await fetch(`${server.url}${outputPath.replace('/executions/1/', '/executions/2/')}?${query}`);
+      assert.equal(wrongEpoch.status, 404);
+      const legacy = await fetch(`${server.url}${outputPath}`);
+      assert.equal(legacy.status, 200);
+      assert.deepEqual(await legacy.json(), report);
+    } finally {
+      await server.close();
+    }
+    await assert.rejects(() => fetch(server.url));
   } finally {
     await rm(legacyRoot, { recursive: true, force: true });
   }

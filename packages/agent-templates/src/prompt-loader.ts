@@ -28,12 +28,18 @@ async function resolveExisting(path: string, label: string): Promise<string> {
 
 export function createFilePromptSource(rootDir: string): AgentPromptSource {
   return {
-    async read(ref: string): Promise<string> {
+    async read(ref: string, options?: { readonly within?: string }): Promise<string> {
       const root = await resolveExisting(rootDir, 'prompt template root');
       const candidate = resolve(root, ref);
       assertInsideRoot(root, candidate);
+      const within = options?.within === undefined ? undefined : resolve(root, options.within);
+      if (within !== undefined) assertInsideRoot(within, candidate);
       const file = await resolveExisting(candidate, `prompt segment ${ref}`);
       assertInsideRoot(root, file);
+      if (within !== undefined) {
+        const resolvedWithin = await resolveExisting(within, 'Skill directory');
+        assertInsideRoot(resolvedWithin, file);
+      }
       try {
         return await readFile(file, 'utf8');
       } catch (error) {

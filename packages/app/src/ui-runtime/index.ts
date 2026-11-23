@@ -33,6 +33,7 @@ import {
   OpenAIChatProviderCodec,
   ProviderAdapter,
   ResponsesProviderCodec,
+  createRccModelCatalog,
   V3ProviderHttpTransport,
   filesystemProviderEvidenceSink,
 } from '../../../adapters/provider/src/index.js';
@@ -67,6 +68,7 @@ import type {
   PreparedExecutionStopPreparationLease,
 } from './prepared-execution-stop.js';
 import { createPreparedOperationBoundary } from '../prepared-operation-boundary.js';
+import { createJournalCallUsageReader } from './call-usage-journal-read.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
@@ -131,6 +133,8 @@ export interface UiRuntimeLaunchOptions {
   readonly providerSource?: ProviderTransportSource;
   readonly checkpointRoot: string;
   readonly interactionRoot?: string;
+  /** Collector-owned committed usage facts for authorized product reads. */
+  readonly callUsage?: UiRuntimeServiceOptions['callUsage'];
   readonly evidenceRoot: string;
   readonly uiRoot: string;
   readonly providerState?: string;
@@ -192,7 +196,7 @@ export interface UiRuntimeLaunchOptions {
    * physical journal, so a fault can be observed at the real adapter boundary.
    */
   readonly taskIdentity?: TaskIdentityConsumer;
-  readonly agentRoster?: readonly { readonly agentId: string; readonly roleId: AgentRole }[];
+  readonly agentRoster?: readonly Pick<import('../../../config/src/index.js').AgentConfig, 'agentId' | 'roleId' | 'managementRole'>[];
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: Omit<NonNullable<UiRuntimeServiceOptions['runtimeComposition']>, 'prepareAgentProvider'> & {
     readonly prepareAgentProvider?: <TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef>(selection: {
@@ -305,6 +309,13 @@ const NATIVE_PROVIDER_TOOLS = [
   RESPONSES_WEB_SEARCH_TOOL,
 ] as const;
 
+function nativeProviderToolsFor(webSearchProviderConfig: WebSearchBackendConfig | undefined):
+  readonly typeof NATIVE_PROVIDER_TOOLS[number][] {
+  return webSearchProviderConfig === undefined
+    ? NATIVE_PROVIDER_TOOLS.filter((tool) => tool.toolId !== RESPONSES_WEB_SEARCH_TOOL.toolId)
+    : NATIVE_PROVIDER_TOOLS;
+}
+
 export function buildRccExecutionPort(config: RccModeConfig, evidenceRoot: string): ExecutionRuntimePort {
   const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot));
   const transport = new V3ProviderHttpTransport({ binding: config.binding, baseUrl: config.baseUrl, evidence });
@@ -313,7 +324,9 @@ export function buildRccExecutionPort(config: RccModeConfig, evidenceRoot: strin
     : config.binding.protocol === 'openai'
       ? new OpenAIChatProviderCodec()
       : new ResponsesProviderCodec();
-  return new ProviderAdapter({ binding: config.binding, routeRef: config.routeRef, codec, transport, evidence });
+  return new ProviderAdapter({ binding: config.binding, routeRef: config.routeRef, codec, transport, evidence,
+    modelCapacitySource: createRccModelCatalog({ baseUrl: config.baseUrl }),
+  });
 }
 
 export function buildFakeExecutionPort(binding: ProviderBinding, stepDelayMs?: number): ExecutionRuntimePort {
@@ -444,6 +457,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     const rawEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(options.evidenceRoot));
     const helperJournal = new JsonlInteractionHelperJournal(taskControlJournal);
     return createProviderExplicitBrainInterpreter({
+      ...(options.agentRoster === undefined ? {} : { agentRoster: options.agentRoster }),
       ...(options.executionBudget === undefined ? {} : { executionBudget: options.executionBudget }),
       lease: resolveLease,
       binding: options.binding, templateRoot, organId: options.organId,
@@ -536,7 +550,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         workspaceRoot: options.workspaceRoot,
         projectKey: options.projectKey,
         artifactRoot: join(options.evidenceRoot, 'provider-tools'),
-        tools: NATIVE_PROVIDER_TOOLS,
+        tools: nativeProviderToolsFor(options.webSearchProviderConfig),
         ...(options.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: options.webSearchProviderConfig }),
       };
   const fakeAdmission = options.mode === 'fake'
@@ -692,7 +706,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.providerRetryConfig === undefined ? {} : { providerRetryConfig: options.providerRetryConfig }),
     ...(options.executionBudget === undefined ? {} : { executionBudget: options.executionBudget }),
     ...(providerToolExecutor === undefined ? {} : {
-      providerTools: [...NATIVE_PROVIDER_TOOLS],
+      providerTools: [...nativeProviderToolsFor(options.webSearchProviderConfig)],
       providerToolExecutor: providerToolExecutor.executor,
       toolOutputStore: providerToolExecutor.toolOutputs,
       providerToolRoundLimit: PROVIDER_TOOL_ROUND_LIMIT,
@@ -707,7 +721,14 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         turn: { ...input, organId: options.organId, interactionScopeId },
       }),
     },
+    callUsage: createJournalCallUsageReader({
+      organId: options.organId,
+      interactionScopeId,
+      controlJournal: taskControlJournal,
+      parentJournal,
+    }),
     interactionParentJournal: parentJournal,
+    ...(options.callUsage === undefined ? {} : { callUsage: options.callUsage }),
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
     ...(options.runtimePaths === undefined ? {} : { runtimePaths: options.runtimePaths }),

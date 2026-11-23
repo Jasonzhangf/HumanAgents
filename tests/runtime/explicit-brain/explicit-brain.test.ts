@@ -600,11 +600,22 @@ test('tool admission requires one-to-one registry, capability, permission, epoch
 });
 
 test('framework executor dispatches operational tools to their scoped owner', async () => {
-  const executor = new ExplicitBrainDecisionExecutor<unknown>({
+  let calls = 0;
+  const traces = new DecisionTraceStore();
+  const makeExecutor = (runtimeBinding: ExplicitBrainRuntimeBinding) => new ExplicitBrainDecisionExecutor<unknown>({
     registry: createExplicitBrainToolRegistry(capabilityDigest),
-    binding: binding(),
-    traces: new DecisionTraceStore(),
-    operationalPorts,
+    binding: runtimeBinding,
+    traces,
+    operationalPorts: {
+      ...operationalPorts,
+      workspace: {
+        ...operationalPorts.workspace,
+        async list(input) {
+          calls++;
+          return operationalPorts.workspace.list(input);
+        },
+      },
+    },
     handler: {
       async execute() {
         throw new Error('operational tools must not fall through to the generic handler');
@@ -622,16 +633,25 @@ test('framework executor dispatches operational tools to their scoped owner', as
     currentPermissionRevision: 'permission-r1',
     argumentsDigest: digestArguments,
   });
-  const [result] = await executor.execute({
+  const decision = {
     decisionId: 'decision-operational-dispatch',
     interactionId: 'interaction-a',
-    kind: 'intent',
-    selectedAction: 'answer',
+    kind: 'intent' as const,
+    selectedAction: 'answer' as const,
     summary: 'inspect a workspace through the scoped owner',
     evidenceRefs: [],
     toolIntents: [intent('workspace.list', { scopeRef: 'scope:workspace-a' })],
-  });
+  };
+  const [result] = await makeExecutor(binding()).execute(decision);
   assert.deepEqual(result?.result, { entries: [] });
+  assert.equal(calls, 1);
+  const readDenied = binding({ agentInstanceId: 'agent-without-workspace-access', permissions: [] });
+  await assert.rejects(
+    () => makeExecutor(readDenied).execute({ ...decision, decisionId: 'decision-read-denied' }),
+    (error: unknown) => error instanceof ExplicitBrainDecisionError && error.admission === 'permission-denied',
+  );
+  assert.equal(calls, 1);
+  assert.equal(traces.query({ interactionRef: decision.interactionId, admission: 'permission-denied' }).length, 1);
 });
 
 test('framework executor records accepted and denied tool decisions without trusting the model to record', async () => {

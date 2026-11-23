@@ -25,6 +25,7 @@ import {
   type TaskId,
 } from '../../contracts/src/index.js';
 import type { AgentConfig, LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
+import { managementRoleForAgent } from '../../agent-templates/src/index.js';
 import { closeAgentProvider, composeAgentDriver, ensureDshSettings, prepareAgentProvider, resolveDshHome, type AgentProviderComposition, type ComposedAgentDriver } from './agent-driver-composition.js';
 import { openAgentExecution, type AgentExecutionSession, type AgentExecutionReceipt } from './agent-execution.js';
 import { createJsonlAttentionPort } from './attention-journal.js';
@@ -140,7 +141,12 @@ function assemblePrompt(input: OpenAgentOperationInput, agent: AgentConfig): { p
       OWNER,
     );
   }
-  const systemPrompt = loaded.segments.map((segment) => segment.content).join('\n\n');
+  const managementRole = managementRoleForAgent(agent);
+  const systemPrompt = loaded.segments
+    .filter((segment) => segment.ref !== 'common/management-ceo.md' || managementRole === 'ceo')
+    .filter((segment) => segment.ref !== 'common/management-project-lead.md' || managementRole === 'project-lead')
+    .map((segment) => segment.content)
+    .join('\n\n');
   return {
     prompt: `${systemPrompt}\n\n# Task input\n\n${input.prompt}`,
     promptRef: `humanagent://template/${agent.roleId}/${agent.templateRef}`,

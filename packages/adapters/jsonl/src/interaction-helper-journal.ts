@@ -19,6 +19,8 @@ import {
 } from '../../../contracts/src/interaction-helper.js';
 import type { OrganId, ScopeRef } from '../../../contracts/src/index.js';
 import type {
+  ExplicitTurnCheckpointIndexJournalPort,
+  ExplicitTurnCheckpointIndexRef,
   InteractionHelperTurnReadbackEntry,
   InteractionHelperTurnReadPort,
   InteractionSemanticCheckpointCommit,
@@ -47,6 +49,7 @@ export type {
 const HANDOFF_RECORD_TYPE = 'interaction-helper.handoff.v1';
 const CALL_CHECKPOINT_RECORD_TYPE = 'interaction-helper.call-checkpoint.v1';
 const SEMANTIC_CHECKPOINT_RECORD_TYPE = 'interaction-helper.semantic-checkpoint.v1';
+const CHECKPOINT_INDEX_RECORD_TYPE = 'interaction.semantic-checkpoint-index.v1';
 
 type DurableHandoffFact =
   | InteractionHelperDispatchAcceptedFact
@@ -566,7 +569,8 @@ function committedCallCheckpoint(record: JournalRecord): InteractionHelperCallCh
  * Typed append/exact-read codec over the existing authoritative Organ Journal.
  * The injected Journal remains the only store and transaction owner.
  */
-export class JsonlInteractionHelperJournal implements InteractionHelperTurnReadPort {
+export class JsonlInteractionHelperJournal
+  implements InteractionHelperTurnReadPort, ExplicitTurnCheckpointIndexJournalPort {
   constructor(private readonly journal: JsonlOrganJournal) {}
 
   async appendDispatchAccepted(
@@ -835,4 +839,55 @@ export class JsonlInteractionHelperJournal implements InteractionHelperTurnReadP
         && entry.checkpoint.interactionScopeId === scope.interactionScopeId)
       .sort((left, right) => left.commit.journalSeq - right.commit.journalSeq);
   }
+
+  async appendCheckpointIndex(ref: ExplicitTurnCheckpointIndexRef): Promise<JournalCommitRef> {
+    validateCheckpointIndexRef(ref);
+    const record = await this.journal.append({
+      commitId: checkpointIndexCommitId(ref),
+      kind: 'event',
+      scope: organScope(ref.organId),
+      payload: { kind: CHECKPOINT_INDEX_RECORD_TYPE, ref },
+    });
+    return commitRef(record);
+  }
+
+  async readScopeCheckpointIndexes(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly ExplicitTurnCheckpointIndexRef[]> {
+    if (scope.organId === null || typeof scope.organId !== 'object'
+      || scope.organId.scope !== 'organ' || !scope.organId.value.trim()) {
+      throw new JournalIntegrityError('semantic checkpoint index scope requires a valid organ id');
+    }
+    if (typeof scope.interactionScopeId !== 'string' || scope.interactionScopeId.trim() === '') {
+      throw new JournalIntegrityError('semantic checkpoint index scope requires an interactionScopeId');
+    }
+    const indexes: ExplicitTurnCheckpointIndexRef[] = [];
+    for (const record of await this.journal.replay()) {
+      const payload = record.payload;
+      if (payload?.kind !== CHECKPOINT_INDEX_RECORD_TYPE) continue;
+      const ref = payload.ref as ExplicitTurnCheckpointIndexRef;
+      validateCheckpointIndexRef(ref);
+      assertOrganOnlyRecord(record, ref.organId);
+      if (sameOrganId(ref.organId, scope.organId) && ref.interactionScopeId === scope.interactionScopeId) indexes.push(ref);
+    }
+    return indexes;
+  }
+}
+
+function validateCheckpointIndexRef(ref: ExplicitTurnCheckpointIndexRef): void {
+  if (!ref || ref.kind !== 'group' || ref.organId?.scope !== 'organ' || !ref.organId?.value?.trim()
+    || !ref.id?.trim() || !ref.label?.trim() || !Array.isArray(ref.children) || ref.children.length < 2
+    || ref.children.some(child => typeof child !== 'string' || !child.trim())
+    || new Set(ref.children).size !== ref.children.length || typeof ref.root !== 'boolean'
+    || (ref.directoryRoots !== undefined && (!ref.root || !Array.isArray(ref.directoryRoots)
+      || !ref.directoryRoots.includes(ref.id) || ref.directoryRoots.some(id => typeof id !== 'string' || !id)
+      || new Set(ref.directoryRoots).size !== ref.directoryRoots.length))
+    || (ref.revision !== undefined && (!Number.isSafeInteger(ref.revision) || ref.revision < 1))) {
+    throw new JournalIntegrityError('semantic checkpoint index record is invalid');
+  }
+}
+
+function checkpointIndexCommitId(ref: ExplicitTurnCheckpointIndexRef): string {
+  return `interaction:checkpoint-index:${createHash('sha256').update(canonicalJsonStringify(ref)).digest('hex')}`;
 }

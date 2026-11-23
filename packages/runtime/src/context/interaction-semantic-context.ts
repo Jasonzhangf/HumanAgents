@@ -16,7 +16,7 @@ import {
   type InteractionSemanticCheckpoint,
   type InteractionTurnIdentity,
 } from '../../../contracts/src/interaction-helper.js';
-import type { InteractionParentOpenedTurnScopeReadPort } from '../explicit-brain/interaction-parent-turn-raw.js';
+import type { InteractionParentOpenedTurnScopeReadPort, InteractionParentTurnRawJournalPort } from '../explicit-brain/interaction-parent-turn-raw.js';
 import type { InteractionSemanticCheckpointJournalPort } from '../explicit-brain/interaction-turn-session.js';
 
 /**
@@ -327,7 +327,7 @@ export async function prepareScopeSemanticHistory(input: {
   readonly parentJournal: Pick<
     InteractionParentOpenedTurnScopeReadPort,
     'readScopeOpenedTurns' | 'readScopeAbandonedTurns' | 'readScopeParseFailures' | 'readScopeExecutionFailures'
-  >;
+  > & Partial<Pick<InteractionParentTurnRawJournalPort, 'readTurnSnapshot'>>;
   readonly checkpointJournal: Pick<
     InteractionSemanticCheckpointJournalPort,
     'readScopeSemanticCheckpoints'
@@ -370,6 +370,15 @@ export async function prepareScopeSemanticHistory(input: {
       // A turn whose epoch failed before any terminal output is equally closed:
       // its partial reasoning is not a claim about the answer.
       if (failedEpochs.has(interactionTurnKey(opened.fact.turn))) continue;
+      if (opened.fact.endProtocol === 'explicit-end-v1' && input.parentJournal.readTurnSnapshot !== undefined) {
+        const snapshot = await input.parentJournal.readTurnSnapshot(opened.fact.turn);
+        const latest = snapshot.endControls?.at(-1)?.fact;
+        // Only a physically closed partial is history-free. It keeps its own
+        // recovery responsibility and never becomes successful semantic history.
+        if (latest?.kind === 'submission' && latest.result.kind === 'partial'
+          && snapshot.resourceClose?.fact.execution.executionEpoch === latest.attempt.execution.executionEpoch
+          && snapshot.providerSettlements.some(entry => entry.fact.settlement.executionEpoch === latest.attempt.execution.executionEpoch)) continue;
+      }
       throw new ContractError(
         `unclosed interaction parent turn ${opened.fact.turn.turnId} requires recovery or semantic closure before opening ${input.activeTurn.turnId}`,
       );

@@ -11,6 +11,7 @@ import {
   type AgentOutput,
   type BusinessPayload,
   type EvidenceRef,
+  type ExplicitTurnEndAcceptedResult,
   type InteractionHelperAssignment,
   type InteractionHelperAssignmentFields,
   type InteractionHelperIdentity,
@@ -37,7 +38,8 @@ import {
   type TasklessHelperExecutionResult,
   type TasklessInteractionHelperAcceptance,
 } from './taskless-helper-executor.js';
-import type { InteractionParentFinalTurnOutput } from './interaction-parent-turn-raw.js';
+import type { InteractionParentFinalTurnOutput, InteractionParentTurnRawJournalPort } from './interaction-parent-turn-raw.js';
+import { assertExplicitEndCheckpointBoundary } from './explicit-turn-end.js';
 
 /**
  * Runtime-owned per-turn helper session.
@@ -95,6 +97,26 @@ export interface InteractionSemanticCheckpointJournalPort {
     readonly organId: OrganId;
     readonly interactionScopeId: string;
   }): Promise<readonly InteractionSemanticCheckpointCommit[]>;
+}
+
+export interface ExplicitTurnCheckpointIndexRef {
+  readonly organId: OrganId;
+  readonly interactionScopeId: string;
+  readonly id: string;
+  readonly kind: 'group';
+  readonly label: string;
+  readonly children: readonly string[];
+  readonly root: boolean;
+  readonly directoryRoots?: readonly string[];
+  readonly revision?: number;
+}
+
+export interface ExplicitTurnCheckpointIndexJournalPort {
+  appendCheckpointIndex(ref: ExplicitTurnCheckpointIndexRef): Promise<JournalCommitRef>;
+  readScopeCheckpointIndexes(scope: {
+    readonly organId: OrganId;
+    readonly interactionScopeId: string;
+  }): Promise<readonly ExplicitTurnCheckpointIndexRef[]>;
 }
 
 export interface InteractionHelperTurnReadbackEntry {
@@ -219,6 +241,7 @@ export type ExplicitTurnInterpretedOutcome =
     };
 
 export interface ExplicitTurnHelperSessionInput {
+  readonly endJournal?: InteractionParentTurnRawJournalPort;
   readonly identity: InteractionTurnIdentity;
   readonly latestTurn: InteractionLatestTurn;
   readonly journal: InteractionHelperJournalPort;
@@ -379,6 +402,7 @@ function sameSemanticContent(
 }
 
 export class ExplicitTurnHelperSession {
+  private readonly endJournal: InteractionParentTurnRawJournalPort | undefined;
   private readonly identity: InteractionTurnIdentity;
   private readonly journal: InteractionHelperJournalPort;
   private readonly clock: ExplicitTurnHelperClock;
@@ -391,6 +415,7 @@ export class ExplicitTurnHelperSession {
   private sequence = 0;
 
   constructor(input: ExplicitTurnHelperSessionInput) {
+    this.endJournal = input.endJournal;
     validateInteractionTurnIdentity(input.identity);
     validateInteractionLatestTurn(input.latestTurn);
     if (!sameTurnIdentity(input.identity, input.latestTurn)) {
@@ -574,6 +599,8 @@ export class ExplicitTurnHelperSession {
   async closeTurnSemanticCheckpoint(input: {
     readonly finalParentOutput: InteractionParentFinalTurnOutput;
     readonly outcome: ExplicitTurnInterpretedOutcome;
+    readonly acceptedEnd?: ExplicitTurnEndAcceptedResult;
+    readonly providerOwnership?: 'owned' | 'borrowed';
   }): Promise<InteractionSemanticCheckpointCommit> {
     const checkpointJournal = this.checkpointJournal;
     const rawContent = this.rawContent;
@@ -587,6 +614,12 @@ export class ExplicitTurnHelperSession {
       throw new ContractError('explicit turn semantic close final parent output does not match the session turn');
     }
 
+    const acceptedEnd = await assertExplicitEndCheckpointBoundary({
+      journal: this.endJournal, identity: this.identity, finalParentOutput: input.finalParentOutput,
+      acceptedEnd: input.acceptedEnd, outcome: input.outcome,
+      ...(input.providerOwnership === undefined ? {} : { providerOwnership: input.providerOwnership }),
+    });
+
     const content = await buildExplicitTurnSemanticContent({
       identity: this.identity,
       finalParentOutput: input.finalParentOutput,
@@ -597,6 +630,15 @@ export class ExplicitTurnHelperSession {
       dispatched: this.dispatched,
       turnHelperJournal: this.turnHelperJournal,
     });
+    if (acceptedEnd?.capsule !== undefined) {
+      const capsule = acceptedEnd.capsule;
+      // The complete validated capsule is one semantic claim; failed attempts
+      // never reach this boundary. Its detail refs remain references, not IO grants.
+      (content.claims as SemanticClaim[]).push({
+        fact: `explicit-end-capsule: ${canonicalJsonStringify(capsule)}`,
+        certainty: 'confirmed', sourceRefs: [acceptedEnd.acceptedEndCall!.callId],
+      });
+    }
 
     const existing = await checkpointJournal.readSemanticCheckpointExact(this.identity);
     if (existing !== null) {

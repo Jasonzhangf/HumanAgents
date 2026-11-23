@@ -19,6 +19,7 @@ import {
   type CheckpointControlGrant,
 } from './checkpoint-controls.js';
 import { validateJournalCommitRef } from './i2-history.js';
+import type { ToolExecutionFact } from './native-reasoning.js';
 import {
   validateSemanticEventRef,
   type PublicOutputPublication,
@@ -150,6 +151,38 @@ export interface ProductMessage {
   readonly occurredAtUnavailableReason?: string;
   readonly text: string;
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly toolEvent?: ProductTaskToolEvent;
+}
+
+/** Recorded tool facts. The execution binding is supplied by allocation truth. */
+export interface ProductTaskToolEvent {
+  readonly scope: Extract<ProductReadScope, { readonly kind: 'task' }>;
+  readonly eventId: string;
+  readonly operationId: string;
+  readonly executionEpoch: number;
+  readonly seq: number;
+  readonly kind: string;
+  readonly state: string;
+  readonly occurredAt: string;
+  readonly summary: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly callId?: string;
+  readonly toolId?: string;
+  readonly requestId?: string;
+  readonly parentRequestId?: string;
+  readonly turnId?: string;
+  readonly arguments?: unknown;
+  readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+  readonly error?: unknown;
+  readonly outputRef?: string;
+  readonly outputDigest?: string;
+  readonly executionFact?: ToolExecutionFact;
+  readonly execution?: {
+    readonly runtimeId: string;
+    readonly assignmentId: string;
+    readonly role?: string;
+    readonly configuredAgentId?: string;
+  };
 }
 
 export type ProductRelationKind =
@@ -498,7 +531,7 @@ export function validateProductMessage(message: ProductMessage): void {
   record(message, 'product message');
   onlyKeys(
     message,
-    ['ref', 'targetRef', 'actor', 'occurredAt', 'occurredAtUnavailableReason', 'text', 'evidenceRefs'],
+    ['ref', 'targetRef', 'actor', 'occurredAt', 'occurredAtUnavailableReason', 'text', 'evidenceRefs', 'toolEvent'],
     'product message',
   );
   validateSemanticEventRef(message.ref);

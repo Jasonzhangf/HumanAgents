@@ -580,6 +580,31 @@ test('Responses built-in tools execute write, edit, bash, todo, goal, and presen
       signal: new AbortController().signal,
     });
 
+    const marker = join(workspaceRoot, 'bash-argument-marker');
+    const invalidBashCalls: Array<{ callId: string; arguments: BusinessPayload }> = [
+      { callId: 'call-bash-missing-command', arguments: { description: 'missing command' } },
+      { callId: 'call-bash-invalid-timeout', arguments: { command: `touch ${marker}`, description: 'invalid timeout', timeoutMs: 0 } },
+      { callId: 'call-bash-invalid-workdir', arguments: { command: `touch ${marker}`, description: 'invalid workdir', workdir: 7 } },
+      { callId: 'call-bash-extra-argument', arguments: { command: `touch ${marker}`, description: 'extra argument', surprise: true } },
+    ];
+    for (const invalid of invalidBashCalls) {
+      const rejected = await run('bash', invalid.arguments, invalid.callId);
+      assert.equal(rejected.status, 'failed', invalid.callId);
+      assert.equal(rejected.error?.code, 'tool.argument.invalid', invalid.callId);
+      assert.equal(rejected.error?.nextAction.kind, 'continue', invalid.callId);
+      assert.equal(rejected.error?.errorId, `provider-tool-invalid-arguments-${invalid.callId}`, invalid.callId);
+    }
+    await assert.rejects(() => access(marker));
+
+    const correctedBash = await run('bash', {
+      command: `printf corrected >> ${marker}`,
+      description: 'record corrected bash call',
+      workdir: '.',
+      timeoutMs: 1000,
+    }, 'call-bash-corrected');
+    assert.equal(JSON.parse(correctedBash.output).exitCode, 0);
+    assert.equal(await import('node:fs/promises').then(({ readFile }) => readFile(marker, 'utf8')), 'corrected');
+
     const written = await run('file.write', {
       file_path: 'notes/hello.md',
       content: 'hello world\n',

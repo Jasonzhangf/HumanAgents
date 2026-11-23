@@ -1,12 +1,15 @@
 import {
   assertEvidenceRef,
+  assertProviderExecutionIdentity,
   assertSameScope,
   type ActiveTurnProviderExecutionIdentityRef,
   type EvidenceRef,
+  type InteractionParentProviderExecutionIdentityRef,
   type ScopeRef,
 } from './index.js';
 import { validateAdmittedTurnIdentity, type AdmittedTurnIdentity } from './native-reasoning.js';
 import { validateInspectionExecutionOutcome, type InspectionExecutionOutcome } from './i2-history.js';
+import { validateTaskFlowBinding, type TaskFlowBinding } from './task-flow.js';
 import { ContractError } from './errors.js';
 
 /**
@@ -121,6 +124,261 @@ export interface StandardTurnEndCommand extends StandardTurnEndPayload {
   readonly resolvedEvidenceRefs?: readonly EvidenceRef[];
 }
 
+/**
+ * The explicit Brain end protocol is intentionally separate from the Task
+ * standard-turn payload.  The explicit interpreter owns intake decisions;
+ * this shape only carries the already classified decision to its end owner.
+ */
+export type ExplicitTurnEndDecision =
+  | {
+      readonly kind: 'answer';
+      readonly normalizedInput: string;
+      readonly knownFacts: readonly string[];
+      readonly decisionRefs: readonly string[];
+      readonly answer: string;
+    }
+  | {
+      readonly kind: 'status-query';
+      readonly normalizedInput: string;
+      readonly knownFacts: readonly string[];
+      readonly decisionRefs: readonly string[];
+      readonly answer: string;
+      readonly matchedTaskId?: string;
+    }
+  | {
+      readonly kind: 'clarification';
+      readonly normalizedInput: string;
+      readonly knownFacts: readonly string[];
+      readonly decisionRefs: readonly string[];
+      readonly question: string;
+      readonly options?: readonly string[];
+    }
+  | {
+      readonly kind: 'requirement';
+      readonly normalizedInput: string;
+      readonly knownFacts: readonly string[];
+      readonly decisionRefs: readonly string[];
+      readonly proposal: ExplicitRequirementProposal;
+      readonly matchedTaskId?: string;
+      readonly taskFlow?: TaskFlowBinding;
+    };
+
+export interface ExplicitRequirementProposal {
+  readonly revision: number;
+  readonly intent: 'append' | 'change' | 'create';
+  readonly title: string;
+  readonly objective: string;
+  readonly deliverable: string;
+  readonly deliveryConditions: readonly string[];
+  readonly evidenceRefs: readonly string[];
+  readonly blockingGaps: readonly string[];
+}
+
+export interface ExplicitTurnEndCapsule {
+  readonly summary: string;
+  readonly goal: string;
+  readonly process: readonly string[];
+  readonly findings: readonly string[];
+  readonly nextStep: string;
+  readonly detailRefs?: readonly string[];
+}
+
+/** First-layer checkpoint index submitted with the end call. */
+export interface ExplicitTurnEndCheckpointIndex {
+  readonly action: string;
+  readonly result: string;
+}
+
+/** Input carried by the explicit Brain end tool. */
+export interface ExplicitTurnEndInput {
+  readonly kind: 'simple' | 'complex';
+  readonly decision: ExplicitTurnEndDecision;
+  readonly checkpointRecord: { readonly index: ExplicitTurnEndCheckpointIndex };
+  readonly capsule?: ExplicitTurnEndCapsule;
+}
+
+export interface ExplicitTurnEndAcceptedResult {
+  readonly kind: 'accepted';
+  readonly interactionId: string;
+  readonly inputRevision: number;
+  readonly turnId: string;
+  readonly decision: ExplicitTurnEndDecision;
+  /** Absent from receipts persisted before leaf indexing. New end calls require it. */
+  readonly checkpointRecord?: ExplicitTurnEndInput['checkpointRecord'];
+  readonly capsule?: ExplicitTurnEndCapsule;
+  readonly acceptedEndCall?: ExplicitTurnEndCallReference;
+}
+
+export interface ExplicitTurnEndCallReference {
+  readonly requestId: string;
+  readonly callId: string;
+  readonly execution: InteractionParentProviderExecutionIdentityRef;
+}
+
+export interface ExplicitTurnEndValidationIssue {
+  readonly path: string;
+  readonly message: string;
+}
+
+export interface ExplicitTurnPartialResult {
+  readonly kind: 'partial';
+  readonly partialRef: string;
+  readonly interactionId: string;
+  readonly inputRevision: number;
+  readonly turnId: string;
+  readonly failedAttempt: number;
+  readonly maxAttempts: number;
+  readonly errors: readonly ExplicitTurnEndValidationIssue[];
+  readonly userMessage: string;
+  readonly recoverable: true;
+  readonly resumePartialRef?: string;
+  readonly lastCheckpointRef?: string;
+}
+
+export type ExplicitTurnEndResult = ExplicitTurnEndAcceptedResult | ExplicitTurnPartialResult;
+
+function validateExplicitDecision(decision: unknown): asserts decision is ExplicitTurnEndDecision {
+  if (typeof decision !== 'object' || decision === null || Array.isArray(decision)) {
+    throw new ContractError('explicit-turn-end.decision');
+  }
+  const value = decision as Record<string, unknown>;
+  if (value.kind !== 'answer' && value.kind !== 'status-query'
+    && value.kind !== 'clarification' && value.kind !== 'requirement') {
+    throw new ContractError('explicit-turn-end.decision.kind');
+  }
+  requireNonEmptyString(value.normalizedInput, 'explicit-turn-end.decision.normalized-input');
+  requireStringArray(value.knownFacts, 'explicit-turn-end.decision.known-facts');
+  requireStringArray(value.decisionRefs, 'explicit-turn-end.decision.refs');
+  if (value.kind === 'answer' || value.kind === 'status-query') {
+    requireNonEmptyString(value.answer, 'explicit-turn-end.decision.answer');
+  } else if (value.kind === 'clarification') {
+    requireNonEmptyString(value.question, 'explicit-turn-end.decision.question');
+    if (value.options !== undefined) requireStringArray(value.options, 'explicit-turn-end.decision.options');
+  } else {
+    const proposalValue = value.proposal;
+    if (typeof proposalValue !== 'object' || proposalValue === null || Array.isArray(proposalValue)) {
+      throw new ContractError('explicit-turn-end.decision.proposal');
+    }
+    const proposal = proposalValue as Record<string, unknown>;
+    const revision = proposal.revision;
+    if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0) {
+      throw new ContractError('explicit-turn-end.decision.proposal.revision');
+    }
+    if (proposal.intent !== 'append' && proposal.intent !== 'change' && proposal.intent !== 'create') {
+      throw new ContractError('explicit-turn-end.decision.proposal.intent');
+    }
+    requireNonEmptyString(proposal.title, 'explicit-turn-end.decision.proposal.title');
+    requireNonEmptyString(proposal.objective, 'explicit-turn-end.decision.proposal.objective');
+    requireNonEmptyString(proposal.deliverable, 'explicit-turn-end.decision.proposal.deliverable');
+    requireStringArray(proposal.deliveryConditions, 'explicit-turn-end.decision.proposal.delivery-conditions');
+    requireStringArray(proposal.evidenceRefs, 'explicit-turn-end.decision.proposal.evidence-refs');
+    requireStringArray(proposal.blockingGaps, 'explicit-turn-end.decision.proposal.blocking-gaps');
+    if (value.taskFlow !== undefined) {
+      if (typeof value.taskFlow !== 'object' || value.taskFlow === null || Array.isArray(value.taskFlow)) {
+        throw new ContractError('explicit-turn-end.decision.task-flow');
+      }
+      validateTaskFlowBinding(value.taskFlow as TaskFlowBinding);
+    }
+  }
+}
+
+export function validateExplicitTurnEndInput(input: ExplicitTurnEndInput): void {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw new ContractError('explicit-turn-end.input');
+  }
+  if (input.kind !== 'simple' && input.kind !== 'complex') {
+    throw new ContractError('explicit-turn-end.input.kind');
+  }
+  validateExplicitDecision(input.decision);
+  if ((input.kind === 'complex') !== (input.decision.kind === 'requirement')) {
+    throw new ContractError('explicit-turn-end.input-kind-decision');
+  }
+  validateEndCheckpointIndex(input.checkpointRecord);
+  validateEndCapsule(input.kind, input.capsule);
+}
+
+function validateEndCheckpointIndex(checkpointRecord: ExplicitTurnEndInput['checkpointRecord']): void {
+  if (typeof checkpointRecord !== 'object' || checkpointRecord === null || Array.isArray(checkpointRecord)) {
+    throw new ContractError('explicit-turn-end.checkpoint-record');
+  }
+  const index = checkpointRecord.index;
+  if (typeof index !== 'object' || index === null || Array.isArray(index)) {
+    throw new ContractError('explicit-turn-end.checkpoint.index');
+  }
+  requireNonEmptyString(index.action, 'explicit-turn-end.checkpoint.index.action');
+  requireNonEmptyString(index.result, 'explicit-turn-end.checkpoint.index.result');
+}
+
+function validateEndCapsule(kind: ExplicitTurnEndInput['kind'], capsule: ExplicitTurnEndInput['capsule']): void {
+  if (kind === 'complex') {
+    if (typeof capsule !== 'object' || capsule === null || Array.isArray(capsule)) {
+      throw new ContractError('explicit-turn-end.capsule');
+    }
+    requireNonEmptyString(capsule.summary, 'explicit-turn-end.capsule.summary');
+    requireNonEmptyString(capsule.goal, 'explicit-turn-end.capsule.goal');
+    requireStringArray(capsule.process, 'explicit-turn-end.capsule.process');
+    requireStringArray(capsule.findings, 'explicit-turn-end.capsule.findings');
+    requireNonEmptyString(capsule.nextStep, 'explicit-turn-end.capsule.next-step');
+    if (capsule.detailRefs !== undefined) requireStringArray(capsule.detailRefs, 'explicit-turn-end.capsule.detail-refs');
+  } else if (capsule !== undefined) {
+    throw new ContractError('explicit-turn-end.simple-capsule');
+  }
+}
+
+export function validateExplicitTurnPartialResult(result: ExplicitTurnPartialResult): void {
+  if (typeof result !== 'object' || result === null || Array.isArray(result) || result.kind !== 'partial') {
+    throw new ContractError('explicit-turn-end.partial');
+  }
+  requireNonEmptyString(result.partialRef, 'explicit-turn-end.partial-ref');
+  requireNonEmptyString(result.interactionId, 'explicit-turn-end.interaction-id');
+  if (!Number.isInteger(result.inputRevision) || result.inputRevision < 0) {
+    throw new ContractError('explicit-turn-end.input-revision');
+  }
+  requireNonEmptyString(result.turnId, 'explicit-turn-end.turn-id');
+  if (!Number.isInteger(result.failedAttempt) || result.failedAttempt < 1) {
+    throw new ContractError('explicit-turn-end.failed-attempt');
+  }
+  if (!Number.isInteger(result.maxAttempts) || result.maxAttempts < result.failedAttempt) {
+    throw new ContractError('explicit-turn-end.max-attempts');
+  }
+  if (result.recoverable !== true) throw new ContractError('explicit-turn-end.recoverable');
+  if (!Array.isArray(result.errors)) throw new ContractError('explicit-turn-end.errors');
+  for (const issue of result.errors) {
+    if (typeof issue !== 'object' || issue === null || Array.isArray(issue)) {
+      throw new ContractError('explicit-turn-end.error');
+    }
+    requireNonEmptyString(issue.path, 'explicit-turn-end.error.path');
+    requireNonEmptyString(issue.message, 'explicit-turn-end.error.message');
+  }
+  requireNonEmptyString(result.userMessage, 'explicit-turn-end.user-message');
+  if (result.resumePartialRef !== undefined) requireNonEmptyString(result.resumePartialRef, 'explicit-turn-end.resume-partial-ref');
+  if (result.lastCheckpointRef !== undefined) requireNonEmptyString(result.lastCheckpointRef, 'explicit-turn-end.last-checkpoint-ref');
+}
+
+export function validateExplicitTurnEndAcceptedResult(result: ExplicitTurnEndAcceptedResult): void {
+  if (typeof result !== 'object' || result === null || Array.isArray(result) || result.kind !== 'accepted') {
+    throw new ContractError('explicit-turn-end.accepted');
+  }
+  requireNonEmptyString(result.interactionId, 'explicit-turn-end.interaction-id');
+  if (!Number.isInteger(result.inputRevision) || result.inputRevision < 0) {
+    throw new ContractError('explicit-turn-end.input-revision');
+  }
+  requireNonEmptyString(result.turnId, 'explicit-turn-end.turn-id');
+  validateExplicitDecision(result.decision);
+  if (result.checkpointRecord !== undefined) validateEndCheckpointIndex(result.checkpointRecord);
+  validateEndCapsule(result.decision.kind === 'requirement' ? 'complex' : 'simple', result.capsule);
+  if (result.acceptedEndCall !== undefined) {
+    requireNonEmptyString(result.acceptedEndCall.requestId, 'explicit-turn-end.call.request-id');
+    requireNonEmptyString(result.acceptedEndCall.callId, 'explicit-turn-end.call.call-id');
+    assertProviderExecutionIdentity(result.acceptedEndCall.execution);
+    if (result.acceptedEndCall.execution.interactionTurn.turnId !== result.turnId
+      || result.acceptedEndCall.execution.interactionTurn.interactionId !== result.interactionId
+      || result.acceptedEndCall.execution.interactionTurn.inputRevision !== result.inputRevision) {
+      throw new ContractError('explicit-turn-end.call.turn-mismatch');
+    }
+  }
+}
+
 function requireNonEmptyString(value: unknown, label: string): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new ContractError(`${label} must be a non-empty string`);
@@ -186,6 +444,12 @@ export function validateStandardTurnEndPayload(input: StandardTurnEndPayload): v
     requireNonEmptyString(inputRequest.schemaRef, 'standard-turn-end.input-request.schema-ref');
     requireNonEmptyString(inputRequest.reason, 'standard-turn-end.input-request.reason');
     requireNonEmptyString(inputRequest.impact, 'standard-turn-end.input-request.impact');
+    if (inputRequest.options !== undefined) {
+      requireStringArray(inputRequest.options, 'standard-turn-end.input-request.options');
+      if (inputRequest.options.length < 1) {
+        throw new ContractError('standard-turn-end.input-request-options-empty');
+      }
+    }
     if (inputRequest.expiresAt !== undefined) {
       requireNonEmptyString(inputRequest.expiresAt, 'standard-turn-end.input-request.expires-at');
     }

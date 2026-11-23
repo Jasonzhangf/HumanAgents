@@ -9,6 +9,7 @@ import {
   OpenAIChatProviderCodec,
   ProviderAdapter,
   ResponsesProviderCodec,
+  createRccModelCatalog,
   V3ProviderHttpTransport,
   filesystemProviderEvidenceSink,
   type ProviderTransportSource,
@@ -56,5 +57,7 @@ export function assembleProviderExecutionPort<
     : input.binding.protocol === 'openai'
       ? new OpenAIChatProviderCodec()
       : new ResponsesProviderCodec();
-  return new ProviderAdapter<TIdentity>({ binding: input.binding, routeRef: input.routeRef, codec, transport, evidence });
+  return new ProviderAdapter<TIdentity>({ binding: input.binding, routeRef: input.routeRef, codec, transport, evidence,
+    ...(input.source === 'rcc' ? { modelCapacitySource: createRccModelCatalog({ baseUrl: input.baseUrl }) } : {}),
+  });
 }

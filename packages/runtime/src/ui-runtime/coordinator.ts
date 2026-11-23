@@ -236,6 +236,8 @@ export interface RuntimeTaskSnapshot {
   readonly title: string;
   readonly directive: string;
   readonly directiveRevision: number;
+  readonly boardOwner?: RuntimeTaskBoardOwner;
+  readonly taskKind: 'work' | 'inspection';
   readonly state: LifecycleState;
   readonly currentState: string;
   readonly nextStep: string;
@@ -283,6 +285,26 @@ export interface RuntimeTaskSnapshot {
    */
   readonly requestIdentity?: RuntimeTaskRequestIdentity;
   readonly error?: RuntimeTaskError;
+}
+
+export type RuntimeTaskBoardOwner =
+  | { readonly scope: 'ceo'; readonly actorId: 'Alex' }
+  | { readonly scope: 'project'; readonly projectId: string; readonly actorId: string };
+
+export interface RuntimeTaskBoardEntry {
+  readonly task: RuntimeTaskSnapshot;
+  readonly owner: RuntimeTaskBoardOwner;
+}
+
+export interface RuntimeTaskBoardHistoryEntry extends RuntimeTaskBoardEntry {
+  readonly previousOwner?: RuntimeTaskBoardOwner;
+  readonly deletedAt?: string;
+}
+
+export interface RuntimeTaskBoard {
+  readonly owner: RuntimeTaskBoardOwner;
+  readonly current: readonly RuntimeTaskBoardEntry[];
+  readonly history: readonly RuntimeTaskBoardHistoryEntry[];
 }
 
 /**
@@ -510,6 +532,8 @@ export type RuntimeTaskJournalRecord =
       readonly directiveRevision: number;
       readonly createdAt: string;
       readonly taskCounter: number;
+      readonly boardOwner?: RuntimeTaskBoardOwner;
+      readonly taskKind?: 'work' | 'inspection';
     }
   | {
       readonly kind: 'task.updated';
@@ -531,6 +555,13 @@ export type RuntimeTaskJournalRecord =
       readonly request: TaskInputRequest;
       readonly answer: string;
       readonly answeredAt: string;
+    }
+  | {
+      readonly kind: 'task.reassigned';
+      readonly taskId: TaskId;
+      readonly from?: RuntimeTaskBoardOwner;
+      readonly to: RuntimeTaskBoardOwner;
+      readonly occurredAt: string;
     }
   | {
       readonly kind: 'operation.started';
@@ -673,6 +704,7 @@ export interface RuntimeTaskHydrateReadSource {
 
 export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
+  readonly defaultBoardOwner?: RuntimeTaskBoardOwner;
   readonly createDriver: RuntimeExecutionDriverFactory;
   /**
    * Same App composition's mandatory cold owners (source, grant, incarnation
@@ -941,6 +973,9 @@ export interface TaskRecord {
   title: string;
   directive: string;
   directiveRevision: number;
+  boardOwner?: RuntimeTaskBoardOwner;
+  taskKind: 'work' | 'inspection';
+  deletedAt?: string;
   state: LifecycleState;
   currentState: string;
   nextStep: string;
@@ -1238,6 +1273,8 @@ export interface TaskJournalReplayState {
   operations: Map<string, OperationRecord>;
   scopes: Map<string, ScopeRef>;
   deletedTaskIds: Set<string>;
+  deletedBoardHistory: Map<string, TaskRecord>;
+  boardHistory: RuntimeTaskBoardHistoryEntry[];
 }
 
 /**
@@ -1256,6 +1293,13 @@ function retireTaskOperationBindings(
     operations.delete(key);
     scopes.delete(key);
   }
+}
+
+function sameBoardOwner(left: RuntimeTaskBoardOwner | undefined, right: RuntimeTaskBoardOwner | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.scope === right.scope
+    && left.actorId === right.actorId
+    && (left.scope === 'ceo' || (right.scope === 'project' && left.projectId === right.projectId));
 }
 
 /**
@@ -1295,6 +1339,8 @@ export function replayTaskJournalRecords(
           title: record.title,
           directive: record.directive,
           directiveRevision: record.directiveRevision,
+          boardOwner: record.boardOwner,
+          taskKind: record.taskKind ?? 'work',
           state: 'created',
           currentState: '已创建',
           nextStep: '选择模式并发起执行',
@@ -1324,6 +1370,11 @@ export function replayTaskJournalRecords(
       }
       case 'task.deleted': {
         state.deletedTaskIds.add(record.taskId.value);
+        const task = state.tasks.get(record.taskId.value);
+        if (task) {
+          task.deletedAt = record.deletedAt;
+          state.deletedBoardHistory.set(record.taskId.value, task);
+        }
         state.tasks.delete(record.taskId.value);
         retireTaskOperationBindings(state.operations, state.scopes, record.taskId.value);
         break;
@@ -1332,6 +1383,17 @@ export function replayTaskJournalRecords(
         const task = state.tasks.get(record.taskId.value);
         if (task === undefined) break;
         task.consumedInputRequests = appendConsumedInputRequest(task.consumedInputRequests, record);
+        break;
+      }
+      case 'task.reassigned': {
+        const task = state.tasks.get(record.taskId.value);
+        const deleted = state.deletedBoardHistory.get(record.taskId.value);
+        const priorOwner = task?.boardOwner ?? deleted?.boardOwner;
+        if (!sameBoardOwner(priorOwner, record.from)) break;
+        if (sameBoardOwner(priorOwner, record.to)) break;
+        if (task && priorOwner) state.boardHistory.push({ task: taskSnapshotFromRecord(task, state.scopes), owner: priorOwner, previousOwner: priorOwner });
+        if (task) task.boardOwner = record.to;
+        if (deleted) deleted.boardOwner = record.to;
         break;
       }
       case 'operation.prepared': {
@@ -1480,6 +1542,8 @@ function taskSnapshotFromRecord(record: TaskRecord, scopes: ReadonlyMap<string, 
     title: record.title,
     directive: record.directive,
     directiveRevision: record.directiveRevision,
+    boardOwner: record.boardOwner,
+    taskKind: record.taskKind,
     state: record.state,
     currentState: record.currentState,
     nextStep: record.nextStep,
@@ -1623,6 +1687,8 @@ export async function projectDurableTaskInventory(input: {
     operations: new Map(),
     scopes: new Map(),
     deletedTaskIds: new Set(),
+    deletedBoardHistory: new Map(),
+    boardHistory: [],
   };
   try {
     replayTaskJournalRecords(state, input.records);
@@ -2304,6 +2370,8 @@ export class RuntimeTaskCoordinator {
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly operations = new Map<string, OperationRecord>();
   private readonly deletedTaskIds = new Set<string>();
+  private readonly deletedBoardHistory = new Map<string, TaskRecord>();
+  private readonly boardHistory: RuntimeTaskBoardHistoryEntry[] = [];
   private readonly publishedAttentions: Attention[] = [];
   private readonly resolvedAttentions: Attention[] = [];
   private taskCounter = 0;
@@ -2323,7 +2391,8 @@ export class RuntimeTaskCoordinator {
     return EXECUTION_CAPABILITIES;
   }
 
-  createTask(input: { readonly title?: string; readonly directive?: string; readonly taskId?: TaskId }): RuntimeTaskSnapshot {
+  createTask(input: { readonly title?: string; readonly directive?: string; readonly taskId?: TaskId;
+    readonly boardOwner?: RuntimeTaskBoardOwner; readonly taskKind?: 'work' | 'inspection' }): RuntimeTaskSnapshot {
     const title = input.title?.trim() || `任务 ${this.taskCounter + 1}`;
     const directive = input.directive?.trim() || input.title?.trim() || `任务 ${this.taskCounter + 1}`;
     if (input.taskId) {
@@ -2348,6 +2417,8 @@ export class RuntimeTaskCoordinator {
       title,
       directive,
       directiveRevision: 1,
+      boardOwner: input.boardOwner ?? this.options.defaultBoardOwner,
+      taskKind: input.taskKind ?? 'work',
       state: 'created',
       currentState: '已创建',
       nextStep: '选择模式并发起执行',
@@ -2371,6 +2442,8 @@ export class RuntimeTaskCoordinator {
       directiveRevision: record.directiveRevision,
       createdAt: record.createdAt,
       taskCounter,
+      boardOwner: record.boardOwner,
+      taskKind: record.taskKind,
     });
     this.taskCounter = taskCounter;
     this.tasks.set(taskId.value, record);
@@ -2379,6 +2452,33 @@ export class RuntimeTaskCoordinator {
 
   taskSnapshots(): readonly RuntimeTaskSnapshot[] {
     return [...this.tasks.values()].map((record) => this.snapshot(record));
+  }
+
+  reassignTask(taskId: TaskId, owner: RuntimeTaskBoardOwner): RuntimeTaskSnapshot {
+    const record = this.requireTask(taskId);
+    if (record.release?.state === 'prepared' || record.stopping || record.state === 'running' || record.state === 'settling') {
+      throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'running tasks cannot be reassigned', 'stop the current execution first');
+    }
+    const from = record.boardOwner;
+    if (!sameBoardOwner(from, owner)) {
+      this.journal?.append({ kind: 'task.reassigned', taskId, from, to: owner, occurredAt: this.now().toISOString() });
+      if (from !== undefined) this.boardHistory.push({ task: this.snapshot(record), owner: from, previousOwner: from });
+      record.boardOwner = owner;
+      record.updatedAt = this.now().toISOString();
+    }
+    return this.snapshot(record);
+  }
+
+  taskBoard(owner: RuntimeTaskBoardOwner): RuntimeTaskBoard {
+    const matches = [...this.tasks.values(), ...this.deletedBoardHistory.values()].filter((task) => task.boardOwner !== undefined && sameBoardOwner(task.boardOwner, owner));
+    const current = matches.filter((task) => task.deletedAt === undefined && task.state !== 'succeeded'
+      && task.state !== 'failed' && task.state !== 'cancelled' && task.state !== 'stopped');
+    const history = matches.filter((task) => task.deletedAt !== undefined || task.state === 'succeeded'
+      || task.state === 'failed' || task.state === 'cancelled' || task.state === 'stopped');
+    return { owner, current: current.map((task) => ({ task: this.snapshot(task), owner: task.boardOwner! })),
+      history: [...history.map((task) => ({ task: this.snapshot(task), owner: task.boardOwner!,
+        ...(task.deletedAt === undefined ? {} : { deletedAt: task.deletedAt }) })),
+      ...this.boardHistory.filter((entry) => sameBoardOwner(entry.owner, owner))] };
   }
 
   updateTask(taskId: TaskId, input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshot {
@@ -2415,6 +2515,8 @@ export class RuntimeTaskCoordinator {
     const deletedAt = this.now().toISOString();
     this.journal?.append({ kind: 'task.deleted', taskId, deletedAt });
     this.deletedTaskIds.add(taskId.value);
+    record.deletedAt = deletedAt;
+    this.deletedBoardHistory.set(taskId.value, record);
     this.tasks.delete(taskId.value);
     retireTaskOperationBindings(this.operations, this.scopes, taskId.value);
     return { taskId, deleted: true };
@@ -7561,6 +7663,8 @@ export class RuntimeTaskCoordinator {
             title: record.title,
             directive: record.directive,
             directiveRevision: record.directiveRevision,
+            boardOwner: record.boardOwner,
+            taskKind: record.taskKind ?? 'work',
             state: 'created',
             currentState: '已创建',
             nextStep: '选择模式并发起执行',
@@ -7590,6 +7694,11 @@ export class RuntimeTaskCoordinator {
         }
         case 'task.deleted': {
           this.deletedTaskIds.add(record.taskId.value);
+          const task = this.tasks.get(record.taskId.value);
+          if (task) {
+            task.deletedAt = record.deletedAt;
+            this.deletedBoardHistory.set(record.taskId.value, task);
+          }
           this.tasks.delete(record.taskId.value);
           retireTaskOperationBindings(this.operations, this.scopes, record.taskId.value);
           break;
@@ -7598,6 +7707,17 @@ export class RuntimeTaskCoordinator {
           const task = this.tasks.get(record.taskId.value);
           if (task === undefined) break;
           task.consumedInputRequests = appendConsumedInputRequest(task.consumedInputRequests, record);
+          break;
+        }
+        case 'task.reassigned': {
+          const task = this.tasks.get(record.taskId.value);
+          const deleted = this.deletedBoardHistory.get(record.taskId.value);
+          const previousOwner = task?.boardOwner ?? deleted?.boardOwner;
+          if (!sameBoardOwner(previousOwner, record.from)) break;
+          if (sameBoardOwner(previousOwner, record.to)) break;
+          if (task && previousOwner) this.boardHistory.push({ task: this.snapshot(task), owner: previousOwner, previousOwner });
+          if (task) task.boardOwner = record.to;
+          if (deleted) deleted.boardOwner = record.to;
           break;
         }
         case 'operation.prepared': {
@@ -8089,6 +8209,8 @@ export class RuntimeTaskCoordinator {
       title: record.title,
       directive: record.directive,
       directiveRevision: record.directiveRevision,
+      boardOwner: record.boardOwner,
+      taskKind: record.taskKind,
       state: record.state,
       currentState: record.currentState,
       nextStep: record.nextStep,

@@ -50,3 +50,4 @@ export type {
   ResponsesWireRequest,
   ResponsesWireTool,
 } from './wire.js';
+export { createRccModelCatalog } from './model-capacity.js';

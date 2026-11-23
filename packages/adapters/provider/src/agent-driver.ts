@@ -60,6 +60,7 @@ import {
 import type {
   MaterializedRequestInput,
   ProviderRequestContext,
+  ProviderRequestContextUnit,
   ProviderRequestContextHook,
   ProviderRequestContextPhase,
   RequestScopedInstructions,
@@ -109,6 +110,16 @@ export interface ProviderAgentDriverCommonOptions<TIdentity extends AnyProviderE
   readonly tools?: ProviderStartInput['tools'];
   readonly executeTool?: ProviderToolExecutionPort<TIdentity>;
   readonly maxToolRounds?: number;
+  /** Runtime-owned turn protocol. Called after the request and its tool results
+   * are durable. `complete` ends observation without another model request;
+   * `continue` also repairs a text-only response through the same request DAG.
+   * `drain` submits paired results with no tools before final settlement.
+   * Omitting this hook preserves the Task driver's existing end continuation.
+   */
+  readonly completeRequest?: (input: {
+    readonly requestId: string;
+    readonly tools: readonly { readonly call: ProviderToolCall; readonly result: ProviderToolExecutionResult }[];
+  }) => Promise<'continue' | 'complete' | 'drain'>;
   readonly onRequestLifecycle?: (event: ProviderRequestLifecycleEvent<TIdentity>) => void;
   /**
    * Native raw path. `rawEvidence` saves the exact executor output and
@@ -630,10 +641,13 @@ export class ProviderAgentDriver<
         // Only a confirmed normal terminal makes the fully observed request
         // continuable. Preserve waiting, unknown and existing failure facts;
         // execution settle/close stays caller-owned.
-        if (terminal?.terminalState === 'succeeded') await this.commitObservedCompletion(request);
-        return;
+        if (terminal?.terminalState === 'succeeded') {
+          await this.commitObservedCompletion(request);
+          if (request === undefined || this.options.completeRequest === undefined
+            || await this.options.completeRequest({ requestId: request.requestId, tools: [] }) === 'complete') return;
+        } else return;
       }
-      if (!isToolWaiting(terminal, toolCalls)) {
+      if (toolCalls.length > 0 && !isToolWaiting(terminal, toolCalls)) {
         throw this.error('tool.terminal.missing', 'provider emitted a tool call without a tool-waiting terminal', 'observe', 'runtime');
       }
       if (request === undefined) {
@@ -645,7 +659,7 @@ export class ProviderAgentDriver<
       if (this.productionClosed) {
         throw this.error('provider.production.closed', 'provider production was closed; no new tool work can start', 'observe', 'runtime');
       }
-      rounds += 1;
+      if (toolCalls.length > 0) rounds += 1;
       if (this.options.maxToolRounds !== undefined && rounds > this.options.maxToolRounds) {
         const error = this.error('tool.round-limit', 'provider tool round limit was exceeded', 'observe', 'runtime');
         for (const call of toolCalls) {
@@ -673,6 +687,7 @@ export class ProviderAgentDriver<
         }
         throw error;
       }
+      const historyStart = toolHistory.length;
       for (let callIndex = 0; callIndex < toolCalls.length;) {
         const call = toolCalls[callIndex]!;
         if (this.stopping) return;
@@ -714,7 +729,10 @@ export class ProviderAgentDriver<
       if (this.stopping) return;
       await this.commitObservedCompletion(request);
       if (this.stopping) return;
-      const acceptedStandardTurnEnd = toolHistory.some(({ call, result }) =>
+      const completion = toolCalls.length === 0 ? undefined
+        : await this.options.completeRequest?.({ requestId: request.requestId, tools: toolHistory.slice(historyStart) });
+      if (completion === 'complete') return;
+      const acceptedStandardTurnEnd = completion === 'drain' || toolHistory.some(({ call, result }) =>
         isStandardTurnEndToolId(call.toolId) && this.toolStatus(result) === 'succeeded');
       let completeContinuation!: () => void;
       const continuationCompletion = new Promise<void>((resolve) => { completeContinuation = resolve; });
@@ -727,6 +745,15 @@ export class ProviderAgentDriver<
         if (this.stopping) return;
         const context = await this.materializeRequestContext(continuation, 'continuation');
         if (this.stopping) return;
+        const requestContext = context?.canonical ?? {
+          units: [
+            { kind: 'message' as const, role: 'user' as const, text: JSON.stringify(this.initialPayload ?? inputPayloadMissing()) },
+            ...toolHistory.flatMap(({ call, result }): ProviderRequestContextUnit[] => [
+              { kind: 'tool-call', callId: call.callId, toolId: call.toolId, arguments: call.arguments },
+              { kind: 'tool-result', callId: call.callId, toolId: call.toolId, output: result.output, status: this.toolStatus(result), evidenceRefs: result.evidenceRefs },
+            ]),
+          ],
+        };
         submitted = await this.track(this.port.submit({
           ...this.execution,
           ...this.continuationRequestIdentity(continuation),
@@ -736,16 +763,20 @@ export class ProviderAgentDriver<
           ...(!acceptedStandardTurnEnd && this.options.tools !== undefined ? { tools: this.options.tools } : {}),
           ...(context === undefined
             ? {
-                toolContinuations: toolHistory.map(({ call, result }) => ({
+                toolContinuations: toolHistory.slice(historyStart).map(({ call, result }) => ({
                   callId: call.callId,
                   toolId: call.toolId,
                   arguments: call.arguments,
-                evidenceRefs: result.evidenceRefs,
+                  evidenceRefs: result.evidenceRefs,
                   continuationRef: call.continuationRef,
                   output: result.output,
                 })),
               }
-            : this.requestContextFields(context)),
+            : {}),
+          requestContext,
+          ...(acceptedStandardTurnEnd
+            ? { instructions: { text: 'The runtime has recorded the end-tool receipt included in this request. End this response normally.' } }
+            : context?.instructions === undefined ? {} : { instructions: context.instructions }),
         }));
         this.assertProviderIdentity(submitted, 'provider tool continuation receipt', 'submit');
         if (!this.stopping) {

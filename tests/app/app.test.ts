@@ -158,6 +158,95 @@ test('native shared-pair preparation binds final identity without starting and c
   console.log('native preparation resources', JSON.stringify({ rootRemoved: fixture.root, closed: closed.map((receipt) => receipt.state), readinessRequests: fixture.upstream.wires.length, generationPosts: 0 }));
 });
 
+test('management prompts follow explicit roster authority and do not elevate ordinary agents', async () => {
+  const fixture = await nativePairFixture();
+  try {
+    const configPath = join(fixture.controlRoot, 'config.toml');
+    let config = await readFile(configPath, 'utf8');
+    config = config
+      .replace('templateRef = "builtin/interaction@1.0.0"', 'templateRef = "builtin/interaction@1.1.0"')
+      .replace('tools = ["input.receive", "task.query", "proposal.render"]', 'tools = ["task.query"]');
+    const internalPath = join(fixture.controlRoot, 'internal.toml');
+    const originalInternal = await readFile(internalPath, 'utf8');
+    await writeFile(internalPath, originalInternal + '\nceoAgentId = "interaction-default"\n', 'utf8');
+    await writeFile(configPath, config, 'utf8');
+    const ceoConfiguration = await loadConfiguration(fixture.paths);
+    const ceoAgent = ceoConfiguration.agentRoster.find((agent) => agent.agentId === 'interaction-default')!;
+    const ceo = await prepareAgentOperation({
+      ...fixture,
+      configuration: ceoConfiguration,
+      sessionId: 'management-ceo-prompt',
+      plan: 'default',
+      prompt: 'cross-project objective',
+      runtimeId: 'management-ceo-runtime',
+      taskId: id('task', 'management-ceo-task'),
+      operationId: id('operation', 'management-ceo-operation'),
+      agent: ceoAgent,
+      composed: { driver: new FakeAgentDriver({}) },
+      prepareAgentProvider: async () => { throw new Error('fake composed execution must not acquire a provider'); },
+    });
+    assert.match(ceo.prompt, /# CEO/);
+    assert.equal(ceo.prompt.includes('# Project leader'), false);
+    assert.match(ceo.prompt, /This prompt does not grant/);
+
+    await writeFile(internalPath, originalInternal, 'utf8');
+    const projectLeadConfiguration = await loadConfiguration(fixture.paths);
+    const projectLeadAgent = projectLeadConfiguration.agentRoster.find((agent) => agent.agentId === 'interaction-default')!;
+    const projectLead = await prepareAgentOperation({
+      ...fixture,
+      configuration: projectLeadConfiguration,
+      sessionId: 'management-project-lead-prompt',
+      plan: 'default',
+      prompt: 'project objective',
+      runtimeId: 'management-project-lead-runtime',
+      taskId: id('task', 'management-project-lead-task'),
+      operationId: id('operation', 'management-project-lead-operation'),
+      agent: projectLeadAgent,
+      composed: { driver: new FakeAgentDriver({}) },
+      prepareAgentProvider: async () => { throw new Error('fake composed execution must not acquire a provider'); },
+    });
+    assert.equal(projectLead.prompt.includes('# CEO'), false);
+    assert.match(projectLead.prompt, /# Project leader/);
+    assert.equal(projectLead.prompt.includes('# Management role'), true);
+
+    const executionConfiguration = await loadConfiguration(fixture.paths);
+    const executionAgent = executionConfiguration.agentRoster.find((agent) => agent.roleId === 'execution') ?? {
+      agentId: 'execution-default',
+      roleId: 'execution',
+      templateRef: 'builtin/execution@1.1.0',
+      driverRef: 'fake',
+      skills: [],
+      tools: [],
+      permissions: [],
+      memoryScopes: ['task'],
+      resourceClass: 'foreground',
+    };
+    const execution = await prepareAgentOperation({
+      ...fixture,
+      configuration: executionConfiguration,
+      sessionId: 'management-ordinary-execution-prompt',
+      plan: 'default',
+      prompt: 'ordinary worker assignment',
+      runtimeId: 'management-ordinary-execution-runtime',
+      taskId: id('task', 'management-ordinary-execution-task'),
+      operationId: id('operation', 'management-ordinary-execution-operation'),
+      agent: executionAgent,
+      composed: { driver: new FakeAgentDriver({}) },
+      prepareAgentProvider: async () => { throw new Error('fake composed execution must not acquire a provider'); },
+    });
+    assert.equal(execution.prompt.includes('# Management role'), false);
+    assert.equal(execution.prompt.includes('# CEO'), false);
+    assert.equal(execution.prompt.includes('# Project leader'), false);
+    assert.match(execution.prompt, /# Execution Agent/);
+
+    await writeFile(configPath, config.replace('roleId = "interaction"', 'roleId = "interaction"\nmanagementRole = "ceo"'), 'utf8');
+    await assert.rejects(() => loadConfiguration(fixture.paths), /managementRole/);
+  } finally {
+    await fixture.upstream.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('native shared-pair preparation closes acquired pairs on template failure and preserves cleanup errors', async () => {
   for (const failClose of [false, true]) {
     const fixture = await nativePairFixture();

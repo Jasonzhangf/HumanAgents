@@ -10,6 +10,7 @@ import {
   ContractError,
   id,
   type Attention,
+  type ExplicitTurnPartialResult,
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
   type AgentMemoryContextRequest,
@@ -25,6 +26,7 @@ import {
   type CycleId,
   type ExecutionRuntimePort,
   type EvidenceRef,
+  type ProductTaskToolEvent,
   validateCodeSearchReport,
   validateProductPendingDecision,
   type Checkpoint,
@@ -72,9 +74,11 @@ import {
   type PlanRevisionRecord,
   type TaskIdentityScope,
   type TaskIdentityRecord,
+  type ProductReadMode,
 } from '../../../contracts/src/index.js';
 import type {
   InteractionParentCommittedFact,
+  InteractionParentCommittedRequest,
 } from '../../../runtime/src/explicit-brain/index.js';
 import type { InteractionParentTurnRawJournalPort, InteractionParentOpenedTurnScopeReadPort } from '../../../runtime/src/explicit-brain/interaction-parent-turn-raw.js';
 import { JsonlInteractionParentTurnJournal } from '../../../adapters/jsonl/src/interaction-parent-turn-journal.js';
@@ -96,6 +100,7 @@ import {
   type ExplicitInteractionStep,
   type ExplicitInteractionStepInput,
   type ExplicitInteractionSnapshot,
+  type ExplicitInteractionPartial,
   type MatchResult,
   type Proposal,
   type StatusQueryReceipt,
@@ -159,6 +164,8 @@ import {
   type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
   type RuntimeChildLifecycleObserver,
+  type RuntimeTaskBoard,
+  type RuntimeTaskBoardOwner,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { RuntimeColdExecutionResumeRequest } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
 import type { RuntimeInspectionStopCompletionReadPort } from '../../../runtime/src/ui-runtime/coordinator.js';
@@ -215,7 +222,11 @@ import {
   ExplicitBrainDecisionError,
   ExplicitBrainTerminalOutputError,
 } from '../../../runtime/src/explicit-brain/index.js';
-import type { ExplicitBrainAgentTarget, ExplicitBrainInputInterpreter } from '../explicit-brain-runtime.js';
+import type {
+  ExplicitBrainAgentTarget,
+  ExplicitBrainInputInterpreter,
+  ExplicitBrainInterpretation,
+} from '../explicit-brain-runtime.js';
 import type { MemoryReviewState } from '../memory-runtime.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
 import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
@@ -368,6 +379,7 @@ import {
 } from './occurrence-terminal.js';
 import type { OccurrenceTerminalProduction } from './occurrence-consumer.js';
 import type { UiRuntimeScheduledOccurrenceAdmission } from './scheduler.js';
+import { projectCallUsage, type CallUsageInput, type CallUsageRead } from './call-usage-read.js';
 
 const APP_OWNER = 'humanagent.app';
 const CHECKPOINT_ASSET_OWNER = 'humanagent.app.ui-runtime.checkpoint-asset';
@@ -558,6 +570,24 @@ export interface ProductSessionReadScope {
 
 export type ProductReadRequestScope = ProductBoardScope | ProductSessionReadScope;
 
+export type InteractionProviderRequestReadValue = {
+  readonly surface: 'runtime-interaction-provider-request';
+  readonly scope: { readonly kind: 'interaction'; readonly projectKey: string; readonly mode: RuntimeMode; readonly interactionId: string; readonly inputRevision: number };
+  readonly origin: { readonly turnId: string; readonly executionEpoch: number; readonly requestId: string; readonly parentRequestId?: string };
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly content: readonly unknown[];
+};
+
+export type ProductSessionReadWithDebug = ProductSessionRead & {
+  readonly toolEvents?: readonly ProductTaskToolEvent[];
+  /** Standard per-call usage. It is top-level and never depends on debug. */
+  readonly usage: CallUsageRead | null;
+  readonly usageFailure?: RuntimeReadFailure;
+  readonly debug?: {
+    readonly request?: RuntimeReadResult<InteractionProviderRequestReadValue>;
+  };
+};
+
 export interface UiRuntimeTaskControlTarget {
   readonly projectKey: string;
   readonly mode: RuntimeMode;
@@ -615,11 +645,21 @@ export interface UiRuntimeServiceOptions {
   }) => Promise<unknown>;
   readonly explicitBrainAgentQuery?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
-  readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
+  readonly explicitBrainInterpreter: ExplicitBrainServiceInterpreter;
   /** Read-only exact Provider settlement receipt over the composition-bound parent Journal. */
   readonly explicitProviderSettlementRead?: ExplicitProviderSettlementReadPort;
   /** The composition-bound parent Journal; bound reads reuse this instance instead of opening a second authority. */
   readonly interactionParentJournal?: InteractionParentTurnRawJournalPort & InteractionParentOpenedTurnScopeReadPort;
+  /** Collector-owned committed per-call usage facts for the existing authorized product session read. */
+  readonly callUsage?: {
+    readonly read: (input: {
+      readonly projectKey: string;
+      readonly mode: ProductReadMode;
+      readonly interactionId?: string;
+      readonly taskId?: string;
+      readonly occurrenceTaskIds?: readonly string[];
+    }) => Promise<readonly CallUsageInput[] | RuntimeReadResult<readonly CallUsageInput[]>>;
+  };
   /**
    * The existing Task identity owner over the same control Organ Journal the
    * runtime already persists. The service never opens its own journal or mints
@@ -702,6 +742,13 @@ export interface UiRuntimeServiceOptions {
    */
   readonly refinedDeliveryStore?: import('../../../runtime/src/ui-runtime/coordinator.js').RefinedDeliveryStore;
 }
+
+type ExplicitBrainServiceInterpretation = ExplicitBrainInterpretation | ExplicitTurnPartialResult;
+type ExplicitBrainServiceInterpreter = {
+  interpret(input: Parameters<ExplicitBrainInputInterpreter['interpret']>[0] & {
+    readonly resumePartialRef?: string;
+  }): Promise<ExplicitBrainServiceInterpretation>;
+};
 
 export interface ExplicitBrainReceipt {
   /**
@@ -2855,6 +2902,7 @@ function journalRecordTaskId(record: UiRuntimeJournalRecord): string | undefined
     case 'task.created':
     case 'task.updated':
     case 'task.deleted':
+    case 'task.reassigned':
     case 'operation.started':
       return record.taskId.value;
     case 'operation.event':
@@ -2966,6 +3014,16 @@ function rawBuildForJournalRecord(record: UiRuntimeJournalRecord): RawRecordBuil
       };
     case 'task.deleted':
       return { body: { kind: 'task.deleted', deletedAt: record.deletedAt }, occurredAt: record.deletedAt, evidenceRefs: [] };
+    case 'task.reassigned':
+      return {
+        body: {
+          kind: 'task.reassigned',
+          ...(record.from === undefined ? {} : { from: record.from }),
+          to: record.to,
+        },
+        occurredAt: record.occurredAt,
+        evidenceRefs: [],
+      };
     case 'operation.started':
       return {
         body: {
@@ -3214,6 +3272,7 @@ export class UiRuntimeService {
   private readonly requirementInbox = new RequirementInbox();
   private readonly explicitIntake = new ExplicitIntake();
   private readonly explicitStepListeners = new Map<string, Set<(step: ExplicitInteractionStep) => void>>();
+  private readonly explicitPartialContinuations = new Map<string, Promise<ExplicitInteractionSnapshot>>();
   private readonly confirmationLedger = new ConfirmationLedger();
   private readonly requirementSubmissions: RequirementSubmissionOwner;
   private readonly subscriptionControl?: SubscriptionControlPort;
@@ -3226,7 +3285,7 @@ export class UiRuntimeService {
   private readonly healthManager: OrganHealthManager;
   private readonly memoryContexts = new Map<string, BoundMemoryContext>();
   private readonly explicitBrainRuntime?: ExplicitBrainRuntime;
-  private readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
+  private readonly explicitBrainInterpreter: ExplicitBrainServiceInterpreter;
   private readonly explicitBrainTraceRecords: import('../../../contracts/src/index.js').DecisionTraceRecord[] = [];
   private readonly explicitBrainTraceJournal: DecisionTraceJournal;
   private dispatchTail: Promise<void> = Promise.resolve();
@@ -3317,6 +3376,7 @@ export class UiRuntimeService {
     this.nativeDriverBound = nativeDriverBound;
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
+      defaultBoardOwner: this.defaultBoardOwner(),
       ...(options.principalOwner === undefined ? {} : { principalOwner: options.principalOwner }),
       checkpointStoreFor: options.checkpointStoreFor,
       publicOutputStoreFor: options.checkpointStoreFor,
@@ -3936,8 +3996,11 @@ export class UiRuntimeService {
    * it is returned. The response carries only the report body, never artifact
    * file paths on the host.
    */
-  async toolOutput(taskId: TaskId, operationId: OperationId, executionEpoch: number, seq: number): Promise<unknown> {
-    const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+  async toolOutput(taskId: TaskId, operationId: OperationId, executionEpoch: number, seq: number,
+    scope?: { readonly projectKey: string; readonly mode: RuntimeMode; readonly roleId?: string; readonly configuredAgentId?: string },
+  ): Promise<unknown> {
+    const resolved = await this.resolveTaskReadScope(taskId, scope?.projectKey, scope?.mode);
+    const task = resolved.kind === 'bound' ? this.coordinatorOrQueuedTaskSnapshot(taskId) : resolved.entry.snapshot;
     const event = task.events.find((candidate) => (
       candidate.operationId === operationId.value
       && candidate.executionEpoch === executionEpoch
@@ -3951,6 +4014,29 @@ export class UiRuntimeService {
         'select a recorded tool result event',
         404,
       );
+    }
+    if (scope?.roleId !== undefined || scope?.configuredAgentId !== undefined) {
+      const journal = resolved.kind === 'bound' ? this.options.journal?.replay()
+        : readUiRuntimeTaskJournal(resolved.source.checkpointsRoot, resolved.mode).records;
+      const allocations = (journal ?? []).flatMap(record => record.kind === 'operation.prepared'
+        && record.allocation.taskId.value === taskId.value
+        && record.allocation.operationId.value === operationId.value
+        && record.allocation.executionEpoch === executionEpoch ? [record.allocation] : []);
+      const allocation = allocations.length === 1 ? allocations[0] : undefined;
+      if (allocation === undefined || (scope.roleId !== undefined && allocation.role === undefined)
+        || (scope.configuredAgentId !== undefined && allocation.configuredAgentId === undefined)) {
+        throw new UiRuntimeApiError('tool-output.binding-unavailable', RUNTIME_OWNER,
+          'the selected event has no unique recorded role/member allocation', 'select an event with a recorded execution allocation', 409);
+      }
+      if ((scope.roleId !== undefined && allocation.role !== scope.roleId)
+        || (scope.configuredAgentId !== undefined && allocation.configuredAgentId !== scope.configuredAgentId)) {
+        throw new UiRuntimeApiError('tool-output.scope-mismatch', RUNTIME_OWNER,
+          'the selected event is outside the requested role/member', 'select an event in the requested role/member scope', 404);
+      }
+    }
+    if (resolved.kind !== 'bound') {
+      throw new UiRuntimeApiError('tool-output.reader-unavailable', RUNTIME_OWNER,
+        'no tool report store is bound for the selected project and mode', 'read through an instance bound to this project and mode', 501);
     }
     if (event.toolId === undefined || event.status !== 'succeeded' || event.outputRef === undefined || event.outputDigest === undefined) {
       throw new UiRuntimeApiError(
@@ -4063,24 +4149,22 @@ export class UiRuntimeService {
   /** Resolve one no-Task request through its committed interaction turn and raw evidence. */
   async interactionProviderRequest(
     input: { readonly projectKey: string; readonly mode: RuntimeMode; readonly interactionId: string; readonly inputRevision: number; readonly turnId: string; readonly executionEpoch: number; readonly requestId: string; evidenceId?: string },
-  ): Promise<RuntimeReadResult<{
-    readonly surface: 'runtime-interaction-provider-request';
-    readonly scope: { readonly kind: 'interaction'; readonly projectKey: string; readonly mode: RuntimeMode; readonly interactionId: string; readonly inputRevision: number };
-    readonly origin: { readonly turnId: string; readonly executionEpoch: number; readonly requestId: string; readonly parentRequestId?: string };
-    readonly evidenceRefs: readonly EvidenceRef[];
-    readonly content: readonly unknown[];
-  }>> {
+  ): Promise<RuntimeReadResult<InteractionProviderRequestReadValue>> {
     if (input.executionEpoch < 1 || !Number.isSafeInteger(input.executionEpoch) || input.inputRevision < 1 || !Number.isSafeInteger(input.inputRevision)) {
       return { ok: false, failure: { code: 'interaction-request.identity-invalid', ownerId: APP_OWNER, message: 'interaction revision and execution epoch must be positive integers', nextAction: 'select an exact recorded interaction request' } };
     }
-    const source = this.isBoundScope(input.projectKey, input.mode)
-      ? this.boundProjectSource()
-      : await this.findProjectSource(input.projectKey);
+    let bound: Awaited<ReturnType<UiRuntimeService['interactionParentReadSource']>>;
+    try {
+      bound = await this.interactionParentReadSource(input);
+    } catch (error) {
+      if (error instanceof UiRuntimeApiError && error.code === 'project.unknown') {
+        return { ok: false, failure: unknownProjectFailure(input.projectKey) };
+      }
+      throw error;
+    }
+    const { controlJournal, journal } = bound;
+    const source = bound.source;
     if (source === undefined) return { ok: false, failure: unknownProjectFailure(input.projectKey) };
-    const boundJournal = this.isBoundScope(input.projectKey, input.mode) ? this.options.interactionParentJournal : undefined;
-    const journalPath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, input.mode));
-    const controlJournal = new JsonlOrganJournal(journalPath);
-    const journal = boundJournal ?? new JsonlInteractionParentTurnJournal(controlJournal);
     const opened = await journal.readScopeOpenedTurns({ organId: this.options.organId, interactionScopeId: `runtime:${input.projectKey}` });
     const turnEntry = opened.find(({ fact }) => fact.turn.interactionId === input.interactionId
       && fact.turn.inputRevision === input.inputRevision && fact.turn.turnId === input.turnId);
@@ -4098,31 +4182,14 @@ export class UiRuntimeService {
     }
     const requestRecords = committedRequests.filter(({ execution }) => execution.executionEpoch === request.execution.executionEpoch);
     const selectedEvidence = (ref: EvidenceRef): boolean => input.evidenceId === undefined || ref.evidenceId.value === input.evidenceId;
-    const accepted = snapshot.acceptedFacts.filter(({ fact }) => fact.envelope.request.requestId === input.requestId
-      && fact.envelope.execution.executionEpoch === request.execution.executionEpoch
-      && fact.envelope.fact.kind === 'content'
-      && selectedEvidence(fact.envelope.fact.content.ref)).map(({ fact, commit }) => ({ fact: fact.envelope.fact, commit }));
     const wireRefs = requestRecords.flatMap(({ fact }) => fact.evidenceRefs ?? []).filter(selectedEvidence);
-    const evidenceRefs = [...wireRefs, ...accepted.flatMap(({ fact }) => fact.kind === 'content' ? [fact.content.ref] : [])];
+    const evidenceRefs = wireRefs;
     if (evidenceRefs.length === 0) return { ok: false, failure: { code: 'interaction-request.evidence-not-found', ownerId: APP_OWNER, message: input.evidenceId === undefined ? 'the exact request has no accepted wire evidence' : 'the selected evidence is not attached to this exact interaction request', nextAction: input.evidenceId === undefined ? 'select a request with committed provider evidence' : 'select an evidence reference shown by the exact request' } };
     try {
-      const reader = providerRawContentReader(filesystemProviderEvidenceSink(new ImmutableAssetStore(join(source.projectRoot, 'artifacts', 'ui-provider-evidence'))));
       const sink = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(source.projectRoot, 'artifacts', 'ui-provider-evidence')));
       const wireContent = await Promise.all(wireRefs.map(async (ref) => {
         assertSameScope(request.fact.scope, ref.scope);
         const bytes = await sink.read(ref);
-        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-        try { return JSON.parse(text); } catch { return text; }
-      }));
-      const content = await Promise.all(accepted.map(async ({ fact, commit }) => {
-        if (fact.kind !== 'content') return undefined;
-        const wireRecord = await controlJournal.findByCommitId(commit.commitId);
-        const payload = wireRecord?.kind === 'event' ? wireRecord.payload as { readonly entry?: { readonly envelope?: { readonly request?: { readonly requestId?: string; readonly turnId?: string }; readonly fact?: { readonly content?: { readonly ref?: EvidenceRef } } } } } : undefined;
-        const storedRef = payload?.entry?.envelope?.fact?.content?.ref;
-        if (!storedRef || storedRef.evidenceId.value !== fact.content.ref.evidenceId.value
-          || payload?.entry?.envelope?.request?.requestId !== input.requestId
-          ) throw new Error('accepted evidence reference does not match the committed interaction request');
-        const bytes = await reader.read({ scope: request.fact.scope, content: fact.content });
         const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
         try { return JSON.parse(text); } catch { return text; }
       }));
@@ -4131,11 +4198,83 @@ export class UiRuntimeService {
         scope: { kind: 'interaction', projectKey: input.projectKey, mode: input.mode, interactionId: input.interactionId, inputRevision: input.inputRevision },
         origin: { turnId: request.fact.request.turnId, executionEpoch: request.execution.executionEpoch, requestId: request.fact.request.requestId, ...(request.fact.parentRequestId === undefined ? {} : { parentRequestId: request.fact.parentRequestId }) },
         evidenceRefs,
-        content: [...wireContent, ...content.filter((entry) => entry !== undefined)],
+        content: wireContent,
       } };
     } catch (error) {
       return { ok: false, failure: { code: 'interaction-request.evidence-unavailable', ownerId: APP_OWNER, message: error instanceof Error ? error.message : 'interaction request evidence could not be read', nextAction: 'restore the referenced immutable provider evidence asset' } };
     }
+  }
+
+  private async interactionParentReadSource(input: {
+    readonly projectKey: string;
+    readonly mode: RuntimeMode;
+  }): Promise<{
+    readonly source: NonNullable<ReturnType<UiRuntimeService['boundProjectSource']>>;
+    readonly controlJournal?: JsonlOrganJournal;
+    readonly journal: InteractionParentTurnRawJournalPort & InteractionParentOpenedTurnScopeReadPort;
+  }> {
+    const source = this.isBoundScope(input.projectKey, input.mode)
+      ? this.boundProjectSource()
+      : await this.findProjectSource(input.projectKey);
+    if (source === undefined) throw new UiRuntimeApiError(
+      'project.unknown',
+      APP_OWNER,
+      `project ${input.projectKey} is not declared in the control root`,
+      'select a declared project',
+      404,
+    );
+    const journalPath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, input.mode));
+    const boundJournal = this.isBoundScope(input.projectKey, input.mode) ? this.options.interactionParentJournal : undefined;
+    const controlJournal = boundJournal === undefined ? new JsonlOrganJournal(journalPath) : undefined;
+    return {
+      source,
+      controlJournal,
+      journal: boundJournal ?? new JsonlInteractionParentTurnJournal(controlJournal!),
+    };
+  }
+
+  private async latestInteractionProviderRequest(input: {
+    readonly projectKey: string;
+    readonly mode: RuntimeMode;
+    readonly interactionId: string;
+  }): Promise<RuntimeReadResult<InteractionProviderRequestReadValue>> {
+    let bound: Awaited<ReturnType<UiRuntimeService['interactionParentReadSource']>>;
+    try {
+      bound = await this.interactionParentReadSource(input);
+    } catch (error) {
+      if (error instanceof UiRuntimeApiError && error.code === 'project.unknown') {
+        return { ok: false, failure: unknownProjectFailure(input.projectKey) };
+      }
+      throw error;
+    }
+    const opened = await bound.journal.readScopeOpenedTurns({
+      organId: this.options.organId,
+      interactionScopeId: `runtime:${input.projectKey}`,
+    });
+    let selected: {
+      readonly turn: Parameters<InteractionParentTurnRawJournalPort['readTurnSnapshot']>[0];
+      readonly request: InteractionParentCommittedRequest;
+    } | undefined;
+    for (const committed of opened.filter(({ fact }) => fact.turn.interactionId === input.interactionId)) {
+      const snapshot = await bound.journal.readTurnSnapshot(committed.fact.turn);
+      for (const request of snapshot.requests) {
+        if (request.fact.phase !== 'dispatched' || request.fact.evidenceRefs === undefined || request.fact.evidenceRefs.length === 0) continue;
+        selected = { turn: committed.fact.turn, request };
+      }
+    }
+    if (selected === undefined) {
+      return { ok: false, failure: { code: 'interaction-request.request-not-found', ownerId: APP_OWNER, message: 'the selected session has no committed request evidence', nextAction: 'send a model request for this session before reading debug context' } };
+    }
+    const request = selected.request;
+    return this.interactionProviderRequest({
+      projectKey: input.projectKey,
+      mode: input.mode,
+      interactionId: input.interactionId,
+      inputRevision: selected.turn.inputRevision,
+      turnId: selected.turn.turnId,
+      executionEpoch: request.execution.executionEpoch,
+      requestId: request.fact.request.requestId,
+    });
   }
 
   private now(): Date {
@@ -4572,8 +4711,21 @@ export class UiRuntimeService {
     });
   }
 
-  createTask(input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshotInput {
+  createTask(input: { readonly title?: string; readonly directive?: string; readonly boardOwner?: RuntimeTaskBoardOwner; readonly taskKind?: 'work' | 'inspection' }): RuntimeTaskSnapshotInput {
     return toRuntimeTaskSnapshotInput(this.coordinator.createTask(input));
+  }
+
+  taskBoard(owner: RuntimeTaskBoardOwner): RuntimeTaskBoard {
+    const board = this.coordinator.taskBoard(owner);
+    const queued = this.queuedTaskSnapshots()
+      .map((task) => this.queuedRuntimeTaskSnapshot(task.taskId))
+      .filter((task): task is RuntimeTaskSnapshot => task?.boardOwner !== undefined && this.sameBoardOwner(task.boardOwner, owner))
+      .map((task) => ({ task: task!, owner: task.boardOwner! }));
+    return { ...board, current: [...board.current, ...queued] };
+  }
+
+  reassignTask(taskId: TaskId, owner: RuntimeTaskBoardOwner): RuntimeTaskSnapshotInput {
+    return toRuntimeTaskSnapshotInput(this.coordinator.reassignTask(taskId, owner));
   }
 
   /**
@@ -4813,6 +4965,8 @@ export class UiRuntimeService {
       title: queued.title,
       directive: queued.input,
       directiveRevision: 1,
+      boardOwner: this.defaultBoardOwner(),
+      taskKind: 'work',
       state: queued.state,
       currentState: queued.currentState,
       nextStep: queued.nextStep,
@@ -4825,6 +4979,18 @@ export class UiRuntimeService {
       recentEvents: [],
       events: [],
     };
+  }
+
+  private defaultBoardOwner(): RuntimeTaskBoardOwner {
+    return this.options.projectKey === undefined
+      ? { scope: 'ceo', actorId: 'Alex' }
+      : { scope: 'project', projectId: this.options.projectKey, actorId: 'Jenny' };
+  }
+
+  private sameBoardOwner(left: RuntimeTaskBoardOwner, right: RuntimeTaskBoardOwner): boolean {
+    return left.scope === right.scope
+      && left.actorId === right.actorId
+      && (left.scope === 'ceo' || (right.scope === 'project' && left.projectId === right.projectId));
   }
 
   private coordinatorOrQueuedTaskSnapshot(taskId: TaskId): RuntimeTaskSnapshot {
@@ -4921,8 +5087,10 @@ export class UiRuntimeService {
         }));
       if (receipts.length > 1 || parents.length > 1) continue;
       const submitted = parents[0]?.taskId;
-      if (direct !== undefined && submitted !== undefined && direct.value !== submitted.value) continue;
-      const taskId = submitted ?? direct;
+      // A confirmed new-task submission can retain a matched older task in
+      // confirmation.taskRef after draft reorganization. Only its exact
+      // committed TaskIdentity establishes the new task's conversation source.
+      const taskId = receipts.length === 1 ? submitted : direct;
       if (taskId !== undefined) taskRefs.set(interaction.interactionId, taskId);
     }
     const interactionFacts = interactions.map((interaction) => {
@@ -4942,6 +5110,7 @@ export class UiRuntimeService {
           .map(({ seq, kind, occurredAt, requestId, turnId }) => ({ seq, kind, occurredAt, requestId, turnId, summary: '' })),
         ...(interaction.occurredAt === undefined ? {} : { occurredAt: interaction.occurredAt }),
         ...(interaction.reply === undefined ? {} : { reply: interaction.reply }),
+        ...(interaction.partial === undefined ? {} : { partial: interaction.partial }),
         ...(interaction.clarifications === undefined ? {} : { clarifications: interaction.clarifications }),
         ...(interaction.draft?.proposal === undefined ? {} : { draftProposal: interaction.draft.proposal }),
         ...(taskId === undefined ? {} : { taskId }),
@@ -5309,8 +5478,55 @@ export class UiRuntimeService {
    * owner-decoded actor/time from explicit intake, never a task input or update
    * time.
    */
-  async productSessionRead(scope: ProductReadRequestScope): Promise<ProductSessionRead> {
+  async productSessionRead(
+    scope: ProductReadRequestScope,
+    options: { readonly debugRequest?: boolean; readonly roleId?: string; readonly configuredAgentId?: string } = {},
+  ): Promise<ProductSessionReadWithDebug> {
     const selection = this.productSelectionForRequest(scope);
+    if ((options.roleId !== undefined || options.configuredAgentId !== undefined) && selection.taskId === undefined) {
+      throw new UiRuntimeApiError('tool-output.task-scope-required', APP_OWNER,
+        'role/member tool reads require an exact task', 'send taskId with the role/member selection', 400);
+    }
+    const toolEvents: ProductTaskToolEvent[] = [];
+    if (selection.taskId !== undefined) {
+      const task = this.coordinatorOrQueuedTaskSnapshot(selection.taskId);
+      // Legacy task/session consumers without tool facts keep their existing
+      // read contract. Returning tool facts requires the declared binding.
+      if ((options.roleId !== undefined || options.configuredAgentId !== undefined
+        || task.events.some(event => event.kind === 'provider.tool' || event.kind === 'provider.tool-result'))
+        && !this.isBoundScope(selection.projectKey, selection.mode)) {
+        throw new UiRuntimeApiError('product-read.scope-not-bound', APP_OWNER,
+          'product task read is outside the serve-bound project/mode', 'use the instance bound to this task scope', 409);
+      }
+      const records = this.options.journal?.replay() ?? [];
+      for (const event of task.events) {
+        if (event.kind !== 'provider.tool' && event.kind !== 'provider.tool-result') continue;
+        const allocations = records.flatMap(record => record.kind === 'operation.prepared'
+          && record.allocation.taskId.value === selection.taskId!.value
+          && record.allocation.operationId.value === event.operationId
+          && record.allocation.executionEpoch === event.executionEpoch ? [record.allocation] : []);
+        const allocation = allocations.length === 1 ? allocations[0] : undefined;
+        if (options.roleId !== undefined || options.configuredAgentId !== undefined) {
+          if (allocation === undefined || (options.roleId !== undefined && allocation.role === undefined)
+            || (options.configuredAgentId !== undefined && allocation.configuredAgentId === undefined)) {
+            throw new UiRuntimeApiError('tool-output.binding-unavailable', RUNTIME_OWNER,
+              'a tool event has no unique recorded role/member allocation', 'restore the authoritative allocation before selecting this role/member', 409);
+          }
+          if ((options.roleId !== undefined && allocation.role !== options.roleId)
+            || (options.configuredAgentId !== undefined && allocation.configuredAgentId !== options.configuredAgentId)) continue;
+        }
+        toolEvents.push({
+          ...rawEventProjection(event),
+          ...(event.executionFact === undefined ? {} : { executionFact: event.executionFact }),
+          scope: { kind: 'task', projectKey: selection.projectKey, mode: selection.mode, taskId: selection.taskId },
+          ...(allocation === undefined ? {} : { execution: {
+            runtimeId: allocation.runtimeId, assignmentId: allocation.assignmentId,
+            ...(allocation.role === undefined ? {} : { role: allocation.role }),
+            ...(allocation.configuredAgentId === undefined ? {} : { configuredAgentId: allocation.configuredAgentId }),
+          } }),
+        });
+      }
+    }
     const facts = await this.productBoardReadFacts(selection);
     const boardIndex = composeProductBoardIndex(facts.input);
     const selectedTaskId = selection.taskId;
@@ -5318,16 +5534,34 @@ export class UiRuntimeService {
       ? []
       : facts.snapshots
           .filter((snapshot) => snapshot.taskId.value === selectedTaskId.value)
-          .map((snapshot) => ({ taskId: snapshot.taskId, events: snapshot.recentEvents }));
-    const messages = composeProductSessionMessages({
+          .map((snapshot) => ({ taskId: snapshot.taskId, events: snapshot.recentEvents.filter(event =>
+            event.kind !== 'provider.tool' && event.kind !== 'provider.tool-result') }));
+    const messages = [...composeProductSessionMessages({
       selection,
       organId: this.options.organId,
       messages: this.explicitInteractionMessages(selection, this.options.organId),
       taskEvents,
-    });
+    }), ...toolEvents.map(toolEvent => ({
+      ref: { eventId: toolEvent.eventId, sourceId: 'runtime-task-event', scope: { organId: this.options.organId, taskId: toolEvent.scope.taskId } },
+      targetRef: { kind: 'interaction' as const, taskRef: toolEvent.scope.taskId, scope: toolEvent.scope },
+      actor: { kind: 'unknown' as const, sourceKind: 'runtime-task-event', sourceRef: toolEvent.kind },
+      occurredAt: toolEvent.occurredAt, text: toolEvent.summary, evidenceRefs: toolEvent.evidenceRefs, toolEvent,
+    }))];
     const sessionId = 'kind' in scope ? undefined : scope.sessionId;
-    return {
+    const occurrenceTaskIds = selectedTaskId === undefined ? [] : facts.snapshots
+      .filter(snapshot => snapshot.executionLineage?.parentTaskId.value === selectedTaskId.value)
+      .map(snapshot => snapshot.taskId.value);
+    const usage = await this.productCallUsageRead({
+      projectKey: selection.projectKey,
+      mode: selection.mode,
+      ...(selectedTaskId !== undefined ? { taskId: selectedTaskId.value } : {}),
+      ...(occurrenceTaskIds.length ? { occurrenceTaskIds } : {}),
+      ...(selectedTaskId === undefined && sessionId !== undefined ? { interactionId: sessionId } : {}),
+    });
+    const result: ProductSessionReadWithDebug = {
       boardIndex,
+      ...(selectedTaskId === undefined ? {} : { toolEvents }),
+      ...(usage.ok ? { usage: usage.value } : { usage: null, usageFailure: usage.failure }),
       messages: sessionId === undefined
         ? messages
         : messages.filter((message) =>
@@ -5335,6 +5569,56 @@ export class UiRuntimeService {
             && message.targetRef.sessionRef.sourceRef === sessionId)
           || (message.ref.sourceId === 'explicit-intake' && message.ref.eventId === sessionId)),
     };
+    if (!options.debugRequest || selectedTaskId !== undefined) return result;
+    const currentInteraction = sessionId === undefined
+      ? this.explicitIntake.exportState().interactions.at(-1)
+      : this.explicitIntake.exportState().interactions.find((interaction) => interaction.interactionId === sessionId);
+    if (currentInteraction === undefined) {
+      return { ...result, debug: {
+        request: { ok: false, failure: {
+          code: 'interaction-request.session-not-found',
+          ownerId: APP_OWNER,
+          message: 'the selected session has no explicit interaction',
+          nextAction: 'select the current explicit interaction session',
+        } },
+      } };
+    }
+    const debug = await this.latestInteractionProviderRequest({
+      projectKey: selection.projectKey,
+      mode: selection.mode,
+      interactionId: currentInteraction.interactionId,
+    });
+    return {
+      ...result,
+      debug: { request: debug },
+    };
+  }
+
+  private async productCallUsageRead(input: {
+    readonly projectKey: string;
+    readonly mode: ProductReadMode;
+    readonly interactionId?: string;
+    readonly taskId?: string;
+    readonly occurrenceTaskIds?: readonly string[];
+  }): Promise<RuntimeReadResult<CallUsageRead>> {
+    if (this.options.callUsage === undefined) {
+      return { ok: false, failure: {
+        code: 'call-usage.reader-unavailable', ownerId: APP_OWNER,
+        message: 'committed per-call usage facts are not bound',
+        nextAction: 'bind the collector-owned usage fact reader',
+      } };
+    }
+    try {
+      const rows = await this.options.callUsage.read(input);
+      if ('ok' in rows && !rows.ok) return rows;
+      return { ok: true, value: projectCallUsage('value' in rows ? rows.value : rows) };
+    } catch (error) {
+      return { ok: false, failure: {
+        code: 'call-usage.read-failed', ownerId: APP_OWNER,
+        message: error instanceof Error ? error.message : 'committed per-call usage facts could not be read',
+        nextAction: 'repair the collector-owned usage fact reader',
+      } };
+    }
   }
 
   async productPendingDecision(scope: ProductReadRequestScope): Promise<ProductPendingDecision | null> {
@@ -5513,6 +5797,38 @@ export class UiRuntimeService {
    */
   async productPublicOutput(taskId: TaskId): Promise<ProductOutputView> {
     return selectProductOutput(await this.authoritativePublicOutputForTask(taskId));
+  }
+
+  /** Narrow interpretation port; the model never supplies project or execution authority. */
+  private explicitTaskResultReader(interaction: ExplicitInteractionSnapshot): (taskId: string) => Promise<unknown> {
+    return async (rawTaskId) => {
+      if (interaction.workspace !== undefined && this.options.projectKey !== undefined
+        && interaction.workspace.projectKey !== this.options.projectKey) {
+        throw new UiRuntimeApiError('explicit-brain.workspace-outside-serve-scope', APP_OWNER,
+          'task result is outside the serve-bound project', 'use the project owning this conversation', 403);
+      }
+      const taskId = id('task', rawTaskId);
+      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+      let execution = task;
+      if (!hasOwnExecutionOrFailure(task) && this.options.taskIdentity !== undefined && this.subscriptionControl !== undefined) {
+        const snapshots = this.coordinator.taskSnapshots();
+        const identities = new Map<string, TaskIdentityRecord>();
+        await Promise.all(snapshots.map(async (snapshot) => {
+          const identity = await this.options.taskIdentity!.read({ organId: this.options.organId, taskId: snapshot.taskId });
+          if (identity !== undefined) identities.set(snapshot.taskId.value, identity);
+        }));
+        const lineage = executionLineageByChildId(snapshots.map(toRuntimeTaskSnapshotInput), identities,
+          await this.subscriptionControl.list());
+        const children = snapshots.filter(snapshot => lineage.get(snapshot.taskId.value)?.parentTaskId.value === taskId.value);
+        if (children.length > 1) return { taskId: rawTaskId, status: task.state,
+          publicationState: 'ambiguous', executionTaskIds: children.map(child => child.taskId.value), commits: [] };
+        if (children[0] !== undefined) execution = children[0];
+      }
+      const binding = publicOutputBindingFor(execution, this.options.organId);
+      const result = selectProductOutput(await this.authoritativePublicOutputForTask(execution.taskId), binding);
+      return { taskId: rawTaskId, executionTaskId: execution.taskId.value, status: execution.state,
+        publicationState: result.publication?.state ?? 'unavailable', ...result };
+    };
   }
 
   taskDashboard(taskId: TaskId, authoritativePublication?: PublicOutputPublicationProjection): RuntimeTaskDashboardView {
@@ -7762,6 +8078,9 @@ export class UiRuntimeService {
   async interpretExplicitInput(input: { readonly interactionId: string }): Promise<ExplicitInteractionSnapshot> {
     try {
       let snapshot = await this.explicitIntake.inspect(input.interactionId);
+      if (snapshot.state === 'matching' && snapshot.partial?.resumed) {
+        return await this.continueExplicitPartial({ ...input, partialRef: snapshot.partial.partialRef });
+      }
       if (snapshot.state === 'received') {
         await this.explicitIntake.beginMatching(input.interactionId);
         this.persistExplicitBrainState();
@@ -7776,105 +8095,154 @@ export class UiRuntimeService {
           409,
         );
       }
-      const taskCandidates = this.coordinator.taskSnapshots().map((task) => ({
-        taskId: task.taskId.value,
-        title: task.title,
-        status: task.state,
-        currentInput: task.input || task.directive,
-      }));
-      const interpreted = await this.explicitBrainInterpreter.interpret({
-        interactionId: snapshot.interactionId,
-        inputRevision: this.explicitIntake.inputRevision(snapshot.interactionId),
-        sourceRef: snapshot.sourceRef,
-        rawInput: snapshot.rawInput,
-        clarifications: snapshot.clarifications ?? [],
-        taskCandidates,
-        onStep: (step) => this.recordExplicitStep(snapshot.interactionId, step),
-        ...(snapshot.workspace === undefined ? {} : {
-          workspaceCwd: snapshot.workspace.workspaceCwd,
-          projectKey: snapshot.workspace.projectKey,
-        }),
-      });
-      if (interpreted.kind === 'clarification') {
-        await this.explicitIntake.requestClarification(
-          snapshot.interactionId,
-          interpreted.question,
-          interpreted.options,
-        );
-        this.persistExplicitBrainState();
-        return await this.explicitIntake.inspect(snapshot.interactionId);
-      }
-      // A general answer ends before task matching or requirement recording.
-      if (interpreted.kind === 'answer') {
-        this.commitExplicitIntakeSuccess(() => this.explicitIntake.completeAnswer(snapshot.interactionId, interpreted.answer));
-        return await this.explicitIntake.inspect(snapshot.interactionId);
-      }
-      const matched = interpreted.matchedTaskId === undefined
-        ? undefined
-        : this.coordinator.taskSnapshots().find((task) => task.taskId.value === interpreted.matchedTaskId);
-      if (interpreted.matchedTaskId !== undefined && matched === undefined) {
-        throw new UiRuntimeApiError(
-          'explicit-brain.task-match-invalid',
-          'humanagent.runtime.explicit-brain',
-          `interaction agent selected an unknown task: ${interpreted.matchedTaskId}`,
-          'retry interpretation using one of the current task candidates',
-          409,
-        );
-      }
-      if (interpreted.kind === 'requirement' && interpreted.intent === 'create' && matched !== undefined) {
-        throw new UiRuntimeApiError(
-          'explicit-brain.task-match-conflict',
-          'humanagent.runtime.explicit-brain',
-          'create cannot select an existing task',
-          'retry interpretation as append or change, or omit the existing task match for a new task',
-          409,
-        );
-      }
-      if (interpreted.kind === 'requirement'
-        && (interpreted.intent === 'append' || interpreted.intent === 'change')
-        && matched === undefined) {
-        throw new UiRuntimeApiError(
-          'explicit-brain.task-match-required',
-          'humanagent.runtime.explicit-brain',
-          `${interpreted.intent} requires a current task match`,
-          'retry interpretation with a current task or clarify the intended task',
-          409,
-        );
-      }
-      const matchResult = {
-        normalizedInput: interpreted.normalizedInput,
-        matchedTasks: matched === undefined ? [] : [{ taskId: matched.taskId, relation: 'current' as const, status: matched.state }],
-        knownFacts: interpreted.knownFacts,
-      };
-      if (interpreted.kind === 'status-query') {
-        // The status-only success fact, its request number and the counter
-        // advance belong to the same explicit-brain.state save. A status query
-        // has no requirement draft, so begin the status-check directly from
-        // matching. The failed-append rollback then cannot leave stale task
-        // material in the public snapshot.
-        this.commitExplicitIntakeSuccess(() => {
-          this.explicitIntake.beginStatusCheck(snapshot.interactionId);
-          return this.explicitIntake.completeStatusOnly(snapshot.interactionId, interpreted.answer);
-        });
-      } else {
-        this.explicitIntake.recordMatch(snapshot.interactionId, matchResult);
-        await this.explicitIntake.propose(snapshot.interactionId, {
-          proposedIntent: interpreted.intent,
-          proposal: interpreted.proposal,
-          decisionRefs: interpreted.decisionRefs,
-        });
-        // The reviewable draft exists now, so mint the typed revision before
-        // confirmation. The public GET can then project it for editing.
-        await this.ensureTypedDraftRevision(snapshot.interactionId, {
-          title: interpreted.structuredProposal.title,
-          taskFlow: interpreted.taskFlow,
-        });
-        this.persistExplicitBrainState();
-      }
-      return await this.explicitIntake.inspect(snapshot.interactionId);
+      return await this.settleExplicitInterpretation(snapshot);
     } catch (error) {
       throw apiError(error);
     }
+  }
+
+  async continueExplicitPartial(input: {
+    readonly interactionId: string;
+    readonly partialRef: string;
+  }): Promise<ExplicitInteractionSnapshot> {
+    try {
+      const snapshot = await this.explicitIntake.inspect(input.interactionId);
+      if (snapshot.partial === undefined || snapshot.partial.partialRef !== input.partialRef) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.partial-invalid',
+          'humanagent.runtime.explicit-brain',
+          'the supplied partial reference is not the current resumable explicit turn',
+          'read the current interaction and continue its partial reference',
+          409,
+        );
+      }
+      const existing = this.explicitPartialContinuations.get(input.interactionId);
+      if (existing !== undefined) return await existing;
+      if (snapshot.partial.resumed && snapshot.state !== 'matching' && snapshot.state !== 'partial') return snapshot;
+      if (this.explicitIntake.resumePartial(input.interactionId, input.partialRef)) this.persistExplicitBrainState();
+      const execution = (async () => {
+        try {
+          return await this.settleExplicitInterpretation(await this.explicitIntake.inspect(input.interactionId));
+        } catch (error) {
+          if (this.explicitIntake.abortPartialResume(input.interactionId)) this.persistExplicitBrainState();
+          throw error;
+        }
+      })();
+      const tracked = execution.finally(() => {
+        this.explicitPartialContinuations.delete(input.interactionId);
+      });
+      this.explicitPartialContinuations.set(input.interactionId, tracked);
+      return await tracked;
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  private async settleExplicitInterpretation(snapshot: ExplicitInteractionSnapshot): Promise<ExplicitInteractionSnapshot> {
+    const taskCandidates = this.coordinator.taskSnapshots().map((task) => ({
+      taskId: task.taskId.value,
+      title: task.title,
+      status: task.state,
+      currentInput: task.input || task.directive,
+    }));
+    const interpreterInput = {
+      interactionId: snapshot.interactionId,
+      inputRevision: this.explicitIntake.inputRevision(snapshot.interactionId),
+      sourceRef: snapshot.sourceRef,
+      rawInput: snapshot.rawInput,
+      clarifications: snapshot.clarifications ?? [],
+      taskCandidates,
+      readTaskResult: this.explicitTaskResultReader(snapshot),
+      onStep: (step: ExplicitInteractionStepInput) => this.recordExplicitStep(snapshot.interactionId, step),
+      ...(snapshot.workspace === undefined ? {} : {
+        workspaceCwd: snapshot.workspace.workspaceCwd,
+        projectKey: snapshot.workspace.projectKey,
+      }),
+      ...(snapshot.partial === undefined ? {} : { resumePartialRef: snapshot.partial.partialRef }),
+    };
+    const interpreted = await this.explicitBrainInterpreter.interpret(interpreterInput);
+    if (interpreted.kind === 'partial') {
+      this.explicitIntake.recordPartial(snapshot.interactionId, interpreted);
+      this.persistExplicitBrainState();
+      return await this.explicitIntake.inspect(snapshot.interactionId);
+    }
+    if (interpreted.kind === 'clarification') {
+      await this.explicitIntake.requestClarification(
+        snapshot.interactionId,
+        interpreted.question,
+        interpreted.options,
+      );
+      this.persistExplicitBrainState();
+      return await this.explicitIntake.inspect(snapshot.interactionId);
+    }
+    // A general answer ends before task matching or requirement recording.
+    if (interpreted.kind === 'answer') {
+      this.commitExplicitIntakeSuccess(() => this.explicitIntake.completeAnswer(snapshot.interactionId, interpreted.answer));
+      return await this.explicitIntake.inspect(snapshot.interactionId);
+    }
+    const matched = interpreted.matchedTaskId === undefined
+      ? undefined
+      : this.coordinator.taskSnapshots().find((task) => task.taskId.value === interpreted.matchedTaskId);
+    if (interpreted.matchedTaskId !== undefined && matched === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.task-match-invalid',
+        'humanagent.runtime.explicit-brain',
+        `interaction agent selected an unknown task: ${interpreted.matchedTaskId}`,
+        'retry interpretation using one of the current task candidates',
+        409,
+      );
+    }
+    if (interpreted.kind === 'requirement' && interpreted.intent === 'create' && matched !== undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.task-match-conflict',
+        'humanagent.runtime.explicit-brain',
+        'create cannot select an existing task',
+        'retry interpretation as append or change, or omit the existing task match for a new task',
+        409,
+      );
+    }
+    if (interpreted.kind === 'requirement'
+      && (interpreted.intent === 'append' || interpreted.intent === 'change')
+      && matched === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.task-match-required',
+        'humanagent.runtime.explicit-brain',
+        `${interpreted.intent} requires a current task match`,
+        'retry interpretation with a current task or clarify the intended task',
+        409,
+      );
+    }
+    const matchResult = {
+      normalizedInput: interpreted.normalizedInput,
+      matchedTasks: matched === undefined ? [] : [{ taskId: matched.taskId, relation: 'current' as const, status: matched.state }],
+      knownFacts: interpreted.knownFacts,
+    };
+    if (interpreted.kind === 'status-query') {
+      // The status-only success fact, its request number and the counter
+      // advance belong to the same explicit-brain.state save. A status query
+      // has no requirement draft, so begin the status-check directly from
+      // matching. The failed-append rollback then cannot leave stale task
+      // material in the public snapshot.
+      this.commitExplicitIntakeSuccess(() => {
+        this.explicitIntake.beginStatusCheck(snapshot.interactionId);
+        return this.explicitIntake.completeStatusOnly(snapshot.interactionId, interpreted.answer);
+      });
+    } else {
+      this.explicitIntake.recordMatch(snapshot.interactionId, matchResult);
+      await this.explicitIntake.propose(snapshot.interactionId, {
+        proposedIntent: interpreted.intent,
+        proposal: interpreted.proposal,
+        decisionRefs: interpreted.decisionRefs,
+      });
+      // The reviewable draft exists now, so mint the typed revision before
+      // confirmation. The public GET can then project it for editing.
+      await this.ensureTypedDraftRevision(snapshot.interactionId, {
+        title: interpreted.structuredProposal.title,
+        taskFlow: interpreted.taskFlow,
+      });
+      this.persistExplicitBrainState();
+    }
+    return await this.explicitIntake.inspect(snapshot.interactionId);
   }
 
   async answerExplicitClarification(input: {
@@ -8024,6 +8392,7 @@ export class UiRuntimeService {
           : `${snapshot.rawInput}\n\nUser correction: ${correction}`,
         clarifications: snapshot.clarifications ?? [],
         taskCandidates,
+        readTaskResult: this.explicitTaskResultReader(snapshot),
         onStep: (step) => this.recordExplicitStep(snapshot.interactionId, step),
         ...(snapshot.workspace === undefined ? {} : {
           workspaceCwd: snapshot.workspace.workspaceCwd,

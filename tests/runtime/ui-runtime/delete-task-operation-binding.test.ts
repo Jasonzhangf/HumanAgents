@@ -272,6 +272,8 @@ test('replay of the deleted-then-rebuilt sequence does not revive the old operat
     operations: new Map(),
     scopes: new Map(),
     deletedTaskIds: new Set(),
+    deletedBoardHistory: new Map(),
+    boardHistory: [],
   };
   replayTaskJournalRecords(state, records);
 

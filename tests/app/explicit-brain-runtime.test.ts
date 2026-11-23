@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -281,12 +281,100 @@ async function acquireTerminatedOwnerLease(root: string): Promise<{
   return {lease, previousOwner: receipt.owner};
 }
 
+const EXPLICIT_DECISION_KINDS = new Set(['answer', 'status-query', 'clarification', 'requirement']);
+
+function explicitDecisionEndFrames(
+  frames: readonly unknown[],
+  checkpoint: { readonly action: string; readonly result: string },
+): readonly unknown[] {
+  if (frames.length !== 1) return frames;
+  const frame = frames[0] as { readonly type?: string; readonly text?: unknown };
+  if (frame.type !== 'response.output_text.done' || typeof frame.text !== 'string') return frames;
+  let decision: unknown;
+  try { decision = JSON.parse(frame.text); } catch { return frames; }
+  if (typeof decision !== 'object' || decision === null || Array.isArray(decision)) return frames;
+  const kind = (decision as { readonly kind?: unknown }).kind;
+  if (typeof kind !== 'string' || !EXPLICIT_DECISION_KINDS.has(kind)) return frames;
+  const complex = kind === 'requirement';
+  const normalizedInput = (decision as { readonly normalizedInput?: unknown }).normalizedInput;
+  const answer = (decision as { readonly answer?: unknown }).answer;
+  const capsule = complex ? {
+    summary: '已整理用户需求',
+    goal: String((decision as { readonly proposal?: { readonly objective?: unknown } }).proposal?.objective ?? normalizedInput),
+    process: ['识别用户需求'],
+    findings: [],
+    nextStep: '交给隐式大脑执行',
+  } : undefined;
+  const argument = JSON.stringify({
+    kind: complex ? 'complex' : 'simple',
+    decision,
+    checkpointRecord: { index: checkpoint },
+    ...(capsule === undefined ? {} : { capsule }),
+  });
+  return [{
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: {
+      type: 'function_call',
+      id: 'recorded-explicit-end-item',
+      call_id: 'recorded-explicit-end',
+      name: 'humanagent_turn_end',
+      arguments: argument,
+    },
+  }];
+}
+
+function hasExplicitEndFunctionOutput(wire: any): boolean {
+  return Array.isArray(wire?.input) && wire.input.some((item: any) => {
+    if (item?.type !== 'function_call_output' || item.call_id !== 'recorded-explicit-end') return false;
+    try { return ['accepted', 'partial'].includes(JSON.parse(item.output).kind); }
+    catch { return false; } // Legacy unsupported-tool output is ordinary text.
+  });
+}
+
+// Use the public raw owner to model already persisted, pre-C07 terminal text.
+// Fresh Provider fixtures must never enable that retired wire protocol.
+async function seedClosedLegacyOutput(
+  deps: ReturnType<typeof parentDependencies>, binding: ProviderBinding,
+  request: Parameters<ReturnType<typeof createProviderExplicitBrainInterpreter>['interpret']>[0],
+  texts: readonly string[],
+): Promise<InteractionTurnIdentity> {
+  const turn: InteractionTurnIdentity = { organId: deps.organId, interactionScopeId: deps.interactionScopeId,
+    interactionId: request.interactionId, inputRevision: request.inputRevision, turnId: `legacy-${randomUUID()}` };
+  const scope = { organId: deps.organId, operationId: id('operation', turn.turnId) };
+  const execution = { runtimeId: turn.turnId, ...scope, executionEpoch: 1, interactionTurn: turn };
+  const asset = async (type: string, content: string) => ({ ref: await deps.rawEvidence.write({
+    scope, kind: 'execution', type, locator: type, content,
+  }), view: { kind: 'utf8-text' as const } });
+  const owner = createInteractionParentTurnRawOwner({ turn, execution, scope,
+    initialInput: await asset('initial-input', JSON.stringify(request)), providerBinding: binding,
+    journal: deps.parentJournal, rawContent: deps.rawContent });
+  await owner.openTurnInput();
+  const providerRequest = { turnId: turn.turnId, requestId: `${turn.turnId}-terminal` };
+  await owner.registerRequest({ execution, record: { request: providerRequest, scope, phase: 'dispatching' } });
+  for (const [index, text] of texts.entries()) {
+    await owner.acceptRawFact({ execution, scope, request: providerRequest, producerSeq: index + 1,
+      fact: { kind: 'content', channel: 'assistant-text', update: 'full', contentUnitId: `text-${index}`,
+        content: await asset(`text-${index}`, text), complete: true } });
+  }
+  await owner.acceptRawFact({ execution, scope, request: providerRequest, producerSeq: texts.length + 1,
+    fact: { kind: 'request-complete', terminal: 'completed' } });
+  await owner.registerRequest({ execution, record: { request: providerRequest, scope, phase: 'settled' } });
+  await owner.recordProviderClose({ providerBinding: binding, result: {
+    bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, state: 'closed',
+    evidenceRefs: [await deps.rawEvidence.write({ scope, kind: 'operation', type: 'close', locator: 'legacy-close', content: 'closed' })],
+  }, closedAt: new Date().toISOString() });
+  return turn;
+}
+
 // Exercise the real neutral adapter/raw codec. The old Task-only fake cannot
 // represent this identity or deliver raw facts; changing the fixture does not
 // weaken the compiling synthetic-Task RED assertions below.
 class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = InteractionParentProviderExecutionIdentityRef> extends ProviderAdapter<T> {
   constructor(options: { binding: ProviderBinding; stepDelayMs: number; replay: readonly { kind: string; summary: string; state: string; terminalState?: string }[];
     respond?: (wire: any) => Promise<readonly unknown[]>;
+    checkpoint?: { readonly action: string; readonly result: string };
+    legacyTurn?: boolean;
     /**
      * Frame-by-frame variant used by the concurrency consumer: it lets one
      * request stream a partial answer and stay open while a second input is
@@ -294,6 +382,17 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
      */
     stream?: (wire: any, signal?: AbortSignal) => AsyncIterable<unknown>; evidence?: typeof parentEvidence }) {
     const evidence = options.evidence ?? parentEvidence;
+    let drainedDecisionText: string | undefined;
+    let textOnlyResponses = 0;
+    const rememberEndDecision = (value: unknown): void => {
+      const item = (value as { readonly item?: { readonly name?: unknown; readonly arguments?: unknown } }).item;
+      if (item?.name !== 'humanagent_turn_end' || typeof item.arguments !== 'string') return;
+      try {
+        drainedDecisionText = JSON.stringify((JSON.parse(item.arguments) as { readonly decision?: unknown }).decision);
+      } catch {
+        drainedDecisionText = undefined;
+      }
+    };
     const transport = new V3ProviderHttpTransport<T>({
       binding: options.binding, baseUrl: 'http://recorded.test', source: 'http', evidence,
       fetch: async (_url, init) => ({ status: 200, headers: new Headers({ 'content-type': 'text/event-stream' }),
@@ -301,17 +400,60 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
           const encoder = new TextEncoder();
           const frame = (value: unknown) => encoder.encode(`data: ${JSON.stringify(value)}\n\n`);
           const wire = JSON.parse(init.body!);
+          const recoveringLegacy = String(wire.instructions).includes('Resume the existing intake turn. Return one decision object');
+          const toolNames = Array.isArray(wire?.tools)
+            ? wire.tools.map((tool: any) => tool?.name).filter((name: unknown): name is string => typeof name === 'string')
+            : [];
+          const hasFunctionOutput = Array.isArray(wire?.input) && wire.input.some((item: any) => item?.type === 'function_call_output');
+          if (options.legacyTurn !== true && hasExplicitEndFunctionOutput(wire)) {
+            const drainText = drainedDecisionText;
+            drainedDecisionText = undefined;
+            yield encoder.encode([
+              `data: ${JSON.stringify({ type: 'response.created', response: { id: 'recorded-drain' } })}\n\n`,
+              `data: ${JSON.stringify({ type: 'response.output_text.done', item_id: 'recorded-drain-text', text: drainText ?? 'transport drained; this text is not an intake decision' })}\n\n`,
+              `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'recorded-drain' } })}\n\n`,
+            ].join(''));
+            return;
+          }
+          if (!recoveringLegacy && options.legacyTurn !== true && !options.stream && !hasFunctionOutput && toolNames.length === 1 && toolNames[0] === 'interaction_select_skills') {
+            const argumentsText = JSON.stringify({ skillIds: ['task-intake'] });
+            yield encoder.encode([
+              { type: 'response.created', response: { id: 'recorded-skills' } },
+              { type: 'response.output_item.done', output_index: 0, item: {
+                type: 'function_call', id: 'recorded-skill-selection-item', call_id: 'recorded-skill-selection',
+                name: 'interaction_select_skills', arguments: argumentsText,
+              } },
+              { type: 'response.completed', response: { id: 'recorded-skills' } },
+            ].map((value) => `data: ${JSON.stringify(value)}\n\n`).join(''));
+            return;
+          }
           if (options.stream) {
             yield frame({ type: 'response.created', response: { id: 'recorded' } });
-            for await (const next of options.stream(wire, init.signal ?? undefined)) yield frame(next);
+            for await (const next of options.stream(wire, init.signal ?? undefined)) {
+              rememberEndDecision(next);
+              yield frame(next);
+            }
             yield frame({ type: 'response.completed', response: { id: 'recorded' } });
             return;
           }
+          const responseFrames = options.respond ? await options.respond(wire) : options.replay.filter((step) => step.kind === 'output').map((step, index) => ({
+            type: 'response.output_text.done', item_id: `text-${index}`, text: step.summary,
+          }));
+          const modelFrames = recoveringLegacy ? responseFrames : explicitDecisionEndFrames(responseFrames,
+            options.checkpoint ?? { action: '形成显式回合决策', result: '决策已通过结束工具提交' });
+          if (modelFrames.length > 0 && modelFrames.every(value =>
+            (value as { readonly type?: string }).type === 'response.output_text.done')) {
+            assert.ok(++textOnlyResponses <= 2,
+              'recorded Provider fixture exhausted: text-only replay supplied no C07 end call');
+          } else {
+            textOnlyResponses = 0;
+          }
+          for (const value of modelFrames) {
+            rememberEndDecision(value);
+          }
           const frames = [
             { type: 'response.created', response: { id: 'recorded' } },
-            ...(options.respond ? await options.respond(wire) : options.replay.filter((step) => step.kind === 'output').map((step, index) => ({
-              type: 'response.output_text.done', item_id: `text-${index}`, text: step.summary,
-            }))),
+            ...modelFrames,
             { type: 'response.completed', response: { id: 'recorded' } },
           ];
           yield encoder.encode(frames.map((value) => `data: ${JSON.stringify(value)}\n\n`).join(''));
@@ -319,6 +461,17 @@ class RecordedParentPort<T extends AnyProviderExecutionIdentityRef = Interaction
     });
     super({ binding: options.binding, routeRef: 'recorded', codec: new ResponsesProviderCodec(), transport, evidence });
   }
+}
+
+function ownedRecordedPort(binding: ProviderBinding, port: RecordedParentPort) {
+  return {
+    port,
+    prepareAgentProvider: async (): Promise<AgentProviderComposition<InteractionParentProviderExecutionIdentityRef>> => ({
+      roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef },
+    }),
+  };
 }
 
 test('explicit interaction wire exposes no helper dispatch or accept tools', async () => {
@@ -331,6 +484,7 @@ test('explicit interaction wire exposes no helper dispatch or accept tools', asy
   let requestBody = '';
   const port = new RecordedParentPort({
     binding, replay: [], stepDelayMs: 0,
+    checkpoint: { action: '审查显式请求', result: '已形成有效决策' },
     respond: async (wire) => {
       requestBody = JSON.stringify(wire);
       return [{
@@ -344,6 +498,9 @@ test('explicit interaction wire exposes no helper dispatch or accept tools', asy
     ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
     helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
   });
 
   const result = await interpreter.interpret({
@@ -378,10 +535,13 @@ test('provider explicit brain sends answered clarifications to the model as auth
     configDigest: 'sha256:answered-clarification', capabilityDigest: 'sha256:answered-clarification',
   };
   let promptText = '';
+  let userInput = '';
   const port = new RecordedParentPort({
     binding, replay: [], stepDelayMs: 0,
+    checkpoint: { action: '读取权威澄清', result: '已把回答并入决策上下文' },
     respond: async (wire) => {
       promptText = String(wire.instructions ?? wire.system ?? '');
+      userInput = JSON.stringify(wire.input.filter((item: { role?: string }) => item.role === 'user'));
       return [{
         type: 'response.output_text.done',
         item_id: 'final',
@@ -399,6 +559,9 @@ test('provider explicit brain sends answered clarifications to the model as auth
     ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
     helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
   });
 
   const result = await interpreter.interpret({
@@ -413,10 +576,10 @@ test('provider explicit brain sends answered clarifications to the model as auth
   });
 
   assert.equal(result.kind, 'answer');
-  assert.match(promptText, /# Authoritative answered clarifications/);
-  assert.match(promptText, /验收范围包含哪些页面？/);
-  assert.match(promptText, /包含 A 页面和 B 页面/);
-  assert.match(promptText, /Do not ask these answered clarification questions again/);
+  assert.match(promptText, /Use answered clarifications in the committed user input/);
+  assert.equal(promptText.includes('包含 A 页面和 B 页面'), false);
+  assert.match(userInput, /验收范围包含哪些页面？/);
+  assert.match(userInput, /包含 A 页面和 B 页面/);
 });
 
 /**
@@ -1117,7 +1280,6 @@ test('two top-level native tasks share one App and overlap real execution reques
     } finally {
       activeExecutionInitials -= 1;
     }
-    const section = (text: string) => ({ text, evidenceRefs: [] });
     const responseId = `execution-${spec.title.replaceAll(' ', '-')}`;
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(frames([
@@ -1127,13 +1289,13 @@ test('two top-level native tasks share one App and overlap real execution reques
         call_id: `turn-end-${spec.title.replaceAll(' ', '-')}`,
         name: 'humanagent_turn_end',
         arguments: JSON.stringify({
+          outcome: 'completed',
           summary: {
-            goal: section(spec.objective),
-            actions: section(`Execute ${spec.rawInput}`),
-            result: section(spec.deliveryText),
-            expectedNextStep: section('Close this Task'),
+            goal: spec.objective,
+            actions: [`Execute ${spec.rawInput}`],
+            result: { status: 'completed', text: spec.deliveryText },
+            nextStep: 'Close this Task',
           },
-          deliveryText: spec.deliveryText,
           deliveryRefs: [],
         }),
       } },
@@ -2008,24 +2170,70 @@ test('provider explicit brain interpreter loads the interaction template and val
   // Confirmed shared-pair gap; probability unknown, wrong source/model has high
   // impact. Extend this consumer with one local selected wire, not a matrix.
   const posts: string[] = [];
+  let editedTemplateRoot: string | undefined;
   const server = createServer((request, response) => {
     void (async () => {
       const chunks: Uint8Array[] = [];
       for await (const chunk of request) chunks.push(chunk);
-      if (request.method === 'POST') posts.push(Buffer.concat(chunks).toString('utf8'));
+      const body = Buffer.concat(chunks).toString('utf8');
+      if (request.method === 'POST') posts.push(body);
       const requestNumber = posts.length;
+      let wire: any;
+      try { wire = JSON.parse(body); } catch { wire = undefined; }
+      const inputItems = Array.isArray(wire?.input) ? wire.input : [];
+      const hasEndOutput = inputItems.some((item: any) =>
+        item?.type === 'function_call_output' && item.call_id === 'selected-explicit-end');
+      const isMultiSkill = body.includes('查询项目成员地址并发送消息');
+      const isEditedProbe = body.includes('检查编辑后的角色和正文');
+      const needsSkillSelection = requestNumber === 1
+        || ((isMultiSkill || isEditedProbe) && !body.includes('# Selected Skill'));
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end([
-        { type: 'response.created', response: { id: `selected-${posts.length}` } },
-        { type: 'response.output_text.done', item_id: 'message-final', text: JSON.stringify({
+      if (hasEndOutput) {
+        response.end([
+          { type: 'response.created', response: { id: `selected-drain-${requestNumber}` } },
+          { type: 'response.output_text.done', item_id: 'message-drain', text: 'transport drained; this text is not an intake decision' },
+          { type: 'response.completed', response: { id: `selected-drain-${requestNumber}` } },
+        ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+        return;
+      }
+      if (needsSkillSelection) {
+        const argumentsText = JSON.stringify({
+          skillIds: !isMultiSkill
+            ? ['task-intake']
+            : ['task-intake', 'project-management', 'agent-addressing', 'agent-communication'],
+        });
+        response.end([
+          { type: 'response.created', response: { id: !isMultiSkill ? 'selected-skill-first' : 'selected-skill-multi' } },
+          { type: 'response.function_call_arguments.done', call_id: 'select-skills', output_index: 0, arguments: argumentsText },
+          { type: 'response.output_item.done', output_index: 0, item: {
+            type: 'function_call', call_id: 'select-skills', name: 'interaction_select_skills', arguments: argumentsText,
+          } },
+          { type: 'response.completed', response: { id: !isMultiSkill ? 'selected-skill-first' : 'selected-skill-multi' } },
+        ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+        return;
+      }
+      const decision = {
           kind: 'requirement', normalizedInput: '整理启动步骤', knownFacts: ['README exists'],
-          ...(requestNumber === 1 ? { taskFlowKind: 'one-shot' } : {}),
+          ...(requestNumber === 2 || requestNumber === 3
+            ? { taskFlow: { kind: 'one-shot', definitionVersion: 1 } } : {}),
           proposal: {
             revision: 1, intent: 'create', title: '整理启动步骤', objective: '整理项目启动步骤',
             deliverable: '可执行的启动步骤清单',
             deliveryConditions: ['启动步骤完整并有证据'], evidenceRefs: ['README'], blockingGaps: [],
           }, decisionRefs: ['decision:provider-test'],
-        }) },
+      };
+      const endArguments = JSON.stringify({
+        kind: 'complex', decision,
+        checkpointRecord: { index: { action: '整理用户需求', result: '已准备好执行' } },
+        capsule: { summary: '已整理用户需求', goal: '整理项目启动步骤',
+          process: ['识别用户需求'], findings: [], nextStep: '交给隐式大脑执行' },
+      });
+      response.end([
+        { type: 'response.created', response: { id: `selected-${posts.length}` } },
+        { type: 'response.output_item.done', output_index: 0, item: {
+          type: 'function_call', id: 'selected-explicit-end-item', call_id: 'selected-explicit-end',
+          name: 'humanagent_turn_end', arguments: endArguments,
+        } },
         { type: 'response.completed', response: { id: `selected-${posts.length}` } },
       ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
     })().catch((error: unknown) => { response.writeHead(500); response.end(String(error)); });
@@ -2109,9 +2317,10 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.equal(await options.checkpointJournal.readSemanticCheckpointExact(pending.turn), null);
   await assert.rejects(() => interpreter.interpret({ ...firstInput, rawInput: 'different next input' }),
     (error: unknown) => error instanceof Error && error.message.includes(pending.turn.turnId) && error.message.includes('exact prior input'));
-  assert.equal(compositions.length, 1); assert.equal(starts.length, 1); assert.equal(posts.length, 1);
+  assert.equal(compositions.length, 1); assert.equal(starts.length, 1); assert.equal(posts.length, 3,
+    'the first intake selects Skills, ends the turn, then drains the transport');
   const result = await interpreter.interpret(firstInput);
-  assert.equal(compositions.length, 1); assert.equal(starts.length, 1); assert.equal(posts.length, 1);
+  assert.equal(compositions.length, 1); assert.equal(starts.length, 1); assert.equal(posts.length, 3);
   const committed = await options.checkpointJournal.readSemanticCheckpointExact(pending.turn);
   assert.ok(committed);
   if (committed === null) throw new Error('missing semantic commit');
@@ -2121,7 +2330,10 @@ test('provider explicit brain interpreter loads the interaction template and val
 
   assert.equal(result.kind, 'requirement');
   if (result.kind !== 'requirement') throw new Error('expected requirement interpretation');
-  assert.equal(result.normalizedInput, '整理启动步骤');
+  assert.match(result.normalizedInput, /目标：/);
+  assert.match(result.normalizedInput, /交付物：可执行的启动步骤清单/);
+  assert.match(result.normalizedInput, /启动步骤完整并有证据/);
+  assert.match(result.normalizedInput, /需求详情：\n整理启动步骤/);
   assert.equal(result.intent, 'create');
   // Missing structured output loses the semantic producer's validated fields.
   // Impact: raw JSON history or no closure. Cost: extend this real consumer.
@@ -2140,7 +2352,8 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.equal(compositions.length, 1, 'selected interaction callback must run');
   assert.deepEqual(lifecycle, ['0:settled', '0:closed']);
   const secondResult = await interpreter.interpret({ interactionId: 'interaction-provider-second', inputRevision: 1,
-    sourceRef: 'ui:second', rawInput: '第二次独立输入', clarifications: [], taskCandidates: [] });
+    sourceRef: 'ui:second', rawInput: '查询项目成员地址并发送消息', clarifications: [], taskCandidates: [],
+    workspaceCwd: '/tmp/humanagent-project', projectKey: 'humanagent-project' });
   // Historical model output has no kind and must remain honestly unclassified.
   assert.equal(Reflect.get(secondResult, 'taskFlow'), undefined);
   assert.equal(compositions.length, 2);
@@ -2153,13 +2366,17 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.ok(observations[0].requestId !== undefined);
   assert.ok(observations[1].requestId !== undefined);
   assert.ok(observations[0].requestId !== observations[1].requestId);
-  assert.ok(observations[0].turnId !== observations[1].turnId);
+  assert.equal(observations.length, 6);
+  assert.equal(new Set(observations.map((observation) => observation.requestId)).size, 6);
+  assert.ok(observations.slice(0, 3).every((observation) => observation.turnId === observations[0].turnId));
+  assert.ok(observations.slice(3).every((observation) => observation.turnId === observations[3].turnId));
+  assert.ok(observations[0].turnId !== observations[3].turnId);
   assert.deepEqual(starts.map((start) => start.inputRefs), [
     ['humanagent://interaction/interaction-provider-test/revision/1'],
     ['humanagent://interaction/interaction-provider-second/revision/1'],
   ]);
   assert.equal(borrowedStarts, 0);
-  assert.equal(posts.length, 2);
+  assert.equal(posts.length, 6, 'each intake input selects Skills, ends once, then drains once');
   for (const body of posts) assert.equal(JSON.parse(body).model, 'selected.interaction.model');
   // The bounded intake wire carries the verified identity and control-boundary
   // segments plus one flat intake contract, and none of the full-role segments
@@ -2168,14 +2385,79 @@ test('provider explicit brain interpreter loads the interaction template and val
   const wire = JSON.parse(posts[0]) as {
     readonly instructions: string;
   };
-  const secondWire = JSON.parse(posts[1]) as {
+  const ordinaryWire = JSON.parse(posts[1]) as { readonly instructions: string };
+  assert.match(ordinaryWire.instructions, /# Selected Skill: task-intake/);
+  assert.match(ordinaryWire.instructions, /Read-only work with a requested deliverable is still work/);
+  assert.ok(ordinaryWire.instructions.indexOf('# Explicit intake decision output') < ordinaryWire.instructions.indexOf('# Selected Skill: task-intake'));
+  const selectionWire = JSON.parse(posts[3]) as {
+    readonly tools?: readonly { readonly name?: string; readonly parameters?: unknown }[];
+    readonly input?: readonly unknown[];
+  };
+  const finalWire = JSON.parse(posts[4]) as {
     readonly input: readonly {
       readonly type: string;
       readonly role?: string;
       readonly content?: readonly { readonly type: string; readonly text: string }[];
     }[];
   };
-  const priorCheckpoint = JSON.parse(secondWire.input[0]?.content?.[0]?.text ?? '') as {
+  const firstInstructions = wire.instructions;
+  const firstRequest = JSON.parse(posts[0]) as { readonly tools?: readonly unknown[] };
+  const secondInstructions = String(JSON.parse(posts[4]).instructions);
+  let sharedEnd = 0;
+  while (sharedEnd < firstInstructions.length && sharedEnd < secondInstructions.length
+    && firstInstructions[sharedEnd] === secondInstructions[sharedEnd]) sharedEnd += 1;
+  const stablePrefix = firstInstructions.slice(0, sharedEnd);
+  // C01: the same template/tool/skill configuration shares one stable prefix.
+  // Only request-scoped project, clarification, and revision data may follow it.
+  for (const stableMarker of [
+    '# Explicit intake decision output',
+    '# Explicit Brain',
+    '# Registered Skills',
+    '- task-intake:',
+    '- project-management:',
+    '- agent-addressing:',
+    '- agent-communication:',
+    'This request provides interaction.select_skills and humanagent_turn_end',
+  ]) {
+    assert.ok(stablePrefix.includes(stableMarker), `stable prefix must include ${stableMarker}`);
+  }
+  assert.ok(stablePrefix.indexOf('# Explicit intake decision output') < stablePrefix.indexOf('# Explicit Brain'));
+  assert.ok(stablePrefix.indexOf('# Explicit Brain') < stablePrefix.indexOf('# Registered Skills'));
+  assert.ok(stablePrefix.indexOf('This request provides interaction.select_skills and humanagent_turn_end') < stablePrefix.indexOf('# Registered Skills'));
+  assert.deepEqual((firstRequest.tools ?? []).map((tool) => (tool as { readonly name?: string }).name), ['interaction_select_skills', 'humanagent_turn_end']);
+  assert.deepEqual((selectionWire.tools ?? []).map((tool) => tool.name), ['interaction_select_skills', 'humanagent_turn_end']);
+  const selectionTool = selectionWire.tools?.[0];
+  assert.deepEqual((selectionTool?.parameters as { readonly properties?: Record<string, { readonly items?: { readonly enum?: readonly string[] } }> }).properties?.skillIds?.items?.enum,
+    ['task-intake', 'project-management', 'agent-addressing', 'agent-communication']);
+  assert.ok(secondInstructions.includes('# Conversation project directory'));
+  assert.equal(firstInstructions.includes('# Conversation project directory'), false);
+  // C02: the controlled fixture selects task-intake for the ordinary intake and
+  // all four stable IDs for the natural-language multi-Skill request.
+  assert.equal(firstInstructions.includes('# project-management'), false);
+  assert.equal(firstInstructions.includes('# agent-addressing'), false);
+  assert.equal(firstInstructions.includes('# agent-communication'), false);
+  assert.ok(secondInstructions.includes('# Selected Skill: task-intake'));
+  assert.ok(secondInstructions.includes('# Selected Skill: project-management'));
+  assert.ok(secondInstructions.includes('# Selected Skill: agent-addressing'));
+  assert.ok(secondInstructions.includes('# Selected Skill: agent-communication'));
+  for (const selectedSkill of [
+    'task-intake',
+    'project-management',
+    'agent-addressing',
+    'agent-communication',
+  ]) {
+    for (const requiredSection of ['## 适用条件', '## 绑定工具', '## 参数来源', '## 权限', '## 回执']) {
+      const start = secondInstructions.indexOf(`# Selected Skill: ${selectedSkill}`);
+      assert.ok(start >= 0, `selected skill body is missing: ${selectedSkill}`);
+      const body = secondInstructions.slice(start);
+      assert.ok(body.includes(requiredSection), `${selectedSkill} body must include ${requiredSection}`);
+    }
+  }
+  assert.equal(secondInstructions.includes('Read only the current authorized scope.'), true);
+  assert.equal(secondInstructions.includes('Use one resolved target.'), true);
+  assert.equal(secondInstructions.includes('Preserve the typed delivery receipt state and message identity.'), true);
+  assert.equal(secondInstructions.includes('# Selected Skill: attention-triage'), false);
+  const priorCheckpoint = JSON.parse(finalWire.input[0]?.content?.[0]?.text ?? '') as {
     readonly kind: string;
     readonly interactionId: string;
     readonly inputRevision: number;
@@ -2184,8 +2466,8 @@ test('provider explicit brain interpreter loads the interaction template and val
     readonly claims: readonly { readonly fact: string }[];
     readonly constraints: readonly { readonly fact: string }[];
   };
-  assert.equal(secondWire.input[0]?.type, 'message');
-  assert.equal(secondWire.input[0]?.role, 'assistant');
+  assert.equal(finalWire.input[0]?.type, 'message');
+  assert.equal(finalWire.input[0]?.role, 'assistant');
   assert.equal(priorCheckpoint.kind, committed.checkpoint.kind);
   assert.equal(priorCheckpoint.interactionId, 'interaction-provider-test');
   assert.equal(priorCheckpoint.inputRevision, 1);
@@ -2201,24 +2483,55 @@ test('provider explicit brain interpreter loads the interaction template and val
   assert.ok(sentPrompt.includes('# Control Boundaries'));
   assert.ok(sentPrompt.includes('# Explicit Brain'));
   assert.ok(sentPrompt.includes('# Explicit intake decision output'));
-  assert.ok(sentPrompt.includes('taskFlowKind'));
-  assert.ok(sentPrompt.includes('Omit taskFlowKind only when the task shape is genuinely ambiguous'));
+  assert.ok(sentPrompt.includes('put taskFlow inside decision with definitionVersion as the JSON integer 1'));
+  assert.ok(sentPrompt.includes('Omit taskFlow only when genuinely ambiguous'));
   assert.ok(sentPrompt.includes('semantic task shape only'));
   assert.equal(sentPrompt.includes('executionMode'), false);
   assert.equal(sentPrompt.includes('schedule'), false);
   for (const field of ['blockingGaps', 'deliverable', 'deliveryConditions', 'evidenceRefs', 'intent', 'objective', 'revision', 'title']) {
     assert.ok(sentPrompt.includes(`"${field}"`), `intake proposal contract must include ${field}`);
   }
-  for (const absent of ['structured decision', 'selected action', 'needsUserInput', 'needsToolResult',
+  assert.ok(sentPrompt.includes('Put the complete decision under decision in the end tool arguments.'));
+  assert.ok(sentPrompt.includes('Do not put control state, selected actions, tool intents or user-input flags in it.'));
+  for (const absent of ['needsUserInput', 'needsToolResult',
     'typed Tool Intents', 'Call `requirement.submit` only after', 'requiresUserConfirmation',
     'confirmationPrompt', 'awaiting-user-confirmation']) {
     assert.equal(sentPrompt.includes(absent), false, `intake prompt must not carry conflicting instruction: ${absent}`);
   }
   assert.ok(posts[0].includes('帮我整理启动步骤'));
-  assert.ok(posts[1].includes('第二次独立输入'));
-  assert.ok(posts[1].includes('ui:second'));
-  assert.equal(posts[1].includes('帮我整理启动步骤'), false);
+  assert.ok(posts[3].includes('查询项目成员地址并发送消息'));
+  assert.ok(posts[4].includes('查询项目成员地址并发送消息'));
+  assert.ok(posts[4].includes('ui:second'));
+  assert.equal(posts[4].includes('帮我整理启动步骤'), false);
   assert.deepEqual(lifecycle, ['0:settled', '0:closed', '1:settled', '1:closed']);
+  editedTemplateRoot = await mkdtemp(join(parentFixtureRoot, 'edited-template-'));
+  execFileSync('cp', ['-R', join(process.cwd(), 'packages', 'agent-templates', 'templates', 'builtin'), editedTemplateRoot]);
+  const editedIdentity = join(editedTemplateRoot, 'builtin', 'interaction', 'profiles', 'explicit-brain', 'identity.md');
+  const editedIdentityContent = await readFile(editedIdentity, 'utf8');
+  await writeFile(editedIdentity, editedIdentityContent + '\nEDITED_ROLE_MARKER\n', 'utf8');
+  const editedSkill = join(editedTemplateRoot, 'builtin', 'interaction', 'skills', 'task-intake', 'SKILL.md');
+  const editedSkillContent = await readFile(editedSkill, 'utf8');
+  await writeFile(editedSkill, editedSkillContent + '\nEDITED_SKILL_BODY_MARKER\n', 'utf8');
+  const editedInterpreter = createProviderExplicitBrainInterpreter({ ...selectedOptions, templateRoot: editedTemplateRoot });
+  await editedInterpreter.interpret({
+    interactionId: 'interaction-provider-edited', inputRevision: 1, sourceRef: 'ui:edited',
+    rawInput: '检查编辑后的角色和正文', clarifications: [], taskCandidates: [],
+  });
+  assert.equal(posts.length, 9);
+  assert.ok(posts[6].includes('EDITED_ROLE_MARKER'));
+  assert.equal(posts[6].includes('EDITED_SKILL_BODY_MARKER'), false);
+  assert.ok(posts[7].includes('EDITED_ROLE_MARKER'));
+  assert.ok(posts[7].includes('EDITED_SKILL_BODY_MARKER'));
+  assert.equal(posts[7].split('# Selected Skill: task-intake').length - 1, 1);
+  const auditRoot = join(process.cwd(), '..', 'mvp-delivery-audit-20261122');
+  const escapeHtml = (value: string): string => value
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  await writeFile(join(auditRoot, '阶段A5-Skill按需加载请求证据.html'), [
+    '<!doctype html><meta charset="utf-8"><title>显式 Agent 上下文审计</title>',
+    '<h1>C01/C02 request assembly evidence</h1>',
+    '<p>De-identified controlled provider fixture. Tool schemas and request context are public test data; no credentials or hidden reasoning are recorded.</p>',
+    ...posts.map((body, index) => '<section><h2>Request ' + (index + 1) + '</h2><pre>' + escapeHtml(body) + '</pre></section>'),
+  ].join('\n'), 'utf8');
   // A failed durable initial-input commit must prevent the external start.
   // Existing missing durability is the failure basis; impact is an orphaned
   // parent request. Cost: one rejected commit and no network request.
@@ -2237,17 +2550,25 @@ test('provider explicit brain interpreter loads the interaction template and val
   await assert.rejects(() => commitBlocked.interpret({ interactionId: 'blocked-input', inputRevision: 1,
     sourceRef: 'ui:blocked', rawInput: 'must not start', clarifications: [], taskCandidates: [] }),
   (error: unknown) => error === inputCommitError);
-  assert.equal(starts.length, 2);
-  assert.equal(posts.length, 2);
-  assert.deepEqual(lifecycle, ['0:settled', '0:closed', '1:settled', '1:closed', '2:closed']);
+  assert.equal(starts.length, 3, 'a rejected initial-input commit must not start a fourth execution');
+  assert.equal(posts.length, 9);
+  assert.deepEqual(lifecycle, ['0:settled', '0:closed', '1:settled', '1:closed', '2:settled', '2:closed', '3:closed']);
   } finally {
     server.closeIdleConnections?.();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     assert.equal(server.address(), null);
+    if (editedTemplateRoot !== undefined) await rm(editedTemplateRoot, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
     await assert.rejects(() => realpath(root), /ENOENT/);
   }
 
+  // Rejected end calls must be retried. Only a durable partial result drains.
+  const invalidEndResponse = (decision: unknown) => async (wire: any): Promise<readonly unknown[]> => {
+    const partialOutput = Array.isArray(wire?.input) && wire.input.some((item: any) =>
+      item?.type === 'function_call_output' && typeof item.output === 'string'
+      && JSON.parse(item.output).kind === 'partial');
+    return partialOutput ? [] : [{ type: 'response.output_text.done', item_id: 'invalid-decision', text: JSON.stringify(decision) }];
+  };
   const malformedOptions = {
     ...parentDependencies(),
     binding,
@@ -2255,20 +2576,17 @@ test('provider explicit brain interpreter loads the interaction template and val
     port: new RecordedParentPort({
       binding,
       stepDelayMs: 0,
-      replay: [
-        {
-          kind: 'output',
-          state: 'output',
-          summary: JSON.stringify({
+      // Keep returning the invalid end call; do not use the fixture's
+      // successful-end drain shortcut for a rejected submission.
+      legacyTurn: true,
+      replay: [],
+      respond: invalidEndResponse({
             kind: 'requirement',
             normalizedInput: '整理启动步骤',
             knownFacts: [],
             proposal: { objective: '未经过 typed contract 的任意对象' },
             decisionRefs: [],
           }),
-        },
-        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
-      ],
     }),
   };
   const malformedLifecycle: string[] = [];
@@ -2293,10 +2611,12 @@ test('provider explicit brain interpreter loads the interaction template and val
     interactionId: 'interaction-arbitrary-proposal', inputRevision: 1, sourceRef: 'ui:new-task',
     rawInput: '帮我整理启动步骤', clarifications: [], taskCandidates: [],
   };
-  await assert.rejects(
-    () => arbitraryProposal.interpret(malformedInput),
-    /does not match the structured proposal contract/,
-  );
+  const malformedResult = await arbitraryProposal.interpret(malformedInput);
+  assert.equal(malformedResult.kind, 'partial');
+  if (malformedResult.kind !== 'partial') throw new Error('invalid proposal must not become an intake decision');
+  assert.equal(malformedResult.failedAttempt, 3);
+  assert.equal(malformedResult.recoverable, true);
+  assert.match(malformedResult.errors[0]?.path ?? '', /explicit-turn-end.decision.proposal.revision/);
   assert.deepEqual(malformedLifecycle, ['settle', 'close']);
 
   // Driver.submit reaches start, not port.submit. An unaccepted request has
@@ -2377,15 +2697,13 @@ test('provider explicit brain interpreter loads the interaction template and val
     port: new RecordedParentPort({
       binding,
       stepDelayMs: 0,
-      replay: [
-        {
-          kind: 'output',
-          state: 'output',
-          summary: JSON.stringify({
+      legacyTurn: true,
+      replay: [],
+      respond: invalidEndResponse({
             kind: 'requirement',
             normalizedInput: '检查发布状态',
             knownFacts: [],
-            taskFlowKind: 'unknown',
+            taskFlow: { kind: 'unknown', definitionVersion: 1 },
             proposal: {
               revision: 1,
               intent: 'create',
@@ -2398,22 +2716,24 @@ test('provider explicit brain interpreter loads the interaction template and val
             },
             decisionRefs: [],
           }),
-        },
-        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
-      ],
     }),
   };
-  await assert.rejects(
-    () => createProviderExplicitBrainInterpreter(invalidTaskFlowOptions).interpret({
+  const invalidTaskFlow = await createProviderExplicitBrainInterpreter({ ...invalidTaskFlowOptions,
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
+      provider: entries[0].provider!, binding, port: invalidTaskFlowOptions.port }),
+  }).interpret({
       interactionId: 'interaction-invalid-task-flow',
       inputRevision: 1,
       sourceRef: 'ui:new-task',
       rawInput: '检查发布状态',
       clarifications: [],
       taskCandidates: [],
-    }),
-    /taskFlowKind.*one-shot.*inspection.*long-running/,
-  );
+    });
+  assert.equal(invalidTaskFlow.kind, 'partial');
+  if (invalidTaskFlow.kind !== 'partial') throw new Error('unknown task flow must not become an intake decision');
+  assert.equal(invalidTaskFlow.failedAttempt, 3);
+  assert.equal(invalidTaskFlow.recoverable, true);
+  assert.match(invalidTaskFlow.errors[0]?.path ?? '', /task.*flow.*kind/i);
 });
 
 // Failure basis: an interpreter built without supervisor lease authority used to
@@ -2788,6 +3108,9 @@ test('provider explicit brain recovers a drifted original input on the public HT
     const decisions: string[] = [];
     const port = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [], respond: async (wire) => {
       wires.push(wire);
+      if (hasExplicitEndFunctionOutput(wire)) {
+        return [{ type: 'response.output_text.done', item_id: 'drain', text: 'transport drained after explicit turn end' }];
+      }
       const text = decisions.shift();
       if (text === undefined) throw new Error('unexpected Provider request');
       return [{ type: 'response.output_text.done', item_id: 'final', text }];
@@ -2997,16 +3320,21 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
     const port = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [],
       stream: async function* () {
         providerRequests += 1;
-        if (providerRequests > 1) {
-          // The refused input must never get this far; keeping an answer here
-          // makes an accidental second dispatch observable instead of silent.
-          yield { type: 'response.output_text.done', item_id: 'text-refused', text: decision('同时到达的第二个输入', '第二个输入') };
+        if (providerRequests === 2) {
+          yield* explicitDecisionEndFrames([
+            { type: 'response.output_text.done', item_id: 'text-live', text: firstAnswer },
+          ], { action: '整理第一个请求', result: '第一个请求已整理' });
           return;
         }
+        assert.equal(providerRequests, 1, 'only Skill selection and end submission may dispatch');
         yield { type: 'response.output_text.delta', item_id: 'text-live', delta: '{"kind":"requirement",' };
         firstDeltaFlushed();
         await firstMayFinish;
         yield { type: 'response.output_text.done', item_id: 'text-live', text: firstAnswer };
+        yield { type: 'response.output_item.done', output_index: 1, item: {
+          type: 'function_call', call_id: 'overlap-select-skills', name: 'interaction_select_skills',
+          arguments: JSON.stringify({ skillIds: ['task-intake'] }),
+        } };
       } });
     let stops = 0;
     const stop = port.requestStop.bind(port);
@@ -3018,6 +3346,10 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
       helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
       binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
       lease, port,
+      prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+        provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+          model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef },
+      }),
     });
 
     // The first interpret is a real call that stays open mid-answer.
@@ -3289,7 +3621,7 @@ test('provider explicit brain interpreter holds an interrupted turn that dispatc
     });
     const reasoningInterpreter = createProviderExplicitBrainInterpreter({ ...interpreterOptions,
       organId: reasoningScope.organId, interactionScopeId: reasoningScope.interactionScopeId,
-      port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+      ...ownedRecordedPort(binding, new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
         { kind: 'output', state: 'output', summary: JSON.stringify({
           kind: 'requirement', normalizedInput: '崩溃后仍可服务', knownFacts: [],
           proposal: { revision: 1, intent: 'create', title: '崩溃后仍可服务', objective: '崩溃后仍可服务',
@@ -3297,7 +3629,7 @@ test('provider explicit brain interpreter holds an interrupted turn that dispatc
           decisionRefs: [],
         }) },
         { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
-      ] }) });
+      ] })) });
     const served = await reasoningInterpreter.interpret({
       interactionId: 'interaction-side-effect-reasoning-next', inputRevision: 1,
       sourceRef: 'ui:side-effect-reasoning-next', rawInput: '崩溃后仍可服务',
@@ -3444,7 +3776,7 @@ test('provider explicit brain interpreter closes the dead continued epoch of a r
     };
     const served = await createProviderExplicitBrainInterpreter({ ...interpreterOptions,
       organId: scope.organId, interactionScopeId: scope.interactionScopeId, lease,
-      port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+      ...ownedRecordedPort(binding, new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
         { kind: 'output', state: 'output', summary: JSON.stringify({
           kind: 'requirement', normalizedInput: 'reconcile 之后的新输入', knownFacts: [],
           proposal: { revision: 1, intent: 'create', title: 'reconcile 之后的新输入', objective: 'reconcile 之后的新输入',
@@ -3452,7 +3784,7 @@ test('provider explicit brain interpreter closes the dead continued epoch of a r
           decisionRefs: [],
         }) },
         { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
-      ] }) }).interpret({
+      ] })) }).interpret({
         interactionId: 'interaction-reconciled-dead-epoch-next', inputRevision: 1,
         sourceRef: 'ui:reconciled-dead-epoch-next', rawInput: 'reconcile 之后的新输入',
         clarifications: [], taskCandidates: [],
@@ -3698,7 +4030,8 @@ test('provider explicit brain interpreter never closes the epoch a concurrent re
     // The recovered epoch still owns its raw history and finishes normally.
     releaseRecovery();
     const recoveryResult = await recoveryOutcome;
-    assert.equal(recoveryResult.ok, true, 'the recovered epoch can still append its facts and finish');
+    assert.equal(recoveryResult.ok, true, `the recovered epoch can still append its facts and finish: ${
+      recoveryResult.ok ? '' : String(recoveryResult.error)}`);
     if (!recoveryResult.ok) return;
     assert.equal(recoveryResult.value.kind, 'answer');
     if (recoveryResult.value.kind !== 'answer') return;
@@ -3775,7 +4108,7 @@ test('provider explicit brain interpreter discharges a turn whose committed owne
     };
     const served = await createProviderExplicitBrainInterpreter({ ...interpreterOptions,
       organId: scope.organId, interactionScopeId: scope.interactionScopeId, lease,
-      port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
+      ...ownedRecordedPort(binding, new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [
         { kind: 'output', state: 'output', summary: JSON.stringify({
           kind: 'requirement', normalizedInput: '两代之后的新输入', knownFacts: [],
           proposal: { revision: 1, intent: 'create', title: '两代之后的新输入', objective: '两代之后的新输入',
@@ -3783,7 +4116,7 @@ test('provider explicit brain interpreter discharges a turn whose committed owne
           decisionRefs: [],
         }) },
         { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
-      ] }) }).interpret({
+      ] })) }).interpret({
         interactionId: 'interaction-stranded-generation-next', inputRevision: 1,
         sourceRef: 'ui:stranded-generation-next', rawInput: '两代之后的新输入',
         clarifications: [], taskCandidates: [],
@@ -4096,6 +4429,9 @@ test('explicit interpreter advertises no helper tools and a stray helper call fa
   const interpreter = createProviderExplicitBrainInterpreter({ ...dependencies, port: parent, binding,
     templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
     helperFactory: async () => { factoryCalls += 1; throw new Error('the explicit interpreter must not dispatch helpers'); },
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port: parent,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
   });
   try {
     const result = await interpreter.interpret({ interactionId: 'loop', inputRevision: 1, sourceRef: 'test:loop', rawInput: 'parent-private', clarifications: [], taskCandidates: [] });
@@ -4313,7 +4649,9 @@ test('provider explicit brain interpreter keeps resource close independent of se
   const failParent = new JsonlInteractionParentTurnJournal(failJournal);
   const failHelper = new JsonlInteractionHelperJournal(failJournal);
   const failPort = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [
-    { kind: 'output', state: 'output', summary: 'this is not a json decision' },
+    { kind: 'output', state: 'output', summary: JSON.stringify({
+      kind: 'answer', normalizedInput: 'answer this', knownFacts: [], answer: '', decisionRefs: [],
+    }) },
     { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
   ] });
   const failReceipts: ProviderCloseResult[] = [];
@@ -4324,10 +4662,12 @@ test('provider explicit brain interpreter keeps resource close independent of se
     checkpointJournal: failHelper, clock: { now: () => '2026-10-16T00:00:00.000Z' }, templateRoot, port: failPort,
     prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', provider: ownedProvider, binding, port: failPort }),
   });
-  await assert.rejects(
-    () => failInterpreter.interpret({ interactionId: 'parent-close-fail', inputRevision: 1, sourceRef: 'ui:new-task', rawInput: 'answer this', clarifications: [], taskCandidates: [] }),
-    /invalid JSON/,
-  );
+  const invalidEnd = await failInterpreter.interpret({ interactionId: 'parent-close-fail', inputRevision: 1,
+    sourceRef: 'ui:new-task', rawInput: 'answer this', clarifications: [], taskCandidates: [] });
+  assert.equal(invalidEnd.kind, 'partial');
+  if (invalidEnd.kind !== 'partial') throw new Error('invalid C07 answer must remain incomplete');
+  assert.equal(invalidEnd.failedAttempt, 3);
+  assert.deepEqual(invalidEnd.errors.map(error => error.path), ['explicit-turn-end.decision.answer must be a non-empty string']);
   assert.equal(failReceipts.length, 1);
   const failTurn = (await failParent.readScopeOpenedTurns(scope))[0]!.fact.turn;
   const failSnapshot = await failParent.readTurnSnapshot(failTurn);
@@ -4381,10 +4721,8 @@ test('provider explicit brain interpreter keeps resource close independent of se
   assert.equal(await rejectHelper.readSemanticCheckpointExact(rejectTurn), null);
 });
 
-// Real recorded RCC intake output (business output only) from the
-// provider-candidate-live-entry-r2 scene. The model nested the decision under a
-// `decision` object and left no top-level `kind`. The strict intake parser must
-// keep rejecting it with no `decision.kind` fallback.
+// Recorded pre-C07 output: the inner decision lacks the required business
+// fields. A legal decision envelope is tested separately; this one must fail.
 const RECORDED_NESTED_DECISION_OUTPUT = `{
   "interactionId": "interaction-1",
   "inputRevision": 1,
@@ -4437,7 +4775,7 @@ const RECORDED_NESTED_DECISION_OUTPUT = `{
   }
 }`;
 
-test('provider explicit brain interpreter strictly rejects a recorded nested-decision intake output', async () => {
+test('provider explicit brain interpreter strictly rejects a contract-invalid recorded legacy nested decision', async () => {
   const binding: ProviderBinding = {
     bindingId: 'binding-explicit-recorded-nested',
     providerId: 'provider-explicit-recorded-nested',
@@ -4467,20 +4805,25 @@ test('provider explicit brain interpreter strictly rejects a recorded nested-dec
   options.port.close = async (bind) => { lifecycle.push('close'); return close(bind); };
   const interpreter = createProviderExplicitBrainInterpreter({
     ...options,
+    turnHelperJournal: options.helperJournal,
     prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http',
       provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
         model: binding.modelRef, route: 'recorded-nested-fixture', baseUrl: binding.endpointRef },
       binding, port: options.port }),
   });
   try {
+  const request = {
+    interactionId: 'interaction-recorded-nested', inputRevision: 1, sourceRef: 'ui:entry',
+    rawInput: '请完成一次 HumanAgent UX 文档交接任务', clarifications: [], taskCandidates: [],
+  };
+  const turn = await seedClosedLegacyOutput(options, binding, request, [RECORDED_NESTED_DECISION_OUTPUT]);
   await assert.rejects(
-    () => interpreter.interpret({
-      interactionId: 'interaction-recorded-nested', inputRevision: 1, sourceRef: 'ui:entry',
-      rawInput: '请完成一次 HumanAgent UX 文档交接任务', clarifications: [], taskCandidates: [],
-    }),
+    () => interpreter.interpret(request),
     /interaction agent decision does not match the explicit intake contract/,
   );
-  assert.deepEqual(lifecycle, ['settle', 'close']);
+  assert.deepEqual(lifecycle, [], 'cold legacy validation must not contact or close the Provider');
+  assert.equal(await options.checkpointJournal.readSemanticCheckpointExact(turn), null);
+  assert.ok((await options.parentJournal.readTurnSnapshot(turn)).parseFailure);
   } finally {
     await rm(parentFixtureRoot, { recursive: true, force: true });
     await assert.rejects(() => realpath(parentFixtureRoot), /ENOENT/);
@@ -4601,6 +4944,7 @@ test('provider explicit brain interpreter preserves a settlement publication fai
   port.close = async (bind) => { closes += 1; return close(bind); };
   const publicationError = new Error('settlement publication rejected');
   let publicationCalls = 0;
+  let publicationAvailable = false;
   const interpreter = createProviderExplicitBrainInterpreter({
     ...parentDependencies(), binding, parentJournal, helperJournal, checkpointJournal: helperJournal,
     turnHelperJournal: helperJournal,
@@ -4611,7 +4955,7 @@ test('provider explicit brain interpreter preserves a settlement publication fai
       binding, port }),
     publishProviderSettlement: async () => {
       publicationCalls += 1;
-      throw publicationError;
+      if (!publicationAvailable) throw publicationError;
     },
   });
   const request = {
@@ -4628,16 +4972,24 @@ test('provider explicit brain interpreter preserves a settlement publication fai
   assert.equal(starts, 1);
   assert.equal(closes, 1);
   assert.ok(failed.resourceClose, 'the original physical close owner still records its close');
-  assert.deepEqual(failed.providerSettlements, []);
+  assert.equal(failed.providerSettlements.length, 1, 'C07 persists the real settlement before calling the external publisher');
+  assert.deepEqual(failed.providerSettlements[0]!.fact.request, failed.requests.at(-1)!.fact.request);
   assert.equal(await helperJournal.readSemanticCheckpointExact(turn), null,
     'publication failure must not close the semantic answer');
 
-  await assert.rejects(() => interpreter.interpret(request), /provider settlement is missing for the current terminal request/);
-  assert.equal(publicationCalls, 1, 'the retained/cold recovery must not retry the failed callback');
+  await assert.rejects(() => interpreter.interpret(request), (error: unknown) => error === publicationError);
+  assert.equal(await helperJournal.readSemanticCheckpointExact(turn), null, 'a persistent publication failure cannot complete the answer');
+  publicationAvailable = true;
+  const recovered = await interpreter.interpret(request);
+  assert.equal(recovered.kind, 'answer');
+  if (recovered.kind !== 'answer') throw new Error('expected durably settled answer');
+  assert.equal(recovered.answer, 'not completed');
+  assert.equal(publicationCalls, 3, 'each explicit retry reuses the real receipt until the publisher recovers');
   assert.equal(starts, 1, 'the recovery must not replay the Provider request');
   assert.equal(closes, 1, 'the recovery must not close the original owner again');
   assert.deepEqual(await parentJournal.readTurnSnapshot(turn), failed,
-    'the failed recovery must not append or rewrite the original turn');
+    'recovery must not append or rewrite the original turn facts');
+  assert.ok(await helperJournal.readSemanticCheckpointExact(turn), 'the exact retry closes the original semantic turn');
 });
 
 // Failure basis: the App callback loses the physical terminal request and cold
@@ -5018,12 +5370,17 @@ test('provider explicit brain interpreter fresh OS default DI recovers preclose 
     assert.equal(snapshot.resourceClose?.fact.result.state, 'closed');
     // The epoch-2 Provider request must anchor to the settled parent leaf, so
     // the abandoned req-2 no longer leaves two settled terminal requests.
-    const epochTwoRequest = snapshot.requests
+    const epochTwoRequests = snapshot.requests
       .map((entry) => entry.fact.request)
-      .filter((request) => request.requestId !== 'req-1-continue' && request.requestId !== 'req-2')
-      .at(-1);
+      .filter((request, index, all) => request.requestId !== 'req-1-continue' && request.requestId !== 'req-2'
+        && all.findIndex(candidate => candidate.requestId === request.requestId) === index);
+    const epochTwoRequest = epochTwoRequests[0];
     assert.equal(epochTwoRequest?.turnId, 'provider-continue');
     assert.equal(epochTwoRequest?.parentRequestId, 'req-1-continue');
+    for (let index = 1; index < epochTwoRequests.length; index += 1) {
+      assert.equal(epochTwoRequests[index]!.parentRequestId, epochTwoRequests[index - 1]!.requestId,
+        'each Skill continuation anchors to its actual previous request');
+    }
     assert.equal(prepares, 1);
     assert.equal(providerRequests, 1);
     assert.equal(physicalCloses, 1);
@@ -5606,6 +5963,93 @@ test('provider explicit brain interpreter resumes a failed closed epoch on the s
   }
 });
 
+// Real interaction-3 failed during dispatch, then the recovery end-attempt
+// gate closed an empty epoch. Keep both failures recoverable on one input.
+// Impact: a permanent matching interaction. Cost: isolated lease and JSONL.
+for (const recoveryStage of ['dispatch-only', 'empty-recovery'] as const) {
+test(`provider explicit brain interpreter resumes dispatch failure and an empty closed recovery epoch: ${recoveryStage}`, async () => {
+  const root = join(parentFixtureRoot, `dispatch-recovery-${randomUUID()}`);
+  const journal = new JsonlOrganJournal(join(root, 'journal.jsonl'));
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const rawEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const deps = {
+    organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test', journal,
+    parentJournal: new JsonlInteractionParentTurnJournal(journal), helperJournal, checkpointJournal: helperJournal,
+    rawEvidence, rawContent: providerRawContentReader(rawEvidence),
+    clock: { now: () => new Date().toISOString() },
+    helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+  };
+  const binding: ProviderBinding = {
+    bindingId: 'dispatch-recovery', providerId: 'dispatch-recovery', protocol: 'responses',
+    endpointRef: 'http://recorded.test', modelRef: 'recorded',
+    configDigest: 'sha256:dispatch-recovery', capabilityDigest: 'sha256:dispatch-recovery',
+  };
+  let lease: Awaited<ReturnType<typeof acquireDaemonLease>> | undefined;
+  let preparations = 0;
+  let modelResults = 0;
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: process.cwd() });
+    await ensureControlLayout(paths);
+    lease = await acquireDaemonLease(paths);
+    const request = { interactionId: 'dispatch-recovery', inputRevision: 1, sourceRef: 'ui:dispatch-recovery',
+      rawInput: '2 + 2?', clarifications: [], taskCandidates: [] };
+    const interpreter = createProviderExplicitBrainInterpreter({ ...deps, turnHelperJournal: deps.helperJournal,
+      binding, lease, templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+      prepareAgentProvider: async () => {
+        preparations += 1;
+        const port = new RecordedParentPort({ binding, evidence: rawEvidence, stepDelayMs: 0, replay: [], respond: async () => {
+          modelResults += 1;
+          return [{ type: 'response.output_text.done', item_id: 'answer', text: JSON.stringify({
+            kind: 'answer', normalizedInput: request.rawInput, knownFacts: [], answer: '4', decisionRefs: [],
+          }) }];
+        } });
+        if (preparations === 1) port.start = async () => { throw new Error('recorded dispatch failure'); };
+        return { roleId: 'interaction', source: 'http', binding, port,
+          provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+            model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } } as any;
+      },
+    });
+    await assert.rejects(() => interpreter.interpret(request), /recorded dispatch failure/);
+    const opened = await deps.parentJournal.readScopeOpenedTurns(deps);
+    assert.equal(opened.length, 1);
+    const fact = opened[0]!.fact;
+    const failed = await deps.parentJournal.readTurnSnapshot(fact.turn);
+    assert.deepEqual(failed.requests.map(entry => entry.fact.phase), ['dispatching', 'failed']);
+    assert.equal(failed.acceptedFacts.length, 0);
+    assert.equal(failed.resourceClose?.fact.execution.executionEpoch, 1);
+    // Seed the exact second closed epoch observed in the original Journal,
+    // using Runtime writes, never rewriting any durable source.
+    if (recoveryStage === 'empty-recovery') {
+    const executionOwner = await lease.withCurrentLeaseOwner(async owner => owner);
+    const owner = createInteractionParentTurnRawOwner({ ...fact, providerBinding: binding, executionOwner,
+      journal: deps.parentJournal, rawContent: deps.rawContent });
+    await owner.reconcileTurnOwner({ previousOwner: executionOwner, replacementOwner: executionOwner,
+      isCommittedReplacement: false, reconciledAt: deps.clock.now() });
+    const emptyOwner = createInteractionParentTurnRawOwner({ ...fact, providerBinding: binding, executionOwner,
+      execution: { ...fact.execution, executionEpoch: 2 }, journal: deps.parentJournal, rawContent: deps.rawContent });
+    await emptyOwner.recordProviderClose({ providerBinding: binding, result: failed.resourceClose!.fact.result,
+      closedAt: deps.clock.now() });
+    }
+    const before = await deps.journal.replay();
+    const result = await interpreter.interpret(request);
+    assert.equal(result.kind, 'answer');
+    if (result.kind !== 'answer') throw new Error('expected recovered model answer');
+    assert.equal(result.answer, '4');
+    assert.equal(modelResults, 1);
+    const recovered = await deps.parentJournal.readTurnSnapshot(fact.turn);
+    const expectedEpoch = recoveryStage === 'empty-recovery' ? 3 : 2;
+    assert.equal(recovered.ownerReconciliations.at(-1)?.fact.effectiveExecutionEpoch, expectedEpoch);
+    assert.equal(recovered.resourceClose?.fact.execution.executionEpoch, expectedEpoch);
+    assert.ok(await deps.helperJournal.readSemanticCheckpointExact(fact.turn));
+    assert.equal((await deps.parentJournal.readScopeOpenedTurns(deps)).length, 1);
+    assert.deepEqual((await deps.journal.replay()).slice(0, before.length), before);
+  } finally {
+    await lease?.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+}
+
 // Failure basis: real A0 interaction-115 / explicit-interpret-160f91f5-b333-482a-9567-45c84b41cbd9
 // committed one settled terminal request whose response carried TWO complete
 // assistant-text items (an answer item and a requirement item). The raw fold is
@@ -5653,7 +6097,7 @@ test('provider explicit brain interpreter closes an unparseable cold terminal ou
   // Two complete assistant-text items in the same response, exactly like the
   // production batch: a short answer decision and a long requirement decision.
   const answerItem = JSON.stringify({
-    kind: 'answer', normalizedInput: request.rawInput, knownFacts: [], answer: '8', decisionRefs: [],
+    kind: 'answer', normalizedInput: request.rawInput, knownFacts: [], answer: '', decisionRefs: [],
   });
   const requirementItem = JSON.stringify({
     kind: 'requirement', normalizedInput: request.rawInput, knownFacts: [],
@@ -5742,14 +6186,9 @@ test('provider explicit brain interpreter closes an unparseable cold terminal ou
   assert.equal(providerStarts, 2, 'only the two recoverable turns started a Provider');
 });
 
-// Failure basis: the same production shape, but the two complete assistant-text
-// items arrive inside one live Provider response instead of being re-read from a
-// closed turn. The fresh batch is rejected and durably closed, then the same
-// committed input is re-answered exactly once inside the same public call, so
-// the scope stays usable and the first parse-failure fact is not duplicated.
-// Cost: one real UI consumer run with a two-item Provider response and one
-// follow-up input.
-test('provider explicit brain interpreter closes an unparseable live epoch and keeps the scope usable', async () => {
+// Fresh C07 wire: two plain-text items cannot close the turn. A subsequent end
+// call completes the same public request, and the next input remains usable.
+test('provider explicit brain interpreter continues a text-only live response until C07 end and keeps the scope usable', async () => {
   const root = join(parentFixtureRoot, `parse-failure-live-${randomUUID()}`);
   await mkdir(root, { recursive: true });
   const binding: ProviderBinding = {
@@ -5762,7 +6201,7 @@ test('provider explicit brain interpreter closes an unparseable live epoch and k
   // The exact production batch: two complete assistant-text items, same request.
   const requirementText = JSON.stringify({
     kind: 'requirement', normalizedInput: rawInput, knownFacts: [], decisionRefs: [],
-    intent: 'create', proposal: { revision: 1, intent: 'create', title: '标题', objective: '目标' },
+    intent: 'create', proposal: { revision: 1, intent: 'create', title: '标题', objective: '' },
   });
   const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
   let providerRequests = 0;
@@ -5802,28 +6241,25 @@ test('provider explicit brain interpreter closes an unparseable live epoch and k
     const helpers = new JsonlInteractionHelperJournal(new JsonlOrganJournal(journalFile));
     const scope = { organId: id('organ', 'explicit-test'), interactionScopeId: 'runtime:explicit-test' };
 
-    // The fresh two-item batch is rejected and durably closed, then the same
-    // committed input is re-answered exactly once inside this one service call.
+    // Text is kept as raw context; the end call alone publishes the answer.
     const answered = await runtime.service.interpretExplicitInput({ interactionId });
     assert.equal(answered.state, 'answered');
     assert.equal(answered.reply, '8');
-    assert.equal(providerRequests, 2, 'one rejected batch plus one replacement generation');
+    assert.equal(providerRequests, 2, 'text-only response plus typed end on the same logical turn');
 
     const opened = await parent.readScopeOpenedTurns(scope);
-    assert.equal(opened.length, 2, 'the rejected batch and the replacement each open a physical turn');
+    assert.equal(opened.length, 1, 'C07 text continuation keeps the original turn');
     const failures = await parent.readScopeParseFailures(scope);
-    assert.equal(failures.length, 1, 'the rejected batch is closed by exactly one parse-failure fact');
-    const turn = failures[0]!.fact.turn;
+    assert.equal(failures.length, 0, 'unaccepted text is not a legacy terminal parse failure');
+    const turn = opened[0]!.fact.turn;
     const closed = await parent.readTurnSnapshot(turn);
     // The real close is recorded, and the turn is closed by its own honest fact.
     assert.equal(closed.resourceClose?.fact.result.state, 'closed');
     assert.equal(closed.abandonment, null);
-    assert.equal(closed.parseFailure?.fact.terminalRequestId,
-      closed.requests.at(-1)!.fact.request.requestId);
-    assert.equal(await helpers.readSemanticCheckpointExact(turn), null);
-    const replacementTurn = opened.find(({ fact }) => fact.turn.turnId !== turn.turnId)!.fact.turn;
-    assert.ok(await helpers.readSemanticCheckpointExact(replacementTurn),
-      'the replacement generation commits exactly one semantic checkpoint');
+    assert.equal(closed.parseFailure, null);
+    assert.equal(closed.turnInput!.fact.endProtocol, 'explicit-end-v1');
+    assert.equal(closed.endControls?.filter(entry => entry.fact.kind === 'submission' && entry.fact.result.kind === 'accepted').length, 1);
+    assert.ok(await helpers.readSemanticCheckpointExact(turn), 'only the typed end closes the semantic turn');
 
     // A brand new input on the same scope is interpreted normally afterwards.
     const otherId = await runtime.service.receiveExplicitInput({ sourceRef: 'ui:parse-live-next', rawInput, channel: 'business' });
@@ -5833,8 +6269,8 @@ test('provider explicit brain interpreter closes an unparseable live epoch and k
     assert.equal(providerRequests, 3);
     // The durable turn that failed stays closed: one fact, no second write.
     const stillClosed = await parent.readTurnSnapshot(turn);
-    assert.equal(stillClosed.parseFailure !== null, true);
-    assert.equal((await parent.readScopeParseFailures(scope)).length, 1);
+    assert.deepEqual(stillClosed, closed, 'the later input does not rewrite the original turn');
+    assert.equal((await parent.readScopeParseFailures(scope)).length, 0);
   } finally {
     await runtime?.close();
     await lease?.release();
@@ -6821,18 +7257,10 @@ test('public explicit interpret keeps an unclosed terminal-output failure as rec
   }
 });
 
-// Failure basis: real production interaction-118 / explicit-interpret-eb888d16
-// committed one settled terminal request whose response carried TWO complete
-// assistant-text items: the real answer decision and a second, model-invented
-// requirement that restated the request instructions. The raw fold is faithful
-// and concatenates both items, so JSON.parse failed with "Unexpected
-// non-whitespace character after JSON at position 200", which names neither the
-// cause nor the items. Impact: the same simple input failed about 40% of the
-// time and nothing said why. Cost: one seeded terminal turn with the exact
-// two-item shape. This test pins the deterministic semantics: two complete
-// decisions are never concatenated, never silently truncated and never reduced
-// to one of the two by a guess.
-test('provider explicit brain interpreter names two complete decisions instead of concatenating them', async () => {
+// Legacy positive: two complete valid stored decisions follow the existing B3
+// priority. The reader must recover the exact requirement, retain both raw
+// items, and make no Provider request. Invalid history is tested separately.
+test('provider explicit brain interpreter recovers two valid legacy decisions by the existing intake priority', async () => {
   const deps = parentDependencies();
   const binding: ProviderBinding = {
     bindingId: 'binding-two-decisions', providerId: 'provider-two-decisions', protocol: 'responses',
@@ -6875,7 +7303,8 @@ test('provider explicit brain interpreter names two complete decisions instead o
     kind: 'requirement',
     normalizedInput: '继续执行尚未完成的任务；需要工具时直接调用工具；如果任务已完成，请给出完成总结。',
     knownFacts: [], decisionRefs: ['ui-task-implicit-draft-125'],
-    intent: 'create', proposal: { revision: 1, intent: 'create', title: '继续执行尚未完成的任务', objective: '继续执行尚未完成的任务' },
+    proposal: { revision: 1, intent: 'create', title: '继续执行尚未完成的任务', objective: '继续执行尚未完成的任务',
+      deliverable: '原存量任务交付', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
   });
   for (const [index, text] of [answerItem, requirementItem].entries()) {
     await owner.acceptRawFact({
@@ -6917,29 +7346,19 @@ test('provider explicit brain interpreter names two complete decisions instead o
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
   });
 
-  // RED on the base: the same JSON position error the production entry raised,
-  // produced by concatenating two well-formed decisions into one string.
-  // GREEN: the terminal output is described by what it really held.
-  await assert.rejects(
-    () => interpreter.interpret(request),
-    (error: unknown) => {
-      if (!(error instanceof Error)) throw error;
-      const message = error.message;
-      assert.ok(message.includes('interaction agent returned invalid JSON'));
-      assert.equal(message.includes('Unexpected non-whitespace character'), false,
-        'the failure must name the cause, not a JSON parse offset');
-      assert.ok(message.includes('2 top-level JSON decision objects'),
-        `the failure must count the decisions it refused to merge: ${message}`);
-      assert.equal(message.includes('7 加 7 等于 14。'), false, 'no decision text is guessed into the error');
-      return true;
-    },
-  );
-  // No decision was invented and none of the two was taken: the honest closure
-  // is the only durable fact, so the scope is never bricked.
-  assert.equal(await deps.helperJournal.readSemanticCheckpointExact(turn), null,
-    'an ambiguous terminal output commits no semantic claim');
+  const before = await deps.journal.replay();
+  const restored = await interpreter.interpret(request);
+  assert.equal(restored.kind, 'requirement', 'legacy priority keeps a valid requirement ahead of an answer');
+  if (restored.kind !== 'requirement') throw new Error('expected the stored requirement');
+  assert.deepEqual(restored.decisionRefs, ['ui-task-implicit-draft-125']);
+  assert.deepEqual(restored.structuredProposal, JSON.parse(requirementItem).proposal);
+  assert.equal(restored.normalizedInput, ['继续执行尚未完成的任务', '目标：继续执行尚未完成的任务',
+    '交付物：原存量任务交付', '需求详情：', JSON.parse(requirementItem).normalizedInput].join('\n'));
+  assert.ok(await deps.helperJournal.readSemanticCheckpointExact(turn));
   const closed = await deps.parentJournal.readTurnSnapshot(turn);
-  assert.equal(closed.parseFailure?.fact.terminalRequestId, terminalRequest.requestId);
+  assert.equal(closed.turnInput!.fact.endProtocol, undefined, 'only persisted pre-C07 history uses the text parser');
+  assert.equal(closed.parseFailure, null);
+  assert.deepEqual((await deps.journal.replay()).slice(0, before.length), before, 'old raw records remain unchanged');
   assert.equal(providerStarts, 0, 'the seeded terminal output is read, not re-requested');
   const retried = await interpreter.interpret(request);
   assert.equal(retried.kind, 'answer');
@@ -6948,12 +7367,10 @@ test('provider explicit brain interpreter names two complete decisions instead o
   assert.equal(providerStarts, 1);
 });
 
-// Failure basis: a fresh locally executed batch holds two complete decision
-// objects, so the whole batch is rejected. Without an orchestrated repair the
-// one public intake request fails even though one more generation could answer
-// the same committed input correctly. Impact: a valid public intake request
-// fails before confirmation/FIFO. Cost: two recorded generations on one input.
-test('provider explicit brain interpreter re-answers a fresh two-decision batch once with a repair instruction', async () => {
+// C07 migration of the old text re-answer case: two text decisions are raw
+// context, never a terminal decision. Only the following end call can publish.
+// Failure impact: invented text becomes a task or pollutes its checkpoint.
+test('provider explicit brain interpreter ignores two plain-text decisions and accepts only the following C07 end in the same turn', async () => {
   const deps = parentDependencies();
   const binding: ProviderBinding = {
     bindingId: 'binding-reanswer-ok', providerId: 'provider-reanswer-ok', protocol: 'responses',
@@ -6994,6 +7411,8 @@ test('provider explicit brain interpreter re-answers a fresh two-decision batch 
         { type: 'response.output_text.done', item_id: 'item-invented', text: invented },
       ];
     }
+    assert.deepEqual(await deps.checkpointJournal.readScopeSemanticCheckpoints(scope), [],
+      'neither plain-text decision can close a semantic checkpoint before the end call');
     return [{ type: 'response.output_text.done', item_id: 'final', text: replacement }];
   } });
   const interpreter = createProviderExplicitBrainInterpreter({
@@ -7009,28 +7428,27 @@ test('provider explicit brain interpreter re-answers a fresh two-decision batch 
   assert.equal(result.kind, 'requirement');
   if (result.kind !== 'requirement') throw new Error('expected a requirement');
   assert.deepEqual(result.decisionRefs, ['decision:replacement'],
-    'the returned interpretation comes from the replacement generation');
+    'the returned interpretation comes from the typed end, never either plain-text item');
 
-  assert.equal(requests.length, 2, 'one rejected batch plus one replacement generation');
+  assert.equal(requests.length, 2, 'one text-only response plus the typed end continuation');
   const repairInstruction = 'The preceding generation was rejected because it emitted multiple intake decisions.';
   assert.equal(requests[0]!.instructions.includes(repairInstruction), false,
     'the first attempt carries no repair instruction');
-  assert.equal(requests[1]!.instructions.includes(repairInstruction), true,
-    'the second attempt carries the repair instruction');
-  assert.deepEqual(requests[1]!.input, requests[0]!.input,
-    'the committed business input is unchanged across both generations');
+  assert.equal(requests[1]!.instructions.includes(repairInstruction), false,
+    'C07 continues the original turn rather than opening a legacy re-answer');
   assert.equal(JSON.stringify(requests[1]!.input).includes(rawInput), true);
 
   const opened = await deps.parentJournal.readScopeOpenedTurns(scope);
-  assert.equal(opened.length, 2, 'the rejected batch and the replacement each open a physical turn');
+  assert.equal(opened.length, 1, 'plain text never starts a replacement turn');
   const failures = await deps.parentJournal.readScopeParseFailures(scope);
-  assert.equal(failures.length, 1, 'the rejected batch is closed by exactly one parse-failure fact');
-  const rejectedTurn = failures[0]!.fact.turn;
-  assert.equal(await deps.checkpointJournal.readSemanticCheckpointExact(rejectedTurn), null,
-    'the rejected batch commits no semantic claim');
-  const replacementTurn = opened.find(({ fact }) => fact.turn.turnId !== rejectedTurn.turnId)!.fact.turn;
+  assert.equal(failures.length, 0, 'C07 never parses text-only decisions as terminal output');
+  const replacementTurn = opened[0]!.fact.turn;
+  const snapshot = await deps.parentJournal.readTurnSnapshot(replacementTurn);
+  assert.equal(snapshot.turnInput!.fact.endProtocol, 'explicit-end-v1');
+  assert.equal(snapshot.endControls?.filter(entry => entry.fact.kind === 'submission' && entry.fact.result.kind === 'accepted').length, 1,
+    'only the typed end is accepted');
   const checkpoint = await deps.checkpointJournal.readSemanticCheckpointExact(replacementTurn);
-  assert.ok(checkpoint, 'the replacement generation commits exactly one semantic checkpoint');
+  assert.ok(checkpoint, 'the accepted end commits the semantic checkpoint on the original turn');
   const checkpointText = JSON.stringify(checkpoint);
   assert.equal(checkpointText.includes('重写后的发布请求'), false, 'no rejected decision is written to a checkpoint');
   assert.equal(checkpointText.includes('继续完成上轮提出的交付'), false, 'no invented decision is written to a checkpoint');
@@ -7039,13 +7457,9 @@ test('provider explicit brain interpreter re-answers a fresh two-decision batch 
   assert.equal(checkpointText.includes('整理发布步骤'), true, 'the accepted replacement reaches the checkpoint');
 });
 
-// Failure basis: the real close receipt commits and the two-decision batch is
-// durably rejected, but the durable acknowledgement of that close is lost.
-// Impact: a valid public intake request fails before confirmation/FIFO even
-// though one more generation could answer the same committed input correctly.
-// Cost: one injected journal acknowledgement fault and two recorded
-// generations on one input.
-test('provider explicit brain interpreter re-answers a fresh two-decision batch once despite a lost journal acknowledgement', async () => {
+// C07 close-ack failure: the end is accepted and the physical close commits,
+// but its acknowledgement is lost. Retry must reuse the same turn and receipt.
+test('provider explicit brain interpreter recovers the C07 end after a lost real-close acknowledgement without replay', async () => {
   const deps = parentDependencies();
   const binding: ProviderBinding = {
     bindingId: 'binding-reanswer-ack', providerId: 'provider-reanswer-ack', protocol: 'responses',
@@ -7085,10 +7499,8 @@ test('provider explicit brain interpreter re-answers a fresh two-decision batch 
     }
     return [{ type: 'response.output_text.done', item_id: 'final', text: replacement }];
   } });
-  // A real physical close happens, but the durable acknowledgement of that
-  // close (recordProviderClose) is lost: the close fact is written durably, but
-  // the caller sees an error. This cleanup failure must not block the one
-  // replacement generation the accepted contract allows.
+  // A real physical close commits but its acknowledgement is lost. The caller
+  // sees the error; its exact retry must consume the original end and close.
   let ackLost = false;
   const flakyParentJournal: JsonlInteractionParentTurnJournal = new Proxy(deps.parentJournal, {
     get(target, prop) {
@@ -7123,38 +7535,29 @@ test('provider explicit brain interpreter re-answers a fresh two-decision batch 
         model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
   });
 
+  await assert.rejects(() => interpreter.interpret(request), /journal ack lost after real close/);
   const result = await interpreter.interpret(request);
   assert.equal(result.kind, 'requirement');
   if (result.kind !== 'requirement') throw new Error('expected a requirement');
   assert.deepEqual(result.decisionRefs, ['decision:replacement'],
-    'the returned interpretation comes from the replacement generation');
-  assert.equal(generations, 2, 'one rejected batch plus one replacement generation');
+    'recovery returns the already accepted end rather than either plain-text item');
+  assert.equal(generations, 2, 'text-only response and accepted end are not replayed after close acknowledgement loss');
 
   // The close receipt is durable even though its acknowledgement was lost; the
   // parse-failure closes the rejected turn.
   const opened = await deps.parentJournal.readScopeOpenedTurns(scope);
-  assert.equal(opened.length, 2, 'the rejected batch and the replacement each open a physical turn');
+  assert.equal(opened.length, 1, 'the retry closes the same C07 turn');
   const failures = await deps.parentJournal.readScopeParseFailures(scope);
-  assert.equal(failures.length, 1, 'the rejected batch is closed by exactly one parse-failure fact');
-  const closed = await deps.parentJournal.readTurnSnapshot(failures[0]!.fact.turn);
+  assert.equal(failures.length, 0, 'plain-text decisions never become legacy parse failures');
+  const closed = await deps.parentJournal.readTurnSnapshot(opened[0]!.fact.turn);
   assert.equal(closed.resourceClose?.fact.result.state, 'closed',
     'the real close receipt is durable despite the lost acknowledgement');
-  assert.equal(closed.parseFailure?.fact.terminalRequestId,
-    closed.requests.at(-1)!.fact.request.requestId,
-    'the parse failure references the committed terminal request');
+  assert.ok(await deps.helperJournal.readSemanticCheckpointExact(opened[0]!.fact.turn));
 });
 
-// Failure basis: a borrowed provider (no prepareAgentProvider) rejects a fresh
-// two-decision batch, but there is no owned composition and therefore no real
-// close receipt. The accepted re-answer contract ties eligibility to an owned
-// close receipt, so the interpreter must not start a replacement generation and
-// must surface the original multiple-decision parse error unchanged. This was
-// the S1 P1#1 defect: `compositionClosed` started true for a borrowed port
-// (`owned === undefined`), so the gate wrongly returned `reanswer-needed` and
-// ran a second generation. Impact: a duplicate provider request from an
-// unclosed borrowed composition. Cost: one rejected generation and no
-// replacement request.
-test('provider explicit brain interpreter does not re-answer a fresh two-decision batch on a borrowed port without an owned close receipt', async () => {
+// Legacy cold negative: neither candidate satisfies the stored intake
+// contract. A borrowed Provider must never be contacted to replace that history.
+test('provider explicit brain interpreter rejects invalid legacy decisions without replaying a borrowed provider', async () => {
   const deps = parentDependencies();
   const binding: ProviderBinding = {
     bindingId: 'binding-reanswer-borrowed', providerId: 'provider-reanswer-borrowed', protocol: 'responses',
@@ -7173,9 +7576,9 @@ test('provider explicit brain interpreter does not re-answer a fresh two-decisio
   });
   const batchOf = (firstRef: string, secondRef: string) => ([
     { type: 'response.output_text.done', item_id: 'item-first', text: JSON.stringify({
-      kind: 'requirement', normalizedInput: rawInput, knownFacts: [], decisionRefs: [firstRef], intent: 'create', proposal: proposal('就地') }) },
+      kind: 'requirement', normalizedInput: rawInput, knownFacts: 'invalid legacy facts', decisionRefs: [firstRef], intent: 'create', proposal: proposal('就地') }) },
     { type: 'response.output_text.done', item_id: 'item-second', text: JSON.stringify({
-      kind: 'requirement', normalizedInput: '另一个改写', knownFacts: [], decisionRefs: [secondRef], intent: 'create', proposal: proposal('另起') }) },
+      kind: 'requirement', normalizedInput: '另一个改写', knownFacts: 'invalid legacy facts', decisionRefs: [secondRef], intent: 'create', proposal: proposal('另起') }) },
   ]);
   let generations = 0;
   const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => {
@@ -7184,6 +7587,7 @@ test('provider explicit brain interpreter does not re-answer a fresh two-decisio
   } });
   // Borrowed wiring: `port` is supplied directly with NO prepareAgentProvider,
   // so `owned === undefined` and no owned close receipt can ever be recorded.
+  await seedClosedLegacyOutput(deps, binding, request, batchOf('decision:old-a', 'decision:old-b').map(frame => frame.text));
   const interpreter = createProviderExplicitBrainInterpreter({
     ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
     helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
@@ -7196,7 +7600,7 @@ test('provider explicit brain interpreter does not re-answer a fresh two-decisio
       && error.message.includes('interaction agent returned invalid JSON')
       && error.message.includes('2 top-level JSON decision objects'),
   );
-  assert.equal(generations, 1, 'a borrowed port with no owned close receipt must not start a replacement generation');
+  assert.equal(generations, 0, 'invalid cold history must not contact the borrowed provider');
 
   const opened = await deps.parentJournal.readScopeOpenedTurns(scope);
   assert.equal(opened.length, 1, 'only the rejected batch opens a physical turn; no replacement turn exists');
@@ -7206,12 +7610,9 @@ test('provider explicit brain interpreter does not re-answer a fresh two-decisio
     'an ambiguous borrowed batch commits no semantic checkpoint and selects no decision');
 });
 
-// Failure basis: the first generation is ambiguous and the replacement is also
-// ambiguous. The honest result is a rejection with no accepted decision; any
-// selection by equality, position or relevance would be a guess. Impact: a
-// fabricated requirement or a silently merged decision. Cost: two recorded
-// generations and no third request.
-test('provider explicit brain interpreter rejects two ambiguous generations without guessing or a third request', async () => {
+// Legacy cold negative: successive invalid terminal turns each retain their
+// own parse failure. No candidate is guessed into a semantic checkpoint.
+test('provider explicit brain interpreter rejects two invalid legacy terminal turns without guessing or replay', async () => {
   const deps = parentDependencies();
   const binding: ProviderBinding = {
     bindingId: 'binding-reanswer-bad', providerId: 'provider-reanswer-bad', protocol: 'responses',
@@ -7230,9 +7631,9 @@ test('provider explicit brain interpreter rejects two ambiguous generations with
   });
   const batchOf = (firstRef: string, secondRef: string) => ([
     { type: 'response.output_text.done', item_id: 'item-first', text: JSON.stringify({
-      kind: 'requirement', normalizedInput: rawInput, knownFacts: [], decisionRefs: [firstRef], intent: 'create', proposal: proposal('就地') }) },
+      kind: 'requirement', normalizedInput: rawInput, knownFacts: 'invalid legacy facts', decisionRefs: [firstRef], intent: 'create', proposal: proposal('就地') }) },
     { type: 'response.output_text.done', item_id: 'item-second', text: JSON.stringify({
-      kind: 'requirement', normalizedInput: '另一个改写', knownFacts: [], decisionRefs: [secondRef], intent: 'create', proposal: proposal('另起') }) },
+      kind: 'requirement', normalizedInput: '另一个改写', knownFacts: 'invalid legacy facts', decisionRefs: [secondRef], intent: 'create', proposal: proposal('另起') }) },
   ]);
   let generations = 0;
   const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => {
@@ -7248,13 +7649,13 @@ test('provider explicit brain interpreter rejects two ambiguous generations with
         model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
   });
 
-  await assert.rejects(
-    () => interpreter.interpret(request),
-    (error: unknown) => error instanceof Error
+  for (const label of ['first', 'second']) {
+    await seedClosedLegacyOutput(deps, binding, request, batchOf(`decision:${label}-a`, `decision:${label}-b`).map(frame => frame.text));
+    await assert.rejects(() => interpreter.interpret(request), (error: unknown) => error instanceof Error
       && error.message.includes('interaction agent returned invalid JSON')
-      && error.message.includes('2 top-level JSON decision objects'),
-  );
-  assert.equal(generations, 2, 'exactly two generations: one rejected batch and one rejected replacement');
+      && error.message.includes('2 top-level JSON decision objects'));
+  }
+  assert.equal(generations, 0, 'cold invalid history never opens a replacement Provider request');
 
   const opened = await deps.parentJournal.readScopeOpenedTurns(scope);
   assert.equal(opened.length, 2, 'each rejected generation opens exactly one physical turn');
@@ -7266,12 +7667,9 @@ test('provider explicit brain interpreter rejects two ambiguous generations with
   }
 });
 
-// Failure basis: the first ambiguous batch cannot be closed durably (the
-// parse-failure append is rejected), so release and honest closure are not
-// proven. Impact: a replacement generation would duplicate execution while the
-// rejected turn could still be pending. Cost: one rejected append and no second
-// provider request.
-test('provider explicit brain interpreter keeps the parse error and starts no replacement when closing the first batch fails', async () => {
+// Legacy cold negative: failure to append parse closure preserves both the
+// original contract error and the append error, without new execution.
+test('provider explicit brain interpreter keeps the invalid legacy output and parse-close error without starting a replacement', async () => {
   const deps = parentDependencies();
   const binding: ProviderBinding = {
     bindingId: 'binding-reanswer-close-fault', providerId: 'provider-reanswer-close-fault', protocol: 'responses',
@@ -7299,6 +7697,10 @@ test('provider explicit brain interpreter keeps the parse error and starts no re
     ];
   } });
   const faultyParent = new RejectingAppendJournal(deps.parentJournal, 'turn-parse-failure');
+  await seedClosedLegacyOutput(deps, binding, request, [
+    JSON.stringify({ kind: 'requirement', normalizedInput: '改写一', knownFacts: 'invalid', decisionRefs: ['decision:one'], proposal: proposal('一') }),
+    JSON.stringify({ kind: 'requirement', normalizedInput: '改写二', knownFacts: 'invalid', decisionRefs: ['decision:two'], proposal: proposal('二') }),
+  ]);
   const interpreter = createProviderExplicitBrainInterpreter({
     ...deps, binding, parentJournal: faultyParent, checkpointJournal: deps.helperJournal,
     helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
@@ -7322,7 +7724,7 @@ test('provider explicit brain interpreter keeps the parse error and starts no re
       return true;
     },
   );
-  assert.equal(generations, 1, 'no replacement generation starts when the first batch cannot be closed');
+  assert.equal(generations, 0, 'no Provider request starts when invalid legacy history cannot be closed');
   assert.equal((await deps.parentJournal.readScopeOpenedTurns(scope)).length, 1,
     'no replacement turn is opened');
   assert.equal((await deps.parentJournal.readScopeParseFailures(scope)).length, 0,
@@ -7356,6 +7758,9 @@ test('provider explicit brain asks for one intake decision, not one turn of task
     ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
     helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    agentRoster: [{ agentId: 'selected', roleId: 'interaction' }],
+    prepareAgentProvider: async () => ({ roleId: 'interaction', configuredAgentId: 'selected', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses', model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
   });
   const answered = await interpreter.interpret({
     interactionId: 'interaction-intake-framing', inputRevision: 1, sourceRef: 'ui:intake-framing',
@@ -7365,13 +7770,16 @@ test('provider explicit brain asks for one intake decision, not one turn of task
   assert.equal(sentPrompts.length, 1);
   const sentPrompt = sentPrompts[0]!;
   // RED on the base: both execution sentences were present in this exact request.
+  assert.match(sentPrompt, /# Project leader/);
+  assert.match(sentPrompt, /# Management role/);
+  assert.equal(sentPrompt.includes('# CEO'), false);
   assert.equal(sentPrompt.includes('You are executing one turn of a HumanAgent task'), false,
     'one intake decision is not one turn of task execution');
   assert.equal(sentPrompt.includes('reply with your final answer as plain text'), false,
     'a decision turn never ends with a plain-text final answer');
   // GREEN: the request is one intake decision with no executable helper surface.
   assert.ok(sentPrompt.includes('one intake decision, not one turn of task execution'));
-  assert.ok(sentPrompt.includes('You must not dispatch helpers, call tools that execute work, or otherwise run business work'));
+  assert.ok(sentPrompt.includes('Do not dispatch helpers or execute business work'));
   assert.ok(sentPrompt.includes('The committed rawInput is the only request in this turn'));
   assert.ok(sentPrompt.includes('# Explicit intake decision output'));
 });
@@ -7404,6 +7812,9 @@ test('provider explicit brain asks the intake decision to stay one object about 
     ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
     helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
+    agentRoster: [{ agentId: 'selected', roleId: 'interaction', managementRole: 'ceo' }],
+    prepareAgentProvider: async () => ({ roleId: 'interaction', configuredAgentId: 'selected', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses', model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
   });
   await interpreter.interpret({
     interactionId: 'interaction-intake-scope', inputRevision: 1, sourceRef: 'ui:intake-scope',
@@ -7414,16 +7825,17 @@ test('provider explicit brain asks the intake decision to stay one object about 
       { taskId: 'ui-task-scope-3', title: '回答 1 加 1 等于几', status: 'stopped', currentInput: '回答 1 加 1 等于几' },
     ],
   } as Parameters<typeof interpreter.interpret>[0]);
+  assert.match(sentPrompts[0]!, /# CEO/);
+  assert.equal(sentPrompts[0]!.includes('# Project leader'), false);
   assert.equal(sentPrompts.length, 1);
   const sentPrompt = sentPrompts[0]!;
   // RED on the base: the wire said "Return one final JSON object only" and
   // nothing about the candidate statuses, so a second decision was in contract.
   assert.ok(sentPrompt.includes('is the only request in this turn'),
     'taskCandidates are context, so the committed input must be named as the only request');
-  assert.ok(sentPrompt.includes('never a user request'),
+  assert.ok(sentPrompt.includes('historical task status alone does not authorize new work'),
     'an unfinished candidate status must never read as a request for new work');
-  assert.ok(sentPrompt.includes('one assistant message'),
-    'one decision object must also be one message item, or a batch may hold two');
+  assert.ok(sentPrompt.includes('Submit one end decision.'));
 });
 
 // Failure basis: real isolated-provider run roundfix12 interaction-9 (input
@@ -7449,9 +7861,13 @@ test('provider explicit brain reads the unique decision when the output echoes i
   const decision = JSON.stringify({
     kind: 'answer', normalizedInput: '10 加 10 等于几？', knownFacts: [], answer: '10 加 10 等于 20。', decisionRefs: [],
   });
-  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => [
-    { type: 'response.output_text.done', item_id: 'final', text: `${JSON.stringify(request)}\n${decision}` },
-  ] });
+  let starts = 0;
+  const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async () => {
+    starts += 1;
+    throw new Error('legacy echo recovery must not contact the Provider');
+  } });
+  const turn = await seedClosedLegacyOutput(deps, binding, request, [`${JSON.stringify(request)}\n${decision}`]);
+  const before = await deps.parentJournal.readTurnSnapshot(turn);
   const interpreter = createProviderExplicitBrainInterpreter({
     ...deps, binding, parentJournal: deps.parentJournal, checkpointJournal: deps.helperJournal,
     helperJournal: deps.helperJournal, turnHelperJournal: deps.helperJournal,
@@ -7461,6 +7877,9 @@ test('provider explicit brain reads the unique decision when the output echoes i
   assert.equal(answered.kind, 'answer');
   if (answered.kind !== 'answer') throw new Error('expected an answer');
   assert.equal(answered.answer, '10 加 10 等于 20。');
+  assert.equal(starts, 0);
+  assert.deepEqual(await deps.parentJournal.readTurnSnapshot(turn), before, 'legacy raw facts are read without rewriting');
+  assert.ok(await deps.helperJournal.readSemanticCheckpointExact(turn));
   // The echo is the input, not a second decision, so nothing was rejected and
   // nothing was invented: the scope holds no parse failure.
   const scope = { organId: deps.organId, interactionScopeId: deps.interactionScopeId };
@@ -7701,7 +8120,7 @@ test('provider explicit brain keeps the different-input boundary when the busine
         rawEvidence: evidence, rawContent, clock: { now: () => new Date().toISOString() },
         helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
         binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), lease,
-        port,
+        ...ownedRecordedPort(binding, port),
       });
       const retry = { ...mutation.request, taskCandidates: [committedCandidates[0]!] };
       const served = await interpreter.interpret(retry);
@@ -7823,17 +8242,22 @@ test('provider explicit brain interpreter preserves clarification options when p
       options: [''],
       decisionRefs: ['clarify-options-3'],
     };
-    await assert.rejects(
-      () => makeInterpreter('malformed-options').interpret({
+    const malformed = await makeInterpreter('malformed-options').interpret({
         interactionId: 'interaction-clarify-3',
         inputRevision: 1,
         sourceRef: 'ui:clarify-3',
         rawInput: '请帮我整理这份项目文档',
         clarifications: [],
         taskCandidates: [],
-      }),
-      /clarification decision options must be an array of non-empty strings/,
-    );
+      });
+    assert.equal(malformed.kind, 'partial', 'malformed options must never become a clarification');
+    if (malformed.kind !== 'partial') throw new Error('expected incomplete clarification');
+    assert.equal(malformed.failedAttempt, 3);
+    assert.deepEqual(malformed.errors.map(error => error.path), ['explicit-turn-end.decision.options entry must be a non-empty string']);
+    const failedTurn = (await parentJournal.readScopeOpenedTurns({ organId: id('organ', 'explicit-test'),
+      interactionScopeId: 'runtime:clarify-options-malformed-options' }))[0]!.fact.turn;
+    assert.equal(await helperJournal.readSemanticCheckpointExact(failedTurn), null,
+      'malformed options must not commit a semantic checkpoint');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

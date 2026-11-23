@@ -69,6 +69,7 @@ import {
 
 /** The immutable committed input of one neutral interaction parent turn. */
 export interface InteractionParentTurnInputFact {
+  readonly endProtocol?: 'explicit-end-v1';
   readonly turn: InteractionTurnIdentity;
   readonly execution: InteractionParentProviderExecutionIdentityRef;
   /** The parent raw scope: organ plus operation, with no task or cycle. */
@@ -132,6 +133,7 @@ export interface InteractionParentOwnerReconciliationFact {
 
 /** The consistent durable read of exactly one parent turn. */
 export interface InteractionParentTurnSnapshot {
+  readonly endControls?: readonly InteractionParentCommittedFact<import('./explicit-turn-end.js').ExplicitEndControl>[];
   readonly turnInput: InteractionParentCommittedFact<InteractionParentTurnInputFact> | null;
   readonly requests: readonly InteractionParentCommittedRequest[];
   readonly acceptedFacts: readonly InteractionParentCommittedFact<
@@ -263,6 +265,12 @@ export type InteractionParentTurnExecutionFailureEligibility =
 
 /** The single append a transactional turn plan may stage. */
 export type InteractionParentTurnAppend =
+  | {
+      readonly kind: 'explicit-end-control';
+      readonly turn: InteractionTurnIdentity;
+      readonly execution: InteractionParentProviderExecutionIdentityRef;
+      readonly fact: import('./explicit-turn-end.js').ExplicitEndControl;
+    }
   | {
       readonly kind: 'turn-input';
       readonly fact: InteractionParentTurnInputFact;
@@ -561,6 +569,7 @@ export interface InteractionParentTurnRawOwner {
 }
 
 export interface InteractionParentTurnRawOwnerInput {
+  readonly endProtocol?: 'explicit-end-v1';
   readonly turn: InteractionTurnIdentity;
   readonly execution: InteractionParentProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
@@ -944,6 +953,7 @@ export function createInteractionParentTurnRawOwner(
   const journal = input.journal;
   const rawContent = input.rawContent;
   const turnInputFact: InteractionParentTurnInputFact = {
+    ...(input.endProtocol === undefined ? {} : { endProtocol: input.endProtocol }),
     turn: cloneTurnIdentity(turn),
     execution: cloneExecution(execution),
     scope: cloneScope(scope),
@@ -1044,7 +1054,7 @@ export function createInteractionParentTurnRawOwner(
    */
   async function finalOutputFromSnapshot(
     snapshot: InteractionParentTurnSnapshot,
-    ignoredRequestIds: readonly string[] = [],
+    ignoredRequestIds: readonly string[] = ignoredRequests(snapshot),
   ): Promise<InteractionParentFinalTurnOutput> {
     if (snapshot.turnInput === null) {
       throw new ContractError('interaction parent final output requires the committed turn input');
@@ -1065,6 +1075,17 @@ export function createInteractionParentTurnRawOwner(
       && unit.channel === 'assistant-text'
       && unit.supersededBy === undefined);
     if (finalUnits.length === 0) {
+      const conclusion = snapshot.endControls?.map(entry => entry.fact).filter(fact =>
+        fact.kind === 'submission' && fact.result.kind !== 'rejected').at(-1);
+      if (conclusion?.kind === 'submission') {
+        const source = snapshot.acceptedFacts.find(entry => entry.fact.envelope.request.requestId === conclusion.requestId
+          && entry.fact.envelope.execution.executionEpoch === conclusion.attempt.execution.executionEpoch
+          && entry.fact.envelope.fact.kind === 'tool-call' && entry.fact.envelope.fact.call.callId === conclusion.callId);
+        if (source?.fact.envelope.fact.kind === 'tool-call') {
+          return { turnInput: snapshot.turnInput, initialInputText, terminalRequest, requestCompleteCommit,
+            assistantText: '', assistantContentRefs: [source.fact.envelope.fact.rawArguments.ref] };
+        }
+      }
       throw new ContractError('interaction parent final output requires at least one assistant-text unit');
     }
     for (const unit of finalUnits) {
@@ -1178,6 +1199,29 @@ export function createInteractionParentTurnRawOwner(
       }
     }
 
+    // The end outcome and its paired tools are already durable. A closed
+    // failed child containing only transport output may be drained again;
+    // never replay a business call or treat that failed child as completed.
+    const acceptedEnd = snapshot.endControls?.map(entry => entry.fact).filter(fact =>
+      fact.kind === 'submission' && fact.result.kind !== 'rejected').at(-1);
+    if (hasActiveEpochClose && acceptedEnd?.kind === 'submission') {
+      const endRequest = requests.find(record => record.request.requestId === acceptedEnd.requestId);
+      const failed = requests.filter(record => record.phase === 'failed');
+      if (endRequest?.phase === 'settled' && hasCommittedRequestCompletion(snapshot, endRequest)
+        && failed.length > 0
+        && requests.every(record => record.phase === 'settled' || record.phase === 'failed')
+        && failed.every(record => record.request.parentRequestId === acceptedEnd.requestId
+          && !hasCommittedRequestCompletion(snapshot, record)
+          && snapshot.acceptedFacts.filter(entry => sameRequestIdentity(entry.fact.envelope.request, record.request))
+            .every(entry => (entry.fact.envelope.fact.kind === 'content'
+                && entry.fact.envelope.fact.channel !== 'tool-arguments')
+              || entry.fact.envelope.fact.kind === 'content-complete'
+              || entry.fact.envelope.fact.kind === 'usage'))) {
+        return { mode: 'continue', unsettledRequestIds: failed.map(record => record.request.requestId),
+          effectiveExecutionEpoch: active.execution.executionEpoch + 1 };
+      }
+    }
+
     // Hold every cancelled request and every failed request that is not the
     // proven closed-failed-zero-fact shape: their side effects are unknown and
     // must never be replayed or silently dropped.
@@ -1203,6 +1247,26 @@ export function createInteractionParentTurnRawOwner(
         unsettledRequestIds,
         effectiveExecutionEpoch: active.execution.executionEpoch + 1,
       };
+    }
+
+    const latestAttempt = snapshot.endControls?.map(entry => entry.fact).filter(fact => fact.kind === 'attempt').at(-1)?.attempt;
+    const partial = snapshot.endControls?.map(entry => entry.fact).filter(fact =>
+      fact.kind === 'submission' && fact.result.kind === 'partial'
+      && fact.attempt.attemptRef === latestAttempt?.attemptRef).at(-1);
+    if (partial !== undefined) {
+      if (!hasActiveEpochClose || unsettledRequestIds.length > 0
+        || !snapshot.providerSettlements.some(entry => entry.fact.settlement.executionEpoch === active.execution.executionEpoch)) {
+        throw new ContractError('explicit end partial recovery requires request drain, settle and close');
+      }
+      await finalOutputFromSnapshot(snapshot, [...ignored]);
+      return { mode: 'continue', unsettledRequestIds: requests.map(record => record.request.requestId),
+        effectiveExecutionEpoch: active.execution.executionEpoch + 1 };
+    }
+
+    if (snapshot.endControls?.some(entry => entry.fact.kind === 'submission'
+      && entry.fact.result.kind === 'accepted')) {
+      await finalOutputFromSnapshot(snapshot, [...ignored]);
+      return { mode: 'terminal-output', unsettledRequestIds, effectiveExecutionEpoch: active.execution.executionEpoch };
     }
 
     // The settled leaf request is the settled request no registered request
@@ -1318,10 +1382,15 @@ export function createInteractionParentTurnRawOwner(
       }
     }
     const eligibility = await requestEligibility(planSnapshot);
-    // A post-close reconciliation is only ever the failed-zero-fact
-    // continuation; any other closed shape stays held on its own typed error.
+    // A recovery can fail before registering its first request. Its real close
+    // releases that empty epoch too; there is no request to add to ignored IDs.
+    // Eligibility still rejects cancelled/failed-with-facts and unknown tools.
+    const closedWithoutRequests = planSnapshot.resourceClose?.fact.execution.executionEpoch
+      === active.execution.executionEpoch
+      && nonIgnoredRequestRecords(planSnapshot, new Set(ignoredRequests(planSnapshot))).length === 0;
     if (closedEpoch
-      && (eligibility.mode !== 'continue' || eligibility.unsettledRequestIds.length === 0)) {
+      && (eligibility.mode !== 'continue'
+        || (eligibility.unsettledRequestIds.length === 0 && !closedWithoutRequests))) {
       throw new ContractError(
         'interaction parent owner reconciliation requires a turn without a committed resource close',
       );
@@ -2121,7 +2190,19 @@ export function createInteractionParentTurnRawOwner(
       }
       ordered.sort((left, right) => left.seq - right.seq);
       units.push(...ordered.map((item) => item.unit));
-      const instructions = input.instructions === undefined ? undefined : await input.instructions(hookInput);
+      let instructions = input.instructions === undefined ? undefined : await input.instructions(hookInput);
+      const attempt = snapshot.endControls?.map(entry => entry.fact).filter(fact =>
+        fact.kind === 'attempt' && fact.attempt.execution.executionEpoch === execution.executionEpoch).at(-1)?.attempt;
+      if (attempt?.resumePartialRef !== undefined) {
+        const failed = snapshot.endControls?.map(entry => entry.fact).find(fact =>
+          fact.kind === 'submission' && fact.result.kind === 'partial'
+          && fact.result.partialRef === attempt.resumePartialRef);
+        if (failed === undefined) throw new ContractError('explicit end recovery failure memory is missing');
+        const memory = snapshot.endControls!.map(entry => entry.fact).filter(fact =>
+          fact.kind === 'submission' && fact.attempt.attemptRef === failed.attempt.attemptRef);
+        instructions = { ...instructions,
+          text: `${instructions?.text ?? ''}\n继续原交互、原输入和最近有效 checkpoint。上次结束校验失败记忆：${canonicalJsonStringify(memory)}` };
+      }
       const materialized: MaterializedRequestInput = {
         canonical: { units },
         ...(instructions === undefined ? {} : { instructions }),

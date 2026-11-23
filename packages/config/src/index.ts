@@ -3,7 +3,7 @@ import { chmod, mkdir, open as openFile, readFile, readdir, realpath, rename, st
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
-import { ENABLED_AGENT_DRIVER_REFS, loadBuiltinPromptSegments, validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole, type LoadedAgentPromptSegments } from '../../agent-templates/src/index.js';
+import { ENABLED_AGENT_DRIVER_REFS, loadBuiltinPromptSegments, validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole, type LoadedAgentPromptSegments, type ManagementRole } from '../../agent-templates/src/index.js';
 import { DEFAULT_UI_DISPLAY_PREFERENCE, UiPreferenceError, validateUiDisplayPreference, type UiDisplayPreference } from './ui-preferences.js';
 
 declare module 'node:fs/promises' {
@@ -18,7 +18,7 @@ export * from './ui-preferences.js';
 export { resetUiDisplayPreference, saveUiDisplayPreference } from './ui-preference-store.js';
 
 export const CONFIG_SCHEMA_VERSION = 1;
-export const INTERNAL_CONFIG_KEYS = ['controlRoot', 'agentCwd', 'sessionRoot', 'pluginManifest', 'configPolicy'] as const;
+export const INTERNAL_CONFIG_KEYS = ['controlRoot', 'agentCwd', 'sessionRoot', 'pluginManifest', 'configPolicy', 'ceoAgentId'] as const;
 /** Accepted `driverRef` values. The enablement policy is owned by agent-templates. */
 export const AGENT_DRIVER_REFS = ENABLED_AGENT_DRIVER_REFS;
 export type AgentDriverRef = (typeof AGENT_DRIVER_REFS)[number];
@@ -41,6 +41,8 @@ export interface AgentConfig {
   readonly permissions: readonly string[];
   readonly memoryScopes: readonly ('task' | 'organ' | 'approved-global')[];
   readonly resourceClass: string;
+  /** Explicit management identity; ordinary agents do not infer authority from prose. */
+  readonly managementRole?: ManagementRole;
   readonly model?: string;
   /**
    * Optional per-agent provider binding. When omitted the agent inherits the
@@ -152,6 +154,7 @@ export interface UserConfig {
 }
 
 export interface InternalConfig {
+  readonly ceoAgentId?: string;
   readonly schemaVersion: number;
   readonly controlRoot: string;
   readonly agentCwd: string;
@@ -919,6 +922,7 @@ export function validateInternalConfig(value: Record<string, unknown>, controlRo
   return {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     controlRoot: expectedRoot,
+    ...(value.ceoAgentId === undefined ? {} : { ceoAgentId: asString(value.ceoAgentId, 'ceoAgentId') }),
     agentCwd: expectedRoot,
     sessionRoot,
     pluginManifest: expandControlPath(asString(value.pluginManifest, 'pluginManifest'), controlRoot),
@@ -1512,7 +1516,8 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
   if (projectDefaultAgent !== undefined && !user.agents.some((agent) => agent.agentId === projectDefaultAgent)) fail('config-invalid', 'project default agent not found: ' + projectDefaultAgent);
   const effective: UserConfig = {
     schemaVersion: user.schemaVersion,
-    agents: [...user.agents],
+    agents: user.agents.map(agent => agent.roleId === 'interaction' && agent.agentId === internal.ceoAgentId
+      ? { ...agent, managementRole: 'ceo' } : agent),
     ...(user.provider === undefined ? {} : { provider: user.provider }),
     project: { ...user.project, ...projectOverride?.project },
     memory: projectOverride?.memory ?? user.memory,

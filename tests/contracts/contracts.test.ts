@@ -73,10 +73,15 @@ import {
   validateStandardTurnEndPayload,
   validateTokenUsageInspection,
   validateTurnSegmentRecoveryFact,
+  validateExplicitTurnEndInput,
+  validateExplicitTurnEndAcceptedResult,
+  validateExplicitTurnPartialResult,
   type AgentDebugInspection,
   type AgentInvocationIdentity,
   type PlanRevisionRecord,
   type StandardTurnEndPayload,
+  type ExplicitTurnEndInput,
+  type ExplicitTurnPartialResult,
   type TurnSegmentRecoveryFact,
 } from '@humanagent/contracts';
 
@@ -182,6 +187,39 @@ function validRecoveryFact(overrides: Partial<TurnSegmentRecoveryFact> = {}): Tu
     },
     toolEffects: [],
     recoveryOutcome: 'recovery-auto-resumed',
+    ...overrides,
+  };
+}
+
+function validExplicitTurnEndInput(overrides: Partial<ExplicitTurnEndInput> = {}): ExplicitTurnEndInput {
+  return {
+    kind: 'simple',
+    decision: {
+      kind: 'answer',
+      normalizedInput: '用户询问当前状态',
+      knownFacts: ['输入已提交'],
+      decisionRefs: ['journal://input/1'],
+      answer: '当前状态可继续。',
+    },
+    checkpointRecord: { index: { action: '回答用户状态询问', result: '已回答' } },
+    ...overrides,
+  };
+}
+
+function validExplicitTurnPartialResult(
+  overrides: Partial<ExplicitTurnPartialResult> = {},
+): ExplicitTurnPartialResult {
+  return {
+    kind: 'partial',
+    partialRef: 'humanagent://explicit-turn-partial/1',
+    interactionId: 'interaction-a',
+    inputRevision: 1,
+    turnId: 'turn-a',
+    failedAttempt: 3,
+    maxAttempts: 3,
+    errors: [{ path: 'decision.answer', message: 'answer must be a non-empty string' }],
+    userMessage: '本次回复未能完成整理，你可以选择继续。',
+    recoverable: true,
     ...overrides,
   };
 }
@@ -2310,6 +2348,86 @@ test('canonical standard turn end uses summary.result.text and rejects the retir
     deliveryRefs: ['asset://delivery/report.pdf'],
   });
   assert.doesNotThrow(() => validateStandardTurnEndPayload(assetOnly));
+});
+
+test('explicit turn end keeps simple and complex intake separate and exposes a typed partial result', () => {
+  const simple = validExplicitTurnEndInput();
+  assert.doesNotThrow(() => validateExplicitTurnEndInput(simple));
+  // Accepted receipts persisted before the index field was introduced remain readable.
+  assert.doesNotThrow(() => validateExplicitTurnEndAcceptedResult({
+    kind: 'accepted', interactionId: 'interaction-a', inputRevision: 1,
+    turnId: 'turn-a', decision: simple.decision,
+  }));
+  assert.doesNotThrow(() => validateExplicitTurnEndAcceptedResult({
+    kind: 'accepted',
+    interactionId: 'interaction-a',
+    inputRevision: 1,
+    turnId: 'turn-a',
+    decision: simple.decision,
+    checkpointRecord: simple.checkpointRecord,
+  }));
+
+  const complex = validExplicitTurnEndInput({
+    kind: 'complex',
+    decision: {
+      kind: 'requirement',
+      normalizedInput: '创建一个可交付报告',
+      knownFacts: ['输入已提交'],
+      decisionRefs: ['journal://input/1'],
+      proposal: {
+        revision: 1,
+        intent: 'create',
+        title: '交付报告',
+        objective: '完成当前输入的交付报告',
+        deliverable: '一份可读报告',
+        deliveryConditions: ['保留用户原文'],
+        evidenceRefs: [],
+        blockingGaps: [],
+      },
+      taskFlow: { kind: 'one-shot', definitionVersion: 1 },
+    },
+    checkpointRecord: { index: { action: '整理需求', result: '已准备执行' } },
+    capsule: {
+      summary: '已理解并拆解当前输入',
+      goal: '完成当前输入的交付报告',
+      process: ['整理需求'],
+      findings: ['输入可执行'],
+      nextStep: '交给隐式大脑执行',
+    },
+  });
+  assert.doesNotThrow(() => validateExplicitTurnEndInput(complex));
+
+  assert.match(
+    (captureContractError(() => validateExplicitTurnEndInput({
+      ...simple,
+      capsule: complex.capsule,
+    })) as Error).message,
+    /explicit-turn-end\.simple-capsule/,
+  );
+  assert.match(
+    (captureContractError(() => validateExplicitTurnEndInput({
+      ...simple,
+      decision: complex.decision,
+    })) as Error).message,
+    /explicit-turn-end\.input-kind-decision/,
+  );
+
+  const partial = validExplicitTurnPartialResult();
+  assert.doesNotThrow(() => validateExplicitTurnPartialResult(partial));
+  assert.match(
+    (captureContractError(() => validateExplicitTurnPartialResult({
+      ...partial,
+      partialRef: ' ',
+    })) as Error).message,
+    /explicit-turn-end\.partial-ref/,
+  );
+  assert.match(
+    (captureContractError(() => validateExplicitTurnPartialResult({
+      ...partial,
+      userMessage: ' ',
+    })) as Error).message,
+    /explicit-turn-end\.user-message/,
+  );
 });
 
 test('plan revision contract binds immutable committed steps to task execution identity and context isolation', () => {

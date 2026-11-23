@@ -47,6 +47,7 @@ import {
 } from '../../../contracts/src/index.js';
 import { type DecodeContext, type ProviderCodec, type ProviderDecodedEvent } from './codecs.js';
 import type { ProviderEvidenceSink } from './evidence.js';
+import type { ProviderModelCapacitySource } from './model-capacity.js';
 import { ProviderAdapterError } from './errors.js';
 import type { ProviderWireEvent, ProviderWireRequest, ProviderWireStopRequest } from './wire.js';
 
@@ -98,6 +99,10 @@ export interface ProviderAdapterOptions<
   readonly codec: ProviderCodec;
   readonly transport: ProviderTransport<TIdentity>;
   readonly evidence: ProviderEvidenceSink;
+  /** Live model catalog for call capacity; absent keeps capacity unknown. */
+  readonly modelCapacitySource?: ProviderModelCapacitySource;
+  /** Clock for the measured call window; defaults to the system clock. */
+  readonly now?: () => Date;
 }
 
 function sameProviderBinding(a: ProviderBinding, b: ProviderBinding): boolean {
@@ -196,6 +201,7 @@ function probeExpired(result: ProviderProbeResult): boolean {
 interface ActiveExecution {
   readonly identity: AnyProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
+  readonly diagnostics: AbortController;
   externalExecutionRef?: EvidenceRef;
   stopRequested: boolean;
   pendingStart: boolean;
@@ -390,7 +396,7 @@ export class ProviderAdapter<
       }
       const scope = scopeFromEvidence(input, 'start');
       const request = this.options.codec.encodeStart(input, this.options.binding, this.options.routeRef);
-      const active: ActiveExecution = { identity: { ...input }, scope, stopRequested: false, pendingStart: true };
+      const active: ActiveExecution = { identity: { ...input }, scope, diagnostics: new AbortController(), stopRequested: false, pendingStart: true };
       this.sessions.set(key, active);
       try {
         const receipt = await this.callTransport('start', input, () => this.options.transport.start(input, request));
@@ -458,6 +464,7 @@ export class ProviderAdapter<
           externalExecutionRef: previous?.externalExecutionRef,
           stopRequested: false,
           pendingStart: false,
+          diagnostics: new AbortController(),
         });
       }
       return result;
@@ -489,6 +496,7 @@ export class ProviderAdapter<
       });
     }
     let sequence = 0;
+    const now = this.options.now ?? (() => new Date());
     // The observe input carries the concrete identity generic; the codec
     // normalises it back to the canonical identity before building events.
     const context: DecodeContext<TIdentity> = {
@@ -500,6 +508,13 @@ export class ProviderAdapter<
       responsesPendingToolCalls: new Set<string>(),
       responsesRequestStartEmitted: new Map<string, boolean>(),
       responsesStreamRound: { count: 0 },
+      callCapture: {
+        startedAt: now(),
+        now,
+        signal: active.diagnostics.signal,
+        ...(this.options.modelCapacitySource === undefined ? {} : { catalog: this.options.modelCapacitySource }),
+        emitted: false,
+      },
       nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
     };
     try {
@@ -537,6 +552,7 @@ export class ProviderAdapter<
       validateProviderStopRequest(input);
       const active = this.requireActive(input, 'stop');
       active.stopRequested = true;
+      active.diagnostics.abort();
       const request = this.options.codec.encodeStop(input, this.options.binding, this.options.routeRef);
       const receipt = await this.callTransport('stop', input, () => this.options.transport.requestStop(input, request));
       validateProviderStopReceipt(receipt);

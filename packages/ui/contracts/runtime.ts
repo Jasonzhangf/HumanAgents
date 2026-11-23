@@ -477,6 +477,11 @@ export type RuntimeRawRecordBody =
     }
   | { readonly kind: 'task.deleted'; readonly deletedAt: string }
   | {
+      readonly kind: 'task.reassigned';
+      readonly from?: { readonly scope: 'ceo' | 'project'; readonly projectId?: string; readonly actorId: string };
+      readonly to: { readonly scope: 'ceo' | 'project'; readonly projectId?: string; readonly actorId: string };
+    }
+  | {
       readonly kind: 'operation.started';
       readonly operationId: string;
       readonly executionEpoch: number;

@@ -24,11 +24,28 @@ test('public interaction request read resolves the exact no-Task request and rej
   await ensureControlLayout(paths);
   const lease = await acquireDaemonLease(paths, { ownerId: 'interaction-request-http' });
   const { createServer } = await import('node:http');
+  let providerRequests = 0;
   const provider = await new Promise<{ server: import('node:http').Server; url: string }>((resolve, reject) => {
     const server = createServer(async (request, response) => {
       for await (const _chunk of request) void _chunk;
+      const round = providerRequests++;
+      assert.ok(round < 3, 'the fixture must finish after Skill selection, end submission and drain');
+      const tool = round === 0 ? {
+        type: 'function_call', call_id: 'http-select-skills', name: 'interaction_select_skills',
+        arguments: JSON.stringify({ skillIds: ['task-intake'] }),
+      } : {
+        type: 'function_call', call_id: 'http-explicit-end', name: 'humanagent_turn_end',
+        arguments: JSON.stringify({ kind: 'simple', decision: {
+          kind: 'answer', normalizedInput: 'hello', knownFacts: [], answer: 'hello from provider', decisionRefs: [],
+        }, checkpointRecord: { index: { action: '回答问候', result: '已回答' } } }),
+      };
+      const frames = [
+        { type: 'response.created', response: { id: `http-wire-response-${round}` } },
+        ...(round === 2 ? [] : [{ type: 'response.output_item.done', output_index: 0, item: tool }]),
+        { type: 'response.completed', response: { id: `http-wire-response-${round}` } },
+      ];
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end(`data: ${JSON.stringify({ type: 'response.created', response: { id: 'http-wire-response' } })}\n\ndata: ${JSON.stringify({ type: 'response.output_text.done', item_id: 'answer', text: JSON.stringify({ kind: 'answer', normalizedInput: 'hello', knownFacts: [], answer: 'hello from provider', decisionRefs: [] }) })}\n\ndata: ${JSON.stringify({ type: 'response.completed', response: { id: 'http-wire-response' } })}\n\n`);
+      response.end(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(''));
     });
     server.once('error', reject);
     server.listen(0, '127.0.0.1', () => {
@@ -66,6 +83,7 @@ test('public interaction request read resolves the exact no-Task request and rej
     const input = await post.json() as { interactionId: string };
     const interpret = await fetch(`${runtime.server.url}/api/explicit/interactions/${input.interactionId}/interpret`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: runtime.server.url }, body: '{}' });
     assert.equal(interpret.status, 200);
+    assert.equal(providerRequests, 3);
     const rawJournal = await import('../../packages/adapters/jsonl/src/index.js');
     const journalPaths = await import('../../packages/app/src/ui-runtime/journal.js');
     const control = new rawJournal.JsonlOrganJournal(journalPaths.uiRuntimeControlJournalPath(journalPaths.uiRuntimeModeRoot(paths.checkpointsRoot, 'rcc')));

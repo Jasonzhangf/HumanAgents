@@ -1358,9 +1358,12 @@ test('provider agent driver retains tools after a standard-turn-end refusal and 
   assert.deepEqual(
     submissions[1]?.toolContinuations?.map((continuation) => [continuation.callId, continuation.output]),
     [
-      ['call-turn-end-refused', refusedOutput],
       ['call-turn-end-corrected', correctedOutput],
     ],
+  );
+  assert.deepEqual(
+    submissions[1]?.requestContext?.units.filter((unit) => unit.kind === 'tool-result').map((unit) => unit.output),
+    [refusedOutput, correctedOutput],
   );
   assert.deepEqual(
     submissions.map((submission) => ({
@@ -1806,27 +1809,52 @@ test('provider agent driver reports an unowned tool call as an observation inste
   );
 });
 
-test('provider agent driver replays the whole tool history into every continuation', async () => {  // The provider has no server-side conversation state, so a continuation that
-  // carried only the current round would hide every earlier round from the
-  // model and make a multi-round task repeat itself indefinitely.
+test('provider agent driver replays complete tool history across response identities', async () => {
   let round = 0;
   const submissions: ProviderSubmitInput[] = [];
   const runtimePort = port({
     observe: async function* (): AsyncIterable<ProviderEvent> {
       round += 1;
-      if (round <= 3) {
+      if (round === 1) {
+        for (const [callId, filePath] of [['call-1', 'file-1.txt'], ['call-2', 'file-2.txt']] as const) {
+          yield {
+            ...identity,
+            eventId: `event-tool-call-${callId}`,
+            kind: 'tool',
+            summary: 'file.write',
+            outputRefs: [`artifact://tool-${callId}`],
+            evidenceRefs: [evidence],
+            toolCall: {
+              callId,
+              toolId: 'file.write',
+              arguments: { file_path: filePath },
+              continuationRef: 'response-round-1',
+            },
+          };
+        }
         yield {
           ...identity,
-          eventId: `event-tool-call-${round}`,
+          eventId: 'event-tool-waiting-1',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      if (round === 2) {
+        yield {
+          ...identity,
+          eventId: 'event-tool-call-3',
           kind: 'tool',
           summary: 'file.write',
-          outputRefs: [`artifact://tool-call-${round}`],
+          outputRefs: ['artifact://tool-call-3'],
           evidenceRefs: [evidence],
           toolCall: {
-            callId: `call-${round}`,
+            callId: 'call-3',
             toolId: 'file.write',
-            arguments: { file_path: `file-${round}.txt` },
-            continuationRef: `response-round-${round}`,
+            arguments: { file_path: 'file-3.txt', depends_on: ['file-1.txt', 'file-2.txt'] },
+            continuationRef: 'response-round-2',
           },
         };
         yield {
@@ -1868,16 +1896,27 @@ test('provider agent driver replays the whole tool history into every continuati
   for await (const _event of instance.observe({ runtimeId: identity.runtimeId })) {
     // Drain the execution to its terminal state.
   }
-  assert.equal(submissions.length, 3);
-  assert.deepEqual(submissions.map((input) => input.toolContinuations?.map((c) => c.callId)), [
-    ['call-1'],
+  assert.equal(submissions.length, 2);
+  assert.deepEqual(submissions.map((input) => input.requestContext?.units.filter((unit) => unit.kind === 'tool-call').map((unit) => unit.callId)), [
     ['call-1', 'call-2'],
     ['call-1', 'call-2', 'call-3'],
   ]);
-  assert.deepEqual(submissions[2]?.toolContinuations?.map((c) => c.output), [
+  assert.deepEqual(submissions[1]?.requestContext?.units.filter((unit) => unit.kind === 'tool-result').map((unit) => unit.output), [
     'wrote file-1.txt',
     'wrote file-2.txt',
     'wrote file-3.txt',
+  ]);
+  assert.deepEqual(submissions[1]?.requestContext?.units.filter((unit) => unit.kind === 'tool-call').map((unit) => unit.kind === 'tool-call' ? unit.arguments : undefined).at(-1), {
+    file_path: 'file-3.txt',
+    depends_on: ['file-1.txt', 'file-2.txt'],
+  });
+  assert.deepEqual(submissions.map((input) => input.toolContinuations?.map((continuation) => continuation.callId)), [
+    ['call-1', 'call-2'],
+    ['call-3'],
+  ]);
+  assert.deepEqual(submissions.map((input) => input.toolContinuations?.map((continuation) => continuation.continuationRef)), [
+    ['response-round-1', 'response-round-1'],
+    ['response-round-2'],
   ]);
 });
 
@@ -2278,6 +2317,10 @@ test('provider agent driver returns a validation tool failure to the model inste
   assert.deepEqual(submissions[0]?.toolContinuations?.map((continuation) => continuation.callId), ['call-list-empty']);
   assert.deepEqual(
     submissions[1]?.toolContinuations?.map((continuation) => continuation.callId),
+    ['call-list-corrected'],
+  );
+  assert.deepEqual(
+    submissions[1]?.requestContext?.units.filter((unit) => unit.kind === 'tool-call').map((unit) => unit.callId),
     ['call-list-empty', 'call-list-corrected'],
   );
   assert.deepEqual(events.flatMap((event) => event.providerEvent.toolResult === undefined
@@ -3540,13 +3583,15 @@ test('R1-A: provider driver forwards codec raw facts and persists the exact exec
       [
         ['R1', 1, 'content'],
         ['R1', 2, 'tool-call'],
-        ['R1', 3, 'request-complete'],
-        ['R1', 4, 'tool-result'],
+        ['R1', 3, 'usage'],
+        ['R1', 4, 'request-complete'],
+        ['R1', 5, 'tool-result'],
         ['R2', 1, 'content'],
-        ['R2', 2, 'request-complete'],
+        ['R2', 2, 'usage'],
+        ['R2', 3, 'request-complete'],
       ],
     );
-    assert.deepEqual(accepted.map((entry) => entry.seq), [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual(accepted.map((entry) => entry.seq), [1, 2, 3, 4, 5, 6, 7, 8]);
 
     const fact = durableToolResultFact(harness.context);
     const factEnvelope = accepted.find((entry) => entry.envelope.fact.kind === 'tool-result')!.envelope;
@@ -4303,8 +4348,8 @@ test('P1-L2: closeProductionAndDrain waits for the exact-output write and durabl
       entry.envelope.fact.kind,
       entry.envelope.producerSeq,
     ]);
-    assert.deepEqual(factSeqs, [['tool-call', 1], ['request-complete', 2], ['tool-result', 3]]);
-    assert.equal(result.requests[0]!.lastProducerSeq, 3, 'drain did not bind the final accepted producer sequence');
+    assert.deepEqual(factSeqs, [['tool-call', 1], ['usage', 2], ['request-complete', 3], ['tool-result', 4]]);
+    assert.equal(result.requests[0]!.lastProducerSeq, 4, 'drain did not bind the final accepted producer sequence');
     assert.equal(harness.submissions.length, 0, 'drain started a new continuation request');
     assert.equal((await pendingObservation).done, true);
     const fact = durableToolResultFact(harness.context);
