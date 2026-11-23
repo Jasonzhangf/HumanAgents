@@ -10,6 +10,17 @@ const KIND_LABELS = Object.freeze({
   error: '未完成',
 })
 
+const topicStates = new WeakMap()
+const answerControls = new WeakMap()
+
+function requestKey(turn) {
+  return JSON.stringify([turn.taskId?.scope, turn.taskId?.value, turn.requestId, turn.expectedRevision])
+}
+
+function hasRequestRevision(turn) {
+  return Number.isSafeInteger(turn.expectedRevision) && turn.expectedRevision >= 0
+}
+
 function turnClass(turn) {
   return `mt-turn mt-turn--${turn.role} mt-turn--${turn.kind}`
 }
@@ -33,14 +44,18 @@ function turnHeader(turn, label) {
   return header
 }
 
-function renderAnswerControls(request, onAnswer, host) {
+function renderAnswerControls(request, onAnswer, host, topicState) {
   const form = element('div', undefined, 'mt-answer')
   const status = element('p', '', 'mt-answer-status')
   status.hidden = true
   const buttons = []
   let busy = false
+  let currentRequest = request
+  let currentOnAnswer = onAnswer
+  const isCurrent = () => form.isConnected && host.contains(form) && topicStates.get(host) === topicState
 
   const submit = async (answer) => {
+    if (!isCurrent()) return
     const value = String(answer ?? '').trim()
     if (value === '') {
       status.hidden = false
@@ -49,6 +64,8 @@ function renderAnswerControls(request, onAnswer, host) {
       return
     }
     if (busy) return
+    const request = currentRequest
+    const onAnswer = currentOnAnswer
     busy = true
     for (const button of buttons) button.disabled = true
     custom.disabled = true
@@ -57,18 +74,20 @@ function renderAnswerControls(request, onAnswer, host) {
     status.textContent = '正在提交回答…'
     try {
       const projection = await onAnswer(request, value)
+      if (!isCurrent()) return
       if (!projection) throw new Error('回答已提交，但主话题回读失败；请刷新后核对该问题状态。')
-      if (projection?.openInputRequest?.requestId === request.requestId
-        && projection.openInputRequest?.taskId?.value === request.taskId?.value) {
+      if (projection.openInputRequest && requestKey(projection.openInputRequest) === requestKey(request)) {
         throw new Error('问题仍处于待答状态；请检查当前回执后重试。')
       }
       const answeredTurn = projection.turns.some((turn) =>
-        turn.turnId === `input-answer:${request.requestId}` && turn.text === value)
+        turn.turnId === `input-answer:${request.requestId}` && requestKey(turn) === requestKey(request)
+        && hasRequestRevision(turn) && turn.text === value)
       if (!answeredTurn) {
         throw new Error('回答回执已接受，但主话题回读没有这条回答；请刷新后核对真实状态。')
       }
-      renderMainTopic(host, projection, { onAnswer })
+      renderMainTopic(host, projection, { onAnswer: currentOnAnswer })
     } catch (error) {
+      if (!isCurrent()) return
       status.dataset.tone = 'danger'
       status.textContent = error?.message || String(error)
       busy = false
@@ -78,15 +97,7 @@ function renderAnswerControls(request, onAnswer, host) {
   }
 
   const optionGroup = element('div', undefined, 'mt-options')
-  for (const option of request.options || []) {
-    const button = element('button', option, 'mt-option')
-    button.type = 'button'
-    button.dataset.answerOption = option
-    button.addEventListener('click', () => void submit(option))
-    buttons.push(button)
-    optionGroup.append(button)
-  }
-  if (buttons.length > 0) form.append(optionGroup)
+  form.append(optionGroup)
 
   const customRow = element('div', undefined, 'mt-custom-answer')
   const custom = element('input')
@@ -104,29 +115,71 @@ function renderAnswerControls(request, onAnswer, host) {
   buttons.push(customButton)
   customRow.append(custom, customButton)
   form.append(customRow, status)
-  return form
+  let optionsKey
+  const update = (request, onAnswer) => {
+    currentRequest = request
+    currentOnAnswer = onAnswer
+    const nextOptionsKey = JSON.stringify(request.options || [])
+    if (optionsKey === nextOptionsKey) return
+    optionsKey = nextOptionsKey
+    clearNode(optionGroup)
+    buttons.splice(0, buttons.length, customButton)
+    for (const option of request.options || []) {
+      const button = element('button', option, 'mt-option')
+      button.type = 'button'
+      button.dataset.answerOption = option
+      button.disabled = busy
+      button.addEventListener('click', () => void submit(option))
+      buttons.push(button)
+      optionGroup.append(button)
+    }
+  }
+  update(request, onAnswer)
+  return { form, update }
 }
 
-function renderTurn(turn, project, handlers, host, answeredRequestIds) {
-  const article = element('article', undefined, turnClass(turn))
+function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, topicState) {
+  article.className = turnClass(turn)
   article.dataset.turnId = turn.turnId
-  article.append(turnHeader(turn, project.agentName))
-  const bubble = element('div', undefined, 'mt-bubble')
+  const header = turnHeader(turn, project.agentName)
+  const previousHeader = article.querySelector('.mt-turn-head')
+  if (previousHeader) previousHeader.replaceWith(header)
+  else article.append(header)
+  let bubble = article.querySelector('.mt-bubble')
+  if (!bubble) {
+    bubble = element('div', undefined, 'mt-bubble')
+    bubble.append(element('p', '', 'mt-text'))
+    article.append(bubble)
+  }
+  const previousQuote = bubble.querySelector('.mt-quote')
   const quote = quoteBlock(turn.quote)
-  if (quote) bubble.append(quote)
-  bubble.append(element('p', turn.text, 'mt-text'))
+  if (previousQuote && quote) previousQuote.replaceWith(quote)
+  else if (previousQuote) previousQuote.remove()
+  else if (quote) bubble.prepend(quote)
+  const text = bubble.querySelector('.mt-text')
+  if (text.textContent !== turn.text) text.textContent = turn.text
+  let control = answerControls.get(article)
+  const key = requestKey(turn)
   if (turn.kind === 'input-request' && turn.requestId && turn.taskId
-    && !answeredRequestIds.has(turn.requestId)) {
-    bubble.append(renderAnswerControls({
+    && !answeredRequestIds.has(requestKey(turn))) {
+    const request = {
       requestId: turn.requestId,
       taskId: turn.taskId,
       expectedRevision: turn.expectedRevision,
       question: turn.text,
       options: turn.options,
       sourceQuestion: turn.quote,
-    }, handlers.onAnswer, host))
+    }
+    if (control?.key !== key) {
+      control?.form.remove()
+      control = { ...renderAnswerControls(request, onAnswer, host, topicState), key }
+      answerControls.set(article, control)
+      bubble.append(control.form)
+    } else control.update(request, onAnswer)
+  } else if (control) {
+    control.form.remove()
+    answerControls.delete(article)
   }
-  article.append(bubble)
   return article
 }
 
@@ -152,19 +205,26 @@ function renderActiveTask(task) {
 
 export function renderMainTopic(host, projection, { onAnswer } = {}) {
   if (!(host instanceof HTMLElement)) throw new Error('main topic requires a host element')
-  const activeControl = document.activeElement instanceof HTMLElement && host.contains(document.activeElement)
-    ? document.activeElement
-    : undefined
+  const activeControl = host.contains(document.activeElement) ? document.activeElement : undefined
+  const scope = JSON.stringify([projection.projectKey, projection.mode, projection.workspaceCwd])
+  let topicState = topicStates.get(host)
+  if (topicState?.scope !== scope) {
+    clearNode(host)
+    topicState = { scope }
+    topicStates.set(host, topicState)
+  }
   const previousTurns = new Map(
     [...host.querySelectorAll('.mt-turn[data-turn-id]')].map((turn) => [turn.dataset.turnId, turn]),
   )
-  const handlers = { onAnswer }
-  clearNode(host)
   host.dataset.surface = 'main-topic'
   host.dataset.projectKey = projection.projectKey
   host.dataset.mode = projection.mode
 
-  const section = element('section', undefined, 'section mt-shell')
+  let section = host.querySelector('.mt-shell')
+  if (!section) {
+    section = element('section', undefined, 'section mt-shell')
+    host.append(section)
+  }
   section.id = 'main-topic'
   const head = element('header', undefined, 'mt-head')
   const identity = element('div', undefined, 'mt-identity')
@@ -178,33 +238,49 @@ export function renderMainTopic(host, projection, { onAnswer } = {}) {
     element('span', '刷新后仍从同一记录恢复', 'mt-meta-copy'),
   )
   head.append(identity, meta)
-  section.append(head)
+  const previousHead = section.querySelector('.mt-head')
+  if (previousHead) previousHead.replaceWith(head)
+  else section.prepend(head)
 
-  if (projection.activeTask) section.append(renderActiveTask(projection.activeTask))
+  const previousActive = section.querySelector('.mt-active')
+  if (projection.activeTask) {
+    const active = renderActiveTask(projection.activeTask)
+    if (previousActive) previousActive.replaceWith(active)
+    else head.after(active)
+  } else previousActive?.remove()
 
-  const stream = element('div', undefined, 'mt-stream')
+  let stream = section.querySelector('.mt-stream')
+  if (!stream) {
+    stream = element('div', undefined, 'mt-stream')
+    section.append(stream)
+  }
   stream.setAttribute('role', 'log')
   stream.setAttribute('aria-live', 'polite')
   const turns = projection.turns
   const answeredRequestIds = new Set(projection.turns.flatMap((turn) =>
-    turn.kind === 'message' && turn.turnId.startsWith('input-answer:')
-      ? [turn.requestId].filter(Boolean)
+    turn.kind === 'message' && turn.turnId.startsWith('input-answer:') && hasRequestRevision(turn)
+      ? [requestKey(turn)]
       : []
   ))
   if (turns.length === 0) {
-    stream.append(element('p', '还没有对话。直接提问，或交办一个需要读取项目材料的任务。', 'mt-empty'))
-  } else {
-    for (const turn of turns) {
-      const previous = turn.kind === 'input-request' && answeredRequestIds.has(turn.requestId)
-        ? undefined
-        : previousTurns.get(turn.turnId)
-      const current = previous
-      stream.append(current || renderTurn(turn, projection, handlers, host, answeredRequestIds))
+    if (!stream.querySelector('.mt-empty')) {
+      clearNode(stream)
+      stream.append(element('p', '还没有对话。直接提问，或交办一个需要读取项目材料的任务。', 'mt-empty'))
     }
+  } else {
+    stream.querySelector('.mt-empty')?.remove()
+    const retained = new Set()
+    let cursor = stream.firstElementChild
+    for (const turn of turns) {
+      const current = updateTurn(previousTurns.get(turn.turnId) || element('article'),
+        turn, projection, onAnswer, host, answeredRequestIds, topicState)
+      retained.add(current)
+      if (current === cursor) cursor = cursor.nextElementSibling
+      else stream.insertBefore(current, cursor)
+    }
+    for (const child of [...stream.children]) if (!retained.has(child)) child.remove()
   }
-  section.append(stream)
-  host.append(section)
-  if (activeControl?.isConnected) activeControl.focus({ preventScroll: true })
+  if (activeControl?.isConnected && document.activeElement !== activeControl) activeControl.focus({ preventScroll: true })
   const last = stream.lastElementChild
   if (last && typeof last.scrollIntoView === 'function') last.scrollIntoView({ block: 'nearest' })
   return section

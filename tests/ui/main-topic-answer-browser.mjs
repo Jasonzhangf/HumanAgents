@@ -146,6 +146,7 @@ function mainTopicProjection(project) {
         occurredAt: task.updatedAt,
         taskId: task.taskId,
         requestId: consumed.request.requestId,
+        expectedRevision: consumed.request.expectedRevision,
         quote: consumed.request.question,
       })
     }
@@ -328,6 +329,161 @@ try {
     await writeFile(join(evidenceRoot, 'initial-page.html'), await page.content())
     throw error
   }
+
+  // Exercise the public renderer with deliberately reused IDs on the same host.
+  // Navigation would discard the DOM and cannot expose cross-scope reuse.
+  const updateChecks = await page.evaluate(async () => {
+    const { renderMainTopic } = await import('./main-topic.js')
+    const host = document.createElement('div')
+    document.body.append(host)
+    const results = []
+    const check = (name, pass) => results.push({ name, pass })
+    const question = { turnId: 'shared-question', kind: 'input-request', role: 'jenny',
+      text: '旧问题', requestId: 'shared-request', taskId: { scope: 'task', value: 'task-a' },
+      expectedRevision: 1, options: ['旧选项'] }
+    const status = { turnId: 'status:T', kind: 'status', role: 'jenny', text: '已创建',
+      occurredAt: '2026-11-22T10:00:00Z', quote: '旧引用' }
+    let projection = { projectKey: 'project-a', workspaceCwd: '/project-a', mode: 'fake',
+      agentName: 'Jenny', projectName: 'A', topicName: '主话题', turns: [status, question] }
+    let calls = [], release
+    const pendingAnswer = (request, answer) => {
+      calls.push({ request, answer })
+      return new Promise(resolve => { release = resolve })
+    }
+    const render = (onAnswer = pendingAnswer) => renderMainTopic(host, projection, { onAnswer })
+    const input = () => host.querySelector('input')
+    const option = () => host.querySelector('[data-answer-option]')
+    try {
+      render()
+      const shell = host.querySelector('.mt-shell'), stream = host.querySelector('.mt-stream')
+      const article = host.querySelector('[data-turn-id="status:T"]'), originalInput = input()
+      originalInput.value = '保留草稿'
+      originalInput.focus()
+      projection = { ...projection, turns: [{ ...status, text: '执行工具等待结果', role: 'user',
+        kind: 'result', occurredAt: '2026-11-22T11:05:00Z', quote: '新引用' },
+      { ...question, text: '新问题', options: ['新选项'], quote: '新问题出处' }] }
+      render()
+      check('same turn updates body, role, kind, time and quote', article.querySelector('.mt-text').textContent === '执行工具等待结果'
+        && article.classList.contains('mt-turn--user') && article.classList.contains('mt-turn--result')
+        && article.querySelector('time').textContent.includes('05')
+        && article.querySelector('.mt-quote-text').textContent === '新引用')
+      check('shell, stream and message remain mounted', host.querySelector('.mt-shell') === shell
+        && host.querySelector('.mt-stream') === stream && article.isConnected)
+      check('updated question keeps its draft and focus', input() === originalInput
+        && input().value === '保留草稿' && document.activeElement === originalInput)
+      check('question options update', option()?.textContent === '新选项')
+      projection = { ...projection, turns: [...projection.turns].reverse() }
+      render()
+      check('reordered question keeps input focus and draft', input() === originalInput
+        && document.activeElement === originalInput && input().value === '保留草稿')
+      projection = { ...projection, turns: [...projection.turns].reverse() }
+      render()
+      option().click()
+      render()
+      option().click()
+      check('poll preserves submit lock and latest event attributes', calls.length === 1
+        && calls[0].answer === '新选项' && calls[0].request.question === '新问题'
+        && calls[0].request.sourceQuestion === '新问题出处' && input().disabled)
+      release(undefined)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      check('failed submit keeps draft and allows retry', input().value === '保留草稿' && !input().disabled
+        && host.querySelector('.mt-answer-status').dataset.tone === 'danger')
+      const answered = []
+      render(async (request, answer) => { answered.push({ request, answer }); throw new Error('latest handler') })
+      option().click()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      check('reused controls call latest handler', answered.length === 1)
+      for (const [name, change] of [
+        ['revision', p => ({ ...p, turns: [p.turns[0], { ...p.turns[1], expectedRevision: 2 }] })],
+        ['task', p => ({ ...p, turns: [p.turns[0], { ...p.turns[1], taskId: { scope: 'task', value: 'task-b' } }] })],
+        ['task scope', p => ({ ...p, turns: [p.turns[0], { ...p.turns[1], taskId: { ...p.turns[1].taskId, scope: 'another-task-scope' } }] })],
+        ['request', p => ({ ...p, turns: [p.turns[0], { ...p.turns[1], requestId: 'request-b' }] })],
+        ['project', p => ({ ...p, projectKey: 'project-b' })],
+        ['mode', p => ({ ...p, mode: 'rcc' })],
+        ['workspace', p => ({ ...p, workspaceCwd: '/project-b' })],
+      ]) {
+        input().value = `旧 ${name} 草稿`
+        const oldInput = input()
+        const oldOption = option()
+        projection = change(projection)
+        render()
+        check(`same message ID isolates ${name}`, input() !== oldInput && input().value === '')
+        const before = calls.length
+        oldOption.click()
+        check(`detached ${name} control cannot submit`, calls.length === before)
+        option().click()
+        const latest = calls.at(-1)
+        check(`new ${name} control uses current request`, calls.length === before + 1
+          && latest.request.taskId.value === projection.turns[1].taskId.value
+          && latest.request.requestId === projection.turns[1].requestId
+          && latest.request.expectedRevision === projection.turns[1].expectedRevision)
+        release(undefined)
+        await new Promise(resolve => setTimeout(resolve, 0))
+      }
+      input().value = '当前答案'
+      option().click()
+      const staleRelease = release
+      const oldProjection = projection
+      projection = { ...projection, projectKey: 'project-c' }
+      render()
+      staleRelease({ ...oldProjection, turns: [{ turnId: `input-answer:${oldProjection.turns[1].requestId}`,
+        kind: 'message', role: 'user', text: '新选项' }] })
+      await new Promise(resolve => setTimeout(resolve, 0))
+      check('old answer response cannot overwrite a new scope', host.dataset.projectKey === 'project-c' && input()?.value === '')
+      projection = { ...projection, turns: [{ ...status, quote: undefined, occurredAt: undefined }] }
+      render()
+      check('removed quote, time and question controls disappear', !host.querySelector('.mt-quote, time, .mt-answer'))
+
+      // Same task/request identifiers do not identify a question without revision.
+      const revisedQuestion = { ...question, expectedRevision: 2 }
+      const answerTurn = { turnId: `input-answer:${question.requestId}`, kind: 'message', role: 'user',
+        taskId: question.taskId, requestId: question.requestId, expectedRevision: 1, text: '旧选项' }
+      projection = { ...projection, turns: [revisedQuestion] }
+      for (const [name, revision] of [['old revision', 1], ['missing revision', undefined]]) {
+        render(async () => ({ ...projection, turns: [{ ...answerTurn, expectedRevision: revision }] }))
+        const currentInput = input()
+        currentInput.value = '未提交草稿'
+        currentInput.focus()
+        option().click()
+        await new Promise(resolve => setTimeout(resolve, 0))
+        check(`${name} readback cannot acknowledge the current answer`, input() === currentInput
+          && !currentInput.disabled && currentInput.value === '未提交草稿'
+          && host.querySelector('.mt-answer-status')?.dataset.tone === 'danger')
+        projection = { ...projection, turns: [revisedQuestion] }
+        render()
+      }
+      for (const [name, revision] of [['old revision', 1], ['missing revision', undefined]]) {
+        projection = { ...projection, turns: [revisedQuestion, { ...answerTurn, expectedRevision: revision }] }
+        render()
+        check(`${name} history cannot hide the new revision control`, input()?.isConnected === true)
+      }
+      projection = { ...projection, turns: [{ ...question, expectedRevision: undefined },
+        { ...answerTurn, expectedRevision: undefined }] }
+      render()
+      check('two missing revisions do not prove an answered question', input()?.isConnected === true)
+      projection = { ...projection, turns: [revisedQuestion] }
+      render(async (request, answer) => ({ ...projection, turns: [revisedQuestion,
+        { ...answerTurn, expectedRevision: request.expectedRevision, text: answer }] }))
+      option()?.click()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      check('exact revision readback accepts the answer and removes controls', !input()
+        && host.querySelector('[data-turn-id="input-answer:shared-request"] .mt-text')?.textContent === '旧选项')
+      projection = { ...projection, turns: [revisedQuestion] }
+      render(async (request, answer) => ({ ...projection,
+        openInputRequest: { ...request, expectedRevision: 3 },
+        turns: [{ ...revisedQuestion, expectedRevision: 3 },
+          { ...answerTurn, expectedRevision: request.expectedRevision, text: answer }] }))
+      option()?.click()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      check('exact answer may coexist with a newer open revision', input()?.isConnected === true
+        && host.querySelector('.mt-answer-status')?.dataset.tone !== 'danger')
+    } finally {
+      host.remove()
+    }
+    return results
+  })
+  for (const result of updateChecks) check(result.name, result.pass)
+  await writeFile(join(evidenceRoot, 'message-update-checks.json'), JSON.stringify(updateChecks, null, 2))
 
   const alpha = page.locator('[data-turn-id="input-request:request-alpha"]')
   const beta = page.locator('[data-turn-id="input-request:request-beta"]')

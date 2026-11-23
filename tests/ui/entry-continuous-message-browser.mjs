@@ -89,6 +89,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/tasks/price-task/input-requests/price-request/answer') {
       answers.push(body); openRequest = undefined
       turns.push({ turnId: 'input-answer:price-request', requestId: request.requestId, taskId: request.taskId,
+        expectedRevision: request.expectedRevision,
         role: 'user', kind: 'message', text: body.answer })
       return json(res, { taskId: request.taskId, requestId: request.requestId })
     }
@@ -144,6 +145,19 @@ try {
     'confirmed task keeps the old draft workspace hidden behind the main topic')
   const custom = page.locator('[data-answer-custom="price-request"]')
   await custom.fill('待提交的口径')
+  const liveStatus = { turnId: 'status:price-task', role: 'jenny', kind: 'status',
+    text: '已创建', occurredAt: '2026-11-22T10:00:00Z' }
+  turns.push(liveStatus)
+  await page.waitForSelector('[data-turn-id="status:price-task"]')
+  await custom.focus()
+  const oldTime = await page.locator('[data-turn-id="status:price-task"] time').innerText()
+  Object.assign(liveStatus, { text: '执行工具等待结果', occurredAt: '2026-11-22T10:05:00Z', quote: '报价原始要求' })
+  await page.waitForFunction(() => document.querySelector('[data-turn-id="status:price-task"] .mt-text')?.textContent === '执行工具等待结果')
+  assert.notEqual(await page.locator('[data-turn-id="status:price-task"] time').innerText(), oldTime)
+  assert.equal(await page.locator('[data-turn-id="status:price-task"] .mt-quote-text').innerText(), '报价原始要求')
+  assert.equal(await custom.inputValue(), '待提交的口径')
+  assert.equal(await custom.evaluate(node => document.activeElement === node), true)
+  checks.push('same status turn updates text, time and quote without losing question draft or focus')
   await input.fill('等待答问时独立普通消息'); await send.click(); await editable()
   assert.equal(inputs.length, 4)
   assert.equal(confirmations.length, 1, 'ordinary message cannot create a duplicate task')
