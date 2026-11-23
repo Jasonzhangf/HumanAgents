@@ -2358,6 +2358,7 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
       inputRevision: 1,
       normalizedInput: '读取 README',
       proposal: '读取 README 并汇报',
+      proposedIntent: 'create',
     },
   };
   const submission = { rawInput: '读取 README', executionPolicy: { executionMode: 'once' } };
@@ -2416,7 +2417,7 @@ test('entry page attaches the receipt occurrence time to the user turn', async (
   const submission = { rawInput: '读取 README', executionPolicy: { executionMode: 'once' } };
   const api = {
     async inspectExplicitInteraction() {
-      return { state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, normalizedInput: '读取 README', proposal: '读取 README 并汇报' } };
+      return { state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, normalizedInput: '读取 README', proposal: '读取 README 并汇报', proposedIntent: 'create' } };
     },
     async confirmExplicitRequirement() {
       return { requirement: { requirementId: 'requirement:draft-1:1', fifoSeq: 1 } };
@@ -2462,7 +2463,7 @@ test('entry work card shows the receipt time instead of 「时间未提供」', 
   const receipt = { interactionId: 'interaction-receipt', occurredAt: '2026-10-27T07:28:58.639Z' };
   const entryApi = {
     async inspectExplicitInteraction() {
-      return { state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, normalizedInput: '读取 README', proposal: '读取 README 并汇报' } };
+      return { state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, normalizedInput: '读取 README', proposal: '读取 README 并汇报', proposedIntent: 'create' } };
     },
     async confirmExplicitRequirement() {
       return { requirement: { requirementId: 'requirement:draft-1:1', fifoSeq: 1 } };
