@@ -305,6 +305,17 @@ test('builtin roles resolve all external markdown prompt segments', async () => 
   }
 });
 
+test('execution prompt preserves source units and checks deliverables against accepted reads', async () => {
+  const templateRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  const loaded = await loadBuiltinPromptSegments('execution', templateRoot, '1.1.0');
+  const prompt = loaded.segments.map((segment) => segment.content).join('\n\n');
+
+  assert.match(prompt, /保留来源中的原始数值、单位和字段含义/);
+  assert.match(prompt, /不得把总额改写成单价/);
+  assert.match(prompt, /未提供/);
+  assert.match(prompt, /交付前.*对照.*原始工具结果/);
+});
+
 test('code search Gateway is exposed to orchestration only and is prompt-preferred', async () => {
   const templateRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
   const orchestration = await loadBuiltinAgentTemplate(templateRoot, 'orchestration', '1.1.0');

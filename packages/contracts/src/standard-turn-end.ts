@@ -64,6 +64,7 @@ export interface StandardTurnInputRequest {
   readonly schemaRef: string;
   readonly reason: string;
   readonly impact: string;
+  readonly options?: readonly string[];
   readonly expiresAt?: string;
 }
 

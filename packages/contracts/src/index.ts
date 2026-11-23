@@ -772,6 +772,8 @@ export interface TaskInputRequest {
   readonly reason: string;
   readonly impact: string;
   readonly question: string;
+  /** Enumerable answers the asking model offered, in its own words. */
+  readonly options?: readonly string[];
   readonly turnId: string;
   readonly operationId: OperationId;
   readonly executionEpoch: number;

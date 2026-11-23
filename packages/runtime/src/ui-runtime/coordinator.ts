@@ -249,6 +249,11 @@ export interface RuntimeTaskSnapshot {
   readonly cycleId?: string;
   /** The one open input request that blocks continuation of this task, if any. */
   readonly inputRequest?: TaskInputRequest;
+  /** Each question this task already consumed, with the user's exact answer. */
+  readonly consumedInputRequests?: readonly {
+    readonly request: TaskInputRequest;
+    readonly answer: string;
+  }[];
   /** Rebuildable committed public-output projection for the current operation/epoch. */
   readonly publicOutput?: PublicOutputPublication;
   readonly orchestrated: boolean;
@@ -518,6 +523,14 @@ export type RuntimeTaskJournalRecord =
       readonly kind: 'task.deleted';
       readonly taskId: TaskId;
       readonly deletedAt: string;
+    }
+  | {
+      /** One exact question-answer pair consumed by this task, in ask order. */
+      readonly kind: 'task.input-answered';
+      readonly taskId: TaskId;
+      readonly request: TaskInputRequest;
+      readonly answer: string;
+      readonly answeredAt: string;
     }
   | {
       readonly kind: 'operation.started';
@@ -953,6 +966,11 @@ export interface TaskRecord {
    * request per task, and it is consumed idempotently by its exact answer.
    */
   inputRequest?: TaskInputRequest;
+  /** Consumed requests in ask order; the Journal is the only writer. */
+  consumedInputRequests?: {
+    readonly request: TaskInputRequest;
+    readonly answer: string;
+  }[];
   allowedActions: string[];
   runtime?: AgentRuntime;
   driver?: RuntimeExecutionDriver;
@@ -1241,6 +1259,24 @@ function retireTaskOperationBindings(
 }
 
 /**
+ * Appends one consumed question-answer pair once. A Journal replay may see the
+ * same committed record again after a restart; the exact request id keeps the
+ * projection a single ordered history.
+ */
+function appendConsumedInputRequest(
+  history: readonly { readonly request: TaskInputRequest; readonly answer: string }[] | undefined,
+  record: { readonly request: TaskInputRequest; readonly answer: string },
+): { readonly request: TaskInputRequest; readonly answer: string }[] {
+  if (history?.some((entry) => entry.request.requestId === record.request.requestId)) {
+    return [...history!];
+  }
+  return [
+    ...(history ?? []),
+    { request: structuredClone(record.request), answer: record.answer },
+  ];
+}
+
+/**
  * Folds task Journal records into projection state. This is the replay rule a
  * cold read-only reader reuses: it restores only identity, inventory, input,
  * output and events. It never claims live running state and never writes.
@@ -1290,6 +1326,12 @@ export function replayTaskJournalRecords(
         state.deletedTaskIds.add(record.taskId.value);
         state.tasks.delete(record.taskId.value);
         retireTaskOperationBindings(state.operations, state.scopes, record.taskId.value);
+        break;
+      }
+      case 'task.input-answered': {
+        const task = state.tasks.get(record.taskId.value);
+        if (task === undefined) break;
+        task.consumedInputRequests = appendConsumedInputRequest(task.consumedInputRequests, record);
         break;
       }
       case 'operation.prepared': {
@@ -1449,6 +1491,7 @@ function taskSnapshotFromRecord(record: TaskRecord, scopes: ReadonlyMap<string, 
     executionEpoch: record.executionEpoch,
     cycleId: record.cycleId?.value
       ?? (record.operationId === undefined ? undefined : scopes.get(record.operationId.value)?.cycleId?.value),
+    ...(record.consumedInputRequests === undefined ? {} : { consumedInputRequests: structuredClone(record.consumedInputRequests) }),
     publicOutput: record.publicOutput,
     orchestrated: record.orchestrated,
     allowedActions: record.allowedActions,
@@ -3813,6 +3856,7 @@ export class RuntimeTaskCoordinator {
     readonly schemaRef: string;
     readonly reason: string;
     readonly impact: string;
+    readonly options?: readonly string[];
     readonly turnId: string;
     readonly operationId: OperationId;
     readonly executionEpoch: number;
@@ -3855,6 +3899,7 @@ export class RuntimeTaskCoordinator {
       reason: input.reason,
       impact: input.impact,
       question: input.question,
+      ...(input.options === undefined ? {} : { options: [...input.options] }),
       turnId: input.turnId,
       operationId: input.operationId,
       executionEpoch: input.executionEpoch,
@@ -3963,6 +4008,17 @@ export class RuntimeTaskCoordinator {
     }
     record.inputRevisionState = decision.task;
     record.inputRequest = undefined;
+    record.consumedInputRequests = appendConsumedInputRequest(record.consumedInputRequests, {
+      request,
+      answer,
+    });
+    this.journal?.append({
+      kind: 'task.input-answered',
+      taskId: record.taskId,
+      request: structuredClone(request),
+      answer,
+      answeredAt: this.now().toISOString(),
+    });
     // The answer is consumed by the continuation cycle itself, so a second
     // answer or a queued append cannot replay the same revision.
     record.consumedInputRevision = inputRevision;
@@ -7538,6 +7594,12 @@ export class RuntimeTaskCoordinator {
           retireTaskOperationBindings(this.operations, this.scopes, record.taskId.value);
           break;
         }
+        case 'task.input-answered': {
+          const task = this.tasks.get(record.taskId.value);
+          if (task === undefined) break;
+          task.consumedInputRequests = appendConsumedInputRequest(task.consumedInputRequests, record);
+          break;
+        }
         case 'operation.prepared': {
           this.operationCounter = Math.max(this.operationCounter, record.operationCounter);
           this.cycleCounter = Math.max(this.cycleCounter, record.cycleCounter);
@@ -8043,6 +8105,7 @@ export class RuntimeTaskCoordinator {
       executionEpoch: record.executionEpoch,
       cycleId: record.cycleId?.value,
       ...(record.inputRequest === undefined ? {} : { inputRequest: structuredClone(record.inputRequest) }),
+      ...(record.consumedInputRequests === undefined ? {} : { consumedInputRequests: structuredClone(record.consumedInputRequests) }),
       publicOutput: record.publicOutput,
       orchestrated: record.orchestrated,
       ...(record.planRevision === undefined ? {} : { planRevision: record.planRevision }),

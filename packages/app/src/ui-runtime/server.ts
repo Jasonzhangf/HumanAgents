@@ -1400,6 +1400,10 @@ async function handleRequest(
       writeJson(response, 200, await service.listTasksWithIdentitySource());
       return;
     }
+    if (path === '/api/main-topic' && method === 'GET') {
+      writeJson(response, 200, await service.readMainTopic());
+      return;
+    }
     if (path === '/api/tasks' && method === 'POST') {
       const body = await readBody(request);
       // Submitting the new-task entry is the human's confirmation for this Task,

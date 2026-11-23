@@ -237,6 +237,28 @@ test('recorded Responses success sequence replays through codec and immutable ev
   assert.match(new TextDecoder().decode(await context.sink.read(decoded.at(-1)!.evidenceRefs[0])), /resp-replay-success/);
 });
 
+test('Responses metadata extension does not change delivery or hide unknown events', async () => {
+  // RCC emits this registered intermediate frame in real Responses streams.
+  // Rejecting it interrupts tools; accepting it must not certify completion.
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const frames = await readJsonl('responses-success.jsonl');
+  const metadata: ProviderWireEvent = {
+    protocol: 'responses', type: 'response.metadata', sequence_number: 16,
+    response_id: 'resp-replay-success', metadata: { openai_chatgpt_moderation_metadata: { prompt: {} } },
+  };
+  const decoded: ProviderEvent[] = [];
+  for (const frame of [...frames.slice(0, -1), metadata]) {
+    decoded.push(...(await codec.decodeEvent(frame, context)).events);
+  }
+  assert.equal(decoded.some((event) => event.kind === 'terminal' || event.kind === 'error'), false);
+  assert.equal(decoded.filter((event) => event.kind === 'output').map((event) => event.summary).join(''), 'hello');
+  const completed = await codec.decodeEvent(frames.at(-1)!, context);
+  assert.equal(completed.events.at(-1)?.terminalState, 'succeeded');
+  await assert.rejects(codec.decodeEvent({ protocol: 'responses', type: 'response.unregistered' } as unknown as ProviderWireEvent, context),
+    (error: unknown) => (error as { providerError?: { code: string } }).providerError?.code === 'unknown.event');
+});
+
 test('recorded Anthropic success sequence replays through codec and immutable evidence sink', async () => {
   const codec = new AnthropicProviderCodec(4096);
   const context = codecContext();

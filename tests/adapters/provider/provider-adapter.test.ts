@@ -531,6 +531,8 @@ test('responses codec declares the Harness tool surface and keeps tool-less requ
   assert.match(withTools.instructions, /This Harness owns tool execution/);
   assert.match(withTools.instructions, /exec_command/);
   assert.match(withTools.instructions, /Only these function tools can be called: file_read, web_search\./);
+  assert.match(withTools.instructions, /preserve source values and units/i);
+  assert.match(withTools.instructions, /do not infer missing specifications/i);
 
   const withoutTools = codec.encodeStart(startInput(), ccBinding, 'cc-route');
   assert.equal(withoutTools.instructions, '');

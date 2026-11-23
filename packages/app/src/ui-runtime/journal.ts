@@ -426,6 +426,23 @@ function validateJournalRecord(
     requireRecordString(record, 'deletedAt', filePath, line);
     return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
+  if (kind === 'task.input-answered') {
+    requireScopedId(record, 'taskId', 'task', filePath, line);
+    const request = requireRecordObject(record, 'request', filePath, line);
+    requireScopedId(request, 'taskId', 'task', filePath, line);
+    requireRecordString(request, 'requestId', filePath, line);
+    requireRecordString(request, 'schemaRef', filePath, line);
+    requireRecordString(request, 'reason', filePath, line);
+    requireRecordString(request, 'impact', filePath, line);
+    requireRecordString(request, 'question', filePath, line);
+    requireRecordString(request, 'turnId', filePath, line);
+    requireScopedId(request, 'operationId', 'operation', filePath, line);
+    requirePositiveInteger(request, 'executionEpoch', filePath, line);
+    requirePositiveInteger(request, 'expectedRevision', filePath, line);
+    requireRecordString(record, 'answer', filePath, line);
+    requireRecordString(record, 'answeredAt', filePath, line);
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
+  }
   if (kind === 'operation.prepared') {
     validateExecutionAllocation(record.allocation, filePath, line);
     const prepared = record as Extract<UiRuntimeJournalRecord, { readonly kind: 'operation.prepared' }>;

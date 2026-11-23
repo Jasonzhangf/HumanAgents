@@ -41,6 +41,7 @@ import {
   type RuntimeMilestoneReviewProjection,
   type RuntimeTaskSnapshotInput,
 } from '../../packages/ui/projection/runtime.js';
+import { projectMainTopic } from '../../packages/ui/projection/main-topic.js';
 
 const runtimeApiModuleUrl = new URL('../../../../docs/ui/runtime-api.js', import.meta.url).href;
 const agentActivityModuleUrl = new URL('../../../../docs/ui/agent-activity.js', import.meta.url).href;
@@ -282,6 +283,159 @@ test('runtime task list groups only exact committed lineage under one visible wo
     subscriptionId: 'subscription-child-1',
     occurrenceId: 'occurrence-child-1',
   });
+});
+
+test('main topic shows one linked task and relays its child ask to the user-facing task', () => {
+  const parentTaskId = id('task', 'main-topic-parent');
+  const childTaskId = id('task', 'main-topic-child');
+  const request = {
+    requestId: 'main-topic-request-1',
+    taskId: childTaskId,
+    schemaRef: 'humanagent://input/text/v1',
+    reason: '缺少比价口径。',
+    impact: '原任务等待用户选择。',
+    question: '按含税价还是未税价比较？',
+    options: ['含税价', '未税价'],
+    turnId: 'main-topic-turn-1',
+    operationId: id('operation', 'main-topic-operation-1'),
+    executionEpoch: 2,
+    expectedRevision: 1,
+  };
+  const projection = projectMainTopic({
+    projectKey: 'main-topic-project',
+    projectName: '报价项目',
+    workspaceCwd: '/tmp/main-topic-project',
+    mode: 'rcc',
+    interactions: [{
+      interactionId: 'main-topic-interaction-1',
+      rawInput: '比较甲乙报价并给出最低价。',
+      occurredAt: '2026-11-22T10:00:00.000Z',
+      state: 'confirmed',
+      taskId: parentTaskId,
+    }],
+    tasks: [{
+      taskId: parentTaskId,
+      title: '比较报价',
+      state: 'waiting',
+      stateLabel: '等待你的回答',
+      currentNode: '',
+      nextStep: '回答后继续同一任务',
+      output: '',
+      updatedAt: '2026-11-22T10:01:00.000Z',
+      sourceInteractionId: 'main-topic-interaction-1',
+    }, {
+      taskId: childTaskId,
+      title: 'scheduled occurrence',
+      state: 'waiting',
+      stateLabel: '等待你的回答',
+      currentNode: '',
+      nextStep: '回答后继续同一任务',
+      output: '',
+      updatedAt: '2026-11-22T10:01:00.000Z',
+      parentTaskId,
+      inputRequest: request,
+    }],
+  });
+
+  assert.deepEqual(projection.tasks.map((task) => task.taskId.value), [parentTaskId.value]);
+  assert.deepEqual(projection.turns.map((turn) => turn.taskId?.value), [
+    undefined,
+    parentTaskId.value,
+  ]);
+  assert.equal(projection.turns[1]?.kind, 'input-request');
+  assert.equal(projection.turns[1]?.taskId?.value, parentTaskId.value);
+  assert.equal(projection.openInputRequest?.taskId.value, parentTaskId.value);
+  assert.equal(projection.openInputRequest?.requestId, request.requestId);
+  assert.deepEqual(projection.openInputRequest?.options, request.options);
+});
+
+test('main topic retains each consumed request and exact answer once in user turn order', () => {
+  const taskId = id('task', 'main-topic-answered-task');
+  const projection = projectMainTopic({
+    projectKey: 'main-topic-project', projectName: '报价项目', workspaceCwd: '/tmp/main-topic-project', mode: 'rcc',
+    interactions: [{ interactionId: 'main-topic-answered-interaction', rawInput: '比较两份报价。', occurredAt: '2026-11-22T10:00:00.000Z', state: 'confirmed', taskId }],
+    tasks: [{
+      taskId, title: '比较报价', state: 'running', stateLabel: '执行中', currentNode: 'provider.model', nextStep: '', output: '',
+      updatedAt: '2026-11-22T10:04:00.000Z', sourceInteractionId: 'main-topic-answered-interaction',
+      consumedInputRequests: [
+        { request: { requestId: 'request-a', taskId, schemaRef: 'humanagent://input/text/v1', reason: '口径缺失', impact: '等待选择', question: '按含税还是未税价？', turnId: 'turn-a', operationId: id('operation', 'op-a'), executionEpoch: 1, expectedRevision: 1 }, answer: '含税价' },
+        { request: { requestId: 'request-b', taskId, schemaRef: 'humanagent://input/text/v1', reason: '规格缺失', impact: '等待选择', question: '是否要求同规格？', turnId: 'turn-b', operationId: id('operation', 'op-b'), executionEpoch: 2, expectedRevision: 2 }, answer: '同规格的报价' },
+      ],
+    }],
+  });
+  assert.deepEqual(projection.turns.map((turn) => turn.turnId), [
+    'user:main-topic-answered-interaction', 'input-request:request-a', 'input-answer:request-a',
+    'input-request:request-b', 'input-answer:request-b', 'status:main-topic-answered-task',
+  ]);
+  assert.deepEqual(projection.turns.slice(1, 5).map((turn) => [turn.role, turn.text, turn.requestId, turn.quote]), [
+    ['jenny', '按含税还是未税价？', 'request-a', '比较两份报价。'],
+    ['user', '含税价', 'request-a', '按含税还是未税价？'],
+    ['jenny', '是否要求同规格？', 'request-b', '比较两份报价。'],
+    ['user', '同规格的报价', 'request-b', '是否要求同规格？'],
+  ]);
+});
+
+test('main topic keeps a consumed child question under its user-facing parent task', () => {
+  const parentTaskId = id('task', 'main-topic-consumed-parent');
+  const childTaskId = id('task', 'main-topic-consumed-child');
+  const request = {
+    requestId: 'main-topic-consumed-request-1',
+    taskId: childTaskId,
+    schemaRef: 'humanagent://input/text/v1',
+    reason: '缺少比价口径。',
+    impact: '原任务等待用户选择。',
+    question: '按含税价还是未税价比较？',
+    turnId: 'main-topic-consumed-turn-1',
+    operationId: id('operation', 'main-topic-consumed-operation-1'),
+    executionEpoch: 2,
+    expectedRevision: 1,
+  };
+  const projection = projectMainTopic({
+    projectKey: 'main-topic-project',
+    projectName: '报价项目',
+    workspaceCwd: '/tmp/main-topic-project',
+    mode: 'rcc',
+    interactions: [{
+      interactionId: 'main-topic-consumed-interaction',
+      rawInput: '比较甲乙报价并给出最低价。',
+      occurredAt: '2026-11-22T10:00:00.000Z',
+      state: 'confirmed',
+      taskId: parentTaskId,
+    }],
+    tasks: [{
+      taskId: parentTaskId,
+      title: '比较报价',
+      state: 'succeeded',
+      stateLabel: '已完成',
+      currentNode: '',
+      nextStep: '',
+      output: '供应商乙最低。',
+      updatedAt: '2026-11-22T10:05:00.000Z',
+      sourceInteractionId: 'main-topic-consumed-interaction',
+    }, {
+      taskId: childTaskId,
+      title: 'scheduled occurrence',
+      state: 'succeeded',
+      stateLabel: '已完成',
+      currentNode: '',
+      nextStep: '',
+      output: '',
+      updatedAt: '2026-11-22T10:05:00.000Z',
+      parentTaskId,
+      consumedInputRequests: [{ request, answer: '含税价' }],
+    }],
+  });
+
+  assert.deepEqual(projection.tasks.map((task) => task.taskId.value), [parentTaskId.value]);
+  assert.deepEqual(projection.turns.map((turn) => [turn.turnId, turn.role, turn.text]), [
+    ['user:main-topic-consumed-interaction', 'user', '比较甲乙报价并给出最低价。'],
+    ['input-request:main-topic-consumed-request-1', 'jenny', '按含税价还是未税价比较？'],
+    ['input-answer:main-topic-consumed-request-1', 'user', '含税价'],
+    ['result:main-topic-consumed-parent', 'jenny', '供应商乙最低。'],
+  ]);
+  assert.equal(projection.turns[1]?.taskId?.value, parentTaskId.value);
+  assert.equal(projection.turns[1]?.quote, '比较甲乙报价并给出最低价。');
+  assert.equal(projection.turns[2]?.quote, '按含税价还是未税价比较？');
 });
 
 test('a root with its own failure or operation keeps its own facts over a waiting child', () => {

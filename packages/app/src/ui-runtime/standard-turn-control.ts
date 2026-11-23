@@ -79,7 +79,7 @@ export const INSPECTION_OUTCOME_SCHEMA: BusinessPayload = {
  */
 export const STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
   toolId: STANDARD_TURN_END_TOOL_ID,
-  description: 'humanagent.turn.end: End the current task turn when this phase has sufficient results and evidence. Provide outcome; use input-required only when execution cannot continue without an exact user fact, and then provide inputRequest question/schemaRef/reason/impact. Provide the four-part summary goal/actions/result/nextStep; result.text is the user-facing answer. deliveryRefs only cite committed file writes or inspection results. The independent Planner decides continue, complete, or failed after ordinary closure.',
+  description: 'humanagent.turn.end: End the current task turn when this phase has sufficient results and evidence. Provide outcome; use input-required only when execution cannot continue without an exact user fact, and then provide inputRequest question/schemaRef/reason/impact. When the missing fact has a small enumerable set, also provide inputRequest.options with 2 to 4 concrete answers in the user\'s language; always leave room for a custom answer. Provide the four-part summary goal/actions/result/nextStep; result.text is the user-facing answer. deliveryRefs only cite committed file writes or inspection results. The independent Planner decides continue, complete, or failed after ordinary closure.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -98,6 +98,13 @@ export const STANDARD_TURN_END_TOOL: ProviderToolDefinition = {
           schemaRef: { type: 'string', minLength: 1 },
           reason: { type: 'string', minLength: 1 },
           impact: { type: 'string', minLength: 1 },
+          options: {
+            type: 'array',
+            minItems: 2,
+            maxItems: 4,
+            items: { type: 'string', minLength: 1 },
+            description: 'Concrete selectable answers in the user\'s language. Include them whenever the missing fact has a small enumerable set; the UI always keeps a custom answer path.',
+          },
           expiresAt: { type: 'string', minLength: 1 },
         },
         required: ['question', 'schemaRef', 'reason', 'impact'],

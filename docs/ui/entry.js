@@ -19,6 +19,8 @@ import {
   technicalDetailTrigger,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
+import { renderMainTopic, disposeMainTopic } from './main-topic.js'
+import { conversationStatus, elapsedSeconds } from './conversation-status.js'
 import {
   projectInteractionCardFromEntries,
   projectInteractionCardFromSnapshot,
@@ -262,7 +264,7 @@ export { localizedStepPhase, localizedStepSummary, sanitizeUserVisibleText } fro
 // unusually long task must keep a bounded, readable step list (bug 486ddd4).
 const MAX_LIVE_STEPS = 50
 
-export function createSubmitStatusBanner(target, { onOpenDetail } = {}) {
+export function createSubmitStatusBanner(target, { onOpenDetail, clock = true } = {}) {
   let block = null
   let phase = null
   let detail = null
@@ -294,6 +296,7 @@ export function createSubmitStatusBanner(target, { onOpenDetail } = {}) {
     stepTimer.textContent = `本步 ${formatElapsed(now - stepStartedAt)}`
   }
   const startTimer = () => {
+    if (!clock) return
     if (tick !== null) return
     paintTimers()
     tick = setInterval(paintTimers, 1000)
@@ -437,14 +440,20 @@ const template = mountPageTemplate(pageRoot, {
   title: '任务输入',
 })
 const { status } = template.hosts
-const submitBanner = createSubmitStatusBanner(status, { onOpenDetail: openSubmitProgressDetail })
-let interactionCard = null
+// The main Topic owns visible clocks. Keep the legacy submission consumer,
+// but do not run its hidden heading clock alongside the message cards.
+const submitBanner = createSubmitStatusBanner(status, { onOpenDetail: openSubmitProgressDetail, clock: false })
 let pageLeaving = false
 const submissionGate = createSubmissionGate()
+const mainTopicHost = element('div', undefined, 'main-topic-host')
+let latestMainTopic = null
+let mainTopicPoll = null
+let mainTopicRefreshing = null
 // A confirmed once task hands its live execution progress to the single entry
 // interface. While this handle exists the submit banner stays on the page and
 // mirrors the runtime's real execution steps; otherwise it settles normally.
 let liveTaskProgress = null
+let explicitStepStop = null
 
 /**
  * Keep this attempt's user input in a page-owning history state so browser
@@ -484,17 +493,85 @@ function disposeEntryPage(event) {
   if (!shouldDisposeEntryPage(event)) return
   if (pageLeaving) return
   pageLeaving = true
-  interactionCard?.dispose()
+  disposeMainTopic(mainTopicHost)
+  submitBanner.clear()
+  explicitStepStop?.()
+  stopLiveTaskProgress()
+  if (mainTopicPoll !== null) clearTimeout(mainTopicPoll)
+  mainTopicPoll = null
   template.dispose()
 }
 window.addEventListener('pagehide', disposeEntryPage)
 
-// The shared work card mounts on the first real event or snapshot update. Until
-// then the host stays genuinely empty, so first entry claims no work.
-function presentInteractionCard(projection) {
-  if (pageLeaving || !interactionCardHost || !projection) return
-  if (!interactionCard) interactionCard = mountInteractionWorkCard(interactionCardHost)
-  interactionCard.update(projection)
+async function answerMainTopicRequest(request, answer) {
+  const taskId = typeof request.taskId === 'string' ? request.taskId : request.taskId?.value
+  try {
+    await api.answerTaskInputRequest(taskId, request.requestId, {
+      answer,
+      expectedRevision: request.expectedRevision,
+    })
+  } catch (error) {
+    const projection = await api.readMainTopic()
+    const stillOpen = projection.openInputRequest?.requestId === request.requestId
+      && projection.openInputRequest?.taskId?.value === taskId
+    if (stillOpen) throw error
+    renderMainTopic(mainTopicHost, projection, { onAnswer: answerMainTopicRequest,
+      onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, projection) })
+    scheduleMainTopicPoll(projection)
+    return projection
+  }
+  return refreshMainTopic()
+}
+
+function scheduleMainTopicPoll(projection) {
+  if (mainTopicPoll !== null) clearTimeout(mainTopicPoll)
+  mainTopicPoll = null
+  if (pageLeaving || (!projection?.activeTask && !projection?.turns?.some((turn) =>
+    turn.statusFacts?.steps !== undefined && ['received', 'matching'].includes(turn.statusFacts.state)))) return
+  mainTopicPoll = setTimeout(() => {
+    mainTopicPoll = null
+    void refreshMainTopic()
+  }, 1500)
+}
+
+async function refreshMainTopic() {
+  if (pageLeaving) return undefined
+  if (mainTopicRefreshing !== null) return mainTopicRefreshing
+  mainTopicRefreshing = (async () => {
+    try {
+      const projection = await api.readMainTopic()
+      if (pageLeaving) return projection
+      latestMainTopic = projection
+      const pending = projection.openInputRequest
+      renderMainTopic(mainTopicHost, projection, { onAnswer: answerMainTopicRequest,
+        onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, projection) })
+      scheduleMainTopicPoll(projection)
+      return projection
+    } catch (error) {
+      if (pageLeaving) return undefined
+      disposeMainTopic(mainTopicHost)
+      clearNode(mainTopicHost)
+      const panel = element('section', undefined, 'section mt-unavailable')
+      panel.append(
+        element('h2', '项目 Jenny'),
+        element('p', '主话题记录暂时无法读取。输入仍可按单个任务处理。', 'empty'),
+        technicalDetailTrigger(() => ({
+          title: '技术详情',
+          entries: [
+            ['code', error?.code, 'data-detail-code'],
+            ['owner', error?.ownerId, 'data-detail-owner'],
+            ['message', error?.message, 'data-detail-message'],
+          ],
+        })),
+      )
+      mainTopicHost.append(panel)
+      scheduleMainTopicPoll({ activeTask: { state: 'retry' } })
+      return undefined
+    } finally {
+      mainTopicRefreshing = null
+    }
+  })()
+  return mainTopicRefreshing
 }
 
 let interactionId
@@ -504,6 +581,28 @@ let latestRuntimeStatus = null
 let submitting = false
 let pendingSubmission
 const cardState = { sequence: 0, entries: [] }
+
+// Only a successfully returned submission releases its identity. A failed
+// attempt or an intake clarification must still retry the same interaction.
+function completeSubmission(snapshot) {
+  if (snapshot.state === 'awaiting-clarification') return
+  interactionId = undefined
+  confirmation = undefined
+  pendingSubmission = undefined
+  latestState = 'received'
+  cardState.sequence = 0
+  cardState.entries = []
+  const form = document.querySelector('#entry-form')
+  form.elements.namedItem('rawInput').value = ''
+  form.elements.namedItem('rawInput').readOnly = false
+  for (const name of ['executionMode', 'timezone', 'scheduledStartAt', 'scheduledEndAt', 'maxOccurrences',
+    'recurringFrequency', 'intervalMinutes', 'timeOfDay', 'weekDays']) {
+    form.elements.namedItem(name).disabled = false
+  }
+  form.querySelector('button[type="submit"]').textContent =
+    form.elements.namedItem('executionMode').value === 'once' ? '发送给 Jenny' : '保存执行计划'
+  retainEntryDraft()
+}
 
 function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
   cardState.sequence += 1
@@ -522,7 +621,7 @@ function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
       ...detail,
     },
   ]
-  presentInteractionCard(projectInteractionCardFromEntries(cardState.entries, latestState))
+  if (interactionCardHost) interactionCardHost.hidden = true
 }
 
 function updateCardFromSnapshot(snapshot) {
@@ -532,7 +631,7 @@ function updateCardFromSnapshot(snapshot) {
   if (!projection) return
   // The entry form submit is this new requirement's business confirmation. The
   // work card therefore never exposes a second confirmation action on this page.
-  presentInteractionCard({ ...projection, actions: [] })
+  if (interactionCardHost) interactionCardHost.hidden = true
 }
 
 function liveArea() {
@@ -562,20 +661,8 @@ function ensureDirectAnswerRegion() {
 function renderDirectAnswer(result) {
   const host = ensureDirectAnswerRegion()
   clearNode(host)
-  const head = element('header', undefined, 'section-head')
-  head.append(element('h2', '直接回答'), element('span', '本次请求已直接回答', 'section-meta'))
-  host.append(head)
-  const card = element('article', undefined, 'panel')
-  card.dataset.directAnswer = 'true'
-  card.append(element('p', result.text, 'business-output-text'))
-  host.append(card)
-  const live = template.hosts.primary.querySelector('#entry-live')
-  if (live) {
-    clearNode(live)
-    const liveHead = element('header', undefined, 'section-head')
-    liveHead.append(element('h2', '队列与任务状态'), element('span', '0 项', 'section-meta'))
-    live.append(liveHead, element('p', '本次请求已直接回答，未创建任务。', 'empty'))
-  }
+  host.hidden = true
+  void result
 }
 
 function renderField(section, label, value) {
@@ -624,6 +711,12 @@ function setEntryError(error) {
 function renderDraft(snapshot) {
   const section = ensureDraftSection()
   if (!section) return
+  if (mainTopicHost.dataset.surface === 'main-topic' && snapshot.state !== 'awaiting-clarification') {
+    clearNode(section)
+    section.hidden = true
+    return
+  }
+  section.hidden = false
   clearNode(section)
   if (snapshot.state === 'awaiting-clarification') {
     const panel = element('div', undefined, 'panel')
@@ -662,6 +755,7 @@ function renderDraft(snapshot) {
       setClarificationControlsDisabled(true)
       clearEntryError()
       void run.result
+        .then(completeSubmission)
         .catch((error) => handleSubmissionError(error, triggerButton ?? button))
         .finally(() => {
           submitting = false
@@ -813,7 +907,7 @@ function renderStatus(summary, tasks) {
 // row rendering (title, status, time) and carries the exact task id on the
 // link, but reuses the shared shell-layer drawer so the primary column never
 // repeats the full Task List page.
-function taskListEntries(rows) {
+function taskListEntries(rows, openInputRequest) {
   const fragment = document.createDocumentFragment()
   for (const row of rows) {
     const link = element('a', undefined, 'task-row-link')
@@ -832,9 +926,10 @@ function taskListEntries(rows) {
     link.dataset.taskId = row.taskId.value
     link.dataset.taskStatus = row.stateLabel || row.state || ''
     const copy = element('div')
+    const waitingForAnswer = openInputRequest?.taskId?.value === row.taskId.value
     copy.append(element('h3', taskRowTitle(row)))
-    copy.append(element('p', taskRowStateText(row)))
-    const stateChip = element('span', row.stateLabel, 'state-chip')
+    copy.append(element('p', waitingForAnswer ? '等待你的回答 · 回答后继续同一任务' : taskRowStateText(row)))
+    const stateChip = element('span', waitingForAnswer ? '等待你的回答' : row.stateLabel, 'state-chip')
     stateChip.dataset.tone = stateTone(row.executionState || row.state)
     const meta = element('div', undefined, 'item-meta')
     meta.append(element('time', formatTime(row.updatedAt)))
@@ -858,7 +953,7 @@ function openActiveTasksDrawer(activeRows, trigger) {
   const body = element('div', undefined, 'panel stack entry-task-list-drawer')
   body.dataset.taskListDrawer = 'true'
   if (activeRows.length === 0) body.append(element('p', '当前没有进行中或待处理任务。', 'empty'))
-  else body.append(taskListEntries(activeRows))
+  else body.append(taskListEntries(activeRows, latestMainTopic?.openInputRequest))
   const allTasks = element('a', '查看全部任务', 'button button--quiet')
   allTasks.href = './tasks.html'
   allTasks.dataset.entryAllTasks = 'true'
@@ -1032,6 +1127,40 @@ function openSubmitProgressDetail(trigger) {
     content.append(link)
   }
   openTechnicalDetail({ title: '任务执行进度', eyebrow: '实时进度', content, trigger })
+}
+
+function openMainTopicProgressDetail(trigger, turn, scope) {
+  const content = element('div', undefined, 'stack progress-detail-body')
+  const identity = element('dl', undefined, 'draft-receipt')
+  for (const [label, value] of [['消息', turn.turnId], ['会话', turn.interactionId], ['任务', turn.taskId?.value]]) {
+    if (!value) continue
+    const row = element('div')
+    row.append(element('dt', label), element('dd', value))
+    identity.append(row)
+  }
+  content.append(identity)
+  const list = element('ol', undefined, 'progress-step-list')
+  for (const row of conversationStatus(turn.statusFacts)) {
+    const item = element('li', undefined, 'progress-step')
+    item.append(element('span', row.label))
+    const seconds = elapsedSeconds(row)
+    if (seconds !== undefined) item.append(element('span', `${seconds} 秒`))
+    if (row.error) item.append(element('span', sanitizeUserVisibleText([row.error.code, row.error.message].filter(Boolean).join('：'))))
+    if (row.startedAt) item.append(element('time', formatTime(row.startedAt)))
+    list.append(item)
+  }
+  content.append(list)
+  if (turn.taskId) {
+    const link = element('a', '打开完整任务看板', 'button button--sm')
+    link.href = taskDashboardHref(turn.taskId.value, { kind: 'task', projectKey: scope.projectKey, mode: scope.mode })
+    content.append(link)
+  }
+  openTechnicalDetail({ title: '执行进度详情', content, trigger, onClose: () => {
+    // A normal poll may replace the clicked button while this layer is open.
+    if (!trigger.isConnected) {
+      mainTopicHost.querySelector(`[data-turn-id="${CSS.escape(turn.turnId)}"] .conversation-status-detail`)?.focus()
+    }
+  } })
 }
 
 /**
@@ -1468,6 +1597,7 @@ function subscribeExplicitStepStream(activeId) {
     return () => {}
   }
   stream.addEventListener('explicit.step', (event) => {
+    if (pageLeaving) return
     try {
       const payload = JSON.parse(event.data || '{}')
       const step = payload?.step ?? payload
@@ -1479,15 +1609,19 @@ function subscribeExplicitStepStream(activeId) {
         status.dataset.tone = 'warning'
         // Show the real step number and summary in the live banner and reset
         // its per-step timer; the progress block survives each step update.
-        submitBanner.step({ seq: step.seq, summary: step.summary })
+        submitBanner.step(step)
+        void refreshMainTopic()
       }
     } catch {
       // Ignore malformed step event payloads
     }
   })
-  return () => {
+  const stop = () => {
     try { stream.close() } catch {}
+    if (explicitStepStop === stop) explicitStepStop = null
   }
+  explicitStepStop = stop
+  return stop
 }
 
 /**
@@ -1522,6 +1656,7 @@ async function executeSubmission(submission, clarificationAnswer) {
         ? { occurredAt: received.occurredAt }
         : {}),
     })
+    await refreshMainTopic()
   }
 
   let snapshot = await api.inspectExplicitInteraction(interactionId)
@@ -1533,6 +1668,7 @@ async function executeSubmission(submission, clarificationAnswer) {
     await api.answerExplicitClarification(interactionId, clarificationAnswer)
     appendCardEvent('user', clarificationAnswer, 'user', { eventKey: 'explicit.clarification-answer' })
     snapshot = await api.inspectExplicitInteraction(interactionId)
+    await refreshMainTopic()
   }
   if (snapshot.state === 'received' || snapshot.state === 'matching') {
     const stopStepStream = subscribeExplicitStepStream(interactionId)
@@ -1551,18 +1687,21 @@ async function executeSubmission(submission, clarificationAnswer) {
   const directResult = answeredSubmissionPresentation(snapshot)
   if (directResult) {
     status.dataset.tone = directResult.tone
-    status.textContent = '本次请求已直接回答'
-    renderDirectAnswer(directResult)
+    status.textContent = 'Jenny 已直接回答；本次没有创建任务'
+    await refreshMainTopic()
+    if (mainTopicHost.dataset.surface !== 'main-topic') renderDirectAnswer(directResult)
     return snapshot
   }
-  if (snapshot.state === 'confirmed') {
+  if (POST_CONFIRMATION_STATES.has(snapshot.state)) {
     // The backend snapshot already proves the business confirmation. Keep that
     // fact so a later task-refresh failure still reports the accepted
     // demand instead of downgrading to an unfinished input.
     confirmation = snapshot.confirmation || confirmation || snapshot
     status.dataset.tone = 'success'
     submitBanner.text('需求已接收，正在刷新任务进展…')
+    await refreshMainTopic()
     await landOnSubmittedTask(identityFromConfirmedSnapshot(snapshot))
+    await refreshMainTopic()
     return snapshot
   }
   if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
@@ -1598,7 +1737,9 @@ async function executeSubmission(submission, clarificationAnswer) {
     return snapshot
   }
   submitBanner.text('需求已提交，正在刷新任务进展…')
+  await refreshMainTopic()
   await landOnSubmittedTask(identityFromReceipt(receipt.requirement))
+  await refreshMainTopic()
   return snapshot
 }
 
@@ -1642,7 +1783,7 @@ function field(labelText, control) {
 function renderForm() {
   const section = element('section', undefined, 'section')
   const head = element('header', undefined, 'section-head')
-  head.append(element('h2', '用户任务'), element('span', '一次提交即确认本次新任务', 'section-meta'))
+  head.append(element('h2', '继续和 Jenny 对话'), element('span', '简单问题直接回答 · 新任务一次提交即确认', 'section-meta'))
   section.append(head)
 
   const panel = element('div', undefined, 'panel')
@@ -1651,8 +1792,8 @@ function renderForm() {
   const textarea = element('textarea')
   textarea.name = 'rawInput'
   textarea.required = true
-  textarea.placeholder = '描述要处理的一个新任务'
-  form.append(field('任务输入', textarea))
+  textarea.placeholder = '向 Jenny 提问，或交办一个需要读取项目材料的任务'
+  form.append(field('消息', textarea))
 
   const mode = element('select')
   mode.name = 'executionMode'
@@ -1740,7 +1881,7 @@ function renderForm() {
   form.append(errorPanel)
 
   const actions = element('div', undefined, 'actions')
-  const submitButton = element('button', '提交任务', 'button button--primary')
+  const submitButton = element('button', '发送给 Jenny', 'button button--primary')
   submitButton.type = 'submit'
   actions.append(submitButton)
   form.append(actions)
@@ -1761,7 +1902,7 @@ function renderForm() {
     const rendered = (control) => !control.closest('[hidden]')
     timezone.required = rendered(timezone)
     startAt.required = rendered(startAt)
-    submitButton.textContent = modeValue === 'once' ? '提交任务' : '保存执行计划'
+    submitButton.textContent = modeValue === 'once' ? '发送给 Jenny' : '保存执行计划'
   }
   mode.addEventListener('change', syncExecutionFields)
   frequency.addEventListener('change', syncExecutionFields)
@@ -1797,7 +1938,7 @@ function renderForm() {
         pendingSubmission = await prepareSubmission(rawInput, form)
       }
       retainEntryDraft()
-      await executeSubmission(pendingSubmission)
+      return executeSubmission(pendingSubmission)
     })
     if (!run.started) return
     submitting = true
@@ -1807,7 +1948,7 @@ function renderForm() {
     status.dataset.tone = 'warning'
     submitBanner.mount()
     submitBanner.text('正在整理并提交任务…')
-    void run.result.catch((error) => handleSubmissionError(error, submitButton)).finally(() => {
+    void run.result.then(completeSubmission).catch((error) => handleSubmissionError(error, submitButton)).finally(() => {
       submitting = false
       submitButton.disabled = false
       // A confirmed once task keeps the live progress card after this settle;
@@ -1835,8 +1976,10 @@ async function load() {
       ['区块', 'Runtime'],
     ],
   })
-  template.hosts.primary.append(interactionCardHost, liveArea())
+  interactionCardHost.hidden = true
+  template.hosts.primary.append(mainTopicHost, interactionCardHost, liveArea())
   template.hosts.composer.append(renderForm())
+  await refreshMainTopic()
   await refreshQueue()
 }
 
