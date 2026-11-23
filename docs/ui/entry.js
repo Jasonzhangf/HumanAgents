@@ -29,7 +29,7 @@ import {
 } from './interaction-card-page.js'
 import { locationFromHash } from './product-location.js'
 import { entryWorkspaceSelection, entryProjectHref, mountEntryWorkspace } from './entry-workspace.js'
-import { submissionView, intakeFinished } from './send-lifecycle.js'
+import { submissionView, intakeFinished, draftReviewFromSnapshot, canContinueSubmission } from './send-lifecycle.js'
 import { createDispatchTracking, taskValue } from './dispatch-tracking.js'
 
 // ── Page seams shared with the W4 product consumer ──────────────────────────
@@ -472,6 +472,7 @@ let mainTopicRefreshQueued = false
 let mainTopicUsageForce = false
 let sendAttempt = null
 let mainTopicReadFailures = 0
+const pendingDrafts = new Map()
 const dispatchTracking = createDispatchTracking({ api, openDetail: openTechnicalDetail,
   scope: () => latestMainTopic,
   onChange: () => { if (!pageLeaving) paintSubmission() },
@@ -479,13 +480,16 @@ const dispatchTracking = createDispatchTracking({ api, openDetail: openTechnical
 function paintSubmission() {
   if (pageLeaving || (!latestMainTopic && !sendAttempt)) return
   const projection = latestMainTopic || { turns: [], agentName: 'Jenny' }
-  renderMainTopic(mainTopicHost, submissionView(projection, sendAttempt), {
+  const turns = (projection.turns || []).map(turn => turn.kind === 'draft' && pendingDrafts.has(turn.interactionId)
+    ? { ...turn, draftReview: pendingDrafts.get(turn.interactionId) } : turn)
+  renderMainTopic(mainTopicHost, submissionView({ ...projection, turns }, sendAttempt), {
     onAnswer: answerMainTopicRequest,
     onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, latestMainTopic),
     onOpenHistoryDetail: openMainTopicHistoryDetail,
     onOpenDispatch: dispatchTracking.open,
     dispatchObservation: dispatchTracking.observation,
     dispatchExecutionObserved: dispatchTracking.executionObserved,
+    dispatchActivity: dispatchTracking.activity,
   })
 }
 
@@ -506,11 +510,10 @@ async function recoverSubmission() {
 }
 
 async function continueSubmission() {
-  // Only an explicit user action may resume a failed interpret after the
-  // runtime has returned the SAME intake to received. matching is ambiguous
-  // and is never re-dispatched by the browser.
+  // Resume only from a fresh runtime snapshot that still permits processing
+  // the exact local receipt with its original idempotency key.
   if (submissionGate.pending || !pendingSubmission || !interactionId
-    || sendAttempt?.snapshot?.state !== 'received' || !sendAttempt.processError) return
+    || !canContinueSubmission(sendAttempt?.snapshot) || !sendAttempt.processError) return
   sendAttempt.error = undefined
   sendAttempt.processError = undefined
   const run = submissionGate.begin(() => executeSubmission(pendingSubmission))
@@ -644,7 +647,6 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
     try {
       const projection = await api.readMainTopic()
       if (pageLeaving) return projection
-      if (mainTopicRefreshQueued) return projection
       latestMainTopic = projection
       dispatchTracking.sync(projection.tasks || [], projection.turns || [])
       if (!sendAttempt && window.history.state?.entryReceipt) {
@@ -661,7 +663,11 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
       if (sendAttempt?.interactionId) {
         try {
           sendAttempt.snapshot = await api.inspectExplicitInteraction(sendAttempt.interactionId)
-          sendAttempt.error = intakeFinished.has(sendAttempt.snapshot.state) ? undefined : sendAttempt.processError
+          const draft = draftReviewFromSnapshot(sendAttempt.snapshot)
+          if (draft) pendingDrafts.set(sendAttempt.interactionId, draft)
+          else pendingDrafts.delete(sendAttempt.interactionId)
+          const finished = intakeFinished.has(sendAttempt.snapshot.state) && !canContinueSubmission(sendAttempt.snapshot)
+          sendAttempt.error = finished ? undefined : sendAttempt.processError
         } catch (error) { sendAttempt.error = error; mainTopicReadFailures++ }
       }
       if (!sendAttempt?.error) mainTopicReadFailures = 0
@@ -1749,12 +1755,22 @@ function subscribeExplicitStepStream(activeId) {
   } catch {
     return () => {}
   }
+  const seen = new Set()
   stream.addEventListener('explicit.step', (event) => {
     if (pageLeaving) return
     try {
       const payload = JSON.parse(event.data || '{}')
       const step = payload?.step ?? payload
       if (step && typeof step.summary === 'string' && step.summary.trim() !== '') {
+        if (Number.isSafeInteger(step.seq)) {
+          if (seen.has(step.seq)) return
+          seen.add(step.seq)
+          if (sendAttempt?.interactionId === activeId) {
+            sendAttempt.steps ??= []
+            sendAttempt.steps.push(step)
+            paintSubmission()
+          }
+        }
         appendCardEvent('status', localizedStepSummary(step.summary), 'progress', {
           eventKey: step.kind || 'explicit.step',
           interactionId: activeId,
@@ -1868,6 +1884,13 @@ async function executeSubmission(submission, clarificationAnswer) {
     })
   }
 
+  // Existing-task proposals require their own confirmation. Only a create
+  // proposal can use the new-task authorization from the composer.
+  if (snapshot.draft.proposedIntent !== 'create') {
+    pendingDrafts.set(interactionId, draftReviewFromSnapshot(snapshot))
+    await refreshMainTopic({ forceUsage: true })
+    return snapshot
+  }
   const receipt = await api.confirmExplicitRequirement(interactionId, {
     draftId: snapshot.draft.draftId,
     inputRevision: snapshot.draft.inputRevision,
@@ -1896,7 +1919,7 @@ async function executeSubmission(submission, clarificationAnswer) {
   await refreshMainTopic()
   void landOnSubmittedTask({ ...identityFromReceipt(receipt.requirement), interactionId }).catch(() => { void refreshQueue() })
   await refreshMainTopic()
-  return snapshot
+  return { ...snapshot, state: latestState }
 }
 
 function submissionFailureSummary() {

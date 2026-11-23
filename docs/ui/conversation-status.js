@@ -37,11 +37,12 @@ export function conversationStatus(facts = {}) {
     if (!sending) group.wait = add(`${key}:wait:${rows.length}`, 'model-wait', '等待模型响应', at)
     return group
   }
-  const respond = (group, at) => {
-    if (!group) return
+  const respond = (group, at, output = true) => {
+    if (!group || group.settled) return
     close(group.wait, at)
     if (group.wait) group.wait.label = '等待模型响应（已收到）'
-    if (!group.response) group.response = add(`response:${rows.length}`, 'streaming', '正在接收模型响应', at, 'active')
+    if (!group.response) group.response = add(`response:${rows.length}`, 'streaming', '模型正在处理', at, 'active')
+    if (output) group.response.label = '正在接收模型响应'
   }
   const dispatch = (key, at) => {
     const group = models.get(key)
@@ -51,6 +52,7 @@ export function conversationStatus(facts = {}) {
     else if (!group) model(key, at)
   }
   const settle = (group, at) => {
+    if (group) group.settled = true
     close(group?.response, at)
     if (group?.response) { group.response.label = '模型响应已结束'; group.response.tone = 'success' }
     // A settled request with no first-response fact cannot supply wait duration.
@@ -108,14 +110,20 @@ export function conversationStatus(facts = {}) {
     const key = step.requestId && step.turnId ? JSON.stringify([step.turnId, step.requestId]) : undefined
     const group = key === undefined ? undefined : models.get(key)
     if (step.kind === 'request.dispatching') {
-      model(key ?? `unpaired:${step.seq}`, step.occurredAt, true)
+      if (!group) model(key ?? `unpaired:${step.seq}`, step.occurredAt, true)
       if (key && !executions.has(key)) executions.set(key, add(`${key}:total`, 'total', '本次请求总耗时', step.occurredAt, 'active'))
     }
     if (step.kind === 'request.dispatched') {
       dispatch(key ?? `unpaired:${step.seq}`, step.occurredAt)
       if (key && !executions.has(key)) executions.set(key, add(`${key}:total`, 'total', '本次请求总耗时', step.occurredAt, 'active'))
     }
-    if (step.kind === 'response.reasoning' || step.kind === 'response.streaming') respond(group, step.occurredAt)
+    if (step.kind === 'response.reasoning' || step.kind === 'response.streaming') {
+      respond(group, step.occurredAt, step.kind === 'response.streaming')
+    }
+    if (step.kind === 'tool.started' && group?.wait) {
+      close(group.wait, step.occurredAt)
+      group.wait.label = '等待模型响应（已收到）'
+    }
     if (step.kind === 'request.settled') {
       settle(group, step.occurredAt)
       if (key) close(executions.get(key), step.occurredAt)

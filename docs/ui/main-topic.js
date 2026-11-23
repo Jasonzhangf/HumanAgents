@@ -1,8 +1,9 @@
-import { api, appendPairingEntry, clearNode, element, formatTime } from './runtime-shell.js'
+import { api, appendPairingEntry, clearNode, element, formatTime, taskControlHref } from './runtime-shell.js'
 import { conversationStatus, createConversationStatusClock } from './conversation-status.js'
 import * as callUsageFooter from './call-usage-footer.js'
 import { renderToolBody, disposeToolBody } from './tool-presentation.js'
 import { taskForTurn, taskValue, renderDispatchCard } from './dispatch-tracking.js'
+import { renderExplicitToolActivity } from './explicit-tool-activity.js'
 
 export function ownedMainTopicTurns(projection) {
   const turns = projection.turns || []
@@ -233,6 +234,26 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     documentDetail.append(element('summary', '任务文档'), element('p', turn.documentText))
     bubble.append(documentDetail)
   }
+  bubble.querySelector('.mt-draft-next')?.remove()
+  if (turn.kind === 'draft' && !turn.dispatchTask) {
+    const draft = turn.draftReview
+    const next = element('div', undefined, 'mt-draft-next')
+    if (draft?.intent === 'change' || draft?.intent === 'append') {
+      const target = project.tasks?.find(task => taskValue(task.taskId) === draft.taskId)
+      const originalState = target?.stateLabel ? ` 原任务状态：${target.stateLabel}。` : ''
+      next.append(element('p', `待处理 · 请打开原任务查看可用操作。${originalState}`))
+      if (draft.taskId) {
+        const link = element('a', '查看原任务', 'button conversation-status-detail')
+        link.href = taskControlHref(draft.taskId, { kind: 'task', projectKey: project.projectKey, mode: project.mode })
+        next.append(link)
+      }
+    } else {
+      next.append(element('p', draft?.intent === 'create'
+        ? '已整理 · 等待投递给编排 Agent'
+        : '已整理 · 暂未取得任务投递回执'))
+    }
+    bubble.append(next)
+  }
   bubble.querySelector('.dispatch-card')?.remove()
   if (turn.dispatchTask) bubble.append(renderDispatchCard(turn, turn.dispatchTask, {
     onOpen: (trigger, task) => topicState.onOpenDispatch?.(trigger, task, { ...turn, text: turn.documentText }),
@@ -247,17 +268,23 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     }
     detailReadError.textContent = turn.detailReadError.message
   } else detailReadError?.remove()
+  const activity = turn.dispatchTask && topicState.dispatchActivity?.(turn.dispatchTask)
+  const events = activity?.events.length ? activity.events : turn.toolEvents
   let tools = bubble.querySelector('.tool-body')
-  if (turn.toolEvents?.length) {
+  if (events?.length) {
     if (!tools) {
       tools = element('div', undefined, 'tool-body')
       bubble.append(tools)
     }
-    renderToolBody(tools, turn.toolEvents, api.readToolOutput)
+    renderToolBody(tools, events, activity?.events.length ? activity.readOutput : api.readToolOutput)
   } else if (tools) {
     disposeToolBody(tools)
     tools.remove()
   }
+  const explicitState = turn.statusFacts?.state
+  renderExplicitToolActivity(bubble, turn.explicitSteps ?? turn.statusFacts?.steps,
+    Boolean(turn.statusFacts?.steps && !['received', 'matching'].includes(explicitState)) ||
+    Boolean(turn.localStatus?.some(row => row.error)))
   let control = answerControls.get(article)
   const key = requestKey(turn)
   if (turn.kind === 'input-request' && turn.requestId && turn.taskId
@@ -373,7 +400,7 @@ export function mainTopicTurnGroups(projection) {
   }
 }
 
-export function renderMainTopic(host, projection, { onAnswer, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved } = {}) {
+export function renderMainTopic(host, projection, { onAnswer, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved, dispatchActivity } = {}) {
   projection = { ...projection, turns: ownedMainTopicTurns(projection) }
   if (!(host instanceof HTMLElement)) throw new Error('main topic requires a host element')
   const activeControl = host.contains(document.activeElement) ? document.activeElement : undefined
@@ -394,6 +421,7 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDetail, onOp
   if (onOpenDispatch !== undefined) topicState.onOpenDispatch = onOpenDispatch
   if (dispatchObservation !== undefined) topicState.dispatchObservation = dispatchObservation
   if (dispatchExecutionObserved !== undefined) topicState.dispatchExecutionObserved = dispatchExecutionObserved
+  if (dispatchActivity !== undefined) topicState.dispatchActivity = dispatchActivity
   if (topicState.detail && topicState.detail.scope !== scope) topicState.detail = undefined
   const bindings = []
   const previousTurns = new Map(

@@ -16,6 +16,7 @@ import { resolveRuntimePaths, ensureControlLayout } from '../../packages/config/
 import { acquireDaemonLease } from '../../packages/app/src/supervisor/index.js';
 import { RuntimeTaskControlError } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import { beginExplicitEndAttempt, readExplicitEndRecovery } from '../../packages/runtime/src/explicit-brain/explicit-turn-end.js';
+import type { ExplicitInteractionStepInput } from '../../packages/runtime/src/intake/explicit-intake.js';
 
 // Failure basis: the live interpreter accepted plain terminal text, skipped the
 // end contract and checkpointed it. Wrong end continuation also loses tools or
@@ -153,8 +154,10 @@ async function runWire(attempts: readonly unknown[], options: {
         model: binding.modelRef, route: 'controlled', baseUrl } }),
     ...overrides,
   });
+  const steps: ExplicitInteractionStepInput[] = [];
   const request = { interactionId: 'c07-interaction', inputRevision: 1,
     sourceRef: 'test:c07', rawInput: '你好', clarifications: [], taskCandidates: [],
+    onStep: (step: ExplicitInteractionStepInput) => { steps.push(step); },
     ...(options.readTaskResult === undefined ? {} : { readTaskResult: options.readTaskResult }) };
   const interpreter = createInterpreter();
   const append = helpers.appendSemanticCheckpoint.bind(helpers);
@@ -242,7 +245,7 @@ async function runWire(attempts: readonly unknown[], options: {
     }
     assert.equal(wire.tools.some((tool: any) => /execute|dispatch|shell/.test(tool.name)), false);
   }
-    return { result, wires, snapshot, checkpoint };
+    return { result, wires, snapshot, checkpoint, steps };
   } finally {
     try { await port.close(binding); } finally {
       await lease?.release();
@@ -403,11 +406,23 @@ test('C07 actual wire returns durable typed partial on the third bad end without
 });
 
 test('C07 actual wire Skill selection precedes the complex end and executes no business task', async () => {
-  const { result, wires, checkpoint } = await runWire([requirement], { skills: true });
+  const { result, wires, checkpoint, steps } = await runWire([requirement], { skills: true });
   assert.equal(result.kind, 'requirement');
   assert.equal(wires.length, 3);
   assert.match(wires[1].instructions, /Selected Skill: task-intake/);
   assert.ok(checkpoint);
+  const tools = steps.filter(step => step.kind.startsWith('tool.'));
+  assert.equal(tools.length, 4);
+  assert.deepEqual(tools.map(step => step.kind), ['tool.started', 'tool.finished', 'tool.started', 'tool.finished']);
+  assert.equal(tools[0]!.requestId, tools[1]!.requestId);
+  assert.equal(tools[2]!.requestId, tools[3]!.requestId);
+  assert.deepEqual(tools.map(step => step.tool), [
+    { callId: 'call-0', kind: 'select-skills' },
+    { callId: 'call-0', kind: 'select-skills', status: 'succeeded' },
+    { callId: 'call-1', kind: 'submit-turn' },
+    { callId: 'call-1', kind: 'submit-turn', status: 'succeeded' },
+  ]);
+  assert.equal(/整理报告|Selected Skill|blockingGaps|skillIds/.test(JSON.stringify(tools)), false);
 });
 
 test('C07 actual wire text-only decision needs a real end and does not consume a format attempt', async () => {

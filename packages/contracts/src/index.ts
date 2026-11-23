@@ -948,6 +948,13 @@ export type ProviderResourceState = 'released' | 'pending' | 'failed' | 'unknown
 export type ProviderPersistenceState = 'committed' | 'pending' | 'failed' | 'blocked' | 'unknown';
 export type ProviderCloseState = 'closed' | 'pending' | 'failed' | 'unknown';
 export type ProviderToolStatus = 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+
+export interface ExplicitInteractionToolActivity {
+  readonly callId: string;
+  readonly kind: 'select-skills' | 'read-task-result' | 'submit-turn';
+  readonly status?: ProviderToolStatus;
+  readonly errorCode?: string;
+}
 export type ProviderSubmitStatus = 'accepted' | 'completed' | 'blocked' | 'failed' | 'unknown';
 export type AgentRuntimeId = string;
 

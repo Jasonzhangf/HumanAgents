@@ -93,7 +93,12 @@ test('refresh reuses footer/disclosure, replaces same call, retains expansion an
   assert.equal(details.open, true)
   assert.equal(footer.querySelectorAll('.call-usage-call').length, 1)
   assert.match(text(footer.querySelector('.call-usage-summary')), /88/)
-  assert.match(text(footer), /加载中/)
+  assert.doesNotMatch(text(footer), /加载中/)
+  const row = footer.querySelector('.call-usage-call')
+  const summary = footer.querySelector('.call-usage-summary').children[0]
+  usageUI.updateCallUsageFooter(footer, usage([call({ outputTokens: 88 })]))
+  assert.equal(footer.querySelector('.call-usage-call'), row)
+  assert.equal(footer.querySelector('.call-usage-summary').children[0], summary)
   usageUI.updateCallUsageFooter(footer, usage([call({ callId: 'scope-b-call', inputTokens: 321 })]), { error: '读取失败' })
   assert.match(text(footer), /321/)
   assert.equal(facts(footer)['输入 tokens'], '321')

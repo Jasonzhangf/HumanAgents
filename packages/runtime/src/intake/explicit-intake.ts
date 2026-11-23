@@ -7,6 +7,7 @@ import type {
   DraftRevision,
   DraftRevisionInput,
   ExecutionPolicyDefinition,
+  ExplicitInteractionToolActivity,
   ExplicitTurnPartialResult,
   InteractionRequestKind,
   ProductMessageActor,
@@ -156,6 +157,8 @@ export type ExplicitInteractionStepKind =
   | 'request.dispatched'
   | 'response.reasoning'
   | 'response.streaming'
+  | 'tool.started'
+  | 'tool.finished'
   | 'helper.dispatched'
   | 'helper.request'
   | 'helper.response'
@@ -169,6 +172,7 @@ export interface ExplicitInteractionStepInput {
   readonly requestId?: string;
   readonly turnId?: string;
   readonly helperCallId?: string;
+  readonly tool?: ExplicitInteractionToolActivity;
 }
 
 export interface ExplicitInteractionStep extends ExplicitInteractionStepInput {

@@ -55,7 +55,7 @@ const server = createServer(async (req, res) => {
         }
         if (current.rawInput === '请交办报价任务') {
           Object.assign(current, { state: 'awaiting-confirmation', draft: {
-            draftId: 'price-draft', inputRevision: 1, normalizedInput: current.rawInput, proposal: '报价任务',
+            draftId: 'price-draft', inputRevision: 1, normalizedInput: current.rawInput, proposal: '报价任务', proposedIntent: 'create',
           } })
         } else {
           Object.assign(current, { state: current.rawInput === '状态问题' ? 'status-only' : 'answered', reply: `唯一回答：${current.rawInput}` })

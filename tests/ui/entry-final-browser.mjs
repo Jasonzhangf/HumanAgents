@@ -8,21 +8,24 @@ import { resolve, extname } from 'node:path'
 import playwright from '/opt/homebrew/lib/node_modules/playwright/index.js'
 
 const root = resolve(import.meta.dirname, '../../docs/ui')
-const evidence = resolve(import.meta.dirname, '../../docs/verification/entry-final-20261123')
+const evidence = process.env.ENTRY_LAYOUT_EVIDENCE || resolve(import.meta.dirname, '../../docs/verification/entry-final-20261123')
 await mkdir(evidence, { recursive: true })
 const browser = await playwright.chromium.launch({ headless: true })
 const checks = []
 const check = (name, condition) => { assert.ok(condition, name); checks.push(name) }
 let reads = 0
+let usageReads = 0
 const writes = []
 const project = { projectKey: 'entry-acceptance', projectName: 'HumanAgent', agentName: 'Jenny',
   workspaceCwd: '/isolated/entry-acceptance', topicName: '主会话', mode: 'fake' }
 const task = { taskId: { value: 'acceptance-task' }, title: '隔离验收任务', semanticTitle: '隔离验收任务', state: 'running',
   stateLabel: '执行中', updatedAt: '2026-11-23T12:00:00Z' }
 let reply = false
+let addedProject = false
+let catalogState = 'populated'
 const projection = () => ({ ...project, surface: 'main-topic', tasks: [task], activeTask: task,
   turns: [{ turnId: 'user-one', role: 'user', kind: 'message', text: '含税价和未税价有什么区别？' },
-    { turnId: 'reply-one', role: 'jenny', kind: 'message', text: '比较报价时需要统一税价口径。' },
+    { turnId: 'reply-one', role: 'jenny', kind: 'message', text: '比较报价时需要统一税价口径。', taskId: task.taskId },
     ...(reply ? [{ turnId: 'user-two', role: 'user', kind: 'message', text: '正常消息验收' },
       { turnId: 'reply-two', role: 'jenny', kind: 'message', text: '隔离服务已直接回答。' }] : [])] })
 try {
@@ -35,9 +38,21 @@ try {
       if (req.method() !== 'GET') writes.push({ path: url.pathname, body: req.postDataJSON() })
       if (url.pathname === '/api/runtime/status') data = { mode: 'fake', state: 'ready', connected: true }
       else if (url.pathname === '/api/main-topic') { reads++; data = projection() }
-      else if (url.pathname === '/api/dashboard') data = { projects: [{ scope: { projectKey: project.projectKey }, label: project.projectName }] }
+      else if (url.pathname === '/api/dashboard') {
+        if (catalogState === 'failed') {
+          status = 503
+          data = { error: { code: 'catalog.unavailable', message: '项目列表读取失败' } }
+        } else data = { projects: catalogState === 'empty' ? [] : [
+          { scope: { projectKey: project.projectKey }, label: project.projectName },
+          ...(addedProject ? [{ scope: { projectKey: 'new-project' }, label: '新增工作区' }] : []),
+        ] }
+      }
+      else if (url.pathname === '/api/projects/roster') data = { projectKey: url.searchParams.get('projectKey'), members: [] }
       else if (url.pathname === '/api/tasks') data = { draft: [], waiting: [], running: [task], completed: [], stopped: [], failed: [] }
-      else if (url.pathname === '/api/product/session') data = { messages: [] }
+      else if (url.pathname === '/api/product/session') {
+        usageReads++
+        data = { messages: [], usage: { calls: [{ callId: 'fixture-call', inputTokens: 42, outputTokens: 12, context: {} }] } }
+      }
       else if (url.pathname === '/api/explicit/inputs') data = { interactionId: 'acceptance-chat' }
       else if (url.pathname === '/api/explicit/interactions/acceptance-chat') {
         reply = true; data = { state: 'answered', reply: '隔离服务已直接回答。' }
@@ -64,6 +79,24 @@ try {
   await page.getByText('当前公开接口支持读取项目', { exact: false }).waitFor()
   check('project settings dialog restores after reload', await page.locator('dialog[open] #technical-detail-title').textContent() === '项目设置')
   await page.locator('dialog[open] .shell-layer-close').click()
+  const projectSummary = page.locator('.entry-project > summary').first()
+  await projectSummary.focus()
+  await projectSummary.evaluate(node => { window.originalProjectSummary = node })
+  addedProject = true
+  await page.locator('.entry-project > summary').getByText('新增工作区', { exact: true }).waitFor({ timeout: 8000 })
+  check('a project appearing in the system read enters the rail without reload or focus loss',
+    await projectSummary.evaluate(node => node === window.originalProjectSummary && node === document.activeElement && node.parentElement.open))
+  addedProject = false
+  await page.locator('.entry-project > summary').getByText('新增工作区', { exact: true }).waitFor({ state: 'detached', timeout: 8000 })
+  await page.getByRole('button', { name: /调用明细/ }).click()
+  const usageDialog = page.locator('.call-usage-details dialog[open]')
+  const usageRow = usageDialog.locator('.call-usage-call')
+  await usageRow.evaluate(node => { window.originalUsageRow = node })
+  const usageBefore = usageReads
+  await page.waitForResponse(response => response.url().includes('/api/product/session'))
+  check('an unchanged call snapshot keeps the open detail and its row',
+    usageReads > usageBefore && await usageRow.evaluate(node => node === window.originalUsageRow))
+  await page.keyboard.press('Escape')
   await page.locator('textarea[name=rawInput]').fill('保留草稿')
   await page.locator('.entry-members > summary').click()
   const priorReads = reads
@@ -74,12 +107,12 @@ try {
   check('poll performed', reads > priorReads)
   const width = (await page.locator('.main-topic-host').boundingBox()).width
   await page.getByRole('button', { name: '任务板', exact: true }).click()
-  await page.locator('[data-task-list-drawer] .task-row-link').waitFor()
-  check('task board contains task rows', await page.locator('[data-task-list-drawer] .task-row-link').count() === 1)
+  await page.locator('[data-task-list-drawer] .dispatch-board-entry').waitFor()
+  check('task board contains task rows', await page.locator('[data-task-list-drawer] .dispatch-board-entry').count() === 1)
   check('task drawer does not resize timeline', (await page.locator('.main-topic-host').boundingBox()).width === width)
   await page.screenshot({ path: resolve(evidence, 'task-board-drawer.png') })
   await page.reload()
-  await page.locator('[data-task-list-drawer] .task-row-link').waitFor()
+  await page.locator('[data-task-list-drawer] .dispatch-board-entry').waitFor()
   check('reload retains board and draft', await page.locator('textarea[name=rawInput]').inputValue() === '保留草稿')
   check('reload retains tree', !await page.locator('.entry-members').evaluate((el) => el.open))
   await page.locator('dialog[open] .shell-layer-close').click()
@@ -122,6 +155,12 @@ try {
   check('619px still collapses navigation', !await page.locator('.entry-rail').isVisible())
   await page.setViewportSize({ width: 620, height: 844 })
   check('620px restores desktop rail', await page.locator('.entry-rail').isVisible())
+  for (const [state, message] of [['empty', '暂无可读取的项目'], ['failed', '项目暂不可读，请检查连接状态。']]) {
+    catalogState = state
+    await page.goto('http://entry-acceptance.test/?scope=system')
+    await page.getByText(message, { exact: true }).waitFor()
+    check(`the ${state} catalog replaces its loading state`, await page.getByText('正在读取项目…', { exact: true }).count() === 0)
+  }
   check('no page errors', errors.length === 0)
   await context.close()
 } finally {

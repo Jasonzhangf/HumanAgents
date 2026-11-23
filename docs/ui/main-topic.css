@@ -411,3 +411,5 @@
     grid-template-columns: 1fr;
   }
 }
+.mt-explicit-tools{display:grid;gap:6px;margin-block-start:8px}
+.mt-explicit-tool{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;padding:8px 10px;font-size:13px}

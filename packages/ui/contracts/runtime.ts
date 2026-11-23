@@ -1,5 +1,6 @@
 import type {
   EvidenceRef,
+  ExplicitInteractionToolActivity,
   HealthState,
   InteractionTraceEntry,
   LifecycleState,
@@ -1021,6 +1022,8 @@ export type ExplicitInteractionStepKind =
   | 'request.dispatched'
   | 'response.reasoning'
   | 'response.streaming'
+  | 'tool.started'
+  | 'tool.finished'
   | 'helper.dispatched'
   | 'helper.request'
   | 'helper.response'
@@ -1036,6 +1039,7 @@ export interface ExplicitInteractionStepProjection {
   readonly requestId?: string;
   readonly turnId?: string;
   readonly helperCallId?: string;
+  readonly tool?: ExplicitInteractionToolActivity;
 }
 
 export class RuntimeProjectionError extends Error {

@@ -1609,6 +1609,27 @@ export function createProviderExplicitBrainInterpreter(input: {
           if (step.step.done) { observationDrained = true; break; }
           const providerEvent = step.step.value.providerEvent;
           observations.note(providerEvent);
+          if (providerEvent.kind === 'tool') {
+            const result = providerEvent.toolResult;
+            const call = result ?? providerEvent.toolCall;
+            const kind = call?.toolId === SKILL_SELECTION_TOOL.toolId ? 'select-skills'
+              : call?.toolId === TASK_RESULT_READ_TOOL.toolId ? 'read-task-result'
+              : call?.toolId === EXPLICIT_END_TOOL.toolId ? 'submit-turn' : undefined;
+            if (kind !== undefined && call !== undefined) {
+              request.onStep?.({
+                kind: result === undefined ? 'tool.started' : 'tool.finished',
+                summary: result === undefined ? '内置工具已调用' : '内置工具已返回',
+                ...(providerEvent.turnId === undefined ? {} : { turnId: providerEvent.turnId }),
+                ...(providerEvent.requestId === undefined ? {} : { requestId: providerEvent.requestId }),
+                tool: {
+                  kind,
+                  callId: call.callId,
+                  ...(result === undefined ? {} : { status: result.status }),
+                  ...(result?.error === undefined ? {} : { errorCode: result.error.code }),
+                },
+              });
+            }
+          }
           if (!responseReasoningStepEmitted && providerEvent.kind === 'model') {
             responseReasoningStepEmitted = true;
             request.onStep?.({

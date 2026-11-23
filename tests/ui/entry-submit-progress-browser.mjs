@@ -157,6 +157,7 @@ async function handleScriptedApi(url, method, body) {
       inputRevision: 1,
       normalizedInput: `${interaction.rawInput}（规范化）`,
       proposal: `提交后执行：${interaction.rawInput}`,
+      proposedIntent: 'create',
       knownFacts: ['用户提供了一条业务输入', '显式大脑已完成整理'],
     };
     return { status: 200, body: snapshotFor(interaction) };

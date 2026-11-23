@@ -121,14 +121,14 @@ function handleScriptedApi(state, url, method, body) {
     // First inspect returns `received` so entry.js runs the real interpret pass;
     // after interpret it returns the awaiting-confirmation draft.
     const snapshot = state.inspected >= 2
-      ? { interactionId: state.interactionId, state: 'awaiting-confirmation', rawInput: 'submission', nextAction: 'confirm-or-revise', draft: { draftId: 'draft-1', inputRevision: 1, proposal: '提交后执行：submission' }, occurredAt: OCCURRED_AT }
+      ? { interactionId: state.interactionId, state: 'awaiting-confirmation', rawInput: 'submission', nextAction: 'confirm-or-revise', draft: { draftId: 'draft-1', inputRevision: 1, proposal: '提交后执行：submission', proposedIntent: 'create' }, occurredAt: OCCURRED_AT }
       : { interactionId: state.interactionId, state: 'received', rawInput: 'submission', nextAction: 'interpret', occurredAt: OCCURRED_AT };
     return { status: 200, body: snapshot };
   }
   const interpretMatch = /^\/api\/explicit\/interactions\/([^/]+)\/interpret$/.exec(url.pathname);
   if (interpretMatch && method === 'POST') {
     state.inspected = 2;
-    return { status: 200, body: { interactionId: state.interactionId, state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, proposal: '提交后执行：submission' }, occurredAt: OCCURRED_AT } };
+    return { status: 200, body: { interactionId: state.interactionId, state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, proposal: '提交后执行：submission', proposedIntent: 'create' }, occurredAt: OCCURRED_AT } };
   }
   // The explicit.step stream entry.js opens while the brain interprets.
   if (url.pathname === `/api/explicit/interactions/${encodeURIComponent(state.interactionId)}/events` && method === 'GET') {

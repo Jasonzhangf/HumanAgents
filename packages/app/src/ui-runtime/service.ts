@@ -5096,6 +5096,8 @@ export class UiRuntimeService {
     const interactionFacts = interactions.map((interaction) => {
       const taskId = taskRefs.get(interaction.interactionId);
       const firstResponses = new Set<string>();
+      const draft = interaction.draft;
+      const changeTarget = draft?.matchedTasks.find((match) => match.relation === 'current')?.taskId.value;
       return {
         interactionId: interaction.interactionId,
         rawInput: interaction.rawInput,
@@ -5107,12 +5109,19 @@ export class UiRuntimeService {
           firstResponses.add(key);
           return true;
         })
-          .map(({ seq, kind, occurredAt, requestId, turnId }) => ({ seq, kind, occurredAt, requestId, turnId, summary: '' })),
+          .map(({ seq, kind, occurredAt, requestId, turnId, tool }) => ({
+            seq, kind, occurredAt, requestId, turnId, summary: '',
+            ...(tool === undefined ? {} : { tool }),
+          })),
         ...(interaction.occurredAt === undefined ? {} : { occurredAt: interaction.occurredAt }),
         ...(interaction.reply === undefined ? {} : { reply: interaction.reply }),
         ...(interaction.partial === undefined ? {} : { partial: interaction.partial }),
         ...(interaction.clarifications === undefined ? {} : { clarifications: interaction.clarifications }),
         ...(interaction.draft?.proposal === undefined ? {} : { draftProposal: interaction.draft.proposal }),
+        ...(interaction.state === 'awaiting-confirmation' && draft !== undefined ? { draftReview: {
+          state: 'awaiting-confirmation' as const, intent: draft.proposedIntent,
+          ...(changeTarget === undefined ? {} : { taskId: changeTarget }),
+        } } : {}),
         ...(taskId === undefined ? {} : { taskId }),
       };
     });

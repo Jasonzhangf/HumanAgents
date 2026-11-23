@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { submissionView } from '../../docs/ui/send-lifecycle.js'
+import { submissionView, canContinueSubmission } from '../../docs/ui/send-lifecycle.js'
 
 const user = { turnId: 'user:interaction-2', interactionId: 'interaction-2', role: 'user', kind: 'message', text: 'same text' }
 const attempt = { key: 'second', rawInput: 'same text', interactionId: 'interaction-2' }
@@ -29,11 +29,35 @@ test('formal draft and finish stop the local spinner even on old services', () =
     assert.ok(!p.turns.some(t => t.localStatus))
   }
 })
+test('only the pending draft for this receipt carries its confirmed task-change target', () => {
+  const draft = { turnId: 'draft:interaction-2', interactionId: 'interaction-2', role: 'jenny', kind: 'draft', text: '重试计划' }
+  const previous = { ...draft, turnId: 'draft:interaction-1', interactionId: 'interaction-1' }
+  const taskId = { scope: 'task', value: 'original' }
+  const p = submissionView({ turns: [previous, user, draft] }, { ...attempt, snapshot: {
+    state: 'awaiting-confirmation',
+    draft: { proposedIntent: 'change', matchedTasks: [{ relation: 'current', taskId }] },
+  } })
+  assert.equal(p.turns[0].draftReview, undefined)
+  assert.deepEqual(p.turns[2].draftReview, { state: 'awaiting-confirmation', intent: 'change', taskId: 'original' })
+  assert.equal(p.turns[2].taskId, undefined)
+})
 test('read failure remains visible and cannot animate away the error', () => {
   const error = { code: 'auth.session.expired', message: '重新配对' }
   const rows = phase(submissionView({ turns: [user] }, { ...attempt, error }))
   assert.equal(rows[0].error, error)
   assert.ok(rows.every(r => !r.running))
+})
+test('interrupted new-task confirmation can continue on the same draft only', () => {
+  const error = { code: 'transport.failed', message: '连接已中断' }
+  const onContinue = () => {}
+  const draft = { turnId: 'draft:interaction-2', interactionId: 'interaction-2', role: 'jenny', kind: 'draft', text: '任务' }
+  for (const [intent, canContinue] of [['create', true], ['change', false], ['append', false], [undefined, false]]) {
+    const snapshot = { state: 'awaiting-confirmation', draft: { proposedIntent: intent } }
+    assert.equal(canContinueSubmission(snapshot), canContinue)
+    const projection = submissionView({ turns: [user, draft] }, { ...attempt, snapshot, error, processError: error, onContinue })
+    assert.equal(projection.turns.at(-1).onContinue, canContinue ? onContinue : undefined)
+  }
+  assert.equal(canContinueSubmission({ state: 'matching' }), false)
 })
 test('a finish read or permission error stops stale official explicit clocks', () => {
   const status = { turnId: 'status:interaction-2', interactionId: 'interaction-2', role: 'jenny', kind: 'status',

@@ -38,28 +38,36 @@ export function renderCallUsageFooter(usage, options = {}) {
   summary.className = 'call-usage-summary'
   const content = disclosure.content
   content.className = 'call-usage-content'
-  footerParts.set(footer, { make, summary, content })
+  footerParts.set(footer, { make, summary, content, dialog: disclosure.dialog })
   footer.append(disclosure.root)
   return updateCallUsageFooter(footer, usage, options)
 }
 
 /** Refresh in place. Keep the disclosure and summary so open/focus survive. */
 export function updateCallUsageFooter(footer, usage, options = {}) {
-  const { make, summary, content } = footerParts.get(footer)
+  const parts = footerParts.get(footer)
+  const { make, summary, content } = parts
   const calls = usage?.calls ?? []
   const latest = calls.at(-1)
-  footer.setAttribute('aria-busy', String(Boolean(options.pending)))
+  const pending = Boolean(options.pending && usage === undefined && !options.error)
+  const failure = options.error
+  const errorMessage = typeof failure === 'string' ? failure : failure?.message
+  const snapshot = JSON.stringify([pending, calls, usage?.coverage, failure?.code, errorMessage, failure?.ownerId, failure?.nextAction])
+  if (parts.snapshot === snapshot) return footer
+  parts.snapshot = snapshot
+  footer.setAttribute('aria-busy', String(pending))
+  const scroll = content.scrollTop
+  const dialogScroll = parts.dialog?.scrollTop
   summary.replaceChildren()
   const labels = latest ? [
     '最新调用', `输入 ${number(latest.inputTokens)} · 输出 ${number(latest.outputTokens)} tokens`,
     `缓存命中 ${rate(latest.currentCallCacheHitRate)}`,
     `上下文 ${percent(latest.context.percent)}`,
-  ] : options.error || options.pending ? [] : ['暂无调用统计']
-  if (options.pending) labels.push('统计加载中…')
+  ] : failure || pending ? [] : ['暂无调用统计']
+  if (pending) labels.push('统计加载中…')
   labels.push('调用明细')
   if (options.error) {
-    const failure = options.error
-    const message = typeof failure === 'string' ? failure : failure.message ?? '调用统计暂时无法读取。'
+    const message = errorMessage ?? '调用统计暂时无法读取。'
     const error = make('span', `统计加载失败：${failure.code ? `${failure.code} · ` : ''}${message}`, 'call-usage-error call-usage-summary-item')
     error.setAttribute('role', 'alert')
     summary.append(error)
@@ -73,7 +81,7 @@ export function updateCallUsageFooter(footer, usage, options = {}) {
     if (options.error.ownerId) content.append(make('p', `统计来源：${options.error.ownerId}`, 'call-usage-note'))
     if (options.error.nextAction) content.append(make('p', options.error.nextAction, 'call-usage-note'))
   }
-  if (!latest && !options.error && !options.pending) content.append(make('p', '暂无调用统计；尚未取得调用数据。', 'call-usage-note'))
+  if (!latest && !failure && !pending) content.append(make('p', '暂无调用统计；尚未取得调用数据。', 'call-usage-note'))
   for (const [index, call] of calls.entries()) {
     const section = make('section', undefined, 'call-usage-call')
     section.dataset.callId = call.callId
@@ -88,5 +96,7 @@ export function updateCallUsageFooter(footer, usage, options = {}) {
     content.append(make('p', `统计覆盖：共 ${number(coverage?.calls)} 次调用，输入已知 ${number(coverage?.callsWithKnownInput)} 次，缓存读取已知 ${number(coverage?.callsWithKnownCacheRead)} 次。缺失项显示未知，不作为零。`, 'call-usage-note'))
     content.append(make('p', '输出速度按输出 tokens / 对应耗时计算：响应总耗时包含等待响应，生成耗时仅计生成时段。缓存命中率与上下文使用率分别显示。', 'call-usage-note'))
   }
+  content.scrollTop = scroll
+  if (parts.dialog) parts.dialog.scrollTop = dialogScroll
   return footer
 }

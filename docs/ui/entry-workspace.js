@@ -49,7 +49,7 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   ceo.href = './?scope=system'
   if (new URLSearchParams(search).get('scope') === 'system') ceo.setAttribute('aria-current', 'page')
   const projects = element('div', undefined, 'entry-projects')
-  projects.append(element('p', '正在读取项目…', 'muted'))
+  projects.append(element('p', '正在读取项目…', 'muted entry-read-state'))
   const foot = element('div', undefined, 'entry-rail-foot')
   const scopeText = element('p', '当前范围正在读取', 'muted')
   foot.append(scopeText)
@@ -159,6 +159,10 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   let current = null
   let systemRead = null
   let disposed = false
+  let projectRead
+  let projectReadError
+  let projectRefreshTimer
+  const projectGroups = new Map()
   let renderedProjects = ''
   const detailState = (label, message) => {
     const node = element('button', label, 'entry-person entry-unavailable')
@@ -167,21 +171,51 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
     node.addEventListener('click', () => unavailable(label, message, node))
     return node
   }
-  function renderProjects(error) {
+  function updateWorkspaceHint(summary, workspace, duplicate) {
+    const oldHint = summary.querySelector('.entry-project-workspace')
+    if (!duplicate) {
+      oldHint?.remove()
+      summary.removeAttribute('title')
+      return
+    }
+    const hint = entryWorkspaceHint(workspace) || '在项目设置中查看标识'
+    if (oldHint) oldHint.textContent = hint
+    else summary.append(element('small', hint, 'entry-project-workspace'))
+    if (workspace) summary.title = workspace
+  }
+  function renderProjects() {
+    if (!systemRead && !current && !projectReadError) return
     const rows = [...(systemRead?.projects ?? [])]
     if (current && !rows.some((row) => row.scope?.projectKey === current.projectKey)) {
       rows.push({ scope: { projectKey: current.projectKey }, label: current.projectName })
     }
-    const signature = JSON.stringify([rows, current?.projectKey, current?.projectName, current?.agentName, current?.workspaceCwd, current?.mode, Boolean(error)])
+    const signature = JSON.stringify([rows.map(row => [row.scope?.projectKey, row.label, row.workspaceCwd]), current?.projectKey,
+      current?.projectName, current?.agentName, current?.workspaceCwd, current?.mode, Boolean(projectReadError)])
     if (signature === renderedProjects) return
     renderedProjects = signature
-    projects.replaceChildren()
+    projects.querySelector('.entry-read-state')?.remove()
+    const present = new Set()
+    let index = 0
     for (const project of rows) {
       const key = project.scope?.projectKey
-      if (!key) continue
+      if (!key || present.has(key)) continue
+      present.add(key)
       const isCurrent = current?.projectKey === key
       const mode = isCurrent ? current.mode : undefined
+      const label = isCurrent ? current.projectName : project.label || '项目'
+      const duplicate = rows.filter((row) => (row.label || (row.scope?.projectKey === current?.projectKey ? current.projectName : '项目')) === label).length > 1
+      const workspace = isCurrent ? current.workspaceCwd : project.workspaceCwd
+      const groupSignature = JSON.stringify([label, isCurrent, mode, workspace, isCurrent ? current.agentName : undefined])
+      const previous = projectGroups.get(key)
+      if (previous?.signature === groupSignature) {
+        updateWorkspaceHint(previous.summary, workspace, duplicate)
+        const position = projects.children[index++]
+        if (position !== previous.group) projects.insertBefore(previous.group, position ?? null)
+        continue
+      }
+      previous?.group.remove()
       const group = element('details', undefined, 'entry-project')
+      group.dataset.projectKey = key
       group.open = saved().folders?.[key] ?? isCurrent
       let folderOpen = group.open
       group.addEventListener('toggle', () => {
@@ -189,14 +223,9 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
         folderOpen = group.open
         remember({ folders: { ...saved().folders, [key]: group.open } })
       })
-      const label = isCurrent ? current.projectName : project.label || '项目'
       const summary = element('summary', undefined, 'entry-project-name')
       summary.append(element('span', label))
-      if (rows.filter((row) => (row.label || (row.scope?.projectKey === current?.projectKey ? current.projectName : '项目')) === label).length > 1) {
-        const workspace = isCurrent ? current.workspaceCwd : project.workspaceCwd
-        summary.append(element('small', entryWorkspaceHint(workspace) || '在项目设置中查看标识', 'entry-project-workspace'))
-        if (workspace) summary.title = workspace
-      }
+      updateWorkspaceHint(summary, workspace, duplicate)
       group.append(summary)
       const directory = element('div', undefined, 'entry-project-directory')
       const settings = element('button', '项目设置', 'entry-person')
@@ -229,12 +258,37 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
         directory.append(memory, detailState('Buglist ↗', '当前项目尚未提供公开的 Buglist 读取入口。'))
       }
       group.append(directory)
-      projects.append(group)
+      projectGroups.set(key, { group, summary, signature: groupSignature })
+      projects.insertBefore(group, projects.children[index++] ?? null)
+    }
+    for (const [key, entry] of projectGroups) {
+      if (!present.has(key)) {
+        entry.group.remove()
+        projectGroups.delete(key)
+      }
     }
     if (!projects.children.length) {
-      projects.append(element('p', error ? '项目暂不可读，请检查连接状态。' : '暂无可读取的项目', 'entry-read-state'))
-      if (error) scopeText.textContent = '项目范围读取失败'
+      projects.append(element('p', projectReadError ? '项目暂不可读，请检查连接状态。' : '暂无可读取的项目', 'entry-read-state'))
+      if (projectReadError) scopeText.textContent = '项目范围读取失败'
     }
+  }
+  function refreshProjects() {
+    if (disposed || projectRead) return projectRead
+    clearTimeout(projectRefreshTimer)
+    projectRead = api.systemDashboard().then(read => {
+      if (disposed) return
+      systemRead = read
+      projectReadError = undefined
+      renderProjects()
+    }, error => {
+      if (disposed) return
+      projectReadError = error
+      renderProjects()
+    }).finally(() => {
+      projectRead = undefined
+      if (!disposed) projectRefreshTimer = setTimeout(refreshProjects, 5000)
+    })
+    return projectRead
   }
   function update(projection) {
     current = projection
@@ -250,10 +304,11 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
     return selection
   }
   title.textContent = entryWorkspaceSelection(search, null).label
-  void api.systemDashboard().then((read) => {
-    if (disposed) return
-    systemRead = read
-    renderProjects()
-  }).catch((error) => { if (!disposed) renderProjects(error) })
-  return { update, dispose() { disposed = true } }
+  window.addEventListener('focus', refreshProjects)
+  void refreshProjects()
+  return { update, dispose() {
+    disposed = true
+    clearTimeout(projectRefreshTimer)
+    window.removeEventListener('focus', refreshProjects)
+  } }
 }

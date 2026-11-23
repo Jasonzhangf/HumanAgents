@@ -3,7 +3,7 @@ import { renderProductSessionView, disposeProductSessionView, scopedProductToolE
 
 export const taskValue = id => typeof id === 'string' ? id : id?.value
 const roleLabel = role => ({ orchestration: '编排 Agent', execution: '执行 Agent', planner: '规划 Agent', reviewer: '审查 Agent', interaction: '交互 Agent' }[role] || '角色未记录')
-const terminal = new Set(['succeeded', 'failed', 'blocked', 'stopped', 'cancelled', 'stale'])
+const terminal = new Set(['succeeded', 'completed', 'failed', 'blocked', 'stopped', 'cancelled', 'stale'])
 
 // Only the task's formal source interaction can join turns; text is never a key.
 export function taskForTurn(turn, tasks = []) {
@@ -42,6 +42,10 @@ export function observationTools(observation) {
     return [{ stepId: step.stepId, turnId: step.turnId, name: step.name, status: step.status,
       occurredAt: step.occurredAt, role: node.ownerAgentRole }]
   }))
+}
+
+export function dispatchToolEvents(children = []) {
+  return children.flatMap(child => scopedProductToolEvents({ ...child.session, toolScope: child.scope }))
 }
 
 export function renderDispatchCard(turn, task, { onOpen, observation, executionObserved } = {}) {
@@ -203,9 +207,14 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
   }
   function sync(tasks, turns = []) {
     tasks.forEach(task => {
+      const previous = scope() && records.get(keyFor(task, scope()))
+      const justFinished = previous && !terminal.has(previous.task.state) && terminal.has(task.state)
       const record = remember(task)
       const draft = turns.find(turn => turn.kind === 'draft' && taskForTurn(turn, [task]))
       if (record && draft) record.turn = draft
+      if (justFinished) void Promise.resolve(record.pending).then(() => {
+        if (!disposed && current(record)) return read(record)
+      })
     })
     if (opened && current(opened.record)) paintDetail(opened)
     if (timer || ticking || disposed || ![...records.values()].some(active)) return
@@ -222,5 +231,15 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
     dispose() { disposed = true; clearTimeout(timer); opened = undefined },
     observation(task) { return records.get(keyFor(task, scope()))?.children?.[0]?.observation },
     executionObserved(task) { return hasExecution(records.get(keyFor(task, scope()))) },
+    activity(task) {
+      const record = records.get(keyFor(task, scope()))
+      if (!record) return undefined
+      record.readActivityOutput ??= async address => {
+        const child = current(record) && record.children?.find(child => child.scope.taskId === taskValue(address.taskId))
+        if (!child) throw new Error('执行详情所属任务已切换')
+        return api.readScopedToolOutput(address, child.scope)
+      }
+      return { events: dispatchToolEvents(record.children), readOutput: record.readActivityOutput }
+    },
   }
 }

@@ -1,4 +1,4 @@
-import type { ExplicitTurnPartialResult, TaskId, TaskInputRequest } from '../../contracts/src/index.js'
+import type { ExplicitTurnPartialResult, RequirementIntent, TaskId, TaskInputRequest } from '../../contracts/src/index.js'
 import type { RuntimeSseEvent, ExplicitInteractionStepProjection } from '../contracts/runtime.js'
 
 export interface ConversationStatusFacts {
@@ -44,7 +44,14 @@ export interface MainTopicInteractionInput {
   readonly partial?: ExplicitInteractionPartial
   readonly clarifications?: readonly MainTopicClarification[]
   readonly draftProposal?: string
+  readonly draftReview?: MainTopicDraftReview
   readonly taskId?: TaskId
+}
+
+export interface MainTopicDraftReview {
+  readonly state: 'awaiting-confirmation'
+  readonly intent: RequirementIntent
+  readonly taskId?: string
 }
 
 export interface MainTopicTaskInput {
@@ -78,6 +85,7 @@ export interface MainTopicTurn {
   readonly detailReadError?: MainTopicTaskInput['detailReadError']
   readonly toolEvents?: readonly RuntimeSseEvent[]
   readonly statusFacts?: ConversationStatusFacts
+  readonly draftReview?: MainTopicDraftReview
   readonly turnId: string
   readonly role: MainTopicTurnRole
   readonly kind: MainTopicTurnKind
@@ -229,6 +237,7 @@ function interactionTurns(interaction: MainTopicInteractionInput): MainTopicTurn
       interactionId: interaction.interactionId,
       quote: interaction.rawInput,
       ...(interaction.taskId === undefined ? {} : { taskId: interaction.taskId }),
+      ...(interaction.draftReview === undefined ? {} : { draftReview: interaction.draftReview }),
     })
   } else if ((interaction.state === 'partial' || interaction.state === 'matching') && interaction.partial) {
     turns.push({
