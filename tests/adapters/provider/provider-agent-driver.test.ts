@@ -2289,6 +2289,103 @@ test('provider agent driver returns a validation tool failure to the model inste
   assert.equal(events.at(-1)?.terminalState, 'succeeded');
 });
 
+test('provider agent driver continues after update_goal rejects a task with no goal', async () => {
+  let round = 0;
+  const submissions: ProviderSubmitInput[] = [];
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      round += 1;
+      if (round > 1) {
+        yield { ...identity, eventId: 'event-task-result', kind: 'output', summary: '报价结果已写入并核对。', outputRefs: ['output-final'], evidenceRefs: [evidence] };
+        yield { ...identity, eventId: 'event-task-result-terminal', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+        return;
+      }
+      yield {
+        ...identity,
+        eventId: `event-update-goal-${round}`,
+        kind: 'tool',
+        summary: 'update_goal',
+        outputRefs: [`artifact://turn-${round}`],
+        evidenceRefs: [evidence],
+        toolCall: {
+          callId: 'call-update-goal-no-goal',
+          toolId: 'update_goal',
+          arguments: { action: 'complete', goal_id: taskId.value, revision: 1 },
+          continuationRef: `response-round-${round}`,
+        },
+      };
+      yield {
+        ...identity,
+        eventId: `event-update-goal-waiting-${round}`,
+        kind: 'terminal',
+        terminalState: 'waiting',
+        evidenceRefs: [evidence],
+        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+      };
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [
+      { toolId: 'update_goal', description: 'update a persisted goal', inputSchema: { type: 'object' } },
+      { toolId: STANDARD_TURN_END_WIRE_TOOL_ID, description: 'end the current task turn', inputSchema: { type: 'object' } },
+    ],
+    executeTool: {
+      async execute({ call }) {
+        if (call.toolId === 'update_goal') {
+          return {
+            output: JSON.stringify({ status: 'failed', message: 'update_goal requires an existing goal; ordinary task completion uses humanagent_turn_end', recoverable: true }),
+            outputRefs: [],
+            evidenceRefs: [evidence],
+            status: 'failed',
+            error: {
+              errorId: 'provider-tool-update-goal-without-goal',
+              code: 'tool.argument.invalid',
+              category: 'validation',
+              phase: 'tool',
+              message: 'update_goal requires an existing goal; ordinary task completion uses humanagent_turn_end',
+              ownerId: 'humanagent.app.provider-tool-execution',
+              retryable: 'retryable',
+              attention: 'foreground',
+              evidenceRefs: [evidence],
+              nextAction: { kind: 'continue', ref: 'update_goal' },
+            },
+          };
+        }
+        return { output: '{"accepted":true}', outputRefs: [], evidenceRefs: [evidence], status: 'succeeded' };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'finish the existing task and report its result' } });
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+
+  assert.equal(round, 2);
+  assert.equal(submissions.length, 1);
+  const continued = submissions[0]?.toolContinuations ?? [];
+  assert.deepEqual(continued.map(({ callId }) => callId), ['call-update-goal-no-goal']);
+  assert.match(continued[0]?.output ?? '', /ordinary task completion uses humanagent_turn_end/);
+  assert.deepEqual(events.flatMap((event) => event.providerEvent.toolResult === undefined
+    ? []
+    : [[event.providerEvent.toolResult.callId, event.providerEvent.toolResult.status]]), [
+    ['call-update-goal-no-goal', 'failed'],
+  ]);
+  assert.equal(events.at(-1)?.terminalState, 'succeeded');
+});
+
 test('provider agent driver honors the configured tool round limit', async () => {
   // The fixture always asks for another tool round up to a finite ninth round,
   // then emits an ordinary `succeeded` terminal with no tool call. Only an

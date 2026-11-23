@@ -1389,9 +1389,13 @@ async function executeGetGoal(request: ToolExecRequest, params: { readonly artif
 async function executeCreateGoal(request: ToolExecRequest, params: { readonly artifactRoot: string }): Promise<ToolExecResult> {
   if (request.signal.aborted) throw Object.assign(new Error('create_goal was stopped before admission'), { name: 'AbortError' });
   const objective = request.call.arguments.objective;
-  if (typeof objective !== 'string' || objective.trim() === '') throw new Error('create_goal requires a non-empty objective');
+  if (typeof objective !== 'string' || objective.trim() === '') {
+    return invalidToolArguments(request, 'create_goal', 'create_goal requires a non-empty objective');
+  }
   const state = await readProviderTaskState(params.artifactRoot, request);
-  if (state.goal !== undefined && state.goal.phase !== 'complete') throw new Error('create_goal rejected: active goal already exists');
+  if (state.goal !== undefined && state.goal.phase !== 'complete') {
+    return invalidToolArguments(request, 'create_goal', 'create_goal rejected: active goal already exists');
+  }
   const budget = request.call.arguments.token_budget;
   state.goal = { id: randomUUID(), revision: 1, objective: objective.trim(), phase: 'active', roundsStarted: 0, maxGoalRounds: typeof budget === 'number' && Number.isInteger(budget) ? budget : undefined };
   await writeProviderTaskState(params.artifactRoot, request, state);
@@ -1402,10 +1406,14 @@ async function executeUpdateGoal(request: ToolExecRequest, params: { readonly ar
   if (request.signal.aborted) throw Object.assign(new Error('update_goal was stopped before admission'), { name: 'AbortError' });
   const args = request.call.arguments;
   const state = await readProviderTaskState(params.artifactRoot, request);
-  if (state.goal === undefined) throw new Error('update_goal requires an existing goal');
-  if (args.goal_id !== state.goal.id || args.revision !== state.goal.revision) throw new Error('update_goal goal_id and revision do not match the current goal');
+  if (state.goal === undefined) {
+    return invalidToolArguments(request, 'update_goal', 'update_goal requires an existing goal; ordinary task completion uses humanagent_turn_end');
+  }
+  if (args.goal_id !== state.goal.id || args.revision !== state.goal.revision) {
+    return invalidToolArguments(request, 'update_goal', 'update_goal goal_id and revision do not match the current goal');
+  }
   if (args.action !== 'edit' && args.action !== 'pause' && args.action !== 'resume' && args.action !== 'complete' && args.action !== 'blocked') {
-    throw new Error('update_goal action is unsupported');
+    return invalidToolArguments(request, 'update_goal', 'update_goal action is unsupported');
   }
   const updated: TaskState['goal'] = { ...state.goal, revision: state.goal.revision + 1 };
   if (args.action === 'edit') {
@@ -1418,7 +1426,9 @@ async function executeUpdateGoal(request: ToolExecRequest, params: { readonly ar
   } else if (args.action === 'complete') {
     updated.phase = 'complete';
   } else {
-    if (typeof args.blocked_reason !== 'string' || args.blocked_reason.trim() === '') throw new Error('update_goal blocked requires blocked_reason');
+    if (typeof args.blocked_reason !== 'string' || args.blocked_reason.trim() === '') {
+      return invalidToolArguments(request, 'update_goal', 'update_goal blocked requires blocked_reason');
+    }
     updated.phase = 'blocked';
     updated.blockedReason = args.blocked_reason.trim();
   }

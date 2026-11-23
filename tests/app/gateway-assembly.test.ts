@@ -609,6 +609,18 @@ test('Responses built-in tools execute write, edit, bash, todo, goal, and presen
     }, 'call-todo');
     assert.equal(JSON.parse(todos.output).counts.inProgress, 1);
 
+    // This execution happens before create_goal on a fresh artifact root, so
+    // the task state genuinely has no persisted goal.
+    const noGoal = await run('update_goal', {
+      goal_id: 'missing-goal',
+      revision: 1,
+      action: 'complete',
+    }, 'call-update-goal-without-goal');
+    assert.equal(noGoal.status, 'failed');
+    assert.equal(noGoal.error?.category, 'validation');
+    assert.equal(noGoal.error?.nextAction.kind, 'continue');
+    assert.equal(noGoal.error?.message, `update_goal requires an existing goal; ordinary task completion uses humanagent_turn_end`);
+
     const created = await run('create_goal', { objective: 'complete built-in provider tool coverage' }, 'call-create-goal');
     const createdGoal = JSON.parse(created.output).goal;
     assert.equal(createdGoal.phase, 'active');
