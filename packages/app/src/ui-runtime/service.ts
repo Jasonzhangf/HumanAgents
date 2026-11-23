@@ -4087,15 +4087,19 @@ export class UiRuntimeService {
     const turn = turnEntry?.fact.turn;
     if (turn === undefined) return { ok: false, failure: { code: 'interaction-request.turn-not-found', ownerId: APP_OWNER, message: 'the interaction turn is not present in the selected project revision', nextAction: 'select a recorded interaction turn' } };
     const snapshot = await journal.readTurnSnapshot(turn);
-    const requestRecords = snapshot.requests.filter(({ fact }) => fact.request.requestId === input.requestId
+    const committedRequests = snapshot.requests.filter(({ fact }) => fact.request.requestId === input.requestId
       && fact.phase !== 'dispatching');
-    const request = requestRecords.at(-1);
+    const request = committedRequests.at(-1);
+    if (request !== undefined && request.execution.executionEpoch !== input.executionEpoch) {
+      return { ok: false, failure: { code: 'interaction-request.epoch-mismatch', ownerId: APP_OWNER, message: 'the selected request belongs to a different execution epoch', nextAction: 'select the execution epoch recorded for this request' } };
+    }
     if (request === undefined || !snapshot.turnInput) {
       return { ok: false, failure: { code: 'interaction-request.request-not-found', ownerId: APP_OWNER, message: 'the request or execution epoch is not committed for this interaction turn', nextAction: 'select the exact request identity recorded in this turn' } };
     }
+    const requestRecords = committedRequests.filter(({ execution }) => execution.executionEpoch === request.execution.executionEpoch);
     const selectedEvidence = (ref: EvidenceRef): boolean => input.evidenceId === undefined || ref.evidenceId.value === input.evidenceId;
     const accepted = snapshot.acceptedFacts.filter(({ fact }) => fact.envelope.request.requestId === input.requestId
-      && fact.envelope.execution.executionEpoch === input.executionEpoch
+      && fact.envelope.execution.executionEpoch === request.execution.executionEpoch
       && fact.envelope.fact.kind === 'content'
       && selectedEvidence(fact.envelope.fact.content.ref)).map(({ fact, commit }) => ({ fact: fact.envelope.fact, commit }));
     const wireRefs = requestRecords.flatMap(({ fact }) => fact.evidenceRefs ?? []).filter(selectedEvidence);
@@ -4125,7 +4129,7 @@ export class UiRuntimeService {
       return { ok: true, value: {
         surface: 'runtime-interaction-provider-request',
         scope: { kind: 'interaction', projectKey: input.projectKey, mode: input.mode, interactionId: input.interactionId, inputRevision: input.inputRevision },
-        origin: { turnId: request.fact.request.turnId, executionEpoch: input.executionEpoch, requestId: input.requestId, ...(request.fact.parentRequestId === undefined ? {} : { parentRequestId: request.fact.parentRequestId }) },
+        origin: { turnId: request.fact.request.turnId, executionEpoch: request.execution.executionEpoch, requestId: request.fact.request.requestId, ...(request.fact.parentRequestId === undefined ? {} : { parentRequestId: request.fact.parentRequestId }) },
         evidenceRefs,
         content: [...wireContent, ...content.filter((entry) => entry !== undefined)],
       } };

@@ -92,6 +92,12 @@ test('public interaction request read resolves the exact no-Task request and rej
     const selectedText = await selected.text();
     assert.equal(selected.status, 200, selectedText);
     assert.deepEqual((JSON.parse(selectedText) as { evidenceRefs: { evidenceId: { value: string } }[] }).evidenceRefs.map((ref) => ref.evidenceId.value), [selectedRef]);
+    const epoch = identity.execution!.executionEpoch!;
+    const wrongEpoch = await fetch(url.replace(`/epochs/${epoch}/`, `/epochs/${epoch + 1}/`), { headers: { cookie } });
+    const wrongEpochText = await wrongEpoch.text();
+    assert.equal(wrongEpoch.status, 409, wrongEpochText);
+    assert.match(wrongEpochText, /epoch-mismatch/);
+    assert.equal(wrongEpochText.includes('http-wire-response') || wrongEpochText.includes('hello'), false);
     const foreign = await fetch(url.replace(`/requests/${identity.record!.request!.requestId}`, '/requests/not-this-request'), { headers: { cookie } });
     assert.equal(foreign.status, 409);
     const wrongEvidence = await fetch(url + '&evidenceId=not-attached', { headers: { cookie } });

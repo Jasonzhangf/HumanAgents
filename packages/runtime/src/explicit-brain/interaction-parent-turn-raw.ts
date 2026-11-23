@@ -93,6 +93,11 @@ export interface InteractionParentCommittedFact<TFact> {
   readonly commit: JournalCommitRef;
 }
 
+/** A committed request plus the physical execution identity persisted with it. */
+export interface InteractionParentCommittedRequest extends InteractionParentCommittedFact<RuntimeRequestRecord> {
+  readonly execution: InteractionParentProviderExecutionIdentityRef;
+}
+
 /**
  * The durable fact that the original parent Provider owner returned an actual
  * `closed` receipt for the original turn binding, and that the fact committed
@@ -128,7 +133,7 @@ export interface InteractionParentOwnerReconciliationFact {
 /** The consistent durable read of exactly one parent turn. */
 export interface InteractionParentTurnSnapshot {
   readonly turnInput: InteractionParentCommittedFact<InteractionParentTurnInputFact> | null;
-  readonly requests: readonly InteractionParentCommittedFact<RuntimeRequestRecord>[];
+  readonly requests: readonly InteractionParentCommittedRequest[];
   readonly acceptedFacts: readonly InteractionParentCommittedFact<
     AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>
   >[];

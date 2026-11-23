@@ -21,6 +21,7 @@ import {
 } from '../../../contracts/src/index.js';
 import type {
   InteractionParentCommittedFact,
+  InteractionParentCommittedRequest,
   InteractionParentOpenedTurnScopeReadPort,
   InteractionParentOwnerReconciliationFact,
   InteractionParentResourceCloseFact,
@@ -583,7 +584,7 @@ function assertRecordScope(
 
 function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIdentity): InteractionParentTurnSnapshot {
   let turnInput: InteractionParentCommittedFact<InteractionParentTurnInputFact> | null = null;
-  const requests: InteractionParentCommittedFact<RuntimeRequestRecord>[] = [];
+  const requests: InteractionParentCommittedRequest[] = [];
   const acceptedFacts: InteractionParentCommittedFact<
     AcceptedRawFact<InteractionParentProviderExecutionIdentityRef>
   >[] = [];
@@ -898,7 +899,7 @@ function decodeTurn(records: readonly JournalRecord[], turn: InteractionTurnIden
         ownerReconciliations.at(-1)?.fact.effectiveExecutionEpoch
           ?? turnInput.fact.execution.executionEpoch,
       );
-      requests.push({ fact: payload.record, commit });
+      requests.push({ fact: payload.record, commit, execution: payload.execution });
       continue;
     }
     acceptedFacts.push({ fact: payload.entry, commit });
