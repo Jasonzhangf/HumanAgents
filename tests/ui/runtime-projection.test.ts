@@ -438,6 +438,31 @@ test('main topic keeps a consumed child question under its user-facing parent ta
   assert.equal(projection.turns[2]?.quote, '按含税价还是未税价比较？');
 });
 
+test('main topic groups exact linked turns into history and active lanes with sourced summaries', () => {
+  const completedTaskId = id('task', 'main-topic-round-complete');
+  const activeTaskId = id('task', 'main-topic-round-active');
+  const projection = projectMainTopic({
+    projectKey: 'main-topic-project', projectName: '报价项目', workspaceCwd: '/tmp/main-topic-project', mode: 'rcc',
+    interactions: [
+      { interactionId: 'simple-round', rawInput: '巴黎是哪个国家的首都？', occurredAt: '2026-11-22T10:00:00.000Z', state: 'answered', reply: '巴黎是法国的首都。' },
+      { interactionId: 'completed-round', rawInput: '比较甲乙报价。', occurredAt: '2026-11-22T10:01:00.000Z', state: 'confirmed', taskId: completedTaskId },
+      { interactionId: 'active-round', rawInput: '读取项目里的预算文件。', occurredAt: '2026-11-22T10:02:00.000Z', state: 'confirmed', taskId: activeTaskId },
+    ],
+    tasks: [
+      { taskId: completedTaskId, title: '报价比较', state: 'succeeded', stateLabel: '已完成', currentNode: '', nextStep: '', output: '供应商乙最低，含税价109.18元。', latestSummary: '供应商乙最低。', updatedAt: '2026-11-22T10:04:00.000Z', sourceInteractionId: 'completed-round' },
+      { taskId: activeTaskId, title: '读取预算', state: 'running', stateLabel: '执行中', currentNode: 'provider.tool', nextStep: '等待读取结果', output: '', updatedAt: '2026-11-22T10:05:00.000Z', sourceInteractionId: 'active-round', detailReadError: { message: '读取工具记录失败' } },
+    ],
+  });
+
+  assert.deepEqual(projection.rounds.map(({ roundKey, lane, userText, summary, messageRefs }) => ({
+    roundKey, lane, userText, summary, messageRefs,
+  })), [
+    { roundKey: 'interaction:simple-round', lane: 'history', userText: '巴黎是哪个国家的首都？', summary: { text: '巴黎是法国的首都。', source: 'answer-excerpt', sourceRef: 'reply:simple-round' }, messageRefs: ['user:simple-round', 'reply:simple-round'] },
+    { roundKey: 'interaction:completed-round', lane: 'history', userText: '比较甲乙报价。', summary: { text: '供应商乙最低。', source: 'recorded-summary', sourceRef: 'task:main-topic-round-complete' }, messageRefs: ['user:completed-round', 'result:main-topic-round-complete'] },
+    { roundKey: 'interaction:active-round', lane: 'active', userText: '读取项目里的预算文件。', summary: undefined, messageRefs: ['user:active-round', 'status:main-topic-round-active', 'detail-read-error:main-topic-round-active'] },
+  ]);
+});
+
 test('a root with its own failure or operation keeps its own facts over a waiting child', () => {
   const parentTaskId = id('task', 'task-own-execution-root');
   const childTaskId = id('task', 'task-own-execution-child');

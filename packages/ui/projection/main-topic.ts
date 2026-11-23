@@ -104,6 +104,20 @@ export interface MainTopicTaskView {
   readonly sourceInteractionId?: string
 }
 
+export interface MainTopicConversationRound {
+  readonly roundKey: string
+  readonly interactionId?: string
+  readonly taskId?: TaskId
+  readonly lane: 'history' | 'active' | 'unknown'
+  readonly userText?: string
+  readonly summary?: {
+    readonly text: string
+    readonly source: 'recorded-summary' | 'answer-excerpt' | 'result-excerpt'
+    readonly sourceRef: string
+  }
+  readonly messageRefs: readonly string[]
+}
+
 export interface MainTopicProjection {
   readonly surface: 'main-topic'
   readonly projectKey: string
@@ -113,6 +127,7 @@ export interface MainTopicProjection {
   readonly topicName: '主话题'
   readonly mode: 'fake' | 'rcc'
   readonly turns: readonly MainTopicTurn[]
+  readonly rounds: readonly MainTopicConversationRound[]
   readonly tasks: readonly MainTopicTaskView[]
   readonly openInputRequest?: TaskInputRequest & {
     readonly sourceInteractionId?: string
@@ -132,6 +147,16 @@ export interface MainTopicProjectionInput {
 
 const ACTIVE_TASK_STATES = new Set(['created', 'admitted', 'running', 'settling', 'waiting'])
 const FAILED_TASK_STATES = new Set(['failed', 'blocked', 'stopped', 'cancelled', 'stale'])
+const CLOSED_INTERACTION_STATES = new Set(['answered', 'status-only', 'closed', 'completed', 'succeeded'])
+
+function excerpt(text: string): string {
+  const normalized = text.trim().replace(/\s+/g, ' ')
+  if (normalized.length <= 180) return normalized
+  const sentenceEnd = Math.max(normalized.lastIndexOf('。', 180), normalized.lastIndexOf('！', 180),
+    normalized.lastIndexOf('？', 180), normalized.lastIndexOf('；', 180))
+  const boundary = sentenceEnd > 120 ? sentenceEnd + 1 : normalized.lastIndexOf(' ', 180)
+  return `${normalized.slice(0, boundary > 120 ? boundary : 180).trimEnd()}…`
+}
 
 function semanticCurrentNode(currentNode: string): string {
   const labels: Record<string, string> = {
@@ -347,6 +372,7 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
   for (const task of visibleTaskInputs) {
     if (task.sourceInteractionId !== undefined) tasksByInteraction.set(task.sourceInteractionId, task)
   }
+
   const interactions = [...input.interactions].sort((left, right) =>
     (left.occurredAt ?? '').localeCompare(right.occurredAt ?? ''))
   for (const interaction of interactions) {
@@ -373,10 +399,73 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
     turns.push(...(ACTIVE_TASK_STATES.has(task.state) ? taskTurns(task) : consumedRequestTurns(task)))
   }
 
+  for (const task of visibleTaskInputs) {
+    if (task.detailReadError !== undefined) turns.push({
+      turnId: `detail-read-error:${task.taskId.value}`,
+      role: 'jenny', kind: 'status', text: '执行详情读取失败',
+      taskId: task.taskId, quote: task.title, detailReadError: task.detailReadError,
+    })
+  }
+
+  const rounds: MainTopicConversationRound[] = []
+  const turnsByInteraction = new Map<string, MainTopicTurn[]>()
+  for (const turn of turns) {
+    if (turn.interactionId === undefined) continue
+    const group = turnsByInteraction.get(turn.interactionId) ?? []
+    group.push(turn)
+    turnsByInteraction.set(turn.interactionId, group)
+  }
+  for (const interaction of interactions) {
+    const task = tasksByInteraction.get(interaction.interactionId)
+    const group = [
+      ...(turnsByInteraction.get(interaction.interactionId) ?? []),
+      ...(task === undefined ? [] : turns.filter((turn) => turn.taskId?.value === task.taskId.value)),
+    ]
+    const answer = [...group].reverse().find((turn) => turn.role === 'jenny' && turn.kind === 'message')
+    const result = group.find((turn) => turn.kind === 'result')
+    const summaryText = task?.latestSummary?.trim()
+    const summary = summaryText && task !== undefined
+      ? { text: excerpt(summaryText), source: 'recorded-summary' as const, sourceRef: `task:${task.taskId.value}` }
+      : answer !== undefined
+        ? { text: excerpt(answer.text), source: 'answer-excerpt' as const, sourceRef: answer.turnId }
+        : result !== undefined
+          ? { text: excerpt(result.text), source: 'result-excerpt' as const, sourceRef: result.turnId }
+          : undefined
+    const lane = task !== undefined
+      ? task.state === 'succeeded' ? 'history' : ACTIVE_TASK_STATES.has(task.state) || FAILED_TASK_STATES.has(task.state) ? 'active' : 'unknown'
+      : CLOSED_INTERACTION_STATES.has(interaction.state) ? 'history' : 'active'
+    rounds.push({
+      roundKey: `interaction:${interaction.interactionId}`,
+      interactionId: interaction.interactionId,
+      ...(task === undefined ? {} : { taskId: task.taskId }),
+      lane,
+      userText: interaction.rawInput,
+      ...(summary === undefined ? {} : { summary }),
+      messageRefs: group.map((turn) => turn.turnId),
+    })
+  }
+  for (const task of visibleTaskInputs) {
+    if (task.sourceInteractionId !== undefined) continue
+    const group = turns.filter((turn) => turn.taskId?.value === task.taskId.value)
+    const result = group.find((turn) => turn.kind === 'result')
+    const summaryText = task.latestSummary?.trim()
+    const summary = summaryText
+      ? { text: excerpt(summaryText), source: 'recorded-summary' as const, sourceRef: `task:${task.taskId.value}` }
+      : result === undefined ? undefined
+        : { text: excerpt(result.text), source: 'result-excerpt' as const, sourceRef: result.turnId }
+    rounds.push({
+      roundKey: `task:${task.taskId.value}`,
+      taskId: task.taskId,
+      lane: task.state === 'succeeded' ? 'history' : ACTIVE_TASK_STATES.has(task.state) || FAILED_TASK_STATES.has(task.state) ? 'active' : 'unknown',
+      ...(summary === undefined ? {} : { summary }),
+      messageRefs: group.map((turn) => turn.turnId),
+    })
+  }
+
   // Decorate only the current task card. Historical questions keep their own
   // answer lifecycle and never inherit the task's subsequent live phase.
   for (const task of visibleTaskInputs) {
-    const last = [...turns].reverse().find((turn) => turn.taskId?.value === task.taskId.value && turn.role === 'jenny'
+    const last = [...turns].reverse().find((turn) => turn.taskId?.value === task.taskId.value && turn.role === 'jenny' && turn.detailReadError === undefined
       && (turn.kind !== 'input-request' || (turn.requestId === task.inputRequest?.requestId
         && turn.expectedRevision === task.inputRequest?.expectedRevision)))
     const index = last === undefined ? -1 : turns.indexOf(last)
@@ -391,14 +480,6 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
       waitingForUser: task.inputRequest !== undefined,
       ...(task.error === undefined ? {} : { error: task.error }),
     } }
-  }
-
-  for (const task of visibleTaskInputs) {
-    if (task.detailReadError !== undefined) turns.push({
-      turnId: `detail-read-error:${task.taskId.value}`,
-      role: 'jenny', kind: 'status', text: '执行详情读取失败',
-      taskId: task.taskId, quote: task.title, detailReadError: task.detailReadError,
-    })
   }
 
   const waiting = visibleTaskInputs
@@ -422,6 +503,7 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
     topicName: '主话题',
     mode: input.mode,
     turns,
+    rounds,
     tasks,
     ...(waitingView?.error === undefined && waiting !== undefined
       ? {

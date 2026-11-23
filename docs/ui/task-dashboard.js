@@ -80,7 +80,7 @@ import {
   locationFromPopState,
   productLocationHistoryState,
 } from './product-location.js'
-import { renderProductSessionView } from './product-session-view.js'
+import { renderProductSessionView, disposeProductSessionView, scopedProductToolEvents } from './product-session-view.js'
 import {
   focusFromRelation,
   productRelationRefKey,
@@ -95,6 +95,23 @@ import {
 } from './product-control-view.js'
 
 const readScope = taskReadScopeFromLocation()
+// The board may focus an explicit intake before it has produced any Task.
+// Bind this read-only page to that exact project/session, never to a task list.
+export function projectSessionPageScope(source) {
+  const decoded = locationFromHash(source?.hash)
+  if (decoded.kind !== 'valid') return null
+  const value = decoded.location
+  const params = new URLSearchParams(source?.search)
+  if (params.has('task') || value.scope.kind !== 'project'
+    || value.focus?.kind !== 'session'
+    || value.focus.sessionRef.sourceKind !== 'explicit-intake'
+    || value.focus.scope.projectKey !== value.scope.projectKey
+    || params.get('projectKey') !== value.scope.projectKey) return null
+  const mode = params.get('mode')
+  if (!['fake', 'rcc', 'dsh'].includes(mode)) return null
+  return { kind: 'project', projectKey: value.scope.projectKey, mode }
+}
+const sessionPageScope = projectSessionPageScope(location)
 const explicitScope = readScope.kind === 'task' ? readScope : null
 const taskId = explicitScope
   ? (typeof explicitScope.taskId === 'object' ? explicitScope.taskId.value : explicitScope.taskId)
@@ -584,10 +601,19 @@ function productFocusTargetUnavailable(target) {
  * the real interaction messages. A target without a body reader returns the
  * typed unavailable result above; it never falls back to the task body.
  */
-function productSessionReadForTarget(target, transport) {
+function productSessionReadForTarget(target, transport, { signal } = {}) {
   if (target === undefined) return Promise.reject(productFocusTargetUnavailable(undefined))
   if (target.kind === 'execution-instance') {
-    return Promise.reject(productFocusTargetUnavailable(target))
+    const read = productFlatReadScope(target, target.scope)
+    if (!read || typeof transport.readProductSession !== 'function') return Promise.reject(productFocusTargetUnavailable(target))
+    return Promise.resolve().then(() => transport.readProductSession(read, { signal })).then(value => {
+      // The task read supplies complete tool facts, not an arbitrary session
+      // body. Only facts belonging to this exact allocation enter the focus.
+      if (!Array.isArray(value?.toolEvents)) throw productFocusTargetUnavailable(target)
+      const toolEvents = scopedProductToolEvents({ ...value, toolScope: read, toolInstance: target.instance })
+      const ids = new Set(toolEvents.map(event => event.eventId))
+      return { ...value, toolEvents, messages: (value.messages ?? []).filter(message => !message.toolEvent || ids.has(message.toolEvent.eventId)) }
+    })
   }
   if (target.kind === 'session' && target.sessionRef.sourceKind !== 'explicit-intake') {
     return Promise.reject(productFocusTargetUnavailable(target))
@@ -600,7 +626,7 @@ function productSessionReadForTarget(target, transport) {
   }
   const read = productFlatReadScope(target, target.scope)
   if (read === undefined) return Promise.reject(productFocusTargetUnavailable(target))
-  return Promise.resolve().then(() => transport.readProductSession(read))
+  return Promise.resolve().then(() => transport.readProductSession(read, { signal }))
 }
 
 /**
@@ -623,6 +649,9 @@ function productFlatReadScope(focus, scope) {
     const sourceRef = focus.sessionRef?.sourceRef
     if (typeof sourceKind !== 'string' || sourceKind === '') return undefined
     if (typeof sourceRef !== 'string' || sourceRef === '') return undefined
+    // The source session is the exact target. Its associated task is navigation
+    // context, not an alternative selector for the session's usage.
+    delete read.taskId
     read.sessionRef = { sourceKind, sourceRef }
   }
   return read
@@ -873,7 +902,19 @@ export function createTaskFocusController({
     return promise
   }
 
+  let renderedSessionHost
+  let renderedToolKey
+  let readFocusedToolOutput
+
   function renderPending() {
+    const key = JSON.stringify([state.scope, state.focus])
+    if (key !== renderedToolKey) {
+      if (renderedSessionHost) disposeProductSessionView(renderedSessionHost)
+      renderedSessionHost = undefined
+      renderedToolKey = key
+      const toolScope = productFlatReadScope(undefined, state.scope)
+      readFocusedToolOutput = target => transport.readScopedToolOutput(target, toolScope)
+    }
     centerHost.replaceChildren()
     const section = make('section', undefined, 'product-focus-center')
     section.setAttribute('data-product-focus-state', 'pending')
@@ -892,8 +933,10 @@ export function createTaskFocusController({
     section.setAttribute('data-product-focus-scope', productScopeKey(scope))
     section.append(make('h2', '当前会话'))
 
-    const sessionBody = make('div', undefined, 'product-focus-session')
+    const sessionBody = renderedSessionHost ?? make('div', undefined, 'product-focus-session')
+    renderedSessionHost = sessionBody
     if (sessionResult.status === 'rejected') {
+      disposeProductSessionView(sessionBody)
       const failure = productFailure(sessionResult.reason, 'product-session.read.failed')
       renderProductFocusFailure(sessionBody, make, '当前会话读取失败', failure)
     } else {
@@ -902,10 +945,16 @@ export function createTaskFocusController({
       const publication = outputResult.status === 'fulfilled'
         ? selectProductOutputPublication(outputResult.value)
         : undefined
+      const toolScope = productFlatReadScope(undefined, scope)
       renderProductSessionView(sessionBody, {
         ...(messages === undefined ? {} : { messages }),
+        toolEvents: value?.toolEvents,
+        toolScope,
+        toolInstance: focus?.kind === 'execution-instance' ? focus.instance : undefined,
         ...(publication === undefined ? {} : { publicOutput: publication }),
-      }, { element: make })
+        usage: value?.usage,
+        usageFailure: value?.usageFailure,
+      }, { element: make, readToolOutput: readFocusedToolOutput })
       if (outputResult.status === 'rejected') {
         const failure = productFailure(outputResult.reason, 'product-output.read.failed')
         const node = make('div', undefined, 'product-focus-output-failure')
@@ -1035,11 +1084,34 @@ export function createTaskFocusController({
     return focusFromRelation(match, state.focus, direction)
   }
 
-  async function load({ location: supplied } = {}) {
-    if (disposed) return { ok: false, disposed: true }
-    const read = supplied === undefined
+  let loading
+  function load(options = {}) {
+    const locationRead = options.location === undefined
       ? normalizeProductLocationRead(readLocation())
-      : normalizeProductLocationRead({ kind: 'valid', location: supplied })
+      : normalizeProductLocationRead({ kind: 'valid', location: options.location })
+    const key = JSON.stringify(locationRead)
+    if (loading?.key === key) {
+      loading.queued = true
+      serial += 1
+      return loading.promise
+    }
+    loading?.abort.abort()
+    const request = { key, queued: false, abort: new AbortController() }
+    loading = request
+    request.promise = (async () => {
+      let result
+      do {
+        request.queued = false
+        result = await performLoad(options, locationRead, request.abort.signal)
+      } while (!disposed && loading === request && request.queued)
+      return result
+    })().finally(() => { if (loading === request) loading = undefined })
+    return request.promise
+  }
+
+  async function performLoad({ location: supplied } = {}, locationRead, signal) {
+    if (disposed) return { ok: false, disposed: true }
+    const read = locationRead
     if (read.failure) {
       serial += 1
       centerHost.replaceChildren()
@@ -1076,7 +1148,7 @@ export function createTaskFocusController({
     state.decisionFailure = undefined
     renderPending()
 
-    const sessionPromise = productSessionReadForTarget(productFocusReadTarget(focus), transport)
+    const sessionPromise = productSessionReadForTarget(productFocusReadTarget(focus), transport, { signal })
     const relationsPromise = typeof transport.readProductRelations === 'function'
       ? Promise.resolve().then(() => transport.readProductRelations(scope))
       : Promise.reject(productFailure(
@@ -1193,6 +1265,8 @@ export function createTaskFocusController({
 
   function dispose() {
     disposed = true
+    if (renderedSessionHost) disposeProductSessionView(renderedSessionHost)
+    loading?.abort.abort()
     serial += 1
   }
 
@@ -1256,10 +1330,10 @@ const template = TASK_DASHBOARD_TEST_MODE
   : mountProductShell(document.getElementById('page-root'), {
   layout: 'work',
   active: 'Task List',
-  eyebrow: 'Task Dashboard',
-  title: '任务看板',
-  lede: '这里显示这个任务当前的状态、执行进展、关键节点和可执行操作。',
-  scope: explicitScope,
+  eyebrow: sessionPageScope ? '会话' : 'Task Dashboard',
+  title: sessionPageScope ? '显式会话' : '任务看板',
+  lede: sessionPageScope ? '查看这次会话的消息与模型调用统计。' : '这里显示这个任务当前的状态、执行进展、关键节点和可执行操作。',
+  scope: explicitScope ?? sessionPageScope,
   breadcrumbs: explicitScope
     ? [
         { label: '系统', href: './dashboard.html' },
@@ -1268,7 +1342,7 @@ const template = TASK_DASHBOARD_TEST_MODE
       ]
     : [
         { label: '系统', href: './dashboard.html' },
-        { label: '任务', href: null },
+        { label: sessionPageScope ? '显式会话' : '任务', href: null },
       ],
   capabilities: explicitScope
     ? {
@@ -1309,6 +1383,10 @@ function productTaskScope() {
 }
 
 export function productLocationMatchesTask(value) {
+  const projectSession = projectSessionPageScope(location)
+  if (projectSession && value?.scope?.kind === 'project') {
+    return value.scope.projectKey === projectSession.projectKey
+  }
   const scope = productTaskScope()
   if (!scope || !value) return false
   if (value.scope?.kind === 'task') {
@@ -1371,7 +1449,7 @@ function productPageQuery(scope) {
     params.set('mode', scope.mode)
   } else if (scope?.kind === 'project') {
     params.set('projectKey', scope.projectKey)
-    if (explicitScope) params.set('mode', explicitScope.mode)
+    if (explicitScope || sessionPageScope) params.set('mode', (explicitScope ?? sessionPageScope).mode)
   }
   return params
 }
@@ -1412,7 +1490,7 @@ function productScopeQuery(scope) {
     params.set('taskId', scope.taskId?.value ?? '')
   } else if (scope?.kind === 'project') {
     params.set('projectKey', scope.projectKey)
-    if (explicitScope) params.set('mode', explicitScope.mode)
+    if (explicitScope || sessionPageScope) params.set('mode', (explicitScope ?? sessionPageScope).mode)
   } else if (explicitScope) {
     params.set('projectKey', explicitScope.projectKey)
     params.set('mode', explicitScope.mode)
@@ -1427,7 +1505,7 @@ function productReadQuery(scope) {
     : explicitScope?.projectKey
   const mode = scope?.mode === 'fake' || scope?.mode === 'rcc' || scope?.mode === 'dsh'
     ? scope.mode
-    : explicitScope?.mode
+    : (explicitScope ?? sessionPageScope)?.mode
   if (projectKey) params.set('projectKey', projectKey)
   if (mode) params.set('mode', mode)
   const taskValue = typeof scope?.taskId === 'object' ? scope.taskId?.value : scope?.taskId
@@ -1441,8 +1519,8 @@ function productReadQuery(scope) {
   return params
 }
 
-async function fetchProductRead(path, params) {
-  const response = await globalThis.fetch(`${path}?${params}`)
+async function fetchProductRead(path, params, init = {}) {
+  const response = await globalThis.fetch(`${path}?${params}`, init)
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
     const failure = productFailure(
@@ -1458,7 +1536,8 @@ async function fetchProductRead(path, params) {
 
 function pageProductTransport() {
   return {
-    readProductSession: (scope) => fetchProductRead('/api/product/session', productReadQuery(scope)),
+    readScopedToolOutput: (target, scope) => api.readScopedToolOutput(target, scope),
+    readProductSession: (scope, { signal } = {}) => fetchProductRead('/api/product/session', productReadQuery(scope), { signal }),
     readProductDecision: (scope) => fetchProductRead('/api/product/decision', productReadQuery(scope)),
     readProductRelations: (scope) => fetchProductRead('/api/product/relations', productScopeQuery(scope)),
     readProductOutput: (taskIdValue) => {
@@ -1506,7 +1585,7 @@ export function renderProductSessionExtras(host, { focus, lane, transport }) {
 }
 
 function ensureProductFocus() {
-  if (TASK_DASHBOARD_TEST_MODE || !explicitScope) return null
+  if (TASK_DASHBOARD_TEST_MODE || (!explicitScope && !sessionPageScope)) return null
   if (productFocusController) return productFocusController
   productCenterHost = element('div', undefined, 'product-focus-center-host')
   productCenterHost.dataset.productFocusHost = 'center'
@@ -3949,6 +4028,13 @@ function applyPlanHistoryRead(projection) {
 async function refresh() {
   try {
     if (pageDisposed) return
+    if (sessionPageScope) {
+      stopObserving()
+      const focus = ensureProductFocus()
+      primary.replaceChildren(focus.centerHost)
+      await focus.load()
+      return
+    }
     if (scopeFailure || !taskId) {
       setRefreshError(scopeFailure || { code: 'read.scope.invalid', message: 'URL 缺少 task 参数', ownerId: 'humanagent.ui', nextAction: '从项目任务行打开任务' })
       return

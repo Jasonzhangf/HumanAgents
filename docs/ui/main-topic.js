@@ -1,12 +1,28 @@
-import { api, clearNode, element, formatTime } from './runtime-shell.js'
+import { api, appendPairingEntry, clearNode, element, formatTime } from './runtime-shell.js'
 import { conversationStatus, createConversationStatusClock } from './conversation-status.js'
-import { renderToolBody } from './tool-presentation.js'
+import * as callUsageFooter from './call-usage-footer.js'
+import { renderToolBody, disposeToolBody } from './tool-presentation.js'
+import { taskForTurn, taskValue, renderDispatchCard } from './dispatch-tracking.js'
+
+export function ownedMainTopicTurns(projection) {
+  const turns = projection.turns || []
+  const cardTasks = new Set(turns.filter(turn => turn.kind === 'draft' && taskForTurn(turn, projection.tasks)).map(turn => taskValue(taskForTurn(turn, projection.tasks).taskId)))
+  return turns.filter(turn => turn.detailReadError || !(['status', 'error'].includes(turn.kind) && cardTasks.has(taskValue(turn.taskId)))).map(turn => {
+    const task = taskForTurn(turn, projection.tasks)
+    if (!task || turn.role === 'user' || !['draft', 'status', 'error', 'result'].includes(turn.kind)) return turn
+    if (turn.kind === 'draft') return { ...turn, kind: 'dispatch', quote: undefined,
+      dispatchTask: taskValue(projection.openInputRequest?.taskId) === taskValue(task.taskId) ? { ...task, inputRequest: projection.openInputRequest } : task,
+      documentText: turn.text, text: '任务已交办' }
+    return { ...turn, role: 'task', quote: undefined,
+      text: turn.kind === 'error' ? `任务执行链受阻${task.error?.code ? `（${task.error.code}）` : ''} · 恢复状态：未读到恢复完成回执` : turn.text }
+  })
+}
 
 const KIND_LABELS = Object.freeze({
   message: '回答',
   draft: '整理',
+  dispatch: '交办',
   clarification: '需要确认',
-  'input-request': '需要你的信息',
   status: '进展',
   result: '结果',
   error: '未完成',
@@ -34,11 +50,19 @@ function quoteBlock(text) {
   return quote
 }
 
-function turnHeader(turn, label) {
+export function mainTopicActorLabel(role, agentName = 'Jenny') {
+  if (role === 'jenny') return agentName
+  return ({ user: '你', task: '任务执行链', orchestration: '编排 Agent' })[role] || 'Agent'
+}
+
+function turnHeader(turn, label, answered) {
   const header = element('header', undefined, 'mt-turn-head')
+  const kindLabel = turn.kind === 'input-request'
+    ? (answered ? '已回答' : '等待你的回答')
+    : KIND_LABELS[turn.kind] || '消息'
   header.append(
-    element('strong', turn.role === 'user' ? '你' : label),
-    element('span', KIND_LABELS[turn.kind] || '消息', 'mt-turn-kind'),
+    element('strong', mainTopicActorLabel(turn.role, label)),
+    element('span', kindLabel, 'mt-turn-kind'),
   )
   if (typeof turn.occurredAt === 'string' && turn.occurredAt.trim() !== '') {
     header.append(element('time', formatTime(turn.occurredAt), 'mt-turn-time'))
@@ -143,15 +167,16 @@ function renderAnswerControls(request, onAnswer, host, topicState) {
 function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, topicState, bindings) {
   article.className = turnClass(turn)
   article.dataset.turnId = turn.turnId
-  const header = turnHeader(turn, project.agentName)
+  const answered = answeredRequestIds.has(requestKey(turn))
+  const header = turnHeader(turn, project.agentName, answered)
   const previousHeader = article.querySelector('.mt-turn-head')
   if (previousHeader) previousHeader.replaceWith(header)
   else article.append(header)
   const previousStatus = article.querySelector('.conversation-status')
-  if (turn.statusFacts) {
-    const status = element('div', undefined, 'conversation-status')
+  if (turn.statusFacts || turn.localStatus) {
+    const status = element('div', undefined, `conversation-status${turn.turnId.startsWith('local-status:') ? ' mt-send-status' : ''}`)
     status.setAttribute('aria-label', '执行阶段与计时')
-    for (const row of conversationStatus(turn.statusFacts)) {
+    for (const row of turn.localStatus || conversationStatus(turn.statusFacts)) {
       const line = element('div', undefined, 'conversation-status-row')
       line.dataset.phase = row.phase
       line.dataset.tone = row.tone
@@ -162,8 +187,23 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
       const time = element('span', '', 'conversation-status-time')
       line.append(time)
       bindings.push({ row, node: time })
-      if (row.error) line.append(element('span', `${row.error.code || ''} ${row.error.message || ''}`.trim(), 'conversation-status-error'))
+      if (row.error) {
+        line.append(element('span', `${row.error.code || ''} ${row.error.message || ''}`.trim(), 'conversation-status-error'))
+        appendPairingEntry(line, row.error)
+      }
       status.append(line)
+    }
+    if (turn.onRecover && turn.localStatus?.some(row => row.error)) {
+      const recover = element('button', '重新读取本轮状态', 'conversation-status-detail')
+      recover.type = 'button'
+      recover.onclick = () => void turn.onRecover()
+      status.append(recover)
+    }
+    if (turn.onContinue) {
+      const resume = element('button', '继续本轮处理', 'conversation-status-detail')
+      resume.type = 'button'
+      resume.onclick = () => void turn.onContinue()
+      status.append(resume)
     }
     if (typeof topicState.onOpenDetail === 'function') {
       const detail = element('button', '详情', 'conversation-status-detail')
@@ -187,6 +227,18 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
   else if (quote) bubble.prepend(quote)
   const text = bubble.querySelector('.mt-text')
   if (text.textContent !== turn.text) text.textContent = turn.text
+  bubble.querySelector('.mt-task-document')?.remove()
+  if (turn.documentText && !turn.dispatchTask) {
+    const documentDetail = element('details', undefined, 'mt-task-document')
+    documentDetail.append(element('summary', '任务文档'), element('p', turn.documentText))
+    bubble.append(documentDetail)
+  }
+  bubble.querySelector('.dispatch-card')?.remove()
+  if (turn.dispatchTask) bubble.append(renderDispatchCard(turn, turn.dispatchTask, {
+    onOpen: (trigger, task) => topicState.onOpenDispatch?.(trigger, task, { ...turn, text: turn.documentText }),
+    observation: topicState.dispatchObservation?.(turn.dispatchTask),
+    executionObserved: topicState.dispatchExecutionObserved?.(turn.dispatchTask),
+  }))
   let detailReadError = bubble.querySelector('.mt-detail-read-error')
   if (turn.detailReadError) {
     if (!detailReadError) {
@@ -202,11 +254,14 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
       bubble.append(tools)
     }
     renderToolBody(tools, turn.toolEvents, api.readToolOutput)
-  } else tools?.remove()
+  } else if (tools) {
+    disposeToolBody(tools)
+    tools.remove()
+  }
   let control = answerControls.get(article)
   const key = requestKey(turn)
   if (turn.kind === 'input-request' && turn.requestId && turn.taskId
-    && !answeredRequestIds.has(requestKey(turn))) {
+    && !answered) {
     const request = {
       requestId: turn.requestId,
       taskId: turn.taskId,
@@ -248,23 +303,98 @@ function renderActiveTask(task) {
   return row
 }
 
+function renderHistoryRound(round, turns, topicState, scope, previous) {
+  const row = previous || element('article', undefined, 'mt-history-round')
+  row.dataset.historyRoundKey = round.roundKey
+  let user = row.querySelector('.mt-history-user')
+  let button = row.querySelector('.mt-history-summary-button')
+  if (!user) {
+    user = element('div', undefined, 'mt-history-user')
+    user.append(element('p', '', 'mt-text'))
+    row.append(user)
+  }
+  const quote = quoteBlock(turns.find(turn => turn.role === 'user')?.quote)
+  const previousQuote = user.querySelector('.mt-quote')
+  if (previousQuote && quote) previousQuote.replaceWith(quote)
+  else if (previousQuote) previousQuote.remove()
+  else if (quote) user.prepend(quote)
+  user.querySelector('.mt-text').textContent = round.userText || '未记录关联的用户原文'
+  if (!button) {
+    button = element('button', undefined, 'mt-history-summary-button')
+    button.type = 'button'
+    button.setAttribute('aria-haspopup', 'dialog')
+    const mark = element('span', 'H', 'mt-agent-mark')
+    mark.setAttribute('aria-hidden', 'true')
+    const arrow = element('span', '→', 'mt-history-open')
+    arrow.setAttribute('aria-hidden', 'true')
+    button.append(mark, element('span', '', 'mt-history-summary'), arrow)
+    row.append(button)
+  }
+  button.dataset.roundKey = round.roundKey
+  button.querySelector('.mt-history-summary').textContent = round.summary?.text || '本轮已结束，未记录可展示的摘要'
+  button.onclick = () => {
+    topicState.detail = { scope, roundKey: round.roundKey, trigger: button }
+    topicState.onOpenHistoryDetail?.(button, round, turns)
+  }
+  return row
+}
+
+function renderActiveTurns(stream, turns, projection, onAnswer, host, answeredRequestIds, topicState, bindings, previousTurns) {
+  for (const turn of turns) {
+    const current = updateTurn(previousTurns.get(turn.turnId) || element('article'),
+      turn, projection, onAnswer, host, answeredRequestIds, topicState, bindings)
+    stream.append(current)
+  }
+}
+
 export function disposeMainTopic(host) {
+  for (const tools of host.querySelectorAll('.tool-body')) disposeToolBody(tools)
   topicStates.get(host)?.clock.dispose()
   topicStates.delete(host)
 }
 
-export function renderMainTopic(host, projection, { onAnswer, onOpenDetail } = {}) {
+export function updateMainTopicUsage(host, usage, options = {}) {
+  const footer = host.querySelector('.call-usage-footer')
+  if (footer) callUsageFooter.updateCallUsageFooter(footer, usage, options)
+}
+
+// Consume the server's lanes and references once for both chat and its footer.
+// Legacy read models may carry turns without any round metadata, including [].
+export function mainTopicTurnGroups(projection) {
+  const turns = projection?.turns || []
+  if (!projection?.rounds?.length) return { history: [], activeTurns: turns }
+  const turnsById = new Map(turns.map((turn) => [turn.turnId, turn]))
+  const resolve = (round) => round.messageRefs.map((ref) => turnsById.get(ref)).filter(Boolean)
+  return {
+    history: projection.rounds.filter((round) => round.lane === 'history')
+      .map((round) => ({ round, turns: resolve(round) })),
+    activeTurns: [...projection.rounds.filter((round) => round.lane !== 'history').flatMap(resolve),
+      ...turns.filter(turn => projection.localTurnIds?.includes(turn.turnId))],
+  }
+}
+
+export function renderMainTopic(host, projection, { onAnswer, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved } = {}) {
+  projection = { ...projection, turns: ownedMainTopicTurns(projection) }
   if (!(host instanceof HTMLElement)) throw new Error('main topic requires a host element')
   const activeControl = host.contains(document.activeElement) ? document.activeElement : undefined
+  const scroller = host.closest?.('.page-primary') || document.scrollingElement || host
+  const follow = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 100
+  const previousScroll = scroller.scrollTop
   const scope = JSON.stringify([projection.projectKey, projection.mode, projection.workspaceCwd])
   let topicState = topicStates.get(host)
   if (topicState?.scope !== scope) {
+    for (const tools of host.querySelectorAll('.tool-body')) disposeToolBody(tools)
     topicState?.clock.dispose()
     clearNode(host)
-    topicState = { scope, clock: createConversationStatusClock(host) }
+    topicState = { scope, clock: createConversationStatusClock(host), detail: undefined }
     topicStates.set(host, topicState)
   }
   if (onOpenDetail !== undefined) topicState.onOpenDetail = onOpenDetail
+  if (onOpenHistoryDetail !== undefined) topicState.onOpenHistoryDetail = onOpenHistoryDetail
+  if (onOpenDispatch !== undefined) topicState.onOpenDispatch = onOpenDispatch
+  if (dispatchObservation !== undefined) topicState.dispatchObservation = dispatchObservation
+  if (dispatchExecutionObserved !== undefined) topicState.dispatchExecutionObserved = dispatchExecutionObserved
+  if (topicState.detail && topicState.detail.scope !== scope) topicState.detail = undefined
   const bindings = []
   const previousTurns = new Map(
     [...host.querySelectorAll('.mt-turn[data-turn-id]')].map((turn) => [turn.dataset.turnId, turn]),
@@ -281,22 +411,14 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDetail } = {
   section.id = 'main-topic'
   const head = element('header', undefined, 'mt-head')
   const identity = element('div', undefined, 'mt-identity')
-  identity.append(
-    element('p', `${projection.projectName} · ${projection.topicName}`, 'mt-project'),
-    element('h2', projection.agentName, 'mt-agent'),
-  )
-  const meta = element('div', undefined, 'mt-meta')
-  meta.append(
-    element('span', projection.mode === 'rcc' ? '真实执行' : '固定回放', 'mt-chip'),
-    element('span', '刷新后仍从同一记录恢复', 'mt-meta-copy'),
-  )
-  head.append(identity, meta)
+  identity.append(element('h2', '主会话', 'mt-agent'))
+  head.append(identity)
   const previousHead = section.querySelector('.mt-head')
   if (previousHead) previousHead.replaceWith(head)
   else section.prepend(head)
 
   const previousActive = section.querySelector('.mt-active')
-  if (projection.activeTask) {
+  if (projection.activeTask && !projection.tasks?.some(task => taskValue(task.taskId) === taskValue(projection.activeTask.taskId))) {
     const active = renderActiveTask(projection.activeTask)
     if (previousActive) previousActive.replaceWith(active)
     else head.after(active)
@@ -310,6 +432,7 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDetail } = {
   stream.setAttribute('role', 'log')
   stream.setAttribute('aria-live', 'polite')
   const turns = projection.turns
+  const { history, activeTurns } = mainTopicTurnGroups(projection)
   const answeredRequestIds = new Set(projection.turns.flatMap((turn) =>
     turn.kind === 'message' && turn.turnId.startsWith('input-answer:') && hasRequestRevision(turn)
       ? [requestKey(turn)]
@@ -321,21 +444,29 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDetail } = {
       stream.append(element('p', '还没有对话。直接提问，或交办一个需要读取项目材料的任务。', 'mt-empty'))
     }
   } else {
-    stream.querySelector('.mt-empty')?.remove()
-    const retained = new Set()
-    let cursor = stream.firstElementChild
-    for (const turn of turns) {
-      const current = updateTurn(previousTurns.get(turn.turnId) || element('article'),
-        turn, projection, onAnswer, host, answeredRequestIds, topicState, bindings)
-      retained.add(current)
-      if (current === cursor) cursor = cursor.nextElementSibling
-      else stream.insertBefore(current, cursor)
+    const previousHistory = new Map([...stream.querySelectorAll('.mt-history-round')]
+      .map(row => [row.dataset.historyRoundKey, row]))
+    clearNode(stream)
+    for (const { round, turns: roundTurns } of history) {
+      stream.append(renderHistoryRound(round, roundTurns, topicState, scope, previousHistory.get(round.roundKey)))
     }
-    for (const child of [...stream.children]) if (!retained.has(child)) child.remove()
+    if (history.length && activeTurns.length) {
+      const divider = element('hr', undefined, 'mt-conversation-divider')
+      divider.setAttribute('aria-hidden', 'true')
+      stream.append(divider)
+    }
+    renderActiveTurns(stream, activeTurns, projection, onAnswer, host, answeredRequestIds, topicState, bindings, previousTurns)
+  }
+  for (const article of previousTurns.values()) {
+    if (!article.isConnected) for (const tools of article.querySelectorAll('.tool-body')) disposeToolBody(tools)
   }
   topicState.clock.update(bindings)
+  // The page owns the exact session read. Keep the footer node (and disclosure)
+  // across chat refreshes; the independent read updates it without rebuilding chat.
+  if (!section.querySelector('.call-usage-footer')) section.append(callUsageFooter.renderCallUsageFooter())
   if (activeControl?.isConnected && document.activeElement !== activeControl) activeControl.focus({ preventScroll: true })
   const last = stream.lastElementChild
-  if (last && typeof last.scrollIntoView === 'function') last.scrollIntoView({ block: 'nearest' })
+  if (follow && last) scroller.scrollTop = scroller.scrollHeight
+  else scroller.scrollTop = previousScroll
   return section
 }

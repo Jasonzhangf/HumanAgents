@@ -1,4 +1,7 @@
 import { formatTime } from './runtime-api.js'
+import { renderCallUsageFooter } from './call-usage-footer.js'
+import { createDetailDisclosure } from './detail-disclosure.js'
+import { renderToolBody, disposeToolBody } from './tool-presentation.js'
 import {
   localizedEventKind,
   localizedStepSummary,
@@ -29,6 +32,39 @@ const PUBLICATION_STATE_LABELS = Object.freeze({
 // are known wrong sources, so a message that only carries those never renders
 // as human.
 const UNAUTHENTICATED_HUMAN_SOURCES = new Set(['task.input', 'task.updatedAt', 'unknown'])
+
+const toolBodies = new WeakMap()
+
+export function disposeProductSessionView(host) {
+  const body = toolBodies.get(host)
+  if (body) disposeToolBody(body)
+  toolBodies.delete(host)
+}
+
+// Scope comes from the selected task; execution identity comes from allocation
+// truth. Neither message text nor callId alone is an identity source.
+export function scopedProductToolEvents(input) {
+  const scope = input.toolScope
+  if (!scope?.projectKey || !scope.mode || !scope.taskId) return []
+  const source = input.toolEvents ?? messageList(input.messages).flatMap(message => message.toolEvent ? [message.toolEvent] : [])
+  const seen = new Set()
+  return source.filter(event => {
+    if (event.scope?.projectKey !== scope.projectKey || event.scope?.mode !== scope.mode
+      || event.scope?.taskId?.value !== scope.taskId) return false
+    if (scope.roleId !== undefined && event.execution?.role !== scope.roleId) return false
+    if (scope.configuredAgentId !== undefined && event.execution?.configuredAgentId !== scope.configuredAgentId) return false
+    const instance = input.toolInstance
+    const identity = instance?.kind === 'native-execution' ? instance.execution : instance?.incarnation
+    if (instance && (!identity || event.execution?.runtimeId !== identity.runtimeId
+      || event.executionEpoch !== identity.executionEpoch
+      || (instance.kind === 'incarnation' && (event.execution?.assignmentId !== identity.assignmentId
+        || event.execution?.role !== identity.roleId)))) return false
+    const key = JSON.stringify([event.operationId, event.executionEpoch, event.seq, event.eventId])
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  }).map(event => ({ ...event, taskId: event.scope.taskId }))
+}
 
 function nonEmpty(value) {
   return typeof value === 'string' && value.trim().length > 0
@@ -130,11 +166,11 @@ function renderMessageDiagnostics(make, message) {
     return undefined
   }
 
-  const details = markRole(
-    make('details', undefined, 'product-session-diagnostics'),
+  const disclosure = createDetailDisclosure(make, '诊断', 'product-session-diagnostics')
+  const details = disclosure.content
+  markRole(disclosure.root,
     'message-diagnostics',
   )
-  details.append(make('summary', undefined, '诊断'))
   if (eventId !== undefined || sourceId !== undefined) {
     const parts = []
     if (eventId !== undefined) parts.push(`eventId ${eventId}`)
@@ -144,7 +180,7 @@ function renderMessageDiagnostics(make, message) {
   for (const evidence of evidenceRefs) {
     details.append(make('p', evidenceText(evidence), 'product-session-diagnostic-line'))
   }
-  return details
+  return disclosure.root
 }
 
 function renderMessage(make, message) {
@@ -204,11 +240,11 @@ function commitList(publicOutput) {
 }
 
 function renderCommitRefs(make, commit) {
-  const details = markRole(
-    make('details', undefined, 'product-session-commit-refs'),
+  const disclosure = createDetailDisclosure(make, '提交引用', 'product-session-commit-refs')
+  const details = disclosure.content
+  markRole(disclosure.root,
     'public-commit-refs',
   )
-  details.append(make('summary', undefined, '提交引用'))
   const parts = []
   if (nonEmpty(commit.commitId)) parts.push(`commitId ${commit.commitId}`)
   if (Number.isSafeInteger(commit.journalSeq)) parts.push(`journalSeq ${commit.journalSeq}`)
@@ -218,7 +254,7 @@ function renderCommitRefs(make, commit) {
     parts.length > 0 ? parts.join(' · ') : '提交引用未完整提供',
     'product-session-diagnostic-line',
   ))
-  return details
+  return disclosure.root
 }
 
 function renderPublicCommit(make, commit) {
@@ -265,17 +301,17 @@ function renderPublicResult(make, container, publicOutput) {
   section.append(list)
 
   if (Number.isSafeInteger(publicOutput.publicCommitWatermark)) {
-    const diagnostics = markRole(
-      make('details', undefined, 'product-session-result-diagnostics'),
+    const disclosure = createDetailDisclosure(make, '诊断', 'product-session-result-diagnostics')
+    const diagnostics = disclosure.content
+    markRole(disclosure.root,
       'public-result-diagnostics',
     )
-    diagnostics.append(make('summary', undefined, '诊断'))
     diagnostics.append(make(
       'p',
       `publicCommitWatermark ${publicOutput.publicCommitWatermark}`,
       'product-session-diagnostic-line',
     ))
-    section.append(diagnostics)
+    section.append(disclosure.root)
   }
 
   container.append(section)
@@ -289,6 +325,7 @@ function renderPublicResult(make, container, publicOutput) {
 export function renderProductMessages(host, messages, options = {}) {
   requireHost(host)
   const make = resolveElementFactory(host, options)
+  disposeProductSessionView(host)
   host.replaceChildren()
   const root = markRole(
     make('section', undefined, 'product-session-messages-root'),
@@ -315,8 +352,20 @@ export function renderProductSessionView(host, input = {}, options = {}) {
   host.replaceChildren()
   const root = markRole(make('section', undefined, 'product-session-view'), 'session-view')
   root.setAttribute('aria-label', '当前会话')
-  renderMessagesInto(make, root, input.messages)
+  const events = scopedProductToolEvents(input)
+  const toolEventIds = new Set(events.map(event => event.eventId))
+  const messages = messageList(input.messages).filter(message => !message.toolEvent || !toolEventIds.has(message.toolEvent.eventId))
+  if (messages.length > 0 || events.length === 0) renderMessagesInto(make, root, messages)
+  if (events.length > 0) {
+    const tools = toolBodies.get(host) ?? markRole(make('div', undefined, 'product-session-tools'), 'tools')
+    renderToolBody(tools, events, options.readToolOutput)
+    toolBodies.set(host, tools)
+    root.append(tools)
+  } else {
+    disposeProductSessionView(host)
+  }
   renderPublicResult(make, root, input.publicOutput)
+  if (Object.hasOwn(input, 'usage')) root.append(renderCallUsageFooter(input.usage, { element: make, error: input.usageFailure }))
   host.append(root)
   return root
 }

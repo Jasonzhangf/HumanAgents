@@ -19,13 +19,18 @@ import {
   technicalDetailTrigger,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
-import { renderMainTopic, disposeMainTopic } from './main-topic.js'
+import { renderMainTopic, disposeMainTopic, updateMainTopicUsage, mainTopicTurnGroups } from './main-topic.js'
+import { renderMainTopicHistoryDetail } from './main-topic-history-detail.js'
+import { createSessionUsageReader } from './runtime-api.js'
 import { conversationStatus, elapsedSeconds } from './conversation-status.js'
 import {
   projectInteractionCardFromEntries,
   projectInteractionCardFromSnapshot,
 } from './interaction-card-page.js'
 import { locationFromHash } from './product-location.js'
+import { entryWorkspaceSelection, entryProjectHref, mountEntryWorkspace } from './entry-workspace.js'
+import { submissionView, intakeFinished } from './send-lifecycle.js'
+import { createDispatchTracking, taskValue } from './dispatch-tracking.js'
 
 // ── Page seams shared with the W4 product consumer ──────────────────────────
 //
@@ -37,6 +42,19 @@ import { locationFromHash } from './product-location.js'
 
 export function shouldDisposeEntryPage(event) {
   return !event?.persisted
+}
+
+// The final displayed turn owns the footer. An interactionId is the
+// explicit intake owner's actual session selector, including before a Task exists.
+export function mainTopicUsageScope(projection) {
+  if (!projection?.projectKey || !['fake', 'rcc'].includes(projection.mode)) return null
+  const { history, activeTurns } = mainTopicTurnGroups(projection)
+  const turn = activeTurns.at(-1) ?? history.at(-1)?.turns.at(-1)
+  if (!turn) return null
+  const scope = { projectKey: projection.projectKey, mode: projection.mode }
+  if (turn.taskId?.value) return { ...scope, taskId: turn.taskId.value }
+  if (turn.interactionId) return { ...scope, sessionId: turn.interactionId }
+  return null
 }
 
 export function createSubmissionGate() {
@@ -440,6 +458,7 @@ const template = mountPageTemplate(pageRoot, {
   title: '任务输入',
 })
 const { status } = template.hosts
+const workspaceShell = mountEntryWorkspace({ root: pageRoot, template, api })
 // The main Topic owns visible clocks. Keep the legacy submission consumer,
 // but do not run its hidden heading clock alongside the message cards.
 const submitBanner = createSubmitStatusBanner(status, { onOpenDetail: openSubmitProgressDetail, clock: false })
@@ -449,6 +468,61 @@ const mainTopicHost = element('div', undefined, 'main-topic-host')
 let latestMainTopic = null
 let mainTopicPoll = null
 let mainTopicRefreshing = null
+let mainTopicRefreshQueued = false
+let mainTopicUsageForce = false
+let sendAttempt = null
+let mainTopicReadFailures = 0
+const dispatchTracking = createDispatchTracking({ api, openDetail: openTechnicalDetail,
+  scope: () => latestMainTopic,
+  onChange: () => { if (!pageLeaving) paintSubmission() },
+})
+function paintSubmission() {
+  if (pageLeaving || (!latestMainTopic && !sendAttempt)) return
+  const projection = latestMainTopic || { turns: [], agentName: 'Jenny' }
+  renderMainTopic(mainTopicHost, submissionView(projection, sendAttempt), {
+    onAnswer: answerMainTopicRequest,
+    onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, latestMainTopic),
+    onOpenHistoryDetail: openMainTopicHistoryDetail,
+    onOpenDispatch: dispatchTracking.open,
+    dispatchObservation: dispatchTracking.observation,
+    dispatchExecutionObserved: dispatchTracking.executionObserved,
+  })
+}
+
+function acceptSubmission(id) {
+  if (!sendAttempt || !id) return
+  sendAttempt.interactionId = id
+  sendAttempt.error = undefined
+  // Persist only the receipt identity for read-only reload recovery, never a
+  // local phase start. A reload must obtain phase times from runtime facts.
+  window.history.replaceState({ ...window.history.state, entryReceipt: { interactionId: id, rawInput: sendAttempt.rawInput, key: sendAttempt.key } }, '', window.location.href)
+  const input = document.querySelector('#entry-form textarea[name=rawInput]')
+  if (input?.value === sendAttempt.rawDraft) { input.value = ''; retainEntryDraft() }
+  paintSubmission()
+}
+
+async function recoverSubmission() {
+  await refreshMainTopic()
+}
+
+async function continueSubmission() {
+  // Only an explicit user action may resume a failed interpret after the
+  // runtime has returned the SAME intake to received. matching is ambiguous
+  // and is never re-dispatched by the browser.
+  if (submissionGate.pending || !pendingSubmission || !interactionId
+    || sendAttempt?.snapshot?.state !== 'received' || !sendAttempt.processError) return
+  sendAttempt.error = undefined
+  sendAttempt.processError = undefined
+  const run = submissionGate.begin(() => executeSubmission(pendingSubmission))
+  submitting = true
+  paintSubmission()
+  try { completeSubmission(await run.result) }
+  catch (error) { handleSubmissionError(error) }
+  finally { submitting = false; void refreshMainTopic() }
+}
+const mainTopicUsage = createSessionUsageReader({ api,
+  onChange: ({ usage, ...options }) => updateMainTopicUsage(mainTopicHost, usage, options),
+})
 // A confirmed once task hands its live execution progress to the single entry
 // interface. While this handle exists the submit banner stays on the page and
 // mirrors the runtime's real execution steps; otherwise it settles normally.
@@ -470,12 +544,26 @@ function retainEntryDraft() {
     execution: executionInputs(form),
   }
   const state = entryDraftState(window.history.state, controls)
+  const focused = document.activeElement
+  if (focused?.name && form.contains(focused)) state.entryFocus = {
+    name: focused.name, start: focused.selectionStart, end: focused.selectionEnd,
+  }
   try {
     window.history.replaceState(state, '', window.location.href)
   } catch {
     // A replaceState rejection (sandboxed history) must not block the input.
   }
 }
+
+window.addEventListener('pagehide', () => {
+  retainEntryDraft()
+  const control = document.activeElement
+  if (control?.name && control.closest('#entry-form')) {
+    window.history.replaceState({ ...window.history.state, entryFocus: {
+      name: control.name, start: control.selectionStart, end: control.selectionEnd,
+    } }, '', window.location.href)
+  }
+})
 
 function restoreEntryDraft(form) {
   const draft = entryDraftFromState(window.history.state)
@@ -493,6 +581,9 @@ function disposeEntryPage(event) {
   if (!shouldDisposeEntryPage(event)) return
   if (pageLeaving) return
   pageLeaving = true
+  workspaceShell.dispose()
+  dispatchTracking.dispose()
+  mainTopicUsage.clear()
   disposeMainTopic(mainTopicHost)
   submitBanner.clear()
   explicitStepStop?.()
@@ -516,7 +607,9 @@ async function answerMainTopicRequest(request, answer) {
       && projection.openInputRequest?.taskId?.value === taskId
     if (stillOpen) throw error
     renderMainTopic(mainTopicHost, projection, { onAnswer: answerMainTopicRequest,
-      onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, projection) })
+      onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, projection),
+      onOpenHistoryDetail: openMainTopicHistoryDetail })
+    void mainTopicUsage.refresh(mainTopicUsageScope(projection))
     scheduleMainTopicPoll(projection)
     return projection
   }
@@ -526,29 +619,84 @@ async function answerMainTopicRequest(request, answer) {
 function scheduleMainTopicPoll(projection) {
   if (mainTopicPoll !== null) clearTimeout(mainTopicPoll)
   mainTopicPoll = null
-  if (pageLeaving || (!projection?.activeTask && !projection?.turns?.some((turn) =>
+  if (pageLeaving || (!sendAttempt && !projection?.activeTask && !projection?.tasks?.some(task => !['succeeded', 'completed', 'failed', 'blocked', 'stopped', 'cancelled'].includes(task.state)) && !projection?.turns?.some((turn) =>
     turn.statusFacts?.steps !== undefined && ['received', 'matching'].includes(turn.statusFacts.state)))) return
   mainTopicPoll = setTimeout(() => {
     mainTopicPoll = null
     void refreshMainTopic()
-  }, 1500)
+  }, Math.min(1500 * 2 ** mainTopicReadFailures, 15000))
 }
 
-async function refreshMainTopic() {
+async function refreshMainTopic({ forceUsage = false } = {}) {
   if (pageLeaving) return undefined
-  if (mainTopicRefreshing !== null) return mainTopicRefreshing
+  if (new URLSearchParams(window.location.search).get('scope') === 'system') {
+    const selection = workspaceShell.update(null)
+    mainTopicHost.replaceChildren(element('h2', selection.label), element('p', selection.reason))
+    template.hosts.composer.hidden = true
+    return undefined
+  }
+  mainTopicUsageForce ||= forceUsage
+  if (mainTopicRefreshing !== null) {
+    mainTopicRefreshQueued = true
+    return mainTopicRefreshing
+  }
   mainTopicRefreshing = (async () => {
     try {
       const projection = await api.readMainTopic()
       if (pageLeaving) return projection
+      if (mainTopicRefreshQueued) return projection
       latestMainTopic = projection
+      dispatchTracking.sync(projection.tasks || [], projection.turns || [])
+      if (!sendAttempt && window.history.state?.entryReceipt) {
+        sendAttempt = { ...window.history.state.entryReceipt, onRecover: recoverSubmission }
+      }
+      if (!sendAttempt && !submitting) {
+        const user = projection.turns?.findLast(turn => turn.role === 'user' &&
+          (turn.interactionId || turn.turnId.startsWith('user:interaction-')))
+        const id = user?.interactionId || user?.turnId.slice('user:'.length)
+        if (id) sendAttempt = { key: id, interactionId: id, rawInput: user.text, onRecover: recoverSubmission }
+      }
+      // Old services expose interaction snapshots/steps but no statusFacts.
+      // Read those facts for this exact receipt; never resume writes on reload.
+      if (sendAttempt?.interactionId) {
+        try {
+          sendAttempt.snapshot = await api.inspectExplicitInteraction(sendAttempt.interactionId)
+          sendAttempt.error = intakeFinished.has(sendAttempt.snapshot.state) ? undefined : sendAttempt.processError
+        } catch (error) { sendAttempt.error = error; mainTopicReadFailures++ }
+      }
+      if (!sendAttempt?.error) mainTopicReadFailures = 0
+      const selection = workspaceShell.update(projection)
+      if (!selection.available) {
+        mainTopicUsage.clear()
+        disposeMainTopic(mainTopicHost)
+        mainTopicHost.replaceChildren(element('h2', selection.label), element('p', selection.reason))
+        template.hosts.composer.hidden = true
+        return projection
+      }
+      template.hosts.composer.hidden = false
       const pending = projection.openInputRequest
-      renderMainTopic(mainTopicHost, projection, { onAnswer: answerMainTopicRequest,
-        onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, projection) })
+      paintSubmission()
+      if (sendAttempt && !submitting && intakeFinished.has(sendAttempt.snapshot?.state) && !sendAttempt.error) {
+        sendAttempt = null
+        const { entryReceipt, ...rest } = window.history.state || {}
+        window.history.replaceState(rest, '', window.location.href)
+      }
+      // Usage is an independent read: it must never delay the chat or submit.
+      const force = mainTopicUsageForce
+      mainTopicUsageForce = false
+      void mainTopicUsage.refresh(mainTopicUsageScope(projection), { force })
       scheduleMainTopicPoll(projection)
       return projection
     } catch (error) {
       if (pageLeaving) return undefined
+      mainTopicReadFailures++
+      if (latestMainTopic || sendAttempt) {
+        if (sendAttempt) sendAttempt.error = error
+        paintSubmission()
+        scheduleMainTopicPoll({ activeTask: { state: 'retry' } })
+        return undefined
+      }
+      mainTopicUsage.clear()
       disposeMainTopic(mainTopicHost)
       clearNode(mainTopicHost)
       const panel = element('section', undefined, 'section mt-unavailable')
@@ -569,6 +717,10 @@ async function refreshMainTopic() {
       return undefined
     } finally {
       mainTopicRefreshing = null
+      if (mainTopicRefreshQueued && !pageLeaving) {
+        mainTopicRefreshQueued = false
+        void refreshMainTopic()
+      }
     }
   })()
   return mainTopicRefreshing
@@ -585,6 +737,7 @@ const cardState = { sequence: 0, entries: [] }
 // Only a successfully returned submission releases its identity. A failed
 // attempt or an intake clarification must still retry the same interaction.
 function completeSubmission(snapshot) {
+  if (sendAttempt) { sendAttempt.snapshot = snapshot; sendAttempt.error = undefined; paintSubmission() }
   if (snapshot.state === 'awaiting-clarification') return
   interactionId = undefined
   confirmation = undefined
@@ -593,7 +746,8 @@ function completeSubmission(snapshot) {
   cardState.sequence = 0
   cardState.entries = []
   const form = document.querySelector('#entry-form')
-  form.elements.namedItem('rawInput').value = ''
+  // The exact submitted draft was cleared at receipt time. Text typed after
+  // that receipt belongs to the next message and must survive completion.
   form.elements.namedItem('rawInput').readOnly = false
   for (const name of ['executionMode', 'timezone', 'scheduledStartAt', 'scheduledEndAt', 'maxOccurrences',
     'recurringFrequency', 'intervalMinutes', 'timeOfDay', 'weekDays']) {
@@ -857,49 +1011,16 @@ function renderStatus(summary, tasks) {
   if (!section) return
   clearNode(section)
   const rows = taskRows(tasks)
-  const activeRows = activeTaskRows(tasks)
-  const head = element('header', undefined, 'section-head')
-  head.append(element('h2', '队列与任务状态'), element('span', `${rows.length} 项`, 'section-meta'))
-  section.append(head)
-
-  const stats = element('div', undefined, 'stats')
-  if (summary.implicitScheduling) {
-    const queue = summary.implicitScheduling
-    const card = element('article', undefined, 'stat')
-    const queueLabel = queue.state === 'executing' || queue.state === 'admitted'
-      ? '已排入队列，正在执行'
-      : queue.state === 'queued'
-        ? '已排入执行队列，等待调度'
-        : '队列调度就绪'
-    card.append(
-      element('span', '队列进度'),
-      element('strong', `第 ${queue.fifoSeq} 位`),
-      element('p', queueLabel, 'muted'),
-    )
-    stats.append(card)
-  }
-  for (const [label, value] of [
-    ['任务数量', String(rows.length)],
-  ]) {
-    const card = element('article', undefined, 'stat')
-    card.append(element('span', label), element('strong', value))
-    stats.append(card)
-  }
-  section.append(stats)
-
-  // The entry main column keeps only the compact status summary. The Task List
-  // page is the single full list surface. The shared drawer only previews the
-  // active attention subset (draft, waiting, running) and links to that full
-  // list, so the two surfaces never present the same full list.
-  if (rows.length === 0) {
-    section.append(element('p', confirmation ? '需求已提交，等待隐式队列创建任务。' : '尚未提交任务。', 'empty'))
-  }
+  // Task rows live in the toolbar drawer, keeping the conversation full width.
   const trigger = element('button', '当前任务', 'button button--quiet')
   trigger.type = 'button'
   trigger.dataset.taskListDrawerTrigger = 'true'
+  // The toolbar owns this action; retain the trigger as its event endpoint.
+  trigger.hidden = true
   trigger.setAttribute('aria-haspopup', 'dialog')
-  trigger.setAttribute('aria-label', `查看当前任务（${activeRows.length} 项）`)
-  trigger.addEventListener('click', () => openActiveTasksDrawer(activeRows, trigger))
+  trigger.setAttribute('aria-label', `查看项目任务（${rows.length} 项）`)
+  trigger.addEventListener('click', () => openActiveTasksDrawer(rows, trigger))
+  trigger.addEventListener('entry-open-tasks', (event) => openActiveTasksDrawer(rows, event.detail))
   section.append(trigger)
 }
 
@@ -944,34 +1065,45 @@ function taskListEntries(rows, openInputRequest) {
   return fragment
 }
 
-// The entry attention drawer. It reuses the shared shell-layer frame through
-// openTechnicalDetail, so it is the same desktop side panel / mobile bottom
-// drawer as the rest of the product and never a second overlay primitive.
-// It intentionally shows only the active subset; the Task List page owns the
-// complete index and is reachable from the drawer's "查看全部任务" link.
+// The entry task board reuses task rows and the shared shell-layer lifecycle.
+// Entry CSS makes it a right drawer without changing conversation geometry.
 function openActiveTasksDrawer(activeRows, trigger) {
   const body = element('div', undefined, 'panel stack entry-task-list-drawer')
   body.dataset.taskListDrawer = 'true'
-  if (activeRows.length === 0) body.append(element('p', '当前没有进行中或待处理任务。', 'empty'))
-  else body.append(taskListEntries(activeRows, latestMainTopic?.openInputRequest))
+  const tracked = new Map(activeRows.map(task => [taskValue(task.taskId), task]))
+  for (const record of dispatchTracking.records.values()) {
+    if (record.scope.projectKey === latestMainTopic?.projectKey && record.scope.mode === latestMainTopic?.mode)
+      tracked.set(record.scope.taskId, record.task)
+  }
+  for (const task of tracked.values()) {
+    const button = element('button', `${task.title || '已交办任务'} · ${task.stateLabel || '等待接手'}`, 'button dispatch-board-entry')
+    button.type = 'button'
+    button.dataset.dispatchTaskId = taskValue(task.taskId)
+    button.addEventListener('click', () => dispatchTracking.open(button, task))
+    body.append(button)
+  }
+  if (latestRuntimeStatus?.implicitScheduling) {
+    const queue = latestRuntimeStatus.implicitScheduling
+    body.append(element('p', `队列进度：第 ${queue.fifoSeq} 位 · ${queue.state === 'executing' || queue.state === 'admitted' ? '正在执行' : '等待调度'}`))
+  }
+  if (activeRows.length === 0) body.append(element('p', '当前项目暂无任务。任务提交后会在这里显示真实状态。', 'empty'))
+  else if (!tracked.size) body.append(taskListEntries(activeRows, latestMainTopic?.openInputRequest))
   const allTasks = element('a', '查看全部任务', 'button button--quiet')
-  allTasks.href = './tasks.html'
+  allTasks.href = latestMainTopic?.projectKey ? entryProjectHref('tasks.html', latestMainTopic.projectKey, latestMainTopic.mode) : './tasks.html'
   allTasks.dataset.entryAllTasks = 'true'
   body.append(allTasks)
+  rememberEntryDrawer('tasks')
   openTechnicalDetail({
-    eyebrow: '进行中与待处理',
-    title: `当前任务（${activeRows.length}）`,
+    eyebrow: '任务板',
+    title: `项目任务（${activeRows.length}）`,
     content: body,
     trigger,
+    onClose: () => rememberEntryDrawer(null),
   })
 }
 
-function activeTaskRows(tasks) {
-  return [
-    ...(tasks?.draft ?? []),
-    ...(tasks?.waiting ?? []),
-    ...(tasks?.running ?? []),
-  ]
+function rememberEntryDrawer(drawer) {
+  window.history.replaceState({ ...window.history.state, entryDrawer: drawer }, '', window.location.href)
 }
 
 function taskRows(tasks) {
@@ -987,6 +1119,8 @@ function taskRows(tasks) {
 
 async function refreshQueue() {
   if (pageLeaving) return
+  if (!entryWorkspaceSelection(window.location.search, latestMainTopic).available
+    && new URLSearchParams(window.location.search).size > 0) return
   try {
     const { runtimeStatus, tasks } = await readEntryQueue(api)
     if (pageLeaving) return
@@ -1071,6 +1205,7 @@ function subscribeExecutionStepStream(operationId, onEvent) {
       if (kind === 'execution.terminal' && payload.terminalPhase === 'final') stop()
     })
   }
+  stream.onopen = () => { if (!pageLeaving) void refreshMainTopic() }
   return stop
 }
 
@@ -1127,6 +1262,14 @@ function openSubmitProgressDetail(trigger) {
     content.append(link)
   }
   openTechnicalDetail({ title: '任务执行进度', eyebrow: '实时进度', content, trigger })
+}
+
+function openMainTopicHistoryDetail(trigger, round, turns, host = mainTopicHost) {
+  const detail = renderMainTopicHistoryDetail(round, turns)
+  openTechnicalDetail({ title: '本轮对话', eyebrow: '历史消息', content: detail.content, trigger, onClose: () => {
+    detail.dispose()
+    if (!trigger.isConnected) host.querySelector(`[data-round-key="${CSS.escape(round.roundKey)}"]`)?.focus()
+  } })
 }
 
 function openMainTopicProgressDetail(trigger, turn, scope) {
@@ -1264,6 +1407,10 @@ async function startLiveTaskProgress({ taskId, scope }) {
             ? 'danger'
             : 'success'
         }
+        if (['checkpoint.committed', 'execution.terminal', 'execution.settling'].includes(event.kind)
+          || (event.kind === 'provider.model' && event.state === 'settled')) {
+          void refreshMainTopic({ forceUsage: event.kind === 'execution.terminal' })
+        }
       })
       return
     }
@@ -1312,14 +1459,17 @@ async function landOnSubmittedTask(identity) {
       search: window.location.search,
       hash: window.location.hash,
       statusMode: latestRuntimeStatus?.mode,
-      interactionId,
+      interactionId: identity.interactionId,
     })
     if (pageLeaving) return
     // Refresh the committed task row in place so the entry list reflects the
     // new task before the live progress card carries its real steps.
     await refreshQueue()
     if (pageLeaving) return
-    await startLiveTaskProgress({ taskId: taskIdValue, scope: landing.scope })
+    const task = latestMainTopic?.tasks?.find(row => taskValue(row.taskId) === taskIdValue)
+      || { taskId: { scope: 'task', value: taskIdValue }, sourceInteractionId: identity.interactionId, state: 'created', title: '已交办任务' }
+    dispatchTracking.remember(task, landing.scope)
+    dispatchTracking.sync([task])
   } catch (error) {
     if (lookupError) throw lookupError
     throw error
@@ -1569,7 +1719,10 @@ async function waitForTask(identity) {
     const tasks = await api.listTasks()
     if (pageLeaving) return undefined
     const rows = taskRows(tasks)
-    const candidate = rows.find((row) => row.taskId?.value && rowMatchesIdentitySource(row.identitySource, identity))
+    const { interactionId: sourceInteractionId, ...requirementIdentity } = identity
+    const candidate = rows.find((row) => row.taskId?.value && (
+      (sourceInteractionId && row.sourceInteractionId === sourceInteractionId)
+      || rowMatchesIdentitySource(row.identitySource, requirementIdentity)))
     if (candidate?.taskId?.value) return candidate.taskId.value
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
@@ -1621,6 +1774,7 @@ function subscribeExplicitStepStream(activeId) {
     if (explicitStepStop === stop) explicitStepStop = null
   }
   explicitStepStop = stop
+  stream.onopen = () => { if (!pageLeaving) void refreshMainTopic() }
   return stop
 }
 
@@ -1649,6 +1803,7 @@ async function executeSubmission(submission, clarificationAnswer) {
       requestKind: 'new-task-preview',
     })
     interactionId = received.interactionId
+    acceptSubmission(interactionId)
     appendCardEvent('user', submission.rawInput, 'user', {
       eventKey: 'explicit.raw-input',
       interactionId,
@@ -1660,6 +1815,7 @@ async function executeSubmission(submission, clarificationAnswer) {
   }
 
   let snapshot = await api.inspectExplicitInteraction(interactionId)
+  if (sendAttempt) { sendAttempt.snapshot = snapshot; paintSubmission() }
   if (snapshot.state === 'awaiting-clarification') {
     if (!clarificationAnswer) {
       renderDraft(snapshot)
@@ -1688,7 +1844,7 @@ async function executeSubmission(submission, clarificationAnswer) {
   if (directResult) {
     status.dataset.tone = directResult.tone
     status.textContent = 'Jenny 已直接回答；本次没有创建任务'
-    await refreshMainTopic()
+    await refreshMainTopic({ forceUsage: true })
     if (mainTopicHost.dataset.surface !== 'main-topic') renderDirectAnswer(directResult)
     return snapshot
   }
@@ -1700,7 +1856,7 @@ async function executeSubmission(submission, clarificationAnswer) {
     status.dataset.tone = 'success'
     submitBanner.text('需求已接收，正在刷新任务进展…')
     await refreshMainTopic()
-    await landOnSubmittedTask(identityFromConfirmedSnapshot(snapshot))
+    void landOnSubmittedTask({ ...identityFromConfirmedSnapshot(snapshot), interactionId }).catch(() => { void refreshQueue() })
     await refreshMainTopic()
     return snapshot
   }
@@ -1738,7 +1894,7 @@ async function executeSubmission(submission, clarificationAnswer) {
   }
   submitBanner.text('需求已提交，正在刷新任务进展…')
   await refreshMainTopic()
-  await landOnSubmittedTask(identityFromReceipt(receipt.requirement))
+  void landOnSubmittedTask({ ...identityFromReceipt(receipt.requirement), interactionId }).catch(() => { void refreshQueue() })
   await refreshMainTopic()
   return snapshot
 }
@@ -1750,6 +1906,12 @@ function submissionFailureSummary() {
 }
 
 function handleSubmissionError(error, button) {
+  if (sendAttempt) {
+    sendAttempt.error = error
+    sendAttempt.processError = error
+    paintSubmission()
+    scheduleMainTopicPoll(latestMainTopic)
+  }
   clearNode(status)
   status.dataset.tone = 'danger'
   const recovered = confirmation
@@ -1791,8 +1953,9 @@ function renderForm() {
   form.id = 'entry-form'
   const textarea = element('textarea')
   textarea.name = 'rawInput'
+  textarea.rows = 1
   textarea.required = true
-  textarea.placeholder = '向 Jenny 提问，或交办一个需要读取项目材料的任务'
+  textarea.placeholder = '给 HumanAgent 发消息…'
   form.append(field('消息', textarea))
 
   const mode = element('select')
@@ -1802,7 +1965,7 @@ function renderForm() {
     option.value = value
     mode.append(option)
   }
-  form.append(field('执行类型', mode))
+  const modeField = field('执行类型', mode)
 
   const timezone = element('input')
   timezone.name = 'timezone'
@@ -1882,6 +2045,7 @@ function renderForm() {
 
   const actions = element('div', undefined, 'actions')
   const submitButton = element('button', '发送给 Jenny', 'button button--primary')
+  submitButton.setAttribute('aria-label', '发送给 Jenny')
   submitButton.type = 'submit'
   actions.append(submitButton)
   form.append(actions)
@@ -1902,27 +2066,61 @@ function renderForm() {
     const rendered = (control) => !control.closest('[hidden]')
     timezone.required = rendered(timezone)
     startAt.required = rendered(startAt)
-    submitButton.textContent = modeValue === 'once' ? '发送给 Jenny' : '保存执行计划'
+    submitButton.textContent = '↑'
+    submitButton.setAttribute('aria-label', modeValue === 'once' ? '发送给 Jenny' : '保存执行计划')
+    scheduleEdit.textContent = modeValue === 'once' ? '执行设置' : '已设置执行计划'
   }
+  // The dialog stays inside this form, preserving named controls and validation.
+  const scheduleDialog = element('dialog', undefined, 'entry-schedule-dialog')
+  scheduleDialog.setAttribute('aria-label', '定时任务')
+  const scheduleHead = element('div', undefined, 'entry-schedule-head')
+  const scheduleClose = element('button', '完成设置', 'button')
+  scheduleClose.type = 'button'
+  scheduleClose.addEventListener('click', () => scheduleDialog.close())
+  scheduleHead.append(element('h2', '定时任务'), scheduleClose)
+  scheduleDialog.append(scheduleHead, element('p', '设置当前消息的单次、定时或周期执行。发送时保存执行计划。已有任务请在任务板查看；此处没有独立的定时计划列表。', 'muted'), modeField)
+  for (const node of [...form.querySelectorAll('[data-execution-field]')]) scheduleDialog.append(node)
+  form.append(scheduleDialog)
+  const scheduleEdit = element('button', '执行设置', 'button entry-execution-settings')
+  scheduleEdit.type = 'button'
+  scheduleEdit.dataset.entryScheduleTrigger = 'true'
+  scheduleEdit.addEventListener('click', () => { rememberEntryDrawer('schedule'); scheduleDialog.showModal() })
+  scheduleDialog.addEventListener('close', () => {
+    rememberEntryDrawer(null)
+    retainEntryDraft()
+    scheduleEdit.focus()
+  })
+  actions.prepend(scheduleEdit)
+  form.addEventListener('invalid', (event) => {
+    if (scheduleDialog.contains(event.target) && !scheduleDialog.open) scheduleDialog.showModal()
+  }, true)
   mode.addEventListener('change', syncExecutionFields)
   frequency.addEventListener('change', syncExecutionFields)
   syncExecutionFields()
   restoreEntryDraft(form)
   syncExecutionFields()
   form.addEventListener('input', retainEntryDraft)
-
-  // Once a real interaction exists, this attempt's identity is fixed. The
-  // execution trigger is disabled with the goal text so a retry cannot rebind
-  // the same receipt to a different execution strategy.
-  const freezeCreationInputs = () => {
-    for (const control of [mode, timezone, startAt, endAt, maxOccurrences, frequency, intervalMinutes, timeOfDay, weekDays]) {
-      control.disabled = true
+  form.addEventListener('change', retainEntryDraft)
+  form.addEventListener('focusin', retainEntryDraft)
+  textarea.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault()
+      form.requestSubmit(submitButton)
     }
-  }
+  })
 
   form.addEventListener('submit', (event) => {
     event.preventDefault()
+    const requested = new URLSearchParams(window.location.search)
+    if ((requested.has('projectKey') || requested.get('scope') === 'system')
+      && !entryWorkspaceSelection(window.location.search, latestMainTopic).available) return
     if (submissionGate.pending) return
+    // An uncertain or interrupted request is recovered by reads from its card.
+    // The send button cannot turn that recovery into a second POST.
+    if (sendAttempt?.error || (sendAttempt && !sendAttempt.interactionId)) {
+      void recoverSubmission()
+      return
+    }
     const rawInput = textarea.value.trim()
     if (!rawInput) {
       setEntryError(Object.assign(new Error('请先填写任务输入。'), {
@@ -1932,6 +2130,9 @@ function renderForm() {
       }))
       return
     }
+    sendAttempt = { key: `${Date.now()}`, rawInput, rawDraft: textarea.value, startedAt: new Date().toISOString(), onRecover: recoverSubmission, onContinue: continueSubmission }
+    paintSubmission()
+    scheduleMainTopicPoll(latestMainTopic)
     const run = submissionGate.begin(async () => {
       const selection = selectionInputs(rawInput, form)
       if (!pendingSubmission || !selectionsEqual(pendingSubmission.selection, selection)) {
@@ -1943,7 +2144,7 @@ function renderForm() {
     if (!run.started) return
     submitting = true
     submitButton.disabled = true
-    textarea.readOnly = true
+    textarea.readOnly = false
     clearEntryError()
     status.dataset.tone = 'warning'
     submitBanner.mount()
@@ -1954,11 +2155,8 @@ function renderForm() {
       // A confirmed once task keeps the live progress card after this settle;
       // every other result (error, answer, saved plan) removes it normally.
       if (!liveTaskProgress) submitBanner.clear()
-      if (interactionId) {
-        freezeCreationInputs()
-      } else {
-        textarea.readOnly = false
-      }
+      textarea.readOnly = false
+      void refreshMainTopic()
     })
   })
 
@@ -1981,6 +2179,14 @@ async function load() {
   template.hosts.composer.append(renderForm())
   await refreshMainTopic()
   await refreshQueue()
+  if (window.history.state?.entryDrawer === 'tasks') pageRoot.querySelector('[data-entry-board-trigger]')?.click()
+  if (window.history.state?.entryDrawer === 'schedule') pageRoot.querySelector('[data-entry-schedule-trigger]')?.click()
+  const focus = window.history.state?.entryFocus
+  const control = focus && document.querySelector('#entry-form')?.elements.namedItem(focus.name)
+  if (control && control.getClientRects().length && !control.closest('dialog:not([open])')) {
+    control.focus()
+    if (typeof focus.start === 'number' && typeof control.setSelectionRange === 'function') control.setSelectionRange(focus.start, focus.end)
+  }
 }
 
 void load().catch((error) => {

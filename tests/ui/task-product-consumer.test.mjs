@@ -106,6 +106,7 @@ function walk(node) {
 }
 
 function matches(node, selector) {
+  if (selector.startsWith('.')) return node.className.split(' ').includes(selector.slice(1))
   if (selector.startsWith('#')) return node.id === selector.slice(1)
   if (selector.startsWith('[') && selector.endsWith(']')) {
     const body = selector.slice(1, -1)
@@ -243,6 +244,89 @@ function createController(overrides = {}) {
   return { controller, host, interactionHost, decisionHost, status, calls, transport }
 }
 
+const usageSnapshot = (callId) => ({ calls: [{ callId, inputTokens: 12, outputTokens: 0,
+  context: { used: 12, limit: null, percent: null }, currentCallCacheHitRate: 0,
+  outputSpeed: { tokensPerSecond: 0, basis: 'response-elapsed' } }], coverage: { calls: 1 } })
+
+test('normal task detail uses production renderer with injected elements and top-level usage', async () => {
+  const urls = []
+  let body = { messages: [], usage: usageSnapshot('task-call'), debug: { usage: usageSnapshot('wrong') } }
+  let failed = false
+  const api = createRuntimeApi({ fetchImpl: async (url) => {
+    urls.push(url)
+    return { ok: !failed, status: failed ? 503 : 200, json: async () => failed
+      ? { error: { message: 'session unavailable' } } : body }
+  } })
+  const { controller, host } = createController({ transport: api })
+  await controller.refresh()
+  assert.equal(find(host, '.call-usage-call')[0]?.dataset.callId, 'task-call')
+  assert.equal(urls[0], '/api/product/session?projectKey=humanagent&mode=fake&taskId=task-w3')
+  assert.doesNotMatch(text(host), /wrong/)
+  body = { messages: [message('PARTIAL-CHAT')], boardIndex: { kept: true }, usage: null,
+    usageFailure: { code: 'usage.source.failed', ownerId: 'journal-owner', message: '调用统计暂时无法读取', nextAction: '稍后刷新' } }
+  await controller.refresh()
+  assert.match(text(host), /PARTIAL-CHAT/)
+  assert.match(text(host), /usage.source.failed/)
+  assert.doesNotMatch(text(host), /暂无调用统计|\[object Object\]/)
+  controller.setInteraction({ interactionId: 'explicit-real' })
+  body = { messages: [], usage: usageSnapshot('session-call') }
+  await controller.refresh()
+  assert.equal(find(host, '.call-usage-call')[0]?.dataset.callId, 'session-call')
+  assert.doesNotMatch(text(host), /usage.source.failed|统计加载失败/)
+  assert.ok(urls.includes('/api/product/session?projectKey=humanagent&mode=fake&sessionId=explicit-real'))
+  failed = true
+  await controller.refresh()
+  assert.match(text(host), /统计加载失败/)
+  assert.doesNotMatch(text(host), /暂无调用统计/)
+  failed = false
+  body = { messages: [], usage: { calls: [], coverage: { calls: 0 } } }
+  await controller.refresh()
+  assert.match(text(host), /暂无调用统计/)
+  assert.doesNotMatch(text(host), /统计加载失败/)
+  controller.dispose()
+})
+
+test('task detail discards a late old scope success after selecting an explicit session', async () => {
+  let resolveOld
+  const old = new Promise((resolve) => { resolveOld = resolve })
+  const { controller, host } = createController({ transport: {
+    readProductSession: (scope) => scope.sessionId
+      ? Promise.resolve({ messages: [], usage: usageSnapshot('selected') }) : old,
+  } })
+  const pending = controller.refresh()
+  controller.setInteraction({ interactionId: 'explicit-real' })
+  await controller.refresh()
+  resolveOld({ messages: [], usage: null, usageFailure: { code: 'old.failure', message: 'old failure' } })
+  await pending
+  assert.equal(find(host, '.call-usage-call')[0]?.dataset.callId, 'selected')
+  assert.doesNotMatch(text(host), /old.failure/)
+  controller.dispose()
+})
+
+test('bare task identity has no invented scope or usage read', async () => {
+  const reads = []
+  const { controller, host } = createController({ options: { scope: { kind: 'legacy', taskId: 'task-w3' } },
+    transport: { readProductSession: async (scope) => { reads.push(scope); return { usage: usageSnapshot('foreign') } } } })
+  await controller.refresh()
+  assert.equal(reads.length, 0)
+  assert.match(text(host), /缺少 projectKey 与 mode/)
+  assert.equal(find(host, '.call-usage-call').length, 0)
+  controller.dispose()
+})
+
+test('selection and disposal invalidate late task detail errors even before a replacement GET', async () => {
+  let rejectOld
+  const old = new Promise((_, reject) => { rejectOld = reject })
+  const { controller, host } = createController({ transport: { readProductSession: () => old } })
+  const pending = controller.refresh()
+  controller.setInteraction({ interactionId: 'new-session' })
+  rejectOld(new Error('old scope failed'))
+  await pending
+  assert.doesNotMatch(text(host), /old scope failed/)
+  controller.dispose()
+  await controller.refresh()
+})
+
 test('renders real agent actor and source without relabelling it human', async () => {
   const agent = message('AGENT-BODY', {
     kind: 'agent',
@@ -378,7 +462,10 @@ test('closing the approval modal writes no grant or revoke', async () => {
   const pending = decision()
   const { controller, host, decisionHost, calls } = createController({
     transport: {
-      readProductSession: async () => ({ messages: [], pendingDecision: pending }),
+      readProductSession: async () => ({ messages: [] }),
+      // Match the page's existing formal decision read, not the retired
+      // pendingDecision field in a session read. No approval behavior changes.
+      readProductDecision: async () => pending,
     },
   })
 
@@ -491,7 +578,7 @@ test('task session read passes the exact interaction as sessionId when known', a
 
   assert.equal(sessionScopes.length, 1)
   assert.equal(sessionScopes[0].sessionId, 'interaction-1')
-  assert.equal(sessionScopes[0].taskId, 'task-w3')
+  assert.equal(sessionScopes[0].taskId, undefined, 'explicit session is the sole session selector; task stays output/control context')
 })
 
 test('a failed session read keeps an explicit unavailable status', async () => {

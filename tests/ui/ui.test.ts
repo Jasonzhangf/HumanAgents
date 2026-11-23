@@ -2235,6 +2235,8 @@ test('task dashboard execution trace localizes event identity and summary', asyn
 
 type EntrySubmissionHarness = {
   readonly run: (submission: unknown, api: unknown, receipt?: unknown) => Promise<unknown>;
+  readonly calls: readonly string[];
+  readonly taskIdentities: readonly Record<string, unknown>[];
   readonly cardStates: readonly {
     readonly kind: string;
     readonly state: string;
@@ -2269,19 +2271,34 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
   assert.ok(confirmationEnd > confirmationStart, 'entry.js must keep the confirmation flow before its error handler');
   const answerBlock = source.slice(answerStart, answerEnd).replace(/^export /, '');
   const confirmationBlock = source.slice(confirmationStart, confirmationEnd);
+  const acceptanceStart = source.indexOf('function acceptSubmission(');
+  const acceptanceEnd = source.indexOf('async function recoverSubmission(', acceptanceStart);
+  const identityStart = source.indexOf('function identityFromReceipt(');
+  const identityEnd = source.indexOf('async function waitForTask(', identityStart);
+  assert.ok(acceptanceStart >= 0 && acceptanceEnd > acceptanceStart, 'entry.js must expose the receipt acceptance closure');
+  assert.ok(identityStart >= 0 && identityEnd > identityStart, 'entry.js must keep the task identity helpers together');
   const harnessSource = [
     answerBlock,
     confirmationBlock,
+    source.slice(acceptanceStart, acceptanceEnd),
+    source.slice(identityStart, identityEnd),
     'let interactionId;',
+    'let sendAttempt;',
     'let latestState = "received";',
     'let confirmation;',
     'let api = apiRef.current;',
     'const cardStates = [];',
     'const draftedStates = [];',
     'const directAnswers = [];',
+    'const calls = [];',
+    'const taskIdentities = [];',
     'const status = { dataset: {}, textContent: "" };',
     'const submitBanner = { text() {}, clear() {} };',
-    'const window = { location: { assign() {} } };',
+    'const window = { location: { href: "http://entry.test/", assign() {} }, history: { state: {}, replaceState(state) { this.state = state; } } };',
+    'const input = { value: "" };',
+    'const document = { querySelector() { return input; } };',
+    'function retainEntryDraft() {}',
+    'function paintSubmission() {}',
     // Record the exact arguments the page hands to the card event, including the
     // detail object, and mirror the real appendCardEvent's interactionId
     // fallback so the captured entries can be projected like the page's own.
@@ -2292,25 +2309,25 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     'function appendCardError() {}',
     'function renderDraft(snapshot) { draftedStates.push(snapshot.state); }',
     'function renderDirectAnswer(result) { directAnswers.push(result); }',
-    'async function waitForTask() { return "task-1"; }',
     'function observationHref(taskId) { return "./task.html?task=" + taskId; }',
     'async function refreshQueue() {}',
     // Main-topic readback belongs to the page closure outside this source slice.
     'async function refreshMainTopic() {}',
     'const mainTopicHost = { dataset: {} };',
-    // executeSubmission lands on the submitted task through this helper, which
-    // is defined outside the sliced confirmation block, so the harness supplies
-    // a minimal mirror of the real call chain.
-    'async function landOnSubmittedTask(identity) { await waitForTask(identity); await refreshQueue(); }',
-    // The identity helpers sit before the sliced confirmation block, so the
-    // harness stubs them for the waitForTask call. waitForTask is stubbed here
-    // too, so these only keep the call chain real.
-    'function identityFromReceipt(requirement) { return requirement ?? null; }',
-    'function identityFromConfirmedSnapshot(snapshot) { return snapshot?.confirmation ?? null; }',
+    // Task lookup/rendering is outside this fixture. Record the actual identity
+    // handed to that boundary; do not invent a successful task lookup.
+    'async function landOnSubmittedTask(identity) { taskIdentities.push(identity); }',
     'return {',
     '  async run(submission, nextApi, receipt) {',
-    '    api = receipt === undefined ? nextApi : Object.assign({}, nextApi, { async receiveExplicitInput() { return receipt; } });',
+    '    api = Object.assign({}, nextApi, {',
+    '      async receiveExplicitInput(...args) { calls.push("receive"); return receipt === undefined ? nextApi.receiveExplicitInput(...args) : receipt; },',
+    '      async confirmExplicitRequirement(...args) { calls.push("confirm"); return nextApi.confirmExplicitRequirement(...args); },',
+    '    });',
     '    interactionId = receipt === undefined ? "interaction-entry" : undefined;',
+    '    sendAttempt = { rawInput: submission.rawInput, rawDraft: submission.rawInput, key: "entry-test" };',
+    '    input.value = submission.rawInput;',
+    '    calls.length = 0;',
+    '    taskIdentities.length = 0;',
     '    latestState = "received";',
     '    cardStates.length = 0;',
     '    draftedStates.length = 0;',
@@ -2318,6 +2335,7 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     '    return await executeSubmission(submission);',
     '  },',
     '  cardStates,',
+    '  calls, taskIdentities,',
     '  draftedStates,',
     '  directAnswers,',
     '  status,',
@@ -2353,7 +2371,7 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
         return postConfirmation;
       },
       async confirmExplicitRequirement() {
-        return { requirement: { requirementId: 'requirement:draft-1:1', fifoSeq: 1 } };
+        return { requirement: { requirementId: 'requirement:draft-1:1', draftId: 'draft-1', inputRevision: 1, fifoSeq: 1 } };
       },
     };
   };
@@ -2374,6 +2392,8 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
     assert.equal(harness.cardStates[0]!.kind, 'decision');
     assert.equal(harness.cardStates[0]!.state, expected);
     assert.equal(harness.cardStates[0]!.state === 'awaiting-confirmation', false);
+    assert.deepEqual(harness.calls, ['confirm'], 'confirmation submits exactly once');
+    assert.deepEqual(harness.taskIdentities, [{ requirementId: 'requirement:draft-1:1', draftId: 'draft-1', inputRevision: 1, interactionId: 'interaction-entry' }]);
   }
 });
 
@@ -2408,6 +2428,8 @@ test('entry page attaches the receipt occurrence time to the user turn', async (
   const userTurn = withTime.cardStates.find((entry) => entry.kind === 'user');
   assert.ok(userTurn, 'the receive branch must append a user turn');
   assert.equal(userTurn!.occurredAt, '2026-10-27T07:28:58.639Z', 'the user turn must carry the receipt occurredAt');
+  assert.deepEqual(withTime.calls, ['receive', 'confirm'], 'receive and confirmation each submit exactly once');
+  assert.equal(withTime.taskIdentities[0]?.interactionId, receipt.interactionId);
 
   // A receipt that omits occurredAt must not fabricate a time; the explicit
   // missing semantics stay intact so the card still reports 「时间未提供」.
@@ -2416,6 +2438,7 @@ test('entry page attaches the receipt occurrence time to the user turn', async (
   const sparseTurn = withoutTime.cardStates.find((entry) => entry.kind === 'user');
   assert.ok(sparseTurn, 'the receive branch must append a user turn');
   assert.equal(sparseTurn!.occurredAt, undefined, 'no occurredAt must be fabricated when the receipt omits it');
+  assert.deepEqual(withoutTime.calls, ['receive', 'confirm']);
 });
 
 /*
@@ -2564,6 +2587,8 @@ test('entry page presents an answered snapshot as a success result instead of fa
 
   assert.equal(result, answer);
   assert.deepEqual(calls, ['inspect']);
+  assert.deepEqual(harness.calls, [], 'a simple answer must not submit a requirement');
+  assert.deepEqual(harness.taskIdentities, [], 'a simple answer must not route to a task');
   assert.equal(harness.state(), 'answered');
   assert.deepEqual(harness.draftedStates, ['answered']);
   assert.equal(harness.status.dataset.tone, 'success');

@@ -233,6 +233,53 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/runtime/status') {
     return json(res, { mode: 'fake', state: 'ready', providerState: 'ready', connected: true })
   }
+  const productRead = ['/api/product/session', '/api/product/relations'].includes(url.pathname)
+  const taskRead = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(observation|semantic)$/)
+  if (productRead || taskRead) {
+    // Bind the existing read-scope counterexamples to the isolated HTTP owner:
+    // product-relations-http-consumer and product-read-http-public-consumer,
+    // plus observation-read.graph.json. Reads never invent lineage or execution.
+    if (req.method !== 'GET') {
+      return json(res, { error: { code: 'method.not-allowed', message: 'fixture read is GET only' } }, 405)
+    }
+    const projectKey = url.searchParams.get('projectKey')
+    const mode = url.searchParams.get('mode')
+    const allowed = new Set(['projectKey', 'mode', ...(productRead ? ['taskId',
+      ...(url.pathname === '/api/product/session' ? ['sessionId'] : [])] : [])])
+    if (!projectKey?.trim() || !['fake', 'rcc'].includes(mode)
+      || [...url.searchParams].some(([key, value]) => !allowed.has(key)
+        || !value.trim() || url.searchParams.getAll(key).length !== 1)) {
+      return json(res, { error: { code: 'read.scope.invalid', message: 'fixture needs one complete read scope' } }, 400)
+    }
+    if (projectKey !== 'main-topic-answer-fixture' || mode !== 'fake') {
+      return json(res, { error: { code: productRead ? 'product-read.scope-not-bound'
+        : projectKey !== 'main-topic-answer-fixture' ? 'project.unknown' : 'task.not-found',
+      message: 'fixture scope is not bound' } }, productRead ? 409 : 404)
+    }
+    const taskId = taskRead ? decodeURIComponent(taskRead[1]) : url.searchParams.get('taskId')
+    if (taskId && !project.tasks.has(taskId)) {
+      return json(res, { error: { code: 'task.not-found', message: 'fixture task missing in selected scope' } }, 404)
+    }
+    if (url.pathname === '/api/product/relations') return json(res, { relations: [], gaps: [] })
+    if (url.pathname === '/api/product/session') return json(res, { messages: [] })
+    if (taskRead[2] === 'observation') return json(res, { surface: 'observation', nodes: [], agentFrames: [], handoffs: [] })
+    return json(res, { events: [] })
+  }
+  if (req.method === 'GET' && url.pathname === '/api/dashboard'
+    && url.search === '?scope=system') {
+    return json(res, { scope: { kind: 'system' }, projects: [{
+      scope: { kind: 'project', projectKey: 'main-topic-answer-fixture' },
+      label: 'main-topic-answer-fixture',
+    }] })
+  }
+  if (req.method === 'GET' && url.pathname === '/api/projects/roster'
+    && url.searchParams.size === 1 && url.searchParams.has('projectKey')) {
+    if (url.searchParams.get('projectKey') !== 'main-topic-answer-fixture') {
+      return json(res, { error: { code: 'project.unknown', message: 'fixture project missing' } }, 404)
+    }
+    return json(res, { surface: 'project-roster', projectKey: 'main-topic-answer-fixture',
+      rosterState: 'not-initialized', members: [] })
+  }
   if (req.method === 'GET' && url.pathname === '/api/tasks') {
     return json(res, { surface: 'tasks', mode: 'fake', counts: { total: project.tasks.size }, waiting: [], running: [], completed: [], stopped: [], failed: [] })
   }
@@ -284,6 +331,9 @@ const server = createServer(async (req, res) => {
     if (!interaction) return json(res, { error: { code: 'not-found', message: 'fixture interaction missing' } }, 404)
     return json(res, interaction)
   }
+  if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+    return json(res, { error: { code: 'not-found', message: 'fixture API route missing' } }, 404)
+  }
   const relative = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html'
   if (!relative || relative.split('/').includes('..')) {
     res.writeHead(400)
@@ -305,12 +355,14 @@ const playwrightModule = await import(
 const playwright = playwrightModule.default ?? playwrightModule
 const browser = await playwright.chromium.launch({ headless: true })
 const failures = []
+const checks = []
 const pageErrors = []
 const consoleMessages = []
 const requestFailures = []
 const layoutMetrics = []
 
 function check(name, pass, detail = '') {
+  checks.push({ name, pass, ...(detail ? { detail } : {}) })
   if (pass) return
   failures.push({ name, detail })
 }
@@ -329,6 +381,62 @@ try {
     await writeFile(join(evidenceRoot, 'initial-page.html'), await page.content())
     throw error
   }
+
+  // Reuse the answer suite's cross-project/user and closed-request cases for
+  // tracking reads. A successful empty read must not mask a wrong task scope.
+  const beforeTrackingReads = JSON.stringify([...projects].map(([key, value]) =>
+    [key, [...value.tasks], value.answers, value.interactions, value.normalChat]))
+  const trackingReadChecks = await page.evaluate(async () => {
+    const results = []
+    const scope = 'projectKey=main-topic-answer-fixture&mode=fake'
+    const routes = ['/api/product/relations', '/api/product/session',
+      '/api/tasks/task-alpha/observation', '/api/tasks/task-alpha/semantic']
+    const read = async (path, query, method = 'GET', selection) => {
+      const response = await fetch(`${path}?${query}`, { method,
+        ...(selection ? { referrer: `${location.origin}/?${selection}` } : {}) })
+      return { status: response.status, body: await response.json() }
+    }
+    const expect = async (name, path, query, status, code, method, selection) => {
+      const actual = await read(path, query, method, selection)
+      results.push({ name, pass: actual.status === status
+        && (code ? actual.body.error?.code === code : true), actual })
+      return actual.body
+    }
+    for (const path of routes) {
+      const product = path.startsWith('/api/product/')
+      const query = product ? `${scope}&taskId=task-alpha` : scope
+      const body = await expect(`scoped empty GET ${path}`, path, query, 200)
+      const collection = path.endsWith('/relations') ? body.relations : path.endsWith('/session')
+        ? body.messages : path.endsWith('/observation') ? body.nodes : body.events
+      results.push({ name: `no invented execution facts ${path}`, pass: Array.isArray(collection) && collection.length === 0 })
+      await expect(`partial scope rejected ${path}`, path, 'projectKey=main-topic-answer-fixture', 400, 'read.scope.invalid')
+      await expect(`invalid mode rejected ${path}`, path, 'projectKey=main-topic-answer-fixture&mode=invalid', 400, 'read.scope.invalid')
+      await expect(`unbound mode rejected ${path}`, path, query.replace('mode=fake', 'mode=rcc'), product ? 409 : 404,
+        product ? 'product-read.scope-not-bound' : 'task.not-found')
+      await expect(`unbound project rejected ${path}`, path, query.replace('main-topic-answer-fixture', 'unknown'), product ? 409 : 404,
+        product ? 'product-read.scope-not-bound' : 'project.unknown')
+      await expect(`missing task rejected ${path}`, product ? path : path.replace('task-alpha', 'missing'),
+        product ? `${scope}&taskId=missing` : scope, 404, 'task.not-found')
+      for (const selection of ['project=other', 'user=other']) {
+        await expect(`cross ${selection} cannot read main task ${path}`, path, query, 404, 'task.not-found', 'GET', selection)
+        await expect(`selected ${selection} reads its own task ${path}`,
+          product ? path : path.replace('task-alpha', 'task-other'),
+          product ? `${scope}&taskId=task-other` : scope, 200, undefined, 'GET', selection)
+      }
+      for (const method of ['POST', 'PUT', 'DELETE']) {
+        await expect(`${method} cannot mutate tracking ${path}`, path, query, 405, 'method.not-allowed', method)
+      }
+    }
+    for (const path of routes.slice(0, 2)) await expect(`project empty GET ${path}`, path, scope, 200)
+    await expect('unknown API stays a failure', '/api/unknown', scope, 404, 'not-found')
+    await expect('empty session selector rejected', '/api/product/session', `${scope}&sessionId=%20`, 400, 'read.scope.invalid')
+    return results
+  })
+  for (const result of trackingReadChecks) check(result.name, result.pass, JSON.stringify(result.actual ?? ''))
+  check('tracking GETs and rejected writes preserve task, answer and chat state', beforeTrackingReads
+    === JSON.stringify([...projects].map(([key, value]) =>
+      [key, [...value.tasks], value.answers, value.interactions, value.normalChat])))
+  await writeFile(join(evidenceRoot, 'tracking-read-checks.json'), JSON.stringify(trackingReadChecks, null, 2))
 
   // Exercise the public renderer with deliberately reused IDs on the same host.
   // Navigation would discard the DOM and cannot expose cross-scope reuse.
@@ -488,9 +596,11 @@ try {
   const alpha = page.locator('[data-turn-id="input-request:request-alpha"]')
   const beta = page.locator('[data-turn-id="input-request:request-beta"]')
   check('two questions render independently', await alpha.count() === 1 && await beta.count() === 1)
-  const activeTaskText = await page.locator('.mt-active').innerText()
-  check('waiting task names the human answer as the wait object', activeTaskText.includes('等待你的回答后继续原任务')
-    && !activeTaskText.includes('发出请求等待响应'), activeTaskText)
+  for (const question of [alpha, beta]) {
+    check('open question shows that its own task is waiting for the user',
+      await question.locator('.mt-turn-kind').innerText() === '等待你的回答'
+      && !(await question.innerText()).includes('发出请求等待响应'))
+  }
 
   const alphaInput = alpha.locator('[data-answer-custom="request-alpha"]')
   await alphaInput.focus()
@@ -506,6 +616,9 @@ try {
     && main.answers[0].taskId === 'task-alpha' && main.answers[0].requestId === 'request-alpha'
     && main.answers[0].body.expectedRevision === 4)
   check('server answer turn renders exactly once', await page.locator('[data-turn-id="input-answer:request-alpha"]').count() === 1)
+  check('option answer quotes its own original question',
+    await page.locator('[data-turn-id="input-answer:request-alpha"] .mt-quote-text').innerText()
+      === '甲供应商按哪种价格口径比较？')
   check('consumed question no longer renders controls', await alpha.locator('[data-answer-custom="request-alpha"], [data-answer-option]').count() === 0)
   check('option answer keeps the other question open', await beta.locator('[data-answer-custom="request-beta"]').count() === 1)
 
@@ -515,6 +628,12 @@ try {
   check('custom answer uses its own request path and revision', main.answers.length === 2
     && main.answers[1].taskId === 'task-beta' && main.answers[1].requestId === 'request-beta'
     && main.answers[1].body.answer === '上海' && main.answers[1].body.expectedRevision === 7)
+  check('custom answer quotes its own original question',
+    await page.locator('[data-turn-id="input-answer:request-beta"] .mt-quote-text').innerText()
+      === '乙供应商发货到哪个城市？')
+  check('controlled readback retains the same tasks after answers',
+    main.tasks.size === 2 && [...main.tasks.values()].every((task) =>
+      task.state === 'running' && !task.inputRequest && task.consumedInputRequests.length === 1))
 
   const staleResponse = await page.evaluate(async () => {
     const response = await fetch('/api/tasks/task-alpha/input-requests/request-alpha/answer', {
@@ -548,6 +667,11 @@ try {
   check('refresh renders the authoritative request and answer exactly once',
     await page.locator('[data-turn-id="input-request:request-alpha"]').count() === 1
     && await page.locator('[data-turn-id="input-answer:request-alpha"]').count() === 1)
+  check('refresh retains both answers and their original question quotes',
+    await page.locator('[data-turn-id="input-answer:request-alpha"] .mt-quote-text').innerText()
+      === '甲供应商按哪种价格口径比较？'
+    && await page.locator('[data-turn-id="input-answer:request-beta"] .mt-quote-text').innerText()
+      === '乙供应商发货到哪个城市？')
 
   const reopened = await context.newPage()
   await reopened.goto(origin, { waitUntil: 'domcontentloaded' })
@@ -572,7 +696,9 @@ try {
   await page.screenshot({ path: join(evidenceRoot, 'main-topic-answer-controlled.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.screenshot({ path: join(evidenceRoot, 'main-topic-answer-mobile.png'), fullPage: true })
-  const mobileScroll = await page.locator('.mt-stream').evaluate((stream) => {
+  // The formal homepage owns conversation scrolling at .page-primary; the
+  // inner message stream grows with its content in the new workspace shell.
+  const mobileScroll = await page.locator('.page-primary').evaluate((stream) => {
     stream.scrollTop = stream.scrollHeight
     return { scrollTop: stream.scrollTop, scrollHeight: stream.scrollHeight, clientHeight: stream.clientHeight }
   })
@@ -585,7 +711,7 @@ try {
     const metrics = await page.evaluate(() => {
       const bubble = document.querySelector('.mt-bubble')
       const header = document.querySelector('.mt-turn-head')
-      const stream = document.querySelector('.mt-stream')
+      const stream = document.querySelector('.page-primary')
       const input = document.querySelector('#entry-form [name="rawInput"]')
       const rect = input.getBoundingClientRect()
       const style = getComputedStyle(bubble)
@@ -618,6 +744,11 @@ try {
 } finally {
   await browser.close().catch(() => {})
   await new Promise((done) => server.close(done))
+  // Persist cleanup even when an unchanged browser assertion throws early.
+  await writeFile(join(evidenceRoot, 'cleanup.json'), `${JSON.stringify({ origin,
+    browserClosed: !browser.isConnected(), serverListening: server.listening,
+    failures, checks, pageErrors, requestFailures,
+  }, null, 2)}\n`)
 }
 
 await writeFile(join(evidenceRoot, 'main-topic-answer-controlled.json'), `${JSON.stringify({
@@ -626,6 +757,7 @@ await writeFile(join(evidenceRoot, 'main-topic-answer-controlled.json'), `${JSON
   fixture: {
     mode: 'fake',
     projects: ['main', 'other'],
+    executionEvidence: 'controlled HTTP state only; no provider execution or final result is simulated or proved',
   },
   answers: projects.get('main').answers,
   normalChat: projects.get('main').normalChat,
@@ -636,6 +768,7 @@ await writeFile(join(evidenceRoot, 'main-topic-answer-controlled.json'), `${JSON
   layoutMetrics,
   cleanup: { browserClosed: !browser.isConnected(), serverListening: server.listening, port: new URL(origin).port },
   failures,
+  checks,
 }, null, 2)}\n`)
 
 if (failures.length > 0 || pageErrors.length > 0) {

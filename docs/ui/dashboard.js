@@ -175,13 +175,18 @@ export function renderBoardIndex(host, index, options = {}) {
 /**
  * The task focus page for a card. A card with an exact task keeps the task and
  * its project/mode in the query and the whole product location in the hash.
- * A card without a task has no task page; returning null keeps the caller from
- * inventing a task or a new-task entry.
+ * A project explicit-intake session uses the same reader without a task.
  */
-export function focusPageHref(location) {
+export function focusPageHref(location, mode) {
   const focus = location?.focus
   if (!focus) return null
   const hash = encodeProductLocation(location)
+  if (focus.kind === 'session' && focus.scope?.kind === 'project'
+    && focus.sessionRef?.sourceKind === 'explicit-intake') {
+    const params = new URLSearchParams({ projectKey: focus.scope.projectKey })
+    if (readMode(mode)) params.set('mode', mode)
+    return `./task-dashboard.html?${params}${hash}`
+  }
   const taskRef = focus.taskRef
   if (!taskRef || focus.scope?.kind !== 'task') return null
   const params = new URLSearchParams({ task: String(taskRef.value) })
@@ -194,7 +199,7 @@ export function focusPageHref(location) {
  * One card selection. Live/history keep their exact board, lane, focus ref and
  * the ref's own scope. Unknown has no read location and is refused.
  */
-export function cardSelection(item, { board } = {}) {
+export function cardSelection(item, { board, mode } = {}) {
   if (!item || typeof item !== 'object' || !item.ref) {
     throw new TypeError('cardSelection requires a board item with an exact ref')
   }
@@ -211,7 +216,7 @@ export function cardSelection(item, { board } = {}) {
   return {
     location,
     hash: encodeProductLocation(location),
-    href: focusPageHref(location),
+    href: focusPageHref(location, mode),
   }
 }
 
@@ -267,7 +272,7 @@ export function createBoardController({
 
   function select(item, context = {}) {
     if (!item || item.lane === 'unknown') return { ok: false, reason: 'unknown-lane' }
-    const selection = cardSelection(item, context)
+    const selection = cardSelection(item, { ...context, mode: scope?.mode })
     navigate(selection)
     return { ok: true, selection }
   }

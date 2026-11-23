@@ -1,0 +1,66 @@
+/* Footer-owned styles. No tool-card or main-topic stylesheet overrides. */
+.call-usage-footer {
+  margin-block-start: 1rem;
+  border-block-start: 1px solid var(--line);
+  color: var(--muted);
+  font-size: .8125rem;
+  min-width: 0;
+}
+.call-usage-footer .call-usage-summary {
+  display: block;
+  width: 100%;
+  text-align: start;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding-block: .65rem;
+  cursor: pointer;
+  line-height: 1.7;
+}
+.call-usage-footer .call-usage-summary-item {
+  display: inline-block;
+  margin-inline-end: .85rem;
+  overflow-wrap: anywhere;
+}
+.call-usage-footer .call-usage-summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+.call-usage-footer .call-usage-facts {
+  display: grid;
+  grid-template-columns: minmax(10em, 1fr) minmax(0, 1fr);
+  gap: .4rem 1rem;
+  margin: .5rem 0;
+}
+.call-usage-footer .call-usage-facts dt,
+.call-usage-footer .call-usage-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.call-usage-footer .call-usage-facts dd {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.call-usage-footer .call-usage-note {
+  margin-block: .75rem;
+  line-height: 1.6;
+}
+.call-usage-footer .call-usage-call {
+  padding-block: .5rem;
+  border-block-start: 1px solid var(--line);
+}
+.call-usage-footer .call-usage-call h4 {
+  margin: .25rem 0 .75rem;
+  color: var(--ink);
+  font-size: inherit;
+}
+.call-usage-footer .call-usage-error {
+  color: var(--danger, #b42318);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 420px) {
+  .call-usage-footer .call-usage-facts {
+    column-gap: .6rem;
+  }
+}

@@ -1,4 +1,16 @@
 import { element } from './runtime-api.js'
+import { fileSemantics } from './tool-file-semantics.js'
+import { shellSemantics } from './tool-shell-semantics.js'
+import { taskSemantics } from './tool-task-semantics.js'
+import { createDetailDisclosure } from './detail-disclosure.js'
+
+const FILE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.search', 'file.list', 'web.search'])
+
+// One pure interpretation supplies both the immediate call and loaded result.
+export function toolSemantics(toolId, args, report) {
+  const interpret = FILE_TOOLS.has(toolId) ? fileSemantics : toolId === 'bash' ? shellSemantics : taskSemantics
+  return interpret(toolId, args, report)
+}
 
 // Public execution identity only. A missing call identity never joins two facts.
 function callKey(event) {
@@ -28,74 +40,173 @@ export function toolPresentations(events = []) {
 }
 
 export function toolOutputText(toolId, report) {
-  if (toolId === 'file.read' && typeof report?.content === 'string') return report.content
-  return typeof report === 'string' ? report : JSON.stringify(report, null, 2)
+  if (toolId === 'file.read' && typeof report?.content === 'string') return visibleText(report.content)
+  if (toolId === 'bash' && report !== null && typeof report === 'object' && !Array.isArray(report)) {
+    const exit = Number.isInteger(report.exitCode) ? report.exitCode : undefined
+    const interrupted = report.timedOut === true || report.aborted === true || typeof report.signal === 'string'
+    const outcome = interrupted ? '命令已中断' : exit === 0 ? '命令退出成功' : exit !== undefined ? '命令退出失败' : '命令退出状态未提供'
+    const flag = (value) => value === true ? '是' : value === false ? '否' : '未提供'
+    return [
+      outcome, `退出码：${exit ?? (report.exitCode === null ? '无（null）' : '未提供')}`,
+      `超时：${flag(report.timedOut)}`, `取消：${flag(report.aborted)}`,
+      `信号：${typeof report.signal === 'string' ? report.signal : report.signal === null ? '无' : '未提供'}`,
+      ...['stdout', 'stderr'].map((name) => {
+        const stream = report[name]
+        const label = name === 'stdout' ? '标准输出（stdout）' : '标准错误（stderr）'
+        const truncation = stream?.truncated === true ? ' · 已截断，仅显示保留部分' : ''
+        return `${label}${truncation}\n${typeof stream?.text === 'string' ? visibleText(stream.text) : '（未提供）'}`
+      }),
+    ].join('\n\n')
+  }
+  return typeof report === 'string' ? visibleText(report) : JSON.stringify(report, null, 2) ?? '（结果正文未提供）'
 }
+
+function visibleText(value) { return value === '' ? '（空字符串）' : value }
 
 const STATUS = Object.freeze({ succeeded: '执行成功', failed: '执行失败', blocked: '执行受阻', cancelled: '已取消', unknown: '结果状态未知' })
 const bodies = new WeakMap()
 
-function toolCard(row, readOutput) {
-  const card = element('section', undefined, 'tool-card')
+function toolCard(row, readOutput, previous) {
+  const card = previous?.node ?? element('section', undefined, 'tool-card')
+  previous?.dispose()
+  for (const child of [...card.children]) child.remove()
+  let active = true
+  let observer
   card.dataset.toolKey = row.key
   const toolId = row.call?.toolId ?? row.result?.toolId
-  const title = toolId === 'file.read' ? '读取文件' : `工具：${toolId || '名称未提供'}`
-  card.append(element('strong', title))
-  if (toolId === 'file.read' && typeof row.call?.arguments?.path === 'string') {
-    card.append(element('p', row.call.arguments.path, 'tool-path'))
+  const semantic = element('div', undefined, 'tool-semantic')
+  function present(report) {
+    const value = toolSemantics(toolId, row.call?.arguments, report)
+    for (const child of [...semantic.children]) child.remove()
+    semantic.append(element('strong', value.title, 'tool-title'))
+    if (value.subject) semantic.append(element('p', value.subject, 'tool-path'))
+    if (value.summary && report !== undefined) semantic.append(element('p', value.summary, 'tool-summary'))
+    if (value.lines?.length) {
+      const preview = element('pre', undefined, 'tool-preview')
+      for (const line of value.lines.filter(line => report !== undefined || !['尚无结果正文', '等待结果正文'].includes(line.text))) {
+        const node = element('span', `${line.kind === 'add' ? '+ ' : line.kind === 'remove' ? '- ' : line.kind === 'context' ? '  ' : ''}${line.text}`, 'tool-preview-line')
+        node.dataset.kind = line.kind
+        preview.append(node)
+      }
+      semantic.append(preview)
+    }
   }
-  const state = row.result ? (STATUS[row.result.status] || '结果状态未提供') : '调用未返回'
+  present(undefined)
+  if (row.result?.error) {
+    const error = row.result.error
+    card.append(element('p', `${error.code || ''} ${error.message || ''}${error.ownerId ? ` · 错误负责人：${error.ownerId}` : ''}`.trim(), 'tool-error'))
+  }
+  card.append(semantic)
+  const state = row.result
+    ? toolId === 'bash' && row.result.status === 'succeeded' ? '工具已返回 · 命令退出情况见结果' : (STATUS[row.result.status] || '结果状态未提供')
+    : '执行工具等待结果'
   card.append(element('p', row.call ? state : `${state} · 结果关联缺失`, 'tool-state'))
   card.dataset.status = row.result?.status || 'pending'
-  if (row.result?.error) card.append(element('p', `${row.result.error.code || ''} ${row.result.error.message || ''}`.trim(), 'tool-error'))
-  const details = element('details', undefined, 'tool-facts')
-  details.append(element('summary', '调用参数与证据'))
-  if (row.call?.arguments !== undefined) details.append(element('pre', JSON.stringify(row.call.arguments, null, 2)))
-  details.append(element('pre', JSON.stringify({
-    taskId: (row.call ?? row.result).taskId, operationId: (row.call ?? row.result).operationId,
-    executionEpoch: (row.call ?? row.result).executionEpoch,
-    callId: (row.call ?? row.result).callId, calledAt: row.call?.occurredAt,
-    returnedAt: row.result?.occurredAt, outputRef: row.result?.outputRef,
-    evidenceRefs: row.result?.evidenceRefs,
-  }, null, 2)))
-  card.append(details)
+  const facts = createDetailDisclosure(element, '调用参数与证据', 'tool-facts')
+  const details = facts.content
+  facts.onFirstOpen(() => {
+    if (toolId === 'bash' && row.call) {
+      const args = row.call.arguments
+      if (typeof args?.description === 'string') details.append(element('p', args.description, 'tool-description'))
+      details.append(element('p', '命令（原文，Bash -c）', 'tool-command-label'))
+      details.append(element('pre', typeof args?.command === 'string' ? visibleText(args.command) : '（命令未提供）', 'tool-command'))
+      details.append(element('p', `工作目录：${typeof args?.workdir === 'string' && args.workdir.trim() !== '' ? args.workdir : '绑定项目目录（实际路径未提供）'}`, 'tool-path'))
+    }
+    if (row.call?.arguments !== undefined) details.append(element('pre', JSON.stringify(row.call.arguments, null, 2), 'tool-arguments'))
+    details.append(element('pre', JSON.stringify({
+      taskId: (row.call ?? row.result).taskId, operationId: (row.call ?? row.result).operationId,
+      executionEpoch: (row.call ?? row.result).executionEpoch,
+      callId: (row.call ?? row.result).callId, calledAt: row.call?.occurredAt,
+      returnedAt: row.result?.occurredAt, outputRef: row.result?.outputRef,
+      evidenceRefs: row.result?.evidenceRefs,
+    }, null, 2)))
+  })
+  card.append(facts.root)
+  const targetKey = JSON.stringify(row.outputTarget)
+  const stateCache = previous && previous.reader === readOutput && previous.targetKey === targetKey ? previous.stateCache : {}
   if (row.outputTarget) {
-    const button = element('button', '读取完整结果', 'tool-read-output')
-    button.type = 'button'
+    const reportDetail = createDetailDisclosure(element, '读取完整结果', 'tool-result-detail')
+    const button = reportDetail.button
+    button.className = 'tool-read-output'
     const feedback = element('p', '', 'tool-read-feedback')
     feedback.setAttribute('role', 'status')
     const output = element('pre', '', 'tool-output')
     output.hidden = true
-    let loaded = false
-    button.addEventListener('click', async () => {
-      if (loaded) {
-        output.hidden = !output.hidden
-        button.textContent = output.hidden ? '展开完整结果' : '收起完整结果'
-        return
-      }
+    const rawDetail = createDetailDisclosure(element, '报告原文', 'tool-raw-report')
+    const raw = rawDetail.root
+    raw.hidden = true
+    rawDetail.onFirstOpen(() => {
+      rawDetail.content.append(element('pre', typeof stateCache.report === 'string' ? visibleText(stateCache.report) : JSON.stringify(stateCache.report, null, 2) ?? '（结果正文未提供）', 'tool-report-original'))
+    })
+    let expand = stateCache.expanded ?? false
+    function showReport() {
+      present(stateCache.report)
+      // Structured reports have one full representation, in the raw details.
+      // File and shell text keep their useful reader without a second JSON copy.
+      const hasText = toolId === 'file.read' && typeof stateCache.report?.content === 'string'
+        || toolId === 'bash' && (typeof stateCache.report === 'string' || stateCache.report !== null && typeof stateCache.report === 'object' && !Array.isArray(stateCache.report))
+      if (expand && hasText) output.textContent = toolOutputText(toolId, stateCache.report)
+      output.hidden = !expand || !hasText
+      raw.hidden = !stateCache.loaded
+      feedback.textContent = '完整结果已读取'
+      button.textContent = '查看完整结果'
+    }
+    async function load() {
+      if (stateCache.loaded) { showReport(); return }
       button.disabled = true
       feedback.textContent = '正在读取完整结果…'
       try {
-        const report = await readOutput(row.outputTarget)
-        if (!card.isConnected) return
-        output.textContent = toolOutputText(toolId, report)
-        output.hidden = false
-        loaded = true
-        feedback.textContent = '完整结果已读取'
-        button.textContent = '收起完整结果'
+        // Visibility and explicit expansion share the same in-flight read.
+        stateCache.pending ??= Promise.resolve(readOutput(row.outputTarget)).then((report) => {
+          stateCache.report = report
+          stateCache.loaded = true
+        }).finally(() => { stateCache.pending = undefined })
+        await stateCache.pending
+        if (!active || !card.isConnected) return
+        showReport()
+        observer?.disconnect()
       } catch (error) {
-        if (!card.isConnected) return
-        feedback.textContent = `结果不可读：${error?.code ? `${error.code} · ` : ''}${error?.message || String(error)}`
+        if (!active || !card.isConnected) return
+        feedback.textContent = `结果不可读：${error?.code ? `${error.code} · ` : ''}${error?.message || String(error)}${error?.nextAction ? `\n恢复提示：${error.nextAction}` : ''}`
         button.textContent = '重试读取完整结果'
       } finally {
         button.disabled = false
       }
+    }
+    button.addEventListener('click', async () => {
+      if (stateCache.loaded) {
+        expand = true
+        stateCache.expanded = expand
+        showReport()
+        return
+      }
+      expand = true
+      stateCache.expanded = true
+      await load()
     })
-    card.append(button, feedback, output)
+    reportDetail.content.append(feedback, output, raw)
+    card.append(reportDetail.root)
+    if (stateCache.loaded) showReport()
+    else if (typeof IntersectionObserver === 'function') {
+      observer = new IntersectionObserver((entries) => {
+        if (!active || !card.isConnected) { observer.disconnect(); return }
+        if (entries.some((entry) => entry.target === card && entry.isIntersecting)) {
+          observer.disconnect()
+          void load()
+        }
+      })
+      observer.observe(card)
+    }
+    return { node: card, targetKey, stateCache, dispose() { active = false; observer?.disconnect(); rawDetail.dispose(); reportDetail.dispose(); facts.dispose() } }
   } else if (row.result?.status === 'succeeded') {
     card.append(element('p', '结果正文未提供', 'tool-read-feedback'))
   }
-  return card
+  return { node: card, targetKey, stateCache, dispose() { active = false; observer?.disconnect(); facts.dispose() } }
+}
+
+export function disposeToolBody(host) {
+  for (const item of bodies.get(host)?.values() ?? []) { item.dispose(); item.node.remove() }
+  bodies.delete(host)
 }
 
 // Keep open results and details through unchanged polling; no execution state.
@@ -103,13 +214,14 @@ export function renderToolBody(host, events, readOutput) {
   let previous = bodies.get(host) ?? new Map()
   const next = new Map()
   for (const row of toolPresentations(events)) {
-    const signature = JSON.stringify(row)
+    // Journal events are immutable; arguments need no eager JSON copy to poll.
+    const signature = JSON.stringify({ ...row, call: row.call && { ...row.call, arguments: undefined }, result: row.result && { ...row.result, arguments: undefined } })
     const old = previous.get(row.key)
-    const item = old?.signature === signature ? old : { signature, node: toolCard(row, readOutput) }
+    const item = old?.signature === signature && old.reader === readOutput ? old : { signature, reader: readOutput, ...toolCard(row, readOutput, old) }
     next.set(row.key, item)
     host.append(item.node)
   }
-  for (const [key, item] of previous) if (next.get(key)?.node !== item.node) item.node.remove()
+  for (const [key, item] of previous) if (!next.has(key)) { item.dispose(); item.node.remove() }
   bodies.set(host, next)
   host.hidden = next.size === 0
 }

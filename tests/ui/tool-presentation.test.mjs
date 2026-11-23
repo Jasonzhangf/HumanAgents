@@ -48,3 +48,33 @@ test('tool output consumer uses existing scoped endpoint and typed HTTP errors',
   await assert.rejects(api.readToolOutput({ taskId: { value: '财务/甲' }, operationId: 'read/1', executionEpoch: 2, seq: 6 }), /正文不可读/)
   assert.equal(called, '/api/tasks/%E8%B4%A2%E5%8A%A1%2F%E7%94%B2/operations/read%2F1/executions/2/events/6/tool-output')
 })
+
+test('production static dispatcher serves every presentation plugin as JavaScript', async () => {
+  // Real request dispatcher, no socket, runtime state, browser or model. A
+  // missing shipped dependency makes the complete presentation module fail.
+  const { createUiRuntimeRequestDispatcher } = await import('../../dist/app/app/src/ui-runtime/server.js')
+  const { readFile } = await import('node:fs/promises')
+  const dispatcher = createUiRuntimeRequestDispatcher({
+    service: {}, accessControl: {}, productRoot: '/unused',
+    uiRoot: new URL('../../docs/ui/', import.meta.url).pathname,
+    isClosing: () => false,
+  })
+  for (const [file, exported] of [
+    ['tool-presentation.js', 'toolSemantics'],
+    ['tool-file-semantics.js', 'fileSemantics'],
+    ['tool-shell-semantics.js', 'shellSemantics'],
+    ['tool-task-semantics.js', 'taskSemantics'],
+  ]) {
+    const response = await new Promise((resolve) => {
+      const result = {}
+      dispatcher.listener({ url: `/${file}`, method: 'GET', headers: {} }, {
+        writeHead(status, headers) { Object.assign(result, { status, headers }) },
+        end(body) { resolve({ ...result, body: String(body) }) },
+      })
+    })
+    assert.equal(response.status, 200, file)
+    assert.match(response.headers['content-type'], /text\/javascript/)
+    assert.equal(response.body, await readFile(new URL(`../../docs/ui/${file}`, import.meta.url), 'utf8'))
+    assert.match(response.body, new RegExp(`export function ${exported}\\(`))
+  }
+})

@@ -15,6 +15,7 @@ function createElement(tag, text, className) {
     className: className || '',
     children: [],
     attributes: {},
+    dataset: {},
     append(...items) {
       for (const item of items) {
         if (item !== undefined && item !== null) node.children.push(item)
@@ -54,6 +55,23 @@ function attributeText(root) {
     .map((node) => Object.values(node.attributes).join(' '))
     .join(' ')
 }
+
+// The independent red test showed that an untouched GET response lost its
+// partial failure here. Keep the formal field at the renderer boundary.
+test('formal session usageFailure renders without renaming the response', () => {
+  const response = {
+    messages: [],
+    usage: null,
+    usageFailure: { code: 'usage.source.failed', message: '调用统计暂时无法读取' },
+  }
+  const before = structuredClone(response)
+  const host = render(response)
+  assert.match(text(host), /usage\.source\.failed/)
+  assert.match(text(host), /调用统计暂时无法读取/)
+  assert.doesNotMatch(text(host), /暂无调用统计/)
+  assert.equal(walk(host).filter(node => node.getAttribute('role') === 'alert').length, 1)
+  assert.deepEqual(response, before)
+})
 
 const taskId = { scope: 'task', value: 'task-1' }
 const scope = {
@@ -99,6 +117,16 @@ function render(input) {
   renderProductSessionView(host, input, { element: createElement })
   return host
 }
+
+test('usage uses the injected production renderer factory without a global document', () => {
+  assert.equal(typeof globalThis.document, 'undefined')
+  const host = render({ messages: [], usage: { calls: [{ callId: 'injected-call',
+    inputTokens: 0, outputTokens: null, context: { used: 0, limit: null, percent: null },
+    currentCallCacheHitRate: 0, outputSpeed: { tokensPerSecond: null, basis: 'response-elapsed' },
+  }], coverage: { calls: 1 } } })
+  assert.match(text(host), /输入 0/)
+  assert.equal(walk(host).filter((node) => node.dataset?.callId === 'injected-call').length, 1)
+})
 
 test('T1 keeps agent and authenticated human actors distinct and keeps their sources', () => {
   const agent = message({

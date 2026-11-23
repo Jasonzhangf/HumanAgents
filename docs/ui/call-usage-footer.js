@@ -1,0 +1,92 @@
+import { element } from './runtime-api.js'
+import { createDetailDisclosure } from './detail-disclosure.js'
+
+const footerParts = new WeakMap()
+
+const number = (value) => value == null ? '未知' : String(value)
+const percent = (value) => value == null ? '未知' : `${Number(value.toFixed(2))}%`
+const rate = (value) => percent(value == null ? null : value * 100)
+const speed = (value) => `${value?.tokensPerSecond == null ? '未知' : `${Number(value.tokensPerSecond.toFixed(2))} tokens/s`}（${value?.basis === 'generation-elapsed' ? '生成耗时' : '响应总耗时'}）`
+
+// Consume the ordinary session reader's CallUsageRead, not debug inspection.
+// The caller selects the scope and supplies its complete, ordered snapshot.
+// Ratios/coverage/capacity/time measurements belong to the reader, not the UI.
+function callRows(call) {
+  return [
+    ['输入 tokens', number(call.inputTokens)],
+    ['输出 tokens', number(call.outputTokens)],
+    ['缓存读取 tokens', number(call.cacheReadTokens)],
+    ['缓存写入 tokens', number(call.cacheWriteTokens)],
+    ['上下文已用 tokens', number(call.context.used)],
+    ['上下文上限 tokens', number(call.context.limit)],
+    ['上下文使用率', percent(call.context.percent)],
+    ['本次调用缓存命中率', rate(call.currentCallCacheHitRate)],
+    ['上次调用缓存命中率', rate(call.previousCallCacheHitRate)],
+    ['上一业务轮缓存命中率', rate(call.previousBusinessTurnCacheHitRate)],
+    ['本任务缓存命中率', rate(call.taskCacheHitRate)],
+    ['输出速度', speed(call.outputSpeed)],
+  ]
+}
+
+/** Render the selected session/task's public usage snapshot. */
+export function renderCallUsageFooter(usage, options = {}) {
+  const make = options.element ?? element
+  const footer = make('footer', undefined, 'call-usage-footer')
+  footer.setAttribute('aria-label', '模型调用统计')
+  const disclosure = createDetailDisclosure(make, '调用明细', 'call-usage-details')
+  const summary = disclosure.button
+  summary.className = 'call-usage-summary'
+  const content = disclosure.content
+  content.className = 'call-usage-content'
+  footerParts.set(footer, { make, summary, content })
+  footer.append(disclosure.root)
+  return updateCallUsageFooter(footer, usage, options)
+}
+
+/** Refresh in place. Keep the disclosure and summary so open/focus survive. */
+export function updateCallUsageFooter(footer, usage, options = {}) {
+  const { make, summary, content } = footerParts.get(footer)
+  const calls = usage?.calls ?? []
+  const latest = calls.at(-1)
+  footer.setAttribute('aria-busy', String(Boolean(options.pending)))
+  summary.replaceChildren()
+  const labels = latest ? [
+    '最新调用', `输入 ${number(latest.inputTokens)} · 输出 ${number(latest.outputTokens)} tokens`,
+    `缓存命中 ${rate(latest.currentCallCacheHitRate)}`,
+    `上下文 ${percent(latest.context.percent)}`,
+  ] : options.error || options.pending ? [] : ['暂无调用统计']
+  if (options.pending) labels.push('统计加载中…')
+  labels.push('调用明细')
+  if (options.error) {
+    const failure = options.error
+    const message = typeof failure === 'string' ? failure : failure.message ?? '调用统计暂时无法读取。'
+    const error = make('span', `统计加载失败：${failure.code ? `${failure.code} · ` : ''}${message}`, 'call-usage-error call-usage-summary-item')
+    error.setAttribute('role', 'alert')
+    summary.append(error)
+  }
+  for (const label of labels) summary.append(make('span', label, 'call-usage-summary-item'))
+
+  // Replace the snapshot rather than append: the same callId on subsequent
+  // reads updates once, and a changed/empty scope cannot retain old calls.
+  content.replaceChildren()
+  if (options.error) {
+    if (options.error.ownerId) content.append(make('p', `统计来源：${options.error.ownerId}`, 'call-usage-note'))
+    if (options.error.nextAction) content.append(make('p', options.error.nextAction, 'call-usage-note'))
+  }
+  if (!latest && !options.error && !options.pending) content.append(make('p', '暂无调用统计；尚未取得调用数据。', 'call-usage-note'))
+  for (const [index, call] of calls.entries()) {
+    const section = make('section', undefined, 'call-usage-call')
+    section.dataset.callId = call.callId
+    section.append(make('h4', `第 ${index + 1} 次调用${index === calls.length - 1 ? ' · 最新' : ''}`))
+    const facts = make('dl', undefined, 'call-usage-facts')
+    for (const [label, value] of callRows(call)) facts.append(make('dt', label), make('dd', value))
+    section.append(facts)
+    content.append(section)
+  }
+  if (latest) {
+    const coverage = usage.coverage
+    content.append(make('p', `统计覆盖：共 ${number(coverage?.calls)} 次调用，输入已知 ${number(coverage?.callsWithKnownInput)} 次，缓存读取已知 ${number(coverage?.callsWithKnownCacheRead)} 次。缺失项显示未知，不作为零。`, 'call-usage-note'))
+    content.append(make('p', '输出速度按输出 tokens / 对应耗时计算：响应总耗时包含等待响应，生成耗时仅计生成时段。缓存命中率与上下文使用率分别显示。', 'call-usage-note'))
+  }
+  return footer
+}

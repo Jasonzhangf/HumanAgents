@@ -22,7 +22,8 @@ import {
   projectInteractionCardFromSnapshot,
   withTaskHistory,
 } from './interaction-card-page.js'
-import { renderProductSessionView } from './product-session-view.js'
+import { renderProductSessionView, disposeProductSessionView } from './product-session-view.js'
+import { createDetailDisclosure } from './detail-disclosure.js'
 import {
   openDecisionModal,
   renderPendingDecision,
@@ -47,6 +48,7 @@ function productScopeQuery(scope) {
     projectKey: scope.projectKey,
     mode: scope.mode,
     taskId: scope.taskId,
+    sessionId: scope.sessionId,
   }
 }
 
@@ -107,6 +109,7 @@ export function createTaskProductController(options = {}) {
     onError,
   } = options
   const productScope = productScopeOf(scope)
+  const readTaskToolOutput = target => transport.readScopedToolOutput(target, productScope)
   const currentTaskId = typeof taskId === 'string'
     ? taskId
     : scope?.taskId?.value
@@ -135,6 +138,8 @@ export function createTaskProductController(options = {}) {
     lastDecision: undefined,
     modal: undefined,
   }
+  let selectionVersion = 0
+  let disposed = false
 
   function mount() {
     attach(host, section)
@@ -145,6 +150,9 @@ export function createTaskProductController(options = {}) {
   }
 
   function dispose() {
+    disposed = true
+    disposeProductSessionView(sessionHost)
+    selectionVersion += 1
     if (state.modal && typeof state.modal.close === 'function') state.modal.close()
     state.modal = undefined
     section.remove?.()
@@ -178,8 +186,8 @@ export function createTaskProductController(options = {}) {
 
   function appendDiagnostics(container, error) {
     if (!container || !error) return
-    const details = make('details', undefined, 'product-task-diagnostics')
-    details.append(make('summary', '诊断', 'product-task-diagnostic-title'))
+    const disclosure = createDetailDisclosure(make, '诊断', 'product-task-diagnostics')
+    const details = disclosure.content
     for (const [label, value] of [
       ['code', error.code],
       ['owner', error.ownerId],
@@ -200,7 +208,7 @@ export function createTaskProductController(options = {}) {
       pre.setAttribute('data-detail-cause', '')
       details.append(pre)
     }
-    container.append(details)
+    container.append(disclosure.root)
   }
 
   function renderInteraction() {
@@ -432,6 +440,10 @@ export function createTaskProductController(options = {}) {
   }
 
   function setInteraction(input = {}) {
+    if (state.interactionId !== input.interactionId) {
+      selectionVersion += 1
+      disposeProductSessionView(sessionHost)
+    }
     state = {
       ...state,
       interactionId: input.interactionId,
@@ -524,6 +536,9 @@ export function createTaskProductController(options = {}) {
   }
 
   async function refresh() {
+    if (disposed) return undefined
+    const version = selectionVersion
+    const isCurrent = () => !disposed && selectionVersion === version
     if (!productScope || !currentTaskId || currentTaskId === 'new') {
       if (sessionStatus) {
         sessionStatus.textContent = productScope
@@ -536,41 +551,51 @@ export function createTaskProductController(options = {}) {
     // The exact interaction is the session reference when the page knows it.
     // A task detail view without an interaction read must not invent one.
     const readScope = typeof state.interactionId === 'string' && state.interactionId !== ''
-      ? { ...productScope, sessionId: state.interactionId }
+      ? { projectKey: productScope.projectKey, mode: productScope.mode, sessionId: state.interactionId }
       : productScope
     const query = productScopeQuery(readScope)
     let sessionRead
+    let sessionError
     try {
       sessionRead = typeof transport.readProductSession === 'function'
         ? await transport.readProductSession(readScope)
         : await readProductJson('/api/product/session', query)
     } catch (error) {
+      if (!isCurrent()) return undefined
+      sessionError = error
       sessionRead = undefined
       if (sessionStatus) {
         sessionStatus.textContent = `来源不可用：${error?.message || '无法读取当前会话。'}`
       }
     }
+    if (!isCurrent()) return undefined
     let resolvedOutput
     try {
       resolvedOutput = typeof transport.readProductOutput === 'function'
-        ? await transport.readProductOutput(readScope.taskId, readScope)
-        : await readProductJson('/api/product/output', query)
+        ? await transport.readProductOutput(productScope.taskId, productScope)
+        : await readProductJson('/api/product/output', productScopeQuery(productScope))
     } catch {
       resolvedOutput = undefined
     }
+    if (!isCurrent()) return undefined
     let pendingDecision
     try {
       pendingDecision = typeof transport.readProductDecision === 'function'
-        ? await transport.readProductDecision(readScope)
-        : await readProductJson('/api/product/decision', query)
+        ? await transport.readProductDecision(productScope)
+        : await readProductJson('/api/product/decision', productScopeQuery(productScope))
     } catch {
       pendingDecision = undefined
     }
+    if (!isCurrent()) return undefined
     const publication = outputPublication(resolvedOutput)
     renderProductSessionView(sessionHost, {
       messages: sessionRead?.messages ?? [],
+      toolEvents: sessionRead?.toolEvents,
+      toolScope: readScope.taskId ? readScope : undefined,
       publicOutput: publication,
-    }, { element: make })
+      usage: sessionRead?.usage,
+      usageFailure: sessionError ?? sessionRead?.usageFailure,
+    }, { element: make, readToolOutput: readTaskToolOutput })
     outputHost.replaceChildren()
     if (!publication && resolvedOutput?.resultAvailable === true && resolvedOutput.commits?.length > 0) {
       renderProductSessionView(outputHost, {

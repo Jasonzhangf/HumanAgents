@@ -237,6 +237,51 @@ function checkpointAssetBodyPath(selector) {
   return null
 }
 
+// One serialized reader for the visible conversation. A completion arriving
+// during GET invalidates that result and queues one fresh read. Periodic polls
+// share the in-flight read so slow reads can still publish. Navigation
+// aborts the old scope; even a transport ignoring abort cannot publish it.
+export function createSessionUsageReader({ api, onChange }) {
+  let current
+  function clear() {
+    current?.abort.abort()
+    current = undefined
+  }
+  function refresh(scope, { force = false } = {}) {
+    if (!scope) { clear(); onChange({ usage: undefined }); return Promise.resolve() }
+    const key = JSON.stringify([scope.projectKey, scope.mode, scope.taskId, scope.sessionId])
+    if (current?.key !== key) {
+      clear()
+      current = { key, scope: { ...scope }, abort: new AbortController(), usage: undefined }
+    }
+    const selected = current
+    if (selected.running) {
+      if (force) selected.queued = true
+      return selected.running
+    }
+    selected.queued = true
+    onChange({ usage: selected.usage, error: selected.error, pending: true })
+    selected.running = (async () => {
+      while (current === selected && selected.queued) {
+        selected.queued = false
+        try {
+          const read = await api.readProductSession(selected.scope, { signal: selected.abort.signal })
+          if (current !== selected || selected.queued) continue
+          selected.usage = read.usage
+          selected.error = read.usageFailure ?? undefined
+          onChange({ usage: read.usage, error: selected.error })
+        } catch (error) {
+          if (current !== selected || selected.queued) continue
+          selected.error = error
+          onChange({ usage: selected.usage, error })
+        }
+      }
+    })().finally(() => { selected.running = undefined })
+    return selected.running
+  }
+  return { refresh, clear }
+}
+
 export function createRuntimeApi(options = {}) {
   const baseUrl = (options.baseUrl || '').replace(/\/$/, '')
   const fetchImpl = options.fetchImpl || globalThis.fetch.bind(globalThis)
@@ -270,13 +315,21 @@ export function createRuntimeApi(options = {}) {
     resetDisplayPreference: () => request('/api/ui/display-preference', { method: 'DELETE' }),
     dashboard: () => request('/api/dashboard'),
     readProductBoard: (scope) => request(`/api/product/board${productReadScopeQuery(scope)}`),
-    readProductSession: (scope) => request(`/api/product/session${productReadScopeQuery(scope, { includeSession: true })}`),
+    readProductSession: (scope, { signal } = {}) => request(`/api/product/session${productReadScopeQuery(scope, { includeSession: true })}`, { signal }),
     readProductDecision: (scope) => request(`/api/product/decision${productReadScopeQuery(scope)}`),
     readProductRelations: (scope) => request(`/api/product/relations${productReadScopeQuery(scope)}`),
     readProductOutput: (taskId) => request(`/api/product/output${productOutputQuery(taskId)}`),
     listTasks: () => request('/api/tasks'),
     readToolOutput: ({ taskId, operationId, executionEpoch, seq }) => request(
       `/api/tasks/${encodeURIComponent(taskId.value)}/operations/${encodeURIComponent(operationId)}/executions/${executionEpoch}/events/${seq}/tool-output`),
+    readScopedToolOutput: ({ taskId, operationId, executionEpoch, seq }, scope) => {
+      if (taskId?.value !== scope?.taskId) throw new TypeError('tool output requires the selected task scope')
+      const query = new URLSearchParams(exactTaskControlScopeQuery(scope))
+      for (const field of ['roleId', 'configuredAgentId']) {
+        if (scope[field] !== undefined) query.set(field, scope[field])
+      }
+      return request(`/api/tasks/${encodeURIComponent(taskId.value)}/operations/${encodeURIComponent(operationId)}/executions/${executionEpoch}/events/${seq}/tool-output?${query}`)
+    },
     updateTask: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}`, {
       method: 'PATCH',
       body: JSON.stringify(input),
@@ -412,6 +465,7 @@ export function createRuntimeApi(options = {}) {
     // default scope: a caller that omits the scope gets the existing unscoped
     // dashboard, never an invented project/task identity.
     systemDashboard: () => request('/api/dashboard?scope=system', { method: 'GET' }),
+    projectRoster: (projectKey) => request(`/api/projects/roster?${new URLSearchParams({ projectKey })}`, { method: 'GET' }),
     projectDashboard: ({ projectKey }) => {
       const query = new URLSearchParams({ scope: 'project', projectKey })
       return request(`/api/dashboard?${query}`, { method: 'GET' })

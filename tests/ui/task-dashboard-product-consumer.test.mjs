@@ -41,6 +41,9 @@ function createElement(tag, text, className) {
       node._text = ''
       node.append(...items)
     },
+    querySelector(selector) {
+      return walk(node).slice(1).find((child) => child.className.split(' ').includes(selector.slice(1))) ?? null
+    },
     setAttribute(name, value) {
       node.attributes.set(name, String(value))
     },
@@ -279,11 +282,27 @@ const {
   createTaskFocusController,
   dedupeProductRelations,
   productLocationMatchesTask,
+  projectSessionPageScope,
   renderProductSessionExtras,
   taskReadScopeFromLocation,
   taskReadScopeFromQuery,
   writePageProductLocation,
 } = await import('../../docs/ui/task-dashboard.js')
+
+test('a project explicit session boots without a Task and rejects mixed page identities', async () => {
+  const scope = { kind: 'project', projectKey: 'project-7' }
+  const focus = { kind: 'session', sessionRef: { sourceKind: 'explicit-intake', sourceRef: 'interaction-1' }, scope }
+  const value = { board: 'interaction', lane: 'live', scope, focus }
+  const source = { search: '?projectKey=project-7&mode=rcc', hash: encodeProductLocation(value) }
+  assert.deepEqual(projectSessionPageScope(source), { ...scope, mode: 'rcc' })
+  assert.equal(projectSessionPageScope({ ...source, search: '?projectKey=other&mode=rcc' }), null)
+  assert.equal(projectSessionPageScope({ ...source, search: '?task=task-1&projectKey=project-7&mode=rcc' }), null)
+  assert.equal(projectSessionPageScope({ ...source, search: '?projectKey=project-7&mode=invalid' }), null)
+  const { controller, sessionReads } = harness()
+  await controller.applyLocation(value)
+  assert.deepEqual(sessionReads.at(-1), { projectKey: 'project-7', sessionRef: focus.sessionRef })
+  controller.dispose()
+})
 
 function taskRowItem(scope, lane) {
   const taskIdValue = typeof scope.taskId === 'object' ? scope.taskId.value : scope.taskId
@@ -400,6 +419,103 @@ function harness({
     decisionReads,
   }
 }
+
+const callUsage = (callId, inputTokens) => ({
+  calls: [{ callId, turnId: 'business-turn', inputTokens, outputTokens: 0,
+    cacheReadTokens: null, cacheWriteTokens: 0,
+    context: { used: inputTokens, limit: 100, percent: inputTokens },
+    currentCallCacheHitRate: null, previousCallCacheHitRate: 0,
+    previousBusinessTurnCacheHitRate: null, taskCacheHitRate: null,
+    outputSpeed: { tokensPerSecond: 0, basis: 'response-elapsed' } }],
+  coverage: { calls: 1, callsWithKnownInput: 1, callsWithKnownCacheRead: 0 },
+})
+
+test('normal task and explicit pages render top-level usage, refresh empty, and never read debug', async () => {
+  let snapshot = callUsage('current-call', 12)
+  let usageFailure
+  const { controller, centerHost, sessionReads } = harness({ sessionRead: async () => ({
+    messages: [message('CHAT-IS-PRESENT')], usage: snapshot, usageFailure, debug: { usage: callUsage('wrong-debug', 999) },
+  }) })
+  await controller.load()
+  assert.match(text(centerHost), /CHAT-IS-PRESENT/)
+  assert.match(text(centerHost), /输入 12/)
+  assert.doesNotMatch(text(centerHost), /999/)
+  snapshot = { calls: [...snapshot.calls, ...callUsage('latest-call', 34).calls], coverage: snapshot.coverage }
+  await controller.reload()
+  assert.match(text(centerHost), /输入 34/)
+  assert.equal(walk(centerHost).filter((node) => node.dataset.callId === 'current-call').length, 1)
+  assert.equal(sessionReads.length, 2, 'usage reuses the normal session GET')
+  snapshot = null
+  usageFailure = { code: 'usage.task.failed', ownerId: 'journal-owner', message: '任务统计暂时无法读取', nextAction: '稍后刷新' }
+  await controller.reload()
+  assert.match(text(centerHost), /CHAT-IS-PRESENT/)
+  assert.match(text(centerHost), /usage.task.failed/)
+  assert.doesNotMatch(text(centerHost), /暂无调用统计/)
+  usageFailure = undefined
+  snapshot = callUsage('explicit-call', 56)
+  await controller.focusTo(explicitSessionRef)
+  assert.match(text(centerHost), /输入 56/)
+  assert.doesNotMatch(text(centerHost), /输入 34/)
+  assert.doesNotMatch(text(centerHost), /usage.task.failed|统计加载失败/)
+  assert.equal(sessionReads.at(-1).sessionRef.sourceRef, 'interaction-1')
+  assert.equal(sessionReads.at(-1).taskId, undefined, 'explicit session does not carry a contradictory task selector')
+  snapshot = null
+  usageFailure = { code: 'usage.source.failed', ownerId: 'journal-owner', message: '调用统计暂时无法读取', nextAction: '稍后刷新' }
+  await controller.reload()
+  assert.match(text(centerHost), /CHAT-IS-PRESENT/)
+  assert.match(text(centerHost), /usage.source.failed/)
+  assert.doesNotMatch(text(centerHost), /暂无调用统计|\[object Object\]/)
+  usageFailure = undefined
+  snapshot = { calls: [], coverage: { calls: 0 } }
+  await controller.reload()
+  assert.match(text(centerHost), /暂无调用统计/)
+  assert.doesNotMatch(text(centerHost), /输入 56/)
+  assert.doesNotMatch(text(centerHost), /usage.source.failed|统计加载失败/)
+  controller.dispose()
+})
+
+test('late session success or rejection cannot restore previous focus usage; reload recovers', async () => {
+  const old = deferred()
+  let selectedLocation = location()
+  let current = callUsage('new-call', 77)
+  const { controller, centerHost } = harness({
+    readLocation: () => selectedLocation,
+    writeLocation: (next) => { selectedLocation = next },
+    sessionRead: (scope) => scope.sessionRef
+    ? Promise.resolve({ messages: [], usage: current }) : old.promise })
+  const pending = controller.load()
+  await controller.focusTo(explicitSessionRef)
+  old.resolve({ messages: [message('OLD-CHAT')], usage: null,
+    usageFailure: { code: 'old.usage.failed', message: 'previous task disconnected' } })
+  await pending
+  assert.match(text(centerHost), /输入 77/)
+  assert.doesNotMatch(text(centerHost), /previous task disconnected/)
+  assert.doesNotMatch(text(centerHost), /OLD-CHAT|old.usage.failed/)
+  current = { calls: [], coverage: { calls: 0 } }
+  await controller.reload()
+  assert.match(text(centerHost), /暂无调用统计/)
+  controller.dispose()
+})
+
+test('completion reload during a pending normal session GET serializes one fresh snapshot', async () => {
+  const reads = []
+  const { controller, centerHost } = harness({ sessionRead: () => {
+    const read = deferred(); reads.push(read); return read.promise
+  } })
+  const first = controller.load()
+  await new Promise(setImmediate)
+  const completed = controller.reload()
+  controller.reload()
+  assert.equal(reads.length, 1)
+  reads[0].resolve({ messages: [], usage: callUsage('before-completion', 11) })
+  await new Promise(setImmediate)
+  assert.equal(reads.length, 2)
+  assert.doesNotMatch(text(centerHost), /输入 11/)
+  reads[1].resolve({ messages: [], usage: callUsage('completed', 88) })
+  await Promise.all([first, completed])
+  assert.match(text(centerHost), /输入 88/)
+  controller.dispose()
+})
 
 test('a page opened without a product route canonicalizes its location without pushing history', async () => {
   // A task page opened from a task list carries only the task query, so the
@@ -602,7 +718,6 @@ test('the session read carries the exact source kind and reference of the curren
   assert.deepEqual(sessionReads.at(-1), {
     projectKey: 'project-7',
     mode: 'rcc',
-    taskId: 'task-1',
     sessionRef: {
       sourceKind: 'explicit-intake',
       sourceRef: 'interaction-1',
@@ -613,7 +728,6 @@ test('the session read carries the exact source kind and reference of the curren
   assert.deepEqual(sessionReads.at(-1), {
     projectKey: 'project-7',
     mode: 'rcc',
-    taskId: 'task-1',
     sessionRef: {
       sourceKind: 'explicit-intake',
       sourceRef: 'interaction-2',
@@ -621,7 +735,7 @@ test('the session read carries the exact source kind and reference of the curren
   })
 })
 
-test('an execution-instance focus is explicitly unavailable and never shows task messages', async () => {
+test('an execution-instance stays unavailable when the formal task read has no tool projection', async () => {
   const { controller, centerHost, sessionReads } = harness({
     messages: [message('TASK-LEVEL-BODY')],
   })
@@ -630,7 +744,7 @@ test('an execution-instance focus is explicitly unavailable and never shows task
   const readsBefore = sessionReads.length
 
   await controller.focusTo(instanceOne)
-  assert.equal(sessionReads.length, readsBefore, 'an instance without a body reader sends no task-level read')
+  assert.equal(sessionReads.length, readsBefore + 1, 'the exact task read checks for the formal tool projection')
   assert.equal(controller.state().sessionRead, 'unavailable')
   assert.match(text(centerHost), /product-session\.read\.unavailable-target/)
   const mainOne = mainLayerText(centerHost)
@@ -647,7 +761,7 @@ test('an execution-instance focus is explicitly unavailable and never shows task
 
   const firstResult = detailOne
   await controller.focusTo(instanceTwo)
-  assert.equal(sessionReads.length, readsBefore, 'the second instance also sends no task-level read')
+  assert.equal(sessionReads.length, readsBefore + 2, 'each instance checks its exact task read')
   const mainTwo = mainLayerText(centerHost)
   assert.match(mainTwo, /该执行实例暂无正文读取入口/)
   assert.doesNotMatch(mainTwo, /runtimeId|runtime-b|executionEpoch|generation|agentInstanceId|roleId|assignmentId|taskId/)
