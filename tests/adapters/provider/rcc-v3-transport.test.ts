@@ -1183,6 +1183,157 @@ test('RCC v3 start exposes HTTP failure with owner, next action, and evidence', 
   assert.equal(calls.length, 1);
 });
 
+test('RCC v3 rejected start records the exact request body with HTTP status and scope', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  let failureRef: EvidenceRef | undefined;
+  const built = adapter(async (url, init) => {
+    calls.push({ url, init });
+    return textResponse('provider refused this request', 503);
+  });
+
+  await assert.rejects(() => built.adapter.start(startInput()), (error) => {
+    assert.equal(error instanceof ProviderAdapterError, true);
+    const providerError = (error as ProviderAdapterError).providerError;
+    assert.equal(providerError.code, 'http.503');
+    assert.equal(providerError.phase, 'start');
+    failureRef = providerError.evidenceRefs[0];
+    const failure = built.writes.find((write) => write.type === 'request-failure');
+    assert.ok(failure);
+    assert.deepEqual(failure.content, {
+      phase: 'start',
+      status: 503,
+      endpoint: '/v1/responses',
+      protocol: 'responses',
+      model: 'provider.model',
+      route: 'cc:test-route',
+      requestReceipt: {
+        body: calls[0]!.init.body,
+        identity: execution,
+        status: 503,
+        endpoint: '/v1/responses',
+        protocol: 'responses',
+        model: 'provider.model',
+        route: 'cc:test-route',
+      },
+      response: 'provider refused this request',
+    });
+    assert.deepEqual(failure.scope, scope);
+    assert.equal(providerError.evidenceRefs[0]?.locator, 'rcc-v3://request-failure');
+    return true;
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(failureRef);
+  assert.equal(built.writes.some((write) => JSON.stringify(write.content).includes('authorization')), false);
+  const failure = built.writes.find((write) => write.type === 'request-failure');
+  assert.ok(failure);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(await built.evidence.read(failureRef))), failure.content);
+});
+
+test('RCC v3 no-response start records the exact request body without claiming HTTP receipt', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  let failureRef: EvidenceRef | undefined;
+  const built = adapter(async (url, init) => {
+    calls.push({ url, init });
+    throw new Error('socket closed before response');
+  });
+
+  await assert.rejects(() => built.adapter.start(startInput()), (error) => {
+    assert.equal(error instanceof ProviderAdapterError, true);
+    const providerError = (error as ProviderAdapterError).providerError;
+    assert.equal(providerError.code, 'transport.failure');
+    assert.equal(providerError.phase, 'start');
+    failureRef = providerError.evidenceRefs[0];
+    assert.match(providerError.message, /socket closed before response/);
+    const failure = built.writes.find((write) => write.type === 'request-failure');
+    assert.ok(failure);
+    const content = failure.content as Record<string, unknown>;
+    assert.equal(content.phase, 'start');
+    assert.equal('status' in content, false);
+    assert.equal((content.requestReceipt as Record<string, unknown>).body, calls[0]!.init.body);
+    assert.equal('status' in (content.requestReceipt as Record<string, unknown>), false);
+    assert.deepEqual(failure.scope, scope);
+    assert.equal(JSON.stringify(failure.content).includes('socket closed before response'), true);
+    return true;
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(failureRef);
+  const failure = built.writes.find((write) => write.type === 'request-failure');
+  assert.ok(failure);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(await built.evidence.read(failureRef))), failure.content);
+});
+
+test('RCC v3 rejected continuation preserves submit phase, parent request, and settlement error', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const built = adapter(async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) {
+      return response(chunks([
+        `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-failure-root' } })}\n\n`,
+        `data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'call-failure', name: 'file_read', arguments: '{\"path\":\"README.md\"}' } })}\n\n`,
+        `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-failure-root' } })}\n\n`,
+      ]));
+    }
+    return textResponse('continuation refused', 503);
+  });
+  const tools = [{ toolId: 'file.read', description: 'read one file', inputSchema: { type: 'object' } }];
+  await built.adapter.start({ ...startInput(), tools });
+  for await (const _event of built.adapter.observe(execution)) void _event;
+  const requestIdentity = { turnId: 'turn-request-failure', requestId: 'request-failure-child', parentRequestId: 'request-failure-root' };
+  const continuation = {
+    callId: 'call-failure',
+    toolId: 'file.read',
+    arguments: { path: 'README.md' },
+    continuationRef: 'response-failure-root',
+    output: JSON.stringify({ path: 'README.md', content: 'REAL_FILE_CONTENT' }),
+  };
+
+  await assert.rejects(() => built.adapter.submit({
+    ...execution,
+    ...requestIdentity,
+    inputRefs: ['asset://provider-tool/output/call-failure'],
+    evidenceRefs: [evidence('tool-result')],
+    payload: { toolResultRef: 'asset://provider-tool/output/call-failure' },
+    tools,
+    toolContinuations: [continuation],
+  }), (error) => {
+    assert.equal(error instanceof ProviderAdapterError, true);
+    const providerError = (error as ProviderAdapterError).providerError;
+    assert.equal(providerError.code, 'http.503');
+    assert.equal(providerError.phase, 'submit');
+    assert.equal(providerError.evidenceRefs[0]?.locator, 'rcc-v3://request-failure');
+    return true;
+  });
+
+  const failure = built.writes.find((write) => write.type === 'request-failure');
+  assert.ok(failure);
+  assert.deepEqual(failure.content, {
+    phase: 'submit',
+    status: 503,
+    endpoint: '/v1/responses',
+    protocol: 'responses',
+    model: 'provider.model',
+    route: 'cc:test-route',
+    requestReceipt: {
+      body: calls[1]!.init.body,
+      identity: execution,
+      ...requestIdentity,
+      status: 503,
+      endpoint: '/v1/responses',
+      protocol: 'responses',
+      model: 'provider.model',
+      route: 'cc:test-route',
+    },
+    response: 'continuation refused',
+  });
+  assert.deepEqual(failure.scope, scope);
+
+  const settled = await built.adapter.settle({ ...execution, ...requestIdentity, evidenceRefs: [] });
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.error?.code, 'http.503');
+  assert.equal(settled.error?.evidenceRefs[0]?.locator, 'rcc-v3://request-failure');
+  assert.equal(calls.length, 2);
+});
+
 test('RCC v3 start rejects a successful HTTP response without an SSE body', async () => {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const built = adapter(async (url, init) => {

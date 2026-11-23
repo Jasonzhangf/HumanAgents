@@ -110,7 +110,7 @@ interface RccV3LocalRequestReceipt {
   readonly endpoint: string;
   readonly model: string;
   readonly route: string;
-  readonly status: number;
+  readonly status?: number;
   readonly callIds?: readonly string[];
   readonly continuationRef?: string;
 }
@@ -927,7 +927,7 @@ export class RccV3ProviderTransport<
     const route = requestRoute(request);
     const endpoint = endpointPath(protocol);
     const controller = new AbortController();
-    const sent = await this.send(protocol, request, controller);
+    const sent = await this.send(protocol, request, controller, input, 'start', scopeFor(input, input.evidenceRefs[0]?.scope));
     const response = sent.response;
     const body = response.body;
     if (!body) {
@@ -1020,14 +1020,16 @@ export class RccV3ProviderTransport<
     active.singleRoundMessageTerminal = isSingleRoundMessageRequest(protocol, request, this.source);
     let sent: RccV3SendResult;
     try {
-      sent = await this.send(protocol, request, controller);
+      sent = await this.send(protocol, request, controller, input, 'submit', scope);
     } catch (cause) {
       active.streamDone = true;
       active.resourceReleased = true;
       if (active.stopRequested || controller.signal.aborted) active.terminalState = 'stopped';
       else {
         active.terminalState = 'failed';
-        active.terminalError = this.providerError(scope, 'submit', 'submit.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 continuation failed', 'transport');
+        active.terminalError = cause instanceof ProviderAdapterError
+          ? cause.providerError
+          : this.providerError(scope, 'submit', 'submit.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 continuation failed', 'transport');
       }
       throw cause;
     }
@@ -1670,7 +1672,14 @@ export class RccV3ProviderTransport<
     return reason;
   }
 
-  private async send(protocol: 'responses' | 'anthropic' | 'openai', request: ProviderWireRequest, controller: AbortController): Promise<RccV3SendResult> {
+  private async send(
+    protocol: 'responses' | 'anthropic' | 'openai',
+    request: ProviderWireRequest,
+    controller: AbortController,
+    input: AnyProviderExecutionIdentityRef & Partial<ProviderRequestIdentityRef>,
+    phase: 'start' | 'submit',
+    scope: ScopeRef,
+  ): Promise<RccV3SendResult> {
     const headers: Record<string, string> = { accept: 'text/event-stream', 'content-type': 'application/json' };
     if (this.source === 'http') {
       if (protocol === 'anthropic') {
@@ -1681,15 +1690,74 @@ export class RccV3ProviderTransport<
       }
     }
     const body = JSON.stringify(requestPayload(request, this.source));
-    const response = await this.fetcher(urlFor(this.options.baseUrl, endpointPath(protocol)), {
-      method: 'POST',
-      headers,
-      body,
-      signal: controller.signal,
+    const endpoint = endpointPath(protocol);
+    const route = requestRoute(request);
+    const requestReceipt = (status?: number): RccV3LocalRequestReceipt => this.requestReceipt(input, body, {
+      protocol,
+      endpoint,
+      model: request.model,
+      route,
+      ...(status === undefined ? {} : { status }),
     });
+    let response: RccV3FetchResponse;
+    try {
+      response = await this.fetcher(urlFor(this.options.baseUrl, endpoint), {
+        method: 'POST',
+        headers,
+        body,
+        signal: controller.signal,
+      });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'RCC v3 provider request failed before an HTTP response';
+      let evidenceRef: EvidenceRef;
+      try {
+        evidenceRef = await this.writeEvidence(scope, 'request-failure', {
+          phase,
+          endpoint,
+          protocol,
+          model: request.model,
+          route,
+          requestReceipt: requestReceipt(),
+          error: message,
+        });
+      } catch (writeError) {
+        throw new ProviderAdapterError({
+          code: 'transport.failure',
+          category: 'transport',
+          phase,
+          message: `${message}; RCC v3 request-failure evidence write failed: ${writeError instanceof Error ? writeError.message : 'unknown error'}`,
+          scope: input,
+          cause: new AggregateError([cause, writeError], 'RCC v3 request and request-failure evidence both failed'),
+        });
+      }
+      throw new ProviderAdapterError({ code: 'transport.failure', category: 'transport', phase, message, scope: input, cause, evidenceRefs: [evidenceRef] });
+    }
     if (response.status < 200 || response.status >= 300) {
       const errorBody = (await response.text()).slice(0, this.maxEventBytes);
-      throw new ProviderAdapterError({ code: `http.${response.status}`, category: 'provider', phase: 'start', message: `RCC v3 returned HTTP ${response.status}${errorBody ? `: ${errorBody}` : ''}`, scope: this.options.binding });
+      const message = `RCC v3 returned HTTP ${response.status}${errorBody ? `: ${errorBody}` : ''}`;
+      let evidenceRef: EvidenceRef;
+      try {
+        evidenceRef = await this.writeEvidence(scope, 'request-failure', {
+          phase,
+          status: response.status,
+          endpoint,
+          protocol,
+          model: request.model,
+          route,
+          requestReceipt: requestReceipt(response.status),
+          response: errorBody,
+        });
+      } catch (writeError) {
+        throw new ProviderAdapterError({
+          code: `http.${response.status}`,
+          category: 'provider',
+          phase,
+          message: `${message}; RCC v3 request-failure evidence write failed: ${writeError instanceof Error ? writeError.message : 'unknown error'}`,
+          scope: input,
+          cause: writeError,
+        });
+      }
+      throw new ProviderAdapterError({ code: `http.${response.status}`, category: 'provider', phase, message, scope: input, evidenceRefs: [evidenceRef] });
     }
     return { body, response };
   }
@@ -1702,7 +1770,7 @@ export class RccV3ProviderTransport<
       readonly endpoint: string;
       readonly model: string;
       readonly route: string;
-      readonly status: number;
+      readonly status?: number;
     },
     continuation?: {
       readonly callIds: readonly string[];

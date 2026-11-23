@@ -2134,6 +2134,44 @@ async function handleRequest(
       writeJson(response, 200, report);
       return;
     }
+    const taskProviderEvidence = /^\/api\/tasks\/([^/]+)\/operations\/([^/]+)\/executions\/(\d+)\/events\/(\d+)\/evidence\/([^/]+)$/.exec(path);
+    if (taskProviderEvidence && method === 'GET') {
+      const allowed = new Set(['projectKey', 'mode']);
+      for (const key of url.searchParams.keys()) {
+        if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+          throw new UiRuntimeApiError('provider-evidence.query-invalid', APP_OWNER,
+            `unsupported or repeated provider evidence query key: ${key}`, 'send projectKey and mode exactly once', 400);
+        }
+      }
+      const { projectKey, mode } = requireReadScope(url);
+      writeReadResult(response, await service.taskProviderEvidence(
+        id('task', decodeURIComponent(taskProviderEvidence[1]!)),
+        { projectKey, mode, operationId: id('operation', decodeURIComponent(taskProviderEvidence[2]!)), executionEpoch: Number(taskProviderEvidence[3]), seq: Number(taskProviderEvidence[4]), evidenceId: decodeURIComponent(taskProviderEvidence[5]!) },
+      ));
+      return;
+    }
+    const interactionProviderRequest = /^\/api\/explicit\/interactions\/([^/]+)\/revisions\/(\d+)\/turns\/([^/]+)\/epochs\/(\d+)\/requests\/([^/]+)$/.exec(path);
+    if (interactionProviderRequest && method === 'GET') {
+      const allowed = new Set(['projectKey', 'mode', 'evidenceId']);
+      for (const key of url.searchParams.keys()) {
+        if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+          throw new UiRuntimeApiError('interaction-request.query-invalid', APP_OWNER,
+            `unsupported or repeated interaction request query key: ${key}`, 'send projectKey and mode exactly once', 400);
+        }
+      }
+      const { projectKey, mode } = requireReadScope(url);
+      const evidenceId = url.searchParams.get('evidenceId')?.trim();
+      writeReadResult(response, await service.interactionProviderRequest({
+        projectKey, mode,
+        interactionId: decodeURIComponent(interactionProviderRequest[1]!),
+        inputRevision: Number(interactionProviderRequest[2]),
+        turnId: decodeURIComponent(interactionProviderRequest[3]!),
+        executionEpoch: Number(interactionProviderRequest[4]),
+        requestId: decodeURIComponent(interactionProviderRequest[5]!),
+        ...(evidenceId === undefined ? {} : { evidenceId }),
+      }));
+      return;
+    }
     if (path.startsWith('/api/')) {
       writeError(response, new UiRuntimeApiError('route.not-found', APP_OWNER, `no runtime route for ${method} ${path}`, 'use a documented runtime endpoint', 404));
       return;

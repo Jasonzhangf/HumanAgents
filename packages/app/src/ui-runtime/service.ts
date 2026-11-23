@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { ProviderTransportSource } from '../../../adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../../adapters/provider/src/evidence.js';
 import {
+  assertSameScope,
   assertNotExpired,
   ContractError,
   id,
@@ -75,6 +76,8 @@ import {
 import type {
   InteractionParentCommittedFact,
 } from '../../../runtime/src/explicit-brain/index.js';
+import type { InteractionParentTurnRawJournalPort, InteractionParentOpenedTurnScopeReadPort } from '../../../runtime/src/explicit-brain/interaction-parent-turn-raw.js';
+import { JsonlInteractionParentTurnJournal } from '../../../adapters/jsonl/src/interaction-parent-turn-journal.js';
 import { DraftRevisionError } from '../../../core/src/draft-revision.js';
 import { directTaskCreateIdentitySource } from '../../../core/src/task-identity.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
@@ -614,6 +617,8 @@ export interface UiRuntimeServiceOptions {
   readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
   /** Read-only exact Provider settlement receipt over the composition-bound parent Journal. */
   readonly explicitProviderSettlementRead?: ExplicitProviderSettlementReadPort;
+  /** The composition-bound parent Journal; bound reads reuse this instance instead of opening a second authority. */
+  readonly interactionParentJournal?: InteractionParentTurnRawJournalPort & InteractionParentOpenedTurnScopeReadPort;
   /**
    * The existing Task identity owner over the same control Organ Journal the
    * runtime already persists. The service never opens its own journal or mints
@@ -4008,6 +4013,124 @@ export class UiRuntimeService {
       }
     }
     return report;
+  }
+
+  /** Read one provider evidence asset through its recorded task event identity. */
+  async taskProviderEvidence(
+    taskId: TaskId,
+    input: { readonly projectKey: string; readonly mode: RuntimeMode; readonly operationId: OperationId; readonly executionEpoch: number; readonly seq: number; readonly evidenceId: string },
+  ): Promise<RuntimeReadResult<{
+    readonly surface: 'runtime-provider-evidence';
+    readonly scope: Extract<RuntimeReadScope, { readonly kind: 'task' }>;
+    readonly origin: { readonly operationId: string; readonly executionEpoch: number; readonly seq: number; readonly eventId: string; readonly kind: string; readonly requestId?: string; readonly parentRequestId?: string; readonly turnId?: string };
+    readonly evidenceRef: EvidenceRef;
+    readonly content: unknown;
+  }>> {
+    const source = await this.findProjectSource(input.projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(input.projectKey) };
+    const read = readUiRuntimeTaskJournal(source.checkpointsRoot, input.mode);
+    if (read.failure !== undefined) return { ok: false, failure: read.failure };
+    const record = read.records.find((candidate) => candidate.kind === 'operation.event'
+      && candidate.operationId.value === input.operationId.value
+      && candidate.event.executionEpoch === input.executionEpoch
+      && candidate.event.seq === input.seq
+      && journalRecordTaskId(candidate) === taskId.value);
+    if (record === undefined || record.kind !== 'operation.event') {
+      return { ok: false, failure: { code: 'provider-evidence.event-not-found', ownerId: APP_OWNER, message: 'the provider evidence event is not in the selected task scope', nextAction: 'select a recorded provider event from this task' } };
+    }
+    const evidence = record.event.evidenceRefs.find((ref) => ref.evidenceId.value === input.evidenceId);
+    if (evidence === undefined || evidence.kind !== 'external') {
+      return { ok: false, failure: { code: 'provider-evidence.not-found', ownerId: APP_OWNER, message: 'the selected evidence is not attached to this task event', nextAction: 'select an evidence reference shown by the event' } };
+    }
+    try {
+      const bytes = await filesystemProviderEvidenceSink(new ImmutableAssetStore(join(source.projectRoot, 'artifacts', 'ui-provider-evidence'))).read(evidence);
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      let content: unknown = text;
+      try { content = JSON.parse(text); } catch { /* provider payload may be plain text */ }
+      return { ok: true, value: {
+        surface: 'runtime-provider-evidence',
+        scope: { kind: 'task', projectKey: input.projectKey, mode: input.mode, taskId },
+        origin: { operationId: input.operationId.value, executionEpoch: input.executionEpoch, seq: input.seq, eventId: record.event.eventId, kind: record.event.kind, ...(record.event.requestId === undefined ? {} : { requestId: record.event.requestId }), ...(record.event.parentRequestId === undefined ? {} : { parentRequestId: record.event.parentRequestId }), ...(record.event.turnId === undefined ? {} : { turnId: record.event.turnId }) },
+        evidenceRef: evidence,
+        content,
+      } };
+    } catch (error) {
+      return { ok: false, failure: { code: 'provider-evidence.unavailable', ownerId: APP_OWNER, message: error instanceof Error ? error.message : 'provider evidence could not be read', nextAction: 'repair or restore the committed provider evidence asset' } };
+    }
+  }
+
+  /** Resolve one no-Task request through its committed interaction turn and raw evidence. */
+  async interactionProviderRequest(
+    input: { readonly projectKey: string; readonly mode: RuntimeMode; readonly interactionId: string; readonly inputRevision: number; readonly turnId: string; readonly executionEpoch: number; readonly requestId: string; evidenceId?: string },
+  ): Promise<RuntimeReadResult<{
+    readonly surface: 'runtime-interaction-provider-request';
+    readonly scope: { readonly kind: 'interaction'; readonly projectKey: string; readonly mode: RuntimeMode; readonly interactionId: string; readonly inputRevision: number };
+    readonly origin: { readonly turnId: string; readonly executionEpoch: number; readonly requestId: string; readonly parentRequestId?: string };
+    readonly evidenceRefs: readonly EvidenceRef[];
+    readonly content: readonly unknown[];
+  }>> {
+    if (input.executionEpoch < 1 || !Number.isSafeInteger(input.executionEpoch) || input.inputRevision < 1 || !Number.isSafeInteger(input.inputRevision)) {
+      return { ok: false, failure: { code: 'interaction-request.identity-invalid', ownerId: APP_OWNER, message: 'interaction revision and execution epoch must be positive integers', nextAction: 'select an exact recorded interaction request' } };
+    }
+    const source = this.isBoundScope(input.projectKey, input.mode)
+      ? this.boundProjectSource()
+      : await this.findProjectSource(input.projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(input.projectKey) };
+    const boundJournal = this.isBoundScope(input.projectKey, input.mode) ? this.options.interactionParentJournal : undefined;
+    const journalPath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, input.mode));
+    const controlJournal = new JsonlOrganJournal(journalPath);
+    const journal = boundJournal ?? new JsonlInteractionParentTurnJournal(controlJournal);
+    const opened = await journal.readScopeOpenedTurns({ organId: this.options.organId, interactionScopeId: `runtime:${input.projectKey}` });
+    const turnEntry = opened.find(({ fact }) => fact.turn.interactionId === input.interactionId
+      && fact.turn.inputRevision === input.inputRevision && fact.turn.turnId === input.turnId);
+    const turn = turnEntry?.fact.turn;
+    if (turn === undefined) return { ok: false, failure: { code: 'interaction-request.turn-not-found', ownerId: APP_OWNER, message: 'the interaction turn is not present in the selected project revision', nextAction: 'select a recorded interaction turn' } };
+    const snapshot = await journal.readTurnSnapshot(turn);
+    const requestRecords = snapshot.requests.filter(({ fact }) => fact.request.requestId === input.requestId
+      && fact.phase !== 'dispatching');
+    const request = requestRecords.at(-1);
+    if (request === undefined || !snapshot.turnInput) {
+      return { ok: false, failure: { code: 'interaction-request.request-not-found', ownerId: APP_OWNER, message: 'the request or execution epoch is not committed for this interaction turn', nextAction: 'select the exact request identity recorded in this turn' } };
+    }
+    const selectedEvidence = (ref: EvidenceRef): boolean => input.evidenceId === undefined || ref.evidenceId.value === input.evidenceId;
+    const accepted = snapshot.acceptedFacts.filter(({ fact }) => fact.envelope.request.requestId === input.requestId
+      && fact.envelope.execution.executionEpoch === input.executionEpoch
+      && fact.envelope.fact.kind === 'content'
+      && selectedEvidence(fact.envelope.fact.content.ref)).map(({ fact, commit }) => ({ fact: fact.envelope.fact, commit }));
+    const wireRefs = requestRecords.flatMap(({ fact }) => fact.evidenceRefs ?? []).filter(selectedEvidence);
+    const evidenceRefs = [...wireRefs, ...accepted.flatMap(({ fact }) => fact.kind === 'content' ? [fact.content.ref] : [])];
+    if (evidenceRefs.length === 0) return { ok: false, failure: { code: 'interaction-request.evidence-not-found', ownerId: APP_OWNER, message: input.evidenceId === undefined ? 'the exact request has no accepted wire evidence' : 'the selected evidence is not attached to this exact interaction request', nextAction: input.evidenceId === undefined ? 'select a request with committed provider evidence' : 'select an evidence reference shown by the exact request' } };
+    try {
+      const reader = providerRawContentReader(filesystemProviderEvidenceSink(new ImmutableAssetStore(join(source.projectRoot, 'artifacts', 'ui-provider-evidence'))));
+      const sink = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(source.projectRoot, 'artifacts', 'ui-provider-evidence')));
+      const wireContent = await Promise.all(wireRefs.map(async (ref) => {
+        assertSameScope(request.fact.scope, ref.scope);
+        const bytes = await sink.read(ref);
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        try { return JSON.parse(text); } catch { return text; }
+      }));
+      const content = await Promise.all(accepted.map(async ({ fact, commit }) => {
+        if (fact.kind !== 'content') return undefined;
+        const wireRecord = await controlJournal.findByCommitId(commit.commitId);
+        const payload = wireRecord?.kind === 'event' ? wireRecord.payload as { readonly entry?: { readonly envelope?: { readonly request?: { readonly requestId?: string; readonly turnId?: string }; readonly fact?: { readonly content?: { readonly ref?: EvidenceRef } } } } } : undefined;
+        const storedRef = payload?.entry?.envelope?.fact?.content?.ref;
+        if (!storedRef || storedRef.evidenceId.value !== fact.content.ref.evidenceId.value
+          || payload?.entry?.envelope?.request?.requestId !== input.requestId
+          ) throw new Error('accepted evidence reference does not match the committed interaction request');
+        const bytes = await reader.read({ scope: request.fact.scope, content: fact.content });
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        try { return JSON.parse(text); } catch { return text; }
+      }));
+      return { ok: true, value: {
+        surface: 'runtime-interaction-provider-request',
+        scope: { kind: 'interaction', projectKey: input.projectKey, mode: input.mode, interactionId: input.interactionId, inputRevision: input.inputRevision },
+        origin: { turnId: request.fact.request.turnId, executionEpoch: input.executionEpoch, requestId: input.requestId, ...(request.fact.parentRequestId === undefined ? {} : { parentRequestId: request.fact.parentRequestId }) },
+        evidenceRefs,
+        content: [...wireContent, ...content.filter((entry) => entry !== undefined)],
+      } };
+    } catch (error) {
+      return { ok: false, failure: { code: 'interaction-request.evidence-unavailable', ownerId: APP_OWNER, message: error instanceof Error ? error.message : 'interaction request evidence could not be read', nextAction: 'restore the referenced immutable provider evidence asset' } };
+    }
   }
 
   private now(): Date {

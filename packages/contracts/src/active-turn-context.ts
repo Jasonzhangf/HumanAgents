@@ -219,6 +219,8 @@ export interface RuntimeRequestRecord {
   readonly parentRequestId?: string;
   readonly scope: ScopeRef;
   readonly phase: RuntimeRequestLifecyclePhase;
+  /** Immutable evidence attached to the observed lifecycle phase, never control state. */
+  readonly evidenceRefs?: readonly EvidenceRef[];
 }
 
 /** Required acknowledgement before native Provider dispatch. */

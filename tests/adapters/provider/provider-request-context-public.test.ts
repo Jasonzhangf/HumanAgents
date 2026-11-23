@@ -944,7 +944,7 @@ test('J: typed Anthropic tool loop runs one real transport round trip with fresh
   assert.deepEqual(startEvidence?.content, {
     status: 200, endpoint: '/v1/messages', protocol: 'anthropic', model: 'model-p', route: nativeRoute('goaichat'),
     requestReceipt: {
-      body: JSON.stringify(harness.calls[0]!.body), identity,
+      body: harness.calls[0]!.rawBody, identity,
       turnId: harness.registrations[0]!.record.request.turnId, requestId: rootRequestId,
       status: 200, endpoint: '/v1/messages', protocol: 'anthropic', model: 'model-p', route: nativeRoute('goaichat'),
     },
@@ -952,6 +952,9 @@ test('J: typed Anthropic tool loop runs one real transport round trip with fresh
   assert.equal(startEvidence?.locator, 'http://start');
 
   assert.equal(harness.calls[0]!.body.system, 'ORIENTATION_ONE');
+  const submitContent = harness.evidence.find((write) => write.type === 'submit')?.content as HttpEvidenceReceipt;
+  assert.equal(submitContent.requestReceipt.body, harness.calls[1]!.rawBody);
+  assert.equal(submitContent.requestReceipt.requestId, childDispatch!.record.request.requestId);
   assert.equal(harness.calls[0]!.body.max_tokens, 1024);
   assert.deepEqual(harness.calls[0]!.body.messages, [{ role: 'user', content: [{ type: 'text', text: 'CURRENT_TURN_INPUT' }] }]);
   assert.match(String(harness.calls[1]!.body.system), /ORIENTATION_TWO/);

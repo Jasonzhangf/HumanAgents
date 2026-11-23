@@ -707,6 +707,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         turn: { ...input, organId: options.organId, interactionScopeId },
       }),
     },
+    interactionParentJournal: parentJournal,
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
     ...(options.runtimePaths === undefined ? {} : { runtimePaths: options.runtimePaths }),

@@ -502,7 +502,7 @@ export class ProviderAgentDriver<
       throw cause;
     }
     this.initialPayload = input.payload;
-    await this.commitRequestPhase(request, 'dispatched');
+    await this.commitRequestPhase(request, 'dispatched', receipt.evidenceRefs);
     this.publishLifecycle(request, 'dispatched', [], receipt.evidenceRefs);
     const output: AgentOutput<TIdentity> = {
       ...input,
@@ -564,7 +564,7 @@ export class ProviderAgentDriver<
         ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
       });
       this.assertProviderIdentity(submitted, 'provider continuation receipt', 'submit');
-      await this.commitRequestPhase(request, 'dispatched');
+      await this.commitRequestPhase(request, 'dispatched', submitted.evidenceRefs);
       this.publishLifecycle(request, 'dispatched', [], submitted.evidenceRefs);
       return submitted;
     })();
@@ -749,7 +749,7 @@ export class ProviderAgentDriver<
         }));
         this.assertProviderIdentity(submitted, 'provider tool continuation receipt', 'submit');
         if (!this.stopping) {
-          await this.commitRequestPhase(continuation, 'dispatched');
+          await this.commitRequestPhase(continuation, 'dispatched', submitted.evidenceRefs);
           this.publishLifecycle(continuation, 'dispatched', [], submitted.evidenceRefs);
         }
       } catch (cause) {
@@ -888,7 +888,7 @@ export class ProviderAgentDriver<
    * no-op; a rejected registration or a phase/identity/scope-mismatched ack
    * aborts the dispatch so the driver never runs an unregistered request.
    */
-  private async commitRequestPhase(request: RequestAttempt, phase: RuntimeRequestLifecyclePhase): Promise<void> {
+  private async commitRequestPhase(request: RequestAttempt, phase: RuntimeRequestLifecyclePhase, evidenceRefs?: readonly EvidenceRef[]): Promise<void> {
     const register = this.options.registerRequest;
     if (register === undefined) return;
     const record: RuntimeRequestRecord = {
@@ -896,6 +896,7 @@ export class ProviderAgentDriver<
       ...(request.parentRequestId === undefined ? {} : { parentRequestId: request.parentRequestId }),
       scope: this.options.scope,
       phase,
+      ...(evidenceRefs === undefined || evidenceRefs.length === 0 ? {} : { evidenceRefs }),
     };
     const registration: NativeRequestRegistration = {
       execution: { runtimeId: this.options.runtimeId, executionEpoch: this.options.executionEpoch },
