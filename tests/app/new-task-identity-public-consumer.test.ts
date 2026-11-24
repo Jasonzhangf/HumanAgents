@@ -19,6 +19,7 @@ import {
   type ProviderStartInput,
   type ProviderStartReceipt,
   type ScopeRef,
+  type StandardTurnEndPayload,
   type Task,
   type TaskId,
   type TaskFlowBinding,
@@ -714,8 +715,9 @@ async function currentTaskPlanReceipt(
 test('manager snapshot reads per-member boards from the serve scope and rejects an undeclared member', async () => {
   await mkdir(ROOT, { recursive: true });
   const root = await mkdtemp(join(ROOT, 'manager-project-snapshot-'));
-  type Snapshot = { projectKey: string; members: readonly {
-    memberRef: string; status: string; board: { current: readonly { title: string }[] };
+  type TaskRead = { taskId: string; title: string; requesterRelation: string };
+  type Snapshot = { projectKey: string; requesterSource: string; members: readonly {
+    memberRef: string; status: string; board: { current: readonly TaskRead[]; history: readonly TaskRead[] };
   }[] };
   const observed: { read?: (members?: readonly string[]) => Promise<unknown> } = {};
   const runtime = await startRuntime(root, new CountingStartPort({ binding, stepDelayMs: 1 }), {
@@ -727,6 +729,7 @@ test('manager snapshot reads per-member boards from the serve scope and rejects 
     ],
     explicitBrainInterpreter: { async interpret(input) {
       observed.read = input.readProjectSnapshot;
+      if (input.rawInput.startsWith('create the ')) return createInterpreter.interpret(input);
       return { kind: 'answer', answer: 'snapshot fixture', normalizedInput: input.rawInput, knownFacts: [], decisionRefs: [] };
     } },
   });
@@ -747,13 +750,36 @@ test('manager snapshot reads per-member boards from the serve scope and rejects 
     if (read === undefined) throw new Error('the Manager interpretation must receive a live snapshot reader');
     const all = await read() as Snapshot;
     assert.equal(all.projectKey, 'project-snapshot');
+    assert.equal(all.requesterSource, 'identity-unavailable');
     assert.deepEqual(all.members.map(member => member.memberRef), ['Jenny', 'worker']);
     assert.equal(JSON.stringify(all).includes('Other project'), false);
     const batch = await read(['worker']) as Snapshot;
     assert.equal(batch.members.length, 1);
     assert.deepEqual(batch.members[0]?.board.current.map(task => task.title), ['Project worker task']);
     assert.equal(batch.members[0]?.status, 'unknown');
+    assert.equal(batch.members[0]?.board.current[0]?.requesterRelation, 'unverified');
     await assert.rejects(() => read(['unknown']), /absent or ambiguous in the authorized project roster/);
+
+    const submitted = await submitNewTask(runtime, 'requester relation');
+    await waitForAsync(async () => {
+      const records = await identityRecords(taskControlPathFor(root));
+      assert.ok(records.some(record => record.source.requirementId === submitted.receipt.requirement.requirementId));
+    });
+    const submittedIdentity = (await identityRecords(taskControlPathFor(root))).find(
+      record => record.source.requirementId === submitted.receipt.requirement.requirementId,
+    )!;
+    const request = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sourceRef: 'ui:follow-up', rawInput: 'Show project members.', channel: 'business' }),
+    });
+    assert.equal(request.status, 201);
+    const { interactionId: followUp } = await request.json() as { interactionId: string };
+    await runtime.service.interpretExplicitInput({ interactionId: followUp });
+    const linked = await observed.read!() as Snapshot;
+    assert.equal(linked.requesterSource, 'available');
+    const visible = linked.members.flatMap(member => [...member.board.current, ...member.board.history]);
+    assert.equal(visible.find(task => task.taskId === submittedIdentity.scope.taskId.value)?.requesterRelation, 'same-requester');
+    assert.equal(visible.find(task => task.title === 'Project worker task')?.requesterRelation, 'unverified');
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });
@@ -935,7 +961,7 @@ interface TerminalUpstream {
   readonly requests: CapturedUpstreamRequest[];
   readonly plannerRequests: ReadonlyArray<Record<string, unknown>>;
   readonly plannerSnapshots: readonly TaskPlanSnapshot[];
-  readonly endArguments: ReadonlyArray<Record<string, unknown>>;
+  readonly endArguments: readonly StandardTurnEndPayload[];
   restore(): void;
 }
 
@@ -949,7 +975,7 @@ function captureTerminalUpstream(origin: string, deliveryText: string): Terminal
   const requests: CapturedUpstreamRequest[] = [];
   const plannerRequests: Array<Record<string, unknown>> = [];
   const plannerSnapshots: TaskPlanSnapshot[] = [];
-  const endArguments: Array<Record<string, unknown>> = [];
+  const endArguments: StandardTurnEndPayload[] = [];
   const original = globalThis.fetch;
   const capture = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1] = {}) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -1003,14 +1029,14 @@ function captureTerminalUpstream(origin: string, deliveryText: string): Terminal
     }
 
     if (advertisesTurnEnd(body)) {
-      const args: Record<string, unknown> = {
+      const args: StandardTurnEndPayload = {
+        outcome: 'completed',
         summary: {
-          goal: { text: 'Deliver the confirmed B2 task result', evidenceRefs: [] },
-          actions: { text: 'Ran the configured real execution Provider', evidenceRefs: [] },
-          result: { text: deliveryText, evidenceRefs: [] },
-          expectedNextStep: { text: 'Close the turn so the Planner can decide', evidenceRefs: [] },
+          goal: 'Deliver the confirmed B2 task result',
+          actions: ['Ran the configured real execution Provider'],
+          result: { status: 'completed', text: deliveryText },
+          nextStep: 'Close the turn so the Planner can decide',
         },
-        deliveryText,
         deliveryRefs: [],
       };
       endArguments.push(args);
@@ -1174,7 +1200,7 @@ test('B2: one public confirmation composes identity, grant, real execution and t
     // closed-turn Planner consumed that accepted result once.
     assert.ok(upstream.endArguments.length >= 1, 'the real execution must accept a standard turn end');
     assert.equal(
-      (upstream.endArguments[0] as { readonly deliveryText?: string }).deliveryText,
+      upstream.endArguments[0]?.summary.result.text,
       deliveryText,
       'the accepted end must carry the exact delivery text',
     );

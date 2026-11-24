@@ -484,6 +484,15 @@ test('project snapshot rejects unauthorized or invalid arguments and allows corr
   assert.match(corrected.output, /Bob/);
 });
 
+test('Manager can submit a task decision without reading the optional project snapshot', async () => {
+  const { result, checkpoint } = await runWire([requirement], {
+    projectSnapshot: async () => { throw new Error('no snapshot read is needed for this decision'); },
+    projectSnapshotCalls: [],
+  });
+  assert.equal(result.kind, 'requirement');
+  assert.ok(checkpoint);
+});
+
 test('C07 actual wire accepts a simple end and ignores transport drain text', async () => {
   const { result, wires, snapshot, checkpoint } = await runWire([answer]);
   assert.equal(result.kind, 'answer');

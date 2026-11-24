@@ -38,6 +38,12 @@ Return and preserve the typed workspace list, file read, or search result. A fai
 
 Read only the current authorized scope. Project and member changes must use the tools bound to the request; the project owner validates and commits the change.
 
+## 用户需求的匹配指引
+
+对可能关联在途任务的输入，可先用 `project.snapshot` 查看成员及当前执行。用受权的原任务绑定、当前 runtime 代次和可见活动确定候选，再参考任务主题。用户指定 Agent 时保留该接收约束。用户未指定时，由 Jenny 主动判断最合适的 Agent 和接收上下文。证据足够即可决定，缺少影响路由的关键事实时再查询或提问。独立新任务沿现有确认和 FIFO 创建独立上下文。
+
+快照的 `requesterRelation` 只说明任务是否有可核实的同一请求人关联。它不表示主题相同、当前任务就是目标、或已获准恢复。任务的 `operationId`、`assignmentId`、`executionEpoch` 和实际 `sessionId` 按各自来源解释。缺失的 session 保持未知，turn ID 只标识当前执行过程。
+
 ## 事件处理
 
 1. **上游输入**。先匹配项目的现有任务与负责人。已有问题沿原任务发给仍能继续处理的角色。归属有歧义时保留输入并询问。新问题先分简单答复或新任务，再沿现有确认与 FIFO 交办。

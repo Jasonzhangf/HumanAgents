@@ -6063,8 +6063,8 @@ export class UiRuntimeService {
           && (task.state === 'running' || task.state === 'settling'));
         return task === undefined ? [] : [{ allocation, task }];
       });
-      const paths = this.options.runtimePaths;
-      const sessionFacts = paths !== undefined && active.length > 0 ? await (async () => {
+      const paths = this.readResources?.runtimePaths ?? this.options.runtimePaths;
+      const sessionFacts = paths?.projectKey === projectKey && active.length > 0 ? await (async () => {
         try {
           const sessions = await new SessionStore(paths).list();
           return { sessions: await Promise.allSettled(sessions.map(async session => ({
@@ -6074,11 +6074,45 @@ export class UiRuntimeService {
           return { failure: 'session-store-unavailable' };
         }
       })() : { failure: 'session-source-unavailable' };
+      const actor = interaction.actor;
+      const requesterTasks = new Set<string>();
+      let requesterSource: 'available' | 'identity-unavailable' | 'task-source-unavailable' =
+        'identity-unavailable';
+      if (actor?.kind === 'human' && actor.sourceKind === 'product-principal'
+        && actor.sourceRef === this.options.principalOwner) {
+        try {
+          requesterSource = 'task-source-unavailable';
+          const snapshots = await this.snapshotsWithIdentitySource();
+          const identities = new Map(snapshots.map(task => [task.taskId.value, task.identitySource]));
+          const interactions = this.explicitIntake.exportState().interactions.filter(candidate =>
+            candidate.actor?.kind === 'human' && candidate.actor.sourceKind === 'product-principal'
+            && candidate.actor.sourceRef === actor.sourceRef
+            && candidate.confirmation?.intent === 'create'
+            && (candidate.workspace === undefined || candidate.workspace.projectKey === projectKey));
+          const refs = this.explicitInteractionTaskRefs(interactions, snapshots);
+          for (const candidate of interactions) {
+            const taskId = refs.get(candidate.interactionId)?.value;
+            const source = taskId === undefined ? undefined : identities.get(taskId);
+            const confirmation = candidate.confirmation;
+            if (taskId !== undefined && source !== undefined && confirmation !== undefined
+              && source.draftId === confirmation.draftId && source.inputRevision === confirmation.inputRevision
+              && source.confirmationRef === confirmation.confirmationRef) requesterTasks.add(taskId);
+          }
+          for (const snapshot of snapshots) {
+            const parentId = snapshot.executionLineage?.parentTaskId.value;
+            if (parentId !== undefined && requesterTasks.has(parentId)) requesterTasks.add(snapshot.taskId.value);
+          }
+          if (this.options.taskIdentity !== undefined) requesterSource = 'available';
+        } catch {
+          requesterSource = 'task-source-unavailable';
+        }
+      }
       const currentTasks = new Map(this.coordinator.taskSnapshots().map(task => [task.taskId.value, task]));
       const sessionReadFailed = sessionFacts.sessions?.some(result => result.status === 'rejected'
         && (!(result.reason instanceof AppLifecycleError) || result.reason.code !== 'run-manifest-missing'));
       const summarize = (task: RuntimeTaskSnapshot) => ({
         taskId: task.taskId.value, title: task.title, state: task.state, updatedAt: task.updatedAt,
+        requesterRelation: requesterTasks.has(task.taskId.value) ? 'same-requester' : 'unverified',
       });
       const members = selected.map(({ agent, memberRef }) => {
         const board = this.taskBoard({ scope: 'project', projectId: projectKey, actorId: memberRef });
@@ -6087,8 +6121,10 @@ export class UiRuntimeService {
           if (stillCurrent === undefined || stillCurrent.operationId !== task.operationId || stillCurrent.executionEpoch !== task.executionEpoch
             || (stillCurrent.boardOwner !== undefined && (stillCurrent.boardOwner.scope !== 'project' || stillCurrent.boardOwner.projectId !== projectKey))
             || (stillCurrent.state !== 'running' && stillCurrent.state !== 'settling')) return undefined;
-          const activity = task.recentEvents.filter(event => event.operationId === allocation.operationId.value
-            && event.executionEpoch === allocation.executionEpoch).at(-1);
+          const events = stillCurrent.recentEvents.filter(event => event.operationId === allocation.operationId.value
+            && event.executionEpoch === allocation.executionEpoch);
+          const activity = events.at(-1);
+          const turns = new Set(events.flatMap(event => event.turnId === undefined ? [] : [event.turnId]));
           const matchingSessions = sessionFacts.sessions?.flatMap(result => result.status === 'fulfilled'
             && result.value.run.agentId === agent.agentId
             && result.value.run.scope.organId.value === this.options.organId.value
@@ -6098,7 +6134,9 @@ export class UiRuntimeService {
             && result.value.run.taskId.value === task.taskId.value ? [result.value.session] : []);
           const session = matchingSessions?.length === 1 ? matchingSessions[0] : undefined;
           return {
-            ...summarize(task), runtimeId: allocation.runtimeId, executionEpoch: allocation.executionEpoch,
+            ...summarize(stillCurrent), runtimeId: allocation.runtimeId, executionEpoch: allocation.executionEpoch,
+            operationId: allocation.operationId.value, assignmentId: allocation.assignmentId,
+            ...(turns.size === 1 ? { turnId: [...turns][0] } : {}),
             activity: activity === undefined ? null : { kind: activity.kind, state: activity.state, occurredAt: activity.occurredAt },
             session: session === undefined ? { state: 'unknown', reason: sessionFacts.failure
               ?? (matchingSessions?.length ? 'multiple-session-bindings'
@@ -6115,7 +6153,7 @@ export class UiRuntimeService {
           executions,
         };
       });
-      return { projectKey, observedAt, members, coverage: 'configured-roster-and-bound-task-executions',
+      return { projectKey, observedAt, members, requesterSource, coverage: 'configured-roster-and-bound-task-executions',
         unassigned: tasks.filter(task => task.boardOwner === undefined).map(summarize) };
     };
   }
