@@ -4,6 +4,7 @@ import {
   assertScope,
   type Attention,
   type EvidenceRef,
+  type ExplicitInteractionToolActivity,
   type JournalCommitRef,
   type ScopeRef,
   type TaskId,
@@ -152,6 +153,12 @@ export interface ProductMessage {
   readonly text: string;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly toolEvent?: ProductTaskToolEvent;
+  readonly explicitToolStep?: {
+    readonly kind: 'tool.started' | 'tool.finished';
+    readonly requestId: string;
+    readonly turnId: string;
+    readonly tool: ExplicitInteractionToolActivity;
+  };
 }
 
 /** Recorded tool facts. The execution binding is supplied by allocation truth. */
@@ -531,7 +538,7 @@ export function validateProductMessage(message: ProductMessage): void {
   record(message, 'product message');
   onlyKeys(
     message,
-    ['ref', 'targetRef', 'actor', 'occurredAt', 'occurredAtUnavailableReason', 'text', 'evidenceRefs', 'toolEvent'],
+    ['ref', 'targetRef', 'actor', 'occurredAt', 'occurredAtUnavailableReason', 'text', 'evidenceRefs', 'toolEvent', 'explicitToolStep'],
     'product message',
   );
   validateSemanticEventRef(message.ref);

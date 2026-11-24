@@ -9,11 +9,9 @@ import {
   type ProductBoardKind,
   type ProductBoardSection,
   type ProductMessage,
-  type ProductMessageActor,
   type ProductReadMode,
   type ProductReadScope,
   type ProductTargetRef,
-  type SemanticEventRef,
   type TaskExecutionInstanceIdentity,
   type TaskId,
 } from '../../../contracts/src/index.js';
@@ -142,15 +140,7 @@ export type ProductInspectionFact = InspectionOccurrenceRecord | ProductInspecti
  * without an event time receive an explicit unavailable reason; this composer
  * never substitutes a task update time.
  */
-export interface ProductMessageFact {
-  readonly ref: SemanticEventRef;
-  readonly targetRef: ProductTargetRef;
-  readonly actor: ProductMessageActor;
-  readonly occurredAt?: string;
-  readonly occurredAtUnavailableReason?: string;
-  readonly text: string;
-  readonly evidenceRefs: readonly EvidenceRef[];
-}
+export type ProductMessageFact = ProductMessage;
 
 export interface ProductBoardComposeInput {
   readonly selection: ProductReadSelection;

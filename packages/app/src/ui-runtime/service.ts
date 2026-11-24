@@ -5303,7 +5303,7 @@ export class UiRuntimeService {
             sessionRef: { sourceKind: 'explicit-intake', sourceRef: interaction.interactionId },
             scope,
           };
-      return [{
+      const inputMessage: ProductMessageFact = {
         ref: {
           eventId: interaction.interactionId,
           sourceId: 'explicit-intake',
@@ -5320,7 +5320,46 @@ export class UiRuntimeService {
           : { occurredAt: interaction.occurredAt }),
         text: interaction.rawInput,
         evidenceRefs: [],
-      }];
+      };
+      const publicMessage = (suffix: string, text: string, occurredAt?: string): ProductMessageFact => ({
+        ref: { ...inputMessage.ref, eventId: `${interaction.interactionId}:${suffix}` },
+        targetRef: {
+          kind: 'session',
+          sessionRef: { sourceKind: 'explicit-intake', sourceRef: interaction.interactionId },
+          ...(taskId === undefined ? {} : { taskRef: taskId }),
+          scope: targetRef.scope,
+        },
+        actor: { kind: 'agent', sourceKind: 'explicit-intake', sourceRef: interaction.interactionId },
+        ...(occurredAt === undefined
+          ? { occurredAtUnavailableReason: 'the explicit intake owner did not persist a message event time' }
+          : { occurredAt }),
+        text,
+        evidenceRefs: [],
+      });
+      const messages = [inputMessage];
+      for (const { seq, kind, occurredAt, requestId, turnId, tool } of interaction.steps) {
+        if ((kind !== 'tool.started' && kind !== 'tool.finished') || !requestId || !turnId || !tool) continue;
+        const { callId, kind: toolKind, status, errorCode } = tool;
+        messages.push({
+          ...publicMessage(`step:${seq}`, kind === 'tool.started' ? '内置工具已调用' : '内置工具已返回', occurredAt),
+          explicitToolStep: {
+            kind, requestId, turnId,
+            tool: { callId, kind: toolKind, ...(status === undefined ? {} : { status }),
+              ...(errorCode === undefined ? {} : { errorCode }) },
+          },
+        });
+      }
+      for (const [index, exchange] of (interaction.clarifications ?? []).entries()) {
+        messages.push(publicMessage(`clarification:${index}`, exchange.question));
+        if (exchange.answer !== undefined) {
+          messages.push({
+            ...publicMessage(`clarification:${index}:answer`, exchange.answer),
+            actor: { kind: 'unknown', sourceKind: 'explicit-intake', sourceRef: interaction.interactionId },
+          });
+        }
+      }
+      if (interaction.reply !== undefined) messages.push(publicMessage('reply', interaction.reply));
+      return messages;
     });
   }
 

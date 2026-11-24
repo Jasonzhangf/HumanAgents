@@ -25,6 +25,8 @@ import { startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { uiRuntimeControlJournalPath } from '../../packages/app/src/ui-runtime/journal.js';
 import type { AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
+import type { ProductMessage } from '../../packages/contracts/src/product-read.js';
+import type { MainTopicProjection } from '../../packages/ui/projection/main-topic.js';
 
 type Wire = {
   readonly input?: readonly {
@@ -212,6 +214,19 @@ test('product session debug reads the current request and stays closed by defaul
     assert.equal(normalResponse.status, 200, normalText);
     assert.equal('debug' in JSON.parse(normalText), false, 'debug is closed when the parameter is omitted');
     const { usage } = JSON.parse(normalText);
+    const { messages } = JSON.parse(normalText) as { messages: readonly ProductMessage[] };
+    const activity = messages.flatMap(message => message.explicitToolStep ? [message.explicitToolStep] : []);
+    assert.deepEqual(activity.map(step => [step.kind, step.tool]), [
+      ['tool.started', { kind: 'submit-turn', callId: 'session-debug-end' }],
+      ['tool.finished', { kind: 'submit-turn', callId: 'session-debug-end', status: 'succeeded' }],
+    ]);
+    const topicResponse = await fetch(`${origin}/api/main-topic`, { headers: { cookie, origin } });
+    assert.equal(topicResponse.status, 200);
+    const topic = await topicResponse.json() as MainTopicProjection;
+    const topicActivity = topic.turns.find(turn => turn.interactionId === first && turn.statusFacts !== undefined)
+      ?.statusFacts?.steps?.filter(step => step.tool !== undefined);
+    assert.deepEqual(activity, topicActivity?.map(({ kind, requestId, turnId, tool }) => ({ kind, requestId, turnId, tool })));
+    assert.equal(/checkpointRecord|transport drained after the accepted end call/.test(JSON.stringify(messages)), false);
     assert.deepEqual(usage.calls.map((call: { inputTokens: number }) => call.inputTokens), [100, 200]);
     assert.equal(usage.calls[0].currentCallCacheHitRate, 0);
     assert.equal(usage.calls[1].currentCallCacheHitRate, 0.5);
