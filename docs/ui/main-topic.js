@@ -11,6 +11,7 @@ export function ownedMainTopicTurns(projection) {
   return turns.filter(turn => turn.detailReadError || !(['status', 'error'].includes(turn.kind) && cardTasks.has(taskValue(turn.taskId)))).map(turn => {
     const task = taskForTurn(turn, projection.tasks)
     if (!task || turn.role === 'user' || !['draft', 'status', 'error', 'result'].includes(turn.kind)) return turn
+    if (turn.kind === 'draft' && task.sourceInteractionId && turn.interactionId !== task.sourceInteractionId) return turn
     if (turn.kind === 'draft') return { ...turn, kind: 'dispatch', quote: undefined,
       dispatchTask: taskValue(projection.openInputRequest?.taskId) === taskValue(task.taskId) ? { ...task, inputRequest: projection.openInputRequest } : task,
       documentText: turn.text, text: '任务已交办' }
@@ -298,7 +299,14 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     }
     if (control?.key !== key) {
       control?.form.remove()
-      control = { ...renderAnswerControls(request, onAnswer, host, topicState), key }
+      if (topicState.onOpenDecision) {
+        const form = element('button', '回答原问题', 'button mt-option')
+        form.type = 'button'
+        form.addEventListener('click', () => topicState.onOpenDecision(request))
+        control = { form, update() {}, key }
+      } else {
+        control = { ...renderAnswerControls(request, onAnswer, host, topicState), key }
+      }
       answerControls.set(article, control)
       bubble.append(control.form)
     } else control.update(request, onAnswer)
@@ -390,7 +398,7 @@ export function mainTopicTurnGroups(projection) {
   const turns = projection?.turns || []
   if (!projection?.rounds?.length) return { history: [], activeTurns: turns }
   const turnsById = new Map(turns.map((turn) => [turn.turnId, turn]))
-  const resolve = (round) => round.messageRefs.map((ref) => turnsById.get(ref)).filter(Boolean)
+  const resolve = (round) => [...new Set(round.messageRefs)].map((ref) => turnsById.get(ref)).filter(Boolean)
   return {
     history: projection.rounds.filter((round) => round.lane === 'history')
       .map((round) => ({ round, turns: resolve(round) })),
@@ -399,7 +407,7 @@ export function mainTopicTurnGroups(projection) {
   }
 }
 
-export function renderMainTopic(host, projection, { onAnswer, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved } = {}) {
+export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved } = {}) {
   projection = { ...projection, turns: ownedMainTopicTurns(projection) }
   if (!(host instanceof HTMLElement)) throw new Error('main topic requires a host element')
   const activeControl = host.contains(document.activeElement) ? document.activeElement : undefined
@@ -416,6 +424,7 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDetail, onOp
     topicStates.set(host, topicState)
   }
   if (onOpenDetail !== undefined) topicState.onOpenDetail = onOpenDetail
+  if (onOpenDecision !== undefined) topicState.onOpenDecision = onOpenDecision
   if (onOpenHistoryDetail !== undefined) topicState.onOpenHistoryDetail = onOpenHistoryDetail
   if (onOpenDispatch !== undefined) topicState.onOpenDispatch = onOpenDispatch
   if (dispatchObservation !== undefined) topicState.dispatchObservation = dispatchObservation

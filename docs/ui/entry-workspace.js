@@ -58,7 +58,7 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   newProject.dataset.entryDialog = 'new-project'
   newProject.type = 'button'
   newProject.addEventListener('click', () => management(newProject))
-  projectHead.append(element('h2', '项目', 'entry-kicker'), newProject)
+  projectHead.append(element('h2', '工作区', 'entry-kicker'), newProject)
   rail.append(closeRail, brand, ceo, projectHead, projects, foot)
   mobileRail.append(rail)
   const toolbar = element('header', undefined, 'entry-toolbar')
@@ -163,6 +163,7 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   let projectReadError
   let projectRefreshTimer
   const projectGroups = new Map()
+  const workspaceGroups = new Map()
   let renderedProjects = ''
   const detailState = (label, message) => {
     const node = element('button', label, 'entry-person entry-unavailable')
@@ -195,7 +196,8 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
     renderedProjects = signature
     projects.querySelector('.entry-read-state')?.remove()
     const present = new Set()
-    let index = 0
+    const presentWorkspaces = new Set()
+    const positions = new Map()
     for (const project of rows) {
       const key = project.scope?.projectKey
       if (!key || present.has(key)) continue
@@ -205,12 +207,36 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
       const label = isCurrent ? current.projectName : project.label || '项目'
       const duplicate = rows.filter((row) => (row.label || (row.scope?.projectKey === current?.projectKey ? current.projectName : '项目')) === label).length > 1
       const workspace = isCurrent ? current.workspaceCwd : project.workspaceCwd
+      const workspaceKey = workspace || ''
+      if (!workspaceGroups.has(workspaceKey)) {
+        const folder = element('details', undefined, 'entry-workspace-folder')
+        folder.open = saved().workspaces?.[workspaceKey] ?? true
+        let wasOpen = folder.open
+        folder.addEventListener('toggle', () => {
+          if (wasOpen === folder.open) return
+          wasOpen = folder.open
+          remember({ workspaces: { ...saved().workspaces, [workspaceKey]: folder.open } })
+        })
+        const name = element('summary', entryWorkspaceHint(workspace) || '未关联工作区', 'entry-project-name')
+        if (workspace) name.title = workspace
+        const directory = element('div', undefined, 'entry-workspace-projects')
+        folder.append(name, directory)
+        workspaceGroups.set(workspaceKey, { folder, directory })
+      }
+      const { folder, directory: workspaceProjects } = workspaceGroups.get(workspaceKey)
+      if (!presentWorkspaces.has(workspaceKey)) {
+        const position = projects.children[presentWorkspaces.size]
+        if (position !== folder) projects.insertBefore(folder, position ?? null)
+        presentWorkspaces.add(workspaceKey)
+      }
+      const index = positions.get(workspaceKey) ?? 0
+      positions.set(workspaceKey, index + 1)
       const groupSignature = JSON.stringify([label, isCurrent, mode, workspace, isCurrent ? current.agentName : undefined])
       const previous = projectGroups.get(key)
       if (previous?.signature === groupSignature) {
         updateWorkspaceHint(previous.summary, workspace, duplicate)
-        const position = projects.children[index++]
-        if (position !== previous.group) projects.insertBefore(previous.group, position ?? null)
+        const position = workspaceProjects.children[index]
+        if (position !== previous.group) workspaceProjects.insertBefore(previous.group, position ?? null)
         continue
       }
       previous?.group.remove()
@@ -259,7 +285,13 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
       }
       group.append(directory)
       projectGroups.set(key, { group, summary, signature: groupSignature })
-      projects.insertBefore(group, projects.children[index++] ?? null)
+      workspaceProjects.insertBefore(group, workspaceProjects.children[index] ?? null)
+    }
+    for (const [key, entry] of workspaceGroups) {
+      if (!presentWorkspaces.has(key)) {
+        entry.folder.remove()
+        workspaceGroups.delete(key)
+      }
     }
     for (const [key, entry] of projectGroups) {
       if (!present.has(key)) {
@@ -293,6 +325,10 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   function update(projection) {
     current = projection
     const selection = entryWorkspaceSelection(search, projection)
+    topic.hidden = !selection.available
+    for (const button of tools.children) {
+      if (button !== tools.lastElementChild) button.hidden = !selection.available
+    }
     title.textContent = projection ? `${projection.projectName}.${projection.agentName} · cwd ${projection.workspaceCwd}` : selection.label
     title.title = title.textContent
     scopeText.textContent = projection ? `当前服务项目：${projection.projectName}\n${projection.workspaceCwd}` : '项目范围尚未读取'

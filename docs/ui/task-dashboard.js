@@ -88,11 +88,14 @@ import {
   renderProductRelationChain,
 } from './product-relation-view.js'
 import {
+  createTaskDecisionPrompt,
+  decisionMatchesTaskScope,
   isExactControllableTarget,
   openDecisionModal,
   renderInterventionEntry,
   renderPendingDecision,
 } from './product-control-view.js'
+import { taskBlocker } from './task-blocker.js'
 
 const readScope = taskReadScopeFromLocation()
 // The board may focus an explicit intake before it has produced any Task.
@@ -685,12 +688,8 @@ function decisionMatchesFocus(decision, focus, scope) {
     && typeof decision.request?.question === 'string'
     && decision.request.question.trim() !== ''
   if (!grantDecision && !inputDecision) return false
-  const target = decision.target
-  if (target?.kind !== 'interaction' || !isExactControllableTarget(target)) return false
   const scopeTaskId = productTaskScopeValue(scope)
-  if (scopeTaskId === undefined || target.taskRef?.value !== scopeTaskId) return false
-  if (target.scope?.projectKey !== scope.projectKey || target.scope?.mode !== scope.mode) return false
-  if (target.scope?.taskId?.value !== scopeTaskId) return false
+  if (!decisionMatchesTaskScope(decision, productDecisionReadScope(scope))) return false
   if (inputDecision && decision.request.taskId?.value !== scopeTaskId) return false
   if (productTaskScopeValue(focus?.scope) !== scopeTaskId) return false
   return focus?.taskRef?.value === scopeTaskId
@@ -833,6 +832,7 @@ export function createTaskFocusController({
   replaceLocation,
   closeRelationLayer = () => undefined,
   onSessionRendered,
+  decisionPrompt,
 } = {}) {
   productControllerHost(centerHost, 'product focus center host')
   if (relationHost) productControllerHost(relationHost, 'product focus relation host')
@@ -1025,17 +1025,23 @@ export function createTaskFocusController({
   }
 
   function renderDecision(decisionResult) {
+    const decision = state.decision
+    const decisionScope = productDecisionReadScope(state.scope)
     if (decisionResult.status === 'rejected') {
       renderProductDecisionUnavailable(centerHost, make, state.decisionFailure
         ?? productFailure(decisionResult.reason, 'product-decision.read.failed'))
       return
     }
-    const decision = state.decision
     if (!decision) return
     const decisionHost = make('div', undefined, 'product-focus-decision')
     decisionHost.dataset.productFocusControl = 'decision'
     renderPendingDecision(decisionHost, decision, {
       element: make,
+      ...(decisionPrompt ? { onOpen: (selectedDecision) => {
+        if (state.decision === selectedDecision) {
+          decisionPrompt.sync(selectedDecision, decisionScope, undefined, { reopen: true })
+        }
+      } } : {}),
       onIntent: (intent, selectedDecision) => {
         // A focus change replaces state.decision; a stale card handler must not
         // open an approval for the previous task.
@@ -1113,6 +1119,7 @@ export function createTaskFocusController({
     if (disposed) return { ok: false, disposed: true }
     const read = locationRead
     if (read.failure) {
+      decisionPrompt?.dismiss()
       serial += 1
       centerHost.replaceChildren()
       renderProductFocusFailure(centerHost, make, '读取位置无效', read.failure)
@@ -1136,6 +1143,7 @@ export function createTaskFocusController({
     currentLocation = locationValue
     const focus = locationValue.focus ?? defaultProductFocus(locationValue.scope)
     const scope = productScopeForFocus(focus, locationValue.scope)
+    if (productRelationRefKey(focus) !== productRelationRefKey(state.focus)) decisionPrompt?.dismiss()
     state.location = locationValue
     state.focus = focus
     state.scope = scope
@@ -1168,12 +1176,21 @@ export function createTaskFocusController({
           { code: 'product-decision.read.unavailable', message: '当前页面没有待决定事项读取入口。', ownerId: 'humanagent.ui.task-dashboard' },
           'product-decision.read.unavailable',
         ))
+    const readyDecision = decisionPromise.then(value => {
+      if (!disposed && requestSerial === serial) {
+        decisionPrompt?.sync(selectProductPendingDecision(value, focus, scope), decisionReadScope)
+      }
+      return value
+    }, error => {
+      if (!disposed && requestSerial === serial) decisionPrompt?.dismiss()
+      throw error
+    })
 
     const [sessionResult, relationResult, outputResult, decisionResult] = await Promise.allSettled([
       sessionPromise,
       relationsPromise,
       outputPromise,
-      decisionPromise,
+      readyDecision,
     ])
     if (disposed || requestSerial !== serial) {
       return { ok: false, superseded: true, focus, scope }
@@ -1235,8 +1252,6 @@ export function createTaskFocusController({
       return { ok: false, invalid: true }
     }
     serial += 1
-    state.focus = target
-    state.scope = scope
     writeLocation(next)
     return track(load({ location: next }))
   }
@@ -1265,6 +1280,7 @@ export function createTaskFocusController({
 
   function dispose() {
     disposed = true
+    decisionPrompt?.dismiss()
     if (renderedSessionHost) disposeProductSessionView(renderedSessionHost)
     loading?.abort.abort()
     serial += 1
@@ -1330,9 +1346,7 @@ const template = TASK_DASHBOARD_TEST_MODE
   : mountProductShell(document.getElementById('page-root'), {
   layout: 'work',
   active: 'Task List',
-  eyebrow: sessionPageScope ? '会话' : 'Task Dashboard',
   title: sessionPageScope ? '显式会话' : '任务看板',
-  lede: sessionPageScope ? '查看这次会话的消息与模型调用统计。' : '这里显示这个任务当前的状态、执行进展、关键节点和可执行操作。',
   scope: explicitScope ?? sessionPageScope,
   breadcrumbs: explicitScope
     ? [
@@ -1358,6 +1372,7 @@ const template = TASK_DASHBOARD_TEST_MODE
 })
 const { hosts, shell, detail } = template
 const { primary, support, status, heading } = hosts
+if (!TASK_DASHBOARD_TEST_MODE) hosts.page.classList.add('task-dashboard-page')
 
 let productFocusController = null
 let productCenterHost = null
@@ -1604,6 +1619,11 @@ function ensureProductFocus() {
     replaceLocation: replacePageProductLocation,
     closeRelationLayer: () => template.closeRelation?.(),
     onSessionRendered: renderProductSessionExtras,
+    decisionPrompt: createTaskDecisionPrompt({
+      api,
+      host: hosts.page,
+      onReceipt: () => void refresh().catch(setRefreshError),
+    }),
   })
   return productFocusController
 }
@@ -3588,8 +3608,7 @@ function absentPlanFailure(read) {
   const state = read?.ok === true
     ? resolveCurrentPlanRevision(read.value, { explicitScope })
     : read
-  if (state?.ok === true) return undefined
-  return ABSENT_PLAN_CODES.has(state?.failure?.code) ? state.failure : undefined
+  return state?.ok !== true && ABSENT_PLAN_CODES.has(state?.failure?.code) ? state.failure : undefined
 }
 
 function renderDashboardDetailFold(label, content, open = false) {
@@ -3637,7 +3656,7 @@ function renderDashboard() {
     currentCopy.append(breadcrumbs)
   }
   if (explicitScope) {
-    const control = element('button', '任务控制 / 执行授权', 'button button--quiet')
+    const control = element('button', '任务操作', 'button button--quiet')
     control.dataset.taskGrantControlEntry = 'entry'
     control.setAttribute('aria-haspopup', 'dialog')
     control.addEventListener('click', () => {
@@ -3654,9 +3673,6 @@ function renderDashboard() {
   currentSection.append(currentCopy)
   primary.append(currentSection)
 
-  const productFocus = ensureProductFocus()
-  if (productFocus) primary.append(productFocus.centerHost)
-
   const waitingStatus = dashboard.statusSections.waiting
   const waitingStatusAbsent = !waitingStatus || waitingStatus === ABSENT_WAITING_STATUS
   const absentPlan = absentPlanFailure(planHistoryState)
@@ -3670,19 +3686,21 @@ function renderDashboard() {
     ? `可使用：${renderedActionLabels.join('、')}`
     : ''
 
-  if (dashboard.error) {
-    const errorNotice = element('div', undefined, 'status-banner')
+  const blocker = taskBlocker(dashboard)
+  if (blocker) {
+    const errorNotice = element('div', undefined, 'status-banner task-blocker')
     errorNotice.dataset.tone = 'danger'
     errorNotice.setAttribute('role', 'alert')
-    errorNotice.append(element('strong', '任务执行遇到问题，需要处理。'))
-    const failureDetailButton = element('button', '查看失败原因', 'button button--quiet')
-    failureDetailButton.type = 'button'
-    failureDetailButton.addEventListener('click', () => technicalDetail.click())
-    errorNotice.append(failureDetailButton)
+    errorNotice.append(element('strong', blocker.reason))
+    if (blocker.code) errorNotice.append(element('code', blocker.code))
+    if (blocker.next) errorNotice.append(element('p', blocker.next))
     primary.append(errorNotice)
   }
 
-  if (!['succeeded', 'failed', 'cancelled', 'stopped'].includes(dashboard.state)
+  const productFocus = ensureProductFocus()
+  if (productFocus) primary.append(productFocus.centerHost)
+
+  if (!blocker && !['succeeded', 'cancelled', 'stopped'].includes(dashboard.state)
     && (!waitingStatusAbsent || applicableNextStep)) {
     const currentSection = element('section', undefined, 'section')
     currentSection.append(element('h2', '当前进展'))
@@ -3719,37 +3737,15 @@ function renderDashboard() {
   technicalDetail.addEventListener('click', () => openPageDetail({
     title: '任务技术详情',
     entries: [
-      ['当前执行节点', dashboard.currentNode],
-      ['projectKey', explicitScope?.projectKey],
-      ['taskId', taskId],
-      ['mode', dashboard.mode],
-      ['nextStep', dashboard.nextStep],
-      ['error.ownerId', dashboard.error?.ownerId],
-      ['error.code', dashboard.error?.code],
-      ['error.message', dashboard.error?.message],
-      ['error.nextAction', dashboard.error?.nextAction],
-      ['control.error.ownerId', taskControlError?.ownerId],
-      ['control.error.code', taskControlError?.code],
-      ['control.error.message', taskControlError?.message],
-      ['control.error.nextAction', taskControlError?.nextAction],
-      ['error.cleanupError（清理错误链）', dashboard.error?.cleanupError === undefined
-        ? undefined
-        : JSON.stringify(dashboard.error.cleanupError, null, 2)],
-      ['保留的 checkpoint 记录', dashboard.checkpoint ? '以下为保留记录，不表示任务当前受阻。' : undefined],
-      ['checkpoint.outcome', dashboard.checkpoint?.outcome],
-      ['checkpoint.seq', dashboard.checkpoint?.seq],
-      ['checkpoint.summary', dashboard.checkpoint?.summary],
-      ['任务输入', dashboard.input === undefined || dashboard.input === null || dashboard.input === ''
-        ? '尚未输入'
-        : dashboard.input],
-      ['等待 / 收拢状态', waitingStatusAbsent ? waitingStatus : undefined],
-      ['当前任务计划', absentPlan
-        ? `${absentPlan.code} · ${absentPlan.message} · next=${absentPlan.nextAction}`
-        : undefined],
+      ['服务错误原文', dashboard.error?.message],
+      ['恢复动作原文', dashboard.error?.nextAction],
+      ['恢复检查点', dashboard.checkpoint?.summary],
+      ['任务控制错误', taskControlError?.code],
     ].filter(([, value]) => value !== undefined && value !== null),
   }))
   const supportDetails = element('div')
-  supportDetails.append(statuses, technicalDetail)
+  supportDetails.append(statuses)
+  if (dashboard.error || dashboard.checkpoint || taskControlError) supportDetails.append(technicalDetail)
   support.append(renderDashboardDetailFold('运行与连接详情', supportDetails))
 
   if (!explicitScope) {

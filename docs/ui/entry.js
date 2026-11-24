@@ -30,7 +30,8 @@ import {
 import { locationFromHash } from './product-location.js'
 import { entryWorkspaceSelection, entryProjectHref, mountEntryWorkspace } from './entry-workspace.js'
 import { submissionView, intakeFinished, draftReviewFromSnapshot, canContinueSubmission } from './send-lifecycle.js'
-import { createDispatchTracking, taskValue } from './dispatch-tracking.js'
+import { applyTaskCardResult, createDispatchTracking, taskValue } from './dispatch-tracking.js'
+import { createTaskDecisionPrompt, decisionMatchesTaskScope } from './product-control-view.js'
 
 // ── Page seams shared with the W4 product consumer ──────────────────────────
 //
@@ -483,7 +484,7 @@ function paintSubmission() {
   const turns = (projection.turns || []).map(turn => turn.kind === 'draft' && pendingDrafts.has(turn.interactionId)
     ? { ...turn, draftReview: pendingDrafts.get(turn.interactionId) } : turn)
   renderMainTopic(mainTopicHost, submissionView({ ...projection, turns }, sendAttempt), {
-    onAnswer: answerMainTopicRequest,
+    onOpenDecision: (request) => openEntryDecision(request),
     onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, latestMainTopic),
     onOpenHistoryDetail: openMainTopicHistoryDetail,
     onOpenDispatch: dispatchTracking.open,
@@ -525,6 +526,107 @@ async function continueSubmission() {
 const mainTopicUsage = createSessionUsageReader({ api,
   onChange: ({ usage, ...options }) => updateMainTopicUsage(mainTopicHost, usage, options),
 })
+const decisionNotice = element('aside', undefined, 'status-banner task-decision-notice')
+decisionNotice.hidden = true
+decisionNotice.dataset.tone = 'warning'
+const entryDecisionPrompt = createTaskDecisionPrompt({ api, host: template.hosts.page, onReceipt: () => void refreshMainTopic() })
+let visibleDecisions = []
+let selectedDecisionKey
+let decisionRead
+function clearEntryDecision() {
+  visibleDecisions = []
+  selectedDecisionKey = undefined
+  decisionNotice.hidden = true
+  entryDecisionPrompt.dismiss()
+}
+function currentEntryQuestions(projection) {
+  const questions = new Map()
+  for (const turn of projection.turns ?? []) {
+    const taskId = taskValue(turn.taskId)
+    if (!taskId || !turn.requestId) continue
+    if (turn.kind === 'input-request') questions.set(taskId, turn)
+    else if (turn.role === 'user' && turn.turnId.startsWith('input-answer:')) {
+      const question = questions.get(taskId)
+      if (question?.requestId === turn.requestId && question.expectedRevision === turn.expectedRevision) questions.delete(taskId)
+    }
+  }
+  const pending = projection.openInputRequest
+  if (pending) questions.set(taskValue(pending.taskId), pending)
+  return questions
+}
+function openEntryDecision(request) {
+  const item = typeof request === 'string'
+    ? visibleDecisions.find(item => item.key === request)
+    : visibleDecisions.find(({ decision, scope }) => taskValue(request?.taskId) === scope.taskId
+      && request.requestId === decision.request?.requestId && request.expectedRevision === decision.request?.expectedRevision)
+  if (!item) return
+  const { key, decision, scope, title } = item
+  const question = currentEntryQuestions(latestMainTopic).get(scope.taskId)
+  if (question && (decision.request?.requestId !== question.requestId
+    || decision.request?.expectedRevision !== question.expectedRevision)) return
+  selectedDecisionKey = key
+  entryDecisionPrompt.sync(decision, scope, title, { reopen: true, recipient: latestMainTopic.agentName, project: latestMainTopic.projectName })
+}
+function waitingDecisionTasks(projection) {
+  const pendingId = taskValue(projection.openInputRequest?.taskId)
+  const waitingIds = (projection.tasks ?? []).filter(task => task.state === 'waiting').map(task => taskValue(task.taskId))
+  return [...new Set([pendingId, ...waitingIds].filter(Boolean))]
+}
+
+function refreshEntryDecision(projection) {
+  const { projectKey, mode } = projection
+  const taskIds = waitingDecisionTasks(projection)
+  if (!projectKey || !mode || taskIds.length === 0) {
+    clearEntryDecision()
+    return
+  }
+  if (decisionRead) return
+  decisionRead = Promise.allSettled(taskIds.map(taskId => api.readProductDecision({ projectKey, mode, taskId }))).then(results => {
+    const current = latestMainTopic
+    if (pageLeaving || current?.projectKey !== projectKey || current.mode !== mode) return
+    const waitingNow = new Set(waitingDecisionTasks(current))
+    const questions = currentEntryQuestions(current)
+    const items = results.flatMap((result, index) => {
+      const decision = result.status === 'fulfilled' ? result.value : null
+      const taskId = taskIds[index]
+      const scope = { projectKey, mode, taskId }
+      if (!waitingNow.has(taskId) || decision?.state !== 'waiting' || !decisionMatchesTaskScope(decision, scope)
+        || !['task-input-request', 'task-grant'].includes(decision.kind)) return []
+      const pending = questions.get(taskId)
+      if (pending && (decision.kind !== 'task-input-request'
+        || decision.request?.requestId !== pending.requestId || decision.request?.expectedRevision !== pending.expectedRevision)) return []
+      const title = current.tasks?.find(task => taskValue(task.taskId) === taskId)?.title
+      const label = decision.kind === 'task-grant' ? '等待授权' : '等待你的回答'
+      const key = JSON.stringify([scope, decision.target.taskRef.value, decision.kind, title, decision.question,
+        decision.request?.requestId, decision.request?.expectedRevision])
+      return [{ key, decision, scope, title, label }]
+    })
+    if (!items.length) {
+      clearEntryDecision()
+      const failure = results.find((result, index) => result.status === 'rejected' && waitingNow.has(taskIds[index]))?.reason
+      if (failure) {
+        decisionNotice.replaceChildren(element('p', `暂时无法读取待回复事项${failure.code ? `（${failure.code}）` : ''}`))
+        decisionNotice.hidden = false
+      }
+      return
+    }
+    if (items.map(item => item.key).join() !== visibleDecisions.map(item => item.key).join()) {
+      decisionNotice.replaceChildren(...items.map(({ key, title, label }) => {
+        const row = element('div')
+        const button = element('button', '处理待回复事项', 'button')
+        button.type = 'button'
+        button.addEventListener('click', () => openEntryDecision(key))
+        row.append(element('strong', title ? `${title} · ${label}` : label), button)
+        return row
+      }))
+    }
+    visibleDecisions = items
+    const { key, decision, scope, title } = items.find(item => item.key === selectedDecisionKey) ?? items[0]
+    selectedDecisionKey = key
+    decisionNotice.hidden = false
+    entryDecisionPrompt.sync(decision, scope, title, { recipient: current.agentName, project: current.projectName })
+  }).finally(() => { decisionRead = undefined })
+}
 // A confirmed once task hands its live execution progress to the single entry
 // interface. While this handle exists the submit banner stays on the page and
 // mirrors the runtime's real execution steps; otherwise it settles normally.
@@ -586,6 +688,7 @@ function disposeEntryPage(event) {
   workspaceShell.dispose()
   dispatchTracking.dispose()
   mainTopicUsage.clear()
+  entryDecisionPrompt.dismiss()
   disposeMainTopic(mainTopicHost)
   submitBanner.clear()
   explicitStepStop?.()
@@ -595,28 +698,6 @@ function disposeEntryPage(event) {
   template.dispose()
 }
 window.addEventListener('pagehide', disposeEntryPage)
-
-async function answerMainTopicRequest(request, answer) {
-  const taskId = typeof request.taskId === 'string' ? request.taskId : request.taskId?.value
-  try {
-    await api.answerTaskInputRequest(taskId, request.requestId, {
-      answer,
-      expectedRevision: request.expectedRevision,
-    })
-  } catch (error) {
-    const projection = await api.readMainTopic()
-    const stillOpen = projection.openInputRequest?.requestId === request.requestId
-      && projection.openInputRequest?.taskId?.value === taskId
-    if (stillOpen) throw error
-    renderMainTopic(mainTopicHost, projection, { onAnswer: answerMainTopicRequest,
-      onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, projection),
-      onOpenHistoryDetail: openMainTopicHistoryDetail })
-    void mainTopicUsage.refresh(mainTopicUsageScope(projection))
-    scheduleMainTopicPoll(projection)
-    return projection
-  }
-  return refreshMainTopic()
-}
 
 function scheduleMainTopicPoll(projection) {
   if (mainTopicPoll !== null) clearTimeout(mainTopicPoll)
@@ -632,6 +713,7 @@ function scheduleMainTopicPoll(projection) {
 async function refreshMainTopic({ forceUsage = false } = {}) {
   if (pageLeaving) return undefined
   if (new URLSearchParams(window.location.search).get('scope') === 'system') {
+    clearEntryDecision()
     const selection = workspaceShell.update(null)
     mainTopicHost.replaceChildren(element('h2', selection.label), element('p', selection.reason))
     template.hosts.composer.hidden = true
@@ -672,6 +754,7 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
       if (!sendAttempt?.error) mainTopicReadFailures = 0
       const selection = workspaceShell.update(projection)
       if (!selection.available) {
+        clearEntryDecision()
         mainTopicUsage.clear()
         disposeMainTopic(mainTopicHost)
         mainTopicHost.replaceChildren(element('h2', selection.label), element('p', selection.reason))
@@ -679,7 +762,7 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
         return projection
       }
       template.hosts.composer.hidden = false
-      const pending = projection.openInputRequest
+      refreshEntryDecision(projection)
       paintSubmission()
       if (sendAttempt && !submitting && intakeFinished.has(sendAttempt.snapshot?.state) && !sendAttempt.error) {
         sendAttempt = null
@@ -1081,9 +1164,10 @@ function openActiveTasksDrawer(activeRows, trigger) {
       tracked.set(record.scope.taskId, record.task)
   }
   for (const task of tracked.values()) {
-    const button = element('button', `${task.title || '已交办任务'} · ${task.stateLabel || '等待接手'}`, 'button dispatch-board-entry')
+    const button = element('button', task.title || '已交办任务', 'button dispatch-board-entry')
     button.type = 'button'
     button.dataset.dispatchTaskId = taskValue(task.taskId)
+    applyTaskCardResult(button, task, dispatchTracking.observation(task), dispatchTracking.executionObserved(task))
     button.addEventListener('click', () => dispatchTracking.open(button, task))
     body.append(button)
   }
@@ -2197,7 +2281,7 @@ async function load() {
     ],
   })
   interactionCardHost.hidden = true
-  template.hosts.primary.append(mainTopicHost, interactionCardHost, liveArea())
+  template.hosts.primary.append(decisionNotice, mainTopicHost, interactionCardHost, liveArea())
   template.hosts.composer.append(renderForm())
   await refreshMainTopic()
   await refreshQueue()

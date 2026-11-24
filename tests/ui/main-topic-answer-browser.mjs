@@ -102,6 +102,9 @@ const projects = new Map([
     updatedAt: '2026-11-22T10:00:00.000Z', sourceInteractionId: 'short-message', rawInput: '你好',
   }]]), interactions: [], answers: [], normalChat: [], mainTopicReads: [] }],
 ])
+const alphaReadStarted = Promise.withResolvers()
+const releaseAlphaRead = Promise.withResolvers()
+let heldAlphaRead = false
 
 function projectFromRequest(req, url) {
   const requested = url.searchParams.get('project')
@@ -236,6 +239,23 @@ const server = createServer(async (req, res) => {
   const project = projectFromRequest(req, url)
   if (req.method === 'GET' && url.pathname === '/api/runtime/status') {
     return json(res, { mode: 'fake', state: 'ready', providerState: 'ready', connected: true })
+  }
+  if (req.method === 'GET' && url.pathname === '/api/product/decision') {
+    const taskId = url.searchParams.get('taskId')
+    const projectKey = url.searchParams.get('projectKey')
+    const mode = url.searchParams.get('mode')
+    const request = project.tasks.get(taskId)?.inputRequest
+    const taskRef = { scope: 'task', value: taskId }
+    if (project === projects.get('main') && taskId === 'task-alpha' && request && !heldAlphaRead) {
+      heldAlphaRead = true
+      alphaReadStarted.resolve()
+      await releaseAlphaRead.promise
+    }
+    return json(res, request ? {
+      kind: 'task-input-request', state: 'waiting', actions: ['answer'], question: request.question,
+      request: { ...request, taskId: taskRef },
+      target: { kind: 'interaction', taskRef, scope: { kind: 'task', projectKey, mode, taskId: taskRef } },
+    } : null)
   }
   const productRead = ['/api/product/session', '/api/product/relations'].includes(url.pathname)
   const taskRead = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(observation|semantic)$/)
@@ -378,10 +398,18 @@ try {
   page.on('pageerror', (error) => pageErrors.push(error.message))
   page.on('console', (message) => consoleMessages.push(`${message.type()}: ${message.text()}`))
   page.on('requestfailed', (request) => requestFailures.push(`${request.method()} ${request.url()} ${request.failure()?.errorText}`))
+  const alphaTask = projects.get('main').tasks.get('task-alpha')
+  const currentAlpha = alphaTask.inputRequest
+  alphaTask.inputRequest = { ...currentAlpha, question: '已过期的甲供应商问题', expectedRevision: 3 }
   try {
     await page.goto(`${origin}/`, { waitUntil: 'domcontentloaded' })
     await page.waitForSelector('.mt-turn--input-request')
+    await alphaReadStarted.promise
+    alphaTask.inputRequest = currentAlpha
+    await page.getByText(currentAlpha.question, { exact: true }).waitFor()
+    releaseAlphaRead.resolve()
   } catch (error) {
+    releaseAlphaRead.resolve()
     await writeFile(join(evidenceRoot, 'initial-page.html'), await page.content())
     throw error
   }
@@ -441,6 +469,12 @@ try {
     === JSON.stringify([...projects].map(([key, value]) =>
       [key, [...value.tasks], value.answers, value.interactions, value.normalChat])))
   await writeFile(join(evidenceRoot, 'tracking-read-checks.json'), JSON.stringify(trackingReadChecks, null, 2))
+
+  const prompt = page.locator('dialog.task-decision-prompt[open]')
+  await prompt.getByText('乙供应商发货到哪个城市？', { exact: true }).waitFor()
+  check('a stale non-primary decision is discarded without hiding the current decision for another task',
+    await page.locator('.task-decision-notice > div').filter({ hasText: '甲供应商比价' }).count() === 0)
+  await prompt.getByRole('button', { name: '稍后处理' }).click()
 
   // Exercise the public renderer with deliberately reused IDs on the same host.
   // Navigation would discard the DOM and cannot expose cross-scope reuse.
@@ -599,6 +633,7 @@ try {
 
   const alpha = page.locator('[data-turn-id="input-request:request-alpha"]')
   const beta = page.locator('[data-turn-id="input-request:request-beta"]')
+  await page.locator('.task-decision-notice > div').filter({ hasText: '甲供应商比价' }).waitFor()
   check('two questions render independently', await alpha.count() === 1 && await beta.count() === 1)
   for (const question of [alpha, beta]) {
     check('relay card keeps task tools in the task drawer', await question.locator('.tool-card').count() === 0)
@@ -607,14 +642,15 @@ try {
       && !(await question.innerText()).includes('发出请求等待响应'))
   }
 
-  const alphaInput = alpha.locator('[data-answer-custom="request-alpha"]')
+  await alpha.getByRole('button', { name: '回答原问题' }).click()
+  const alphaInput = prompt.locator('[data-product-role="task-input-answer"]')
   await alphaInput.focus()
   await alphaInput.fill('未税价')
   await page.waitForTimeout(2100)
   check('poll keeps the in-progress custom draft', await alphaInput.inputValue() === '未税价')
-  check('poll keeps input focus', await page.evaluate(() => document.activeElement?.dataset.answerCustom) === 'request-alpha')
+  check('poll keeps input focus', await alphaInput.evaluate(node => document.activeElement === node))
 
-  await alpha.locator('button[data-answer-option="含税价"]').click()
+  await prompt.getByRole('button', { name: '含税价', exact: true }).click()
   await page.waitForSelector('[data-turn-id="input-answer:request-alpha"]')
   const main = projects.get('main')
   check('option answer uses the clicked request path and revision', main.answers.length === 1
@@ -624,11 +660,12 @@ try {
   check('option answer quotes its own original question',
     await page.locator('[data-turn-id="input-answer:request-alpha"] .mt-quote-text').innerText()
       === '甲供应商按哪种价格口径比较？')
-  check('consumed question no longer renders controls', await alpha.locator('[data-answer-custom="request-alpha"], [data-answer-option]').count() === 0)
-  check('option answer keeps the other question open', await beta.locator('[data-answer-custom="request-beta"]').count() === 1)
+  check('consumed question no longer renders controls', await alpha.getByRole('button', { name: '回答原问题' }).count() === 0)
+  check('option answer keeps the other question open', await beta.getByRole('button', { name: '回答原问题' }).count() === 1)
 
-  await beta.locator('[data-answer-custom="request-beta"]').fill('上海')
-  await beta.locator('button.mt-option--custom').click()
+  await beta.getByRole('button', { name: '回答原问题' }).click()
+  await prompt.locator('[data-product-role="task-input-answer"]').fill('上海')
+  await prompt.getByRole('button', { name: '提交回答' }).click()
   await page.waitForSelector('[data-turn-id="input-answer:request-beta"]')
   check('custom answer uses its own request path and revision', main.answers.length === 2
     && main.answers[1].taskId === 'task-beta' && main.answers[1].requestId === 'request-beta'

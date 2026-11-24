@@ -18,12 +18,10 @@ const distFile = (relativePath) => pathToFileURL(join(repoRoot, 'dist', 'app', r
 const { id } = await import(distFile('contracts/src/index.js'))
 const { ensureControlLayout, resolveRuntimePaths } = await import(distFile('config/src/index.js'))
 const { AccessControlService } = await import(distFile('app/src/ui-runtime/access-control.js'))
+const { acquireDaemonLease } = await import(distFile('app/src/supervisor/index.js'))
 const { FakeReplayExecutionRuntimePort, startUiRuntime } = await import(distFile('app/src/ui-runtime/index.js'))
 const { DeterministicMemoryBackend } = await import(distFile('adapters/memory/src/index.js'))
 const { MemoryCoordinator } = await import(distFile('runtime/src/index.js'))
-const { JsonlOrganJournal, JsonlTaskIdentityJournal } = await import(distFile('adapters/jsonl/src/index.js'))
-const { JsonlTaskGrantJournal } = await import(distFile('adapters/jsonl/src/task-grants.js'))
-const { TaskIdentityConsumer } = await import(distFile('runtime/src/orchestration/task-identity.js'))
 const { AgentRuntimePoolManager, OrchestrationManager } = await import(distFile('runtime/src/orchestration/index.js'))
 const {
   createAgentProviderPort,
@@ -147,6 +145,7 @@ function captureTerminalUpstream(deliveryText) {
             schemaRef: 'humanagent://input/text/v1',
             reason: '任务缺少部署目标，无法继续执行。',
             impact: '当前任务停止，等待用户回答。',
+            options: ['生产环境', '预发环境'],
           },
           deliveryRefs: [],
         }
@@ -213,41 +212,6 @@ const createInterpreter = {
   },
 }
 
-class GrantPreparingIdentityJournal {
-  constructor(inner, grants, principalOwner) {
-    this.inner = inner
-    this.grants = grants
-    this.principalOwner = principalOwner
-  }
-
-  async append(input) {
-    const record = await this.inner.append(input)
-    const existing = await this.grants.readTaskGrant(record.scope.taskId)
-    if (existing.grant === null) {
-      await this.grants.grant({
-        requestId: `relay-grant:${record.scope.taskId.value}`,
-        taskId: record.scope.taskId,
-        owner: this.principalOwner,
-        capability: {
-          actionId: 'task.execute',
-          capabilities: ['provider.execution'],
-          scope: { organId: record.scope.organId, taskId: record.scope.taskId },
-        },
-        expectedRevision: 0,
-      })
-    }
-    return record
-  }
-
-  replay(scope) {
-    return this.inner.replay(scope)
-  }
-}
-
-function taskControlPathFor(checkpointRoot, mode = 'rcc') {
-  return join(checkpointRoot, mode, 'task-control.jsonl')
-}
-
 function memoryFor(projectKey) {
   return {
     coordinator: new MemoryCoordinator(),
@@ -255,44 +219,6 @@ function memoryFor(projectKey) {
     projectKey,
     roleId: 'execution',
   }
-}
-
-async function submitNewTask(runtime, cookie, suffix, title, directive) {
-  const post = async (path, body) => fetch(`${runtime.server.url}${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', cookie },
-    body: JSON.stringify(body),
-  })
-  const receive = await post('/api/explicit/inputs', {
-    sourceRef: `ui:${suffix}`,
-    rawInput: `create ${title}: ${directive}`,
-    channel: 'business',
-    requestKind: 'new-task-create',
-  })
-  assert.equal(receive.status, 201)
-  const { interactionId } = await receive.json()
-  const interpret = await post(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, {})
-  assert.equal(interpret.status, 200)
-  const inspected = await (await fetch(
-    `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}`,
-    { headers: { cookie } },
-  )).json()
-  assert.ok(inspected.draft)
-  assert.ok(inspected.revision)
-  const confirmation = await post(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/confirmation`, {
-    interactionId,
-    draftId: inspected.draft.draftId,
-    inputRevision: 1,
-    confirmationRef: `confirmation:${suffix}`,
-    confirmedBy: 'human:operator',
-    confirmedAt: new Date().toISOString(),
-    payloadRef: `asset://requirements/${suffix}`,
-    requestKind: 'new-task-create',
-    draftRevisionVersion: inspected.revision.revisionVersion,
-    draftRevisionHash: inspected.revision.revisionHash,
-  })
-  assert.equal(confirmation.status, 200)
-  return { interactionId, receipt: await confirmation.json() }
 }
 
 async function waitForAsync(assertion, timeoutMs = 20_000) {
@@ -316,6 +242,7 @@ async function main() {
   await mkdir(workspace, { recursive: true })
   const paths = await resolveRuntimePaths({ workspace, controlRoot: join(root, 'control') })
   await ensureControlLayout(paths)
+  const lease = await acquireDaemonLease(paths, { ownerId: 'execution-input-relay-browser' })
   projectKey = paths.projectKey
   const deliveryText = 'Relay complete: the production environment was confirmed and applied.'
   const upstream = captureTerminalUpstream(deliveryText)
@@ -326,13 +253,6 @@ async function main() {
   const challenge = await accessControl.issuePairingChallenge()
   const session = await accessControl.consumePairingCode(challenge.code)
   const cookie = accessControl.sessionCookie(session).split(';')[0]
-  const principalOwner = accessControl.readProductPrincipalOwner()
-  const taskControlPath = taskControlPathFor(paths.checkpointsRoot)
-  const identityWithGrant = new TaskIdentityConsumer(new GrantPreparingIdentityJournal(
-    new JsonlTaskIdentityJournal(new JsonlOrganJournal(taskControlPath)),
-    new JsonlTaskGrantJournal(new JsonlOrganJournal(taskControlPath)),
-    principalOwner,
-  ))
   const httpProvider = {
     source: 'http',
     provider: 'http',
@@ -348,7 +268,7 @@ async function main() {
   ]
   const runEvidenceRoot = join(root, 'evidence')
   await mkdir(runEvidenceRoot, { recursive: true })
-  let runtime
+  let runtime, browserInstance
   try {
     runtime = await startUiRuntime({
       mode: 'rcc',
@@ -362,6 +282,9 @@ async function main() {
       projectKey,
       workspaceRoot: paths.workspaceCwd,
       runtimePaths: paths,
+      lease: () => lease,
+      schedulerIntervalMs: 20,
+      agentRoster: [{ agentId: 'jenny', roleId: 'interaction', managementRole: 'manager' }],
       projectCatalog: async () => ({
         projects: [{
           projectKey: paths.projectKey,
@@ -375,7 +298,6 @@ async function main() {
       accessControl,
       explicitBrainInterpreter: createInterpreter,
       providerSource: 'http',
-      taskIdentity: identityWithGrant,
       runtimeComposition: {
         prepareAgentProvider: (selection) => prepareAgentProvider({
           roleId: selection.roleId,
@@ -419,15 +341,48 @@ async function main() {
       },
     })
 
-    const submission = await submitNewTask(runtime, cookie, 'relay-native', '生产环境交付', '需要确认部署环境并继续执行')
-    const tasksResponse = await fetch(`${runtime.server.url}/api/tasks`, { headers: { cookie } })
-    assert.equal(tasksResponse.status, 200)
-    const tasks = await tasksResponse.json()
-    const allTasks = [
-      ...tasks.running, ...tasks.waiting, ...tasks.completed, ...tasks.stopped, ...tasks.draft, ...tasks.failed,
-    ]
-    assert.equal(allTasks.length, 1)
-    const taskId = allTasks[0].taskId.value
+    const browserModule = await import(process.env.EXECUTION_INPUT_RELAY_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js')
+    const browser = browserModule.default ?? browserModule
+    browserInstance = await browser.chromium.launch({ headless: true })
+    const desktopContext = await browserInstance.newContext({ viewport: { width: 1280, height: 720 } })
+    await desktopContext.addCookies([{
+      name: cookie.split('=')[0],
+      value: cookie.slice(cookie.split('=')[0].length + 1),
+      domain: '127.0.0.1',
+      path: '/',
+    }])
+    const desktop = await desktopContext.newPage()
+    const pageErrors = []
+    const grantWrites = []
+    const apiErrors = []
+    const notePageError = error => pageErrors.push(error.message)
+    desktop.on('request', request => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/control/grant')) grantWrites.push(request.url())
+    })
+    const noteApiError = response => {
+      if (new URL(response.url()).pathname.startsWith('/api/') && !response.ok()) {
+        apiErrors.push({ path: new URL(response.url()).pathname, status: response.status() })
+      }
+    }
+    desktop.on('pageerror', notePageError)
+    desktop.on('response', noteApiError)
+    await desktop.goto(runtime.server.url)
+    await desktop.locator('textarea[name="rawInput"]').fill('交付项目报告，确认部署环境后继续执行')
+    await desktop.getByRole('button', { name: '发送给 Jenny' }).click()
+    const prompt = desktop.locator('dialog.task-decision-prompt[open]')
+    try {
+      await prompt.getByText('请补充部署目标。', { exact: true }).waitFor({ timeout: 20_000 })
+    } catch (error) {
+      const read = async path => (await fetch(runtime.server.url + path, { headers: { cookie } })).json()
+      const [topic, tasks] = await Promise.all([read('/api/main-topic'), read('/api/tasks')])
+      await writeFile(join(evidenceRoot, 'waiting-failure.json'), JSON.stringify({
+        visible: await desktop.locator('body').innerText(), pageErrors, apiErrors, topic, tasks,
+      }, null, 2))
+      throw error
+    }
+    assert.deepEqual(grantWrites, [])
+    const projection = await (await fetch(`${runtime.server.url}/api/main-topic`, { headers: { cookie } })).json()
+    const taskId = projection.openInputRequest.taskId.value
     const dashboardUrl = `/api/tasks/${encodeURIComponent(taskId)}/dashboard?projectKey=${encodeURIComponent(projectKey)}&mode=rcc`
     await waitForAsync(async () => {
       const dashboardResponse = await fetch(`${runtime.server.url}${dashboardUrl}`, { headers: { cookie } })
@@ -443,43 +398,33 @@ async function main() {
     assert.equal(decisionResponse.status, 200)
     assert.equal(decision.kind, 'task-input-request')
     assert.deepEqual(decision.actions, ['answer'])
+    assert.deepEqual(decision.request.options, ['生产环境', '预发环境'])
+    assert.ok(decision.request.requester?.roleId)
+    const role = { execution: '执行 Agent', orchestration: '编排 Agent' }[decision.request.requester.roleId]
+    assert.ok(role)
+    assert.match(await prompt.innerText(), new RegExp(role))
+    if (decision.request.requester.agentId) assert.ok((await prompt.innerText()).includes(decision.request.requester.agentId))
     assert.equal(decision.request.taskId.value, taskId)
     const requestId = decision.request.requestId
     const expectedRevision = decision.request.expectedRevision
 
-    const browserModule = await import(process.env.EXECUTION_INPUT_RELAY_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js')
-    const browser = browserModule.default ?? browserModule
-    const browserInstance = await browser.chromium.launch({ headless: true })
-    const desktopContext = await browserInstance.newContext({ viewport: { width: 1280, height: 720 } })
-    await desktopContext.addCookies([{
-      name: cookie.split('=')[0],
-      value: cookie.slice(cookie.split('=')[0].length + 1),
-      domain: '127.0.0.1',
-      path: '/',
-    }])
-    const desktop = await desktopContext.newPage()
-    const consoleErrors = []
-    desktop.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
-    desktop.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
-    const taskPath = `/task-dashboard.html?task=${encodeURIComponent(taskId)}&projectKey=${encodeURIComponent(projectKey)}&mode=rcc`
-    await desktop.goto(`${runtime.server.url}${taskPath}`, { waitUntil: 'load', timeout: 45_000 })
-    await desktop.locator('.product-control-decision[data-product-pending-decision="task-input-request"]').waitFor({ timeout: 45_000 })
-    await desktop.locator('[data-product-role="task-input-answer"]').waitFor({ timeout: 45_000 })
-    await desktop.locator('[data-product-control-action="answer"]').waitFor({ timeout: 45_000 })
     await desktop.screenshot({ path: join(runEvidenceRoot, 'desktop-waiting.png'), fullPage: true })
-    const questionText = await desktop.locator('.product-control-decision-question').innerText()
-    assert.equal(questionText.trim(), '请补充部署目标。')
-    await desktop.locator('[data-product-role="task-input-answer"]').fill('生产环境')
     const answerResponsePromise = desktop.waitForResponse(
       (response) => response.url().includes('/input-requests/') && response.request().method() === 'POST',
       { timeout: 45_000 },
     )
-    await desktop.locator('[data-product-control-action="answer"]').click()
+    await prompt.getByRole('button', { name: '生产环境', exact: true }).click()
     const answerResponse = await answerResponsePromise
     const answerText = await answerResponse.text()
     const answerBody = JSON.parse(answerText)
     assert.equal(answerResponse.status(), 200, answerText)
-    assert.equal(answerBody.taskId.value, taskId)
+    assert.equal(new URL(answerResponse.url()).pathname,
+      `/api/tasks/${encodeURIComponent(taskId)}/input-requests/${encodeURIComponent(requestId)}/answer`)
+    const relationQuery = new URLSearchParams({ scope: 'task', projectKey, mode: 'rcc', taskId })
+    const relations = await (await fetch(`${runtime.server.url}/api/product/relations?${relationQuery}`, { headers: { cookie } })).json()
+    const execution = relations.relations.find(edge => edge.kind === 'child-execution' && edge.source.taskRef.value === taskId)
+    assert.ok(execution, 'ordinary once task must have a committed execution occurrence')
+    assert.equal(answerBody.taskId.value, execution.target.taskRef.value)
     assert.equal(answerBody.inputRevision, expectedRevision)
     assert.ok(answerBody.continuation.executionEpoch > decision.request.executionEpoch)
 
@@ -489,6 +434,11 @@ async function main() {
       assert.equal(dashboard.output, deliveryText)
     }, 45_000)
     await desktop.waitForFunction((expected) => document.body.innerText.includes(expected), deliveryText, { timeout: 45_000 })
+    await desktop.locator('.mt-history-summary-button').filter({ hasText: deliveryText }).click()
+    const answered = desktop.locator(`.mt-history-detail [data-turn-id="input-answer:${requestId}"]`)
+    assert.equal(await answered.locator('blockquote').innerText(), '请补充部署目标。')
+    assert.equal(await answered.locator('.mt-text').innerText(), '生产环境')
+    assert.deepEqual(grantWrites, [])
     await desktop.screenshot({ path: join(runEvidenceRoot, 'desktop-terminal.png'), fullPage: true })
     await desktopContext.close()
 
@@ -500,14 +450,16 @@ async function main() {
       path: '/',
     }])
     const mobile = await mobileContext.newPage()
-    mobile.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
-    mobile.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
-    await mobile.goto(`${runtime.server.url}${taskPath}`, { waitUntil: 'load', timeout: 45_000 })
+    mobile.on('pageerror', notePageError)
+    mobile.on('response', noteApiError)
+    await mobile.goto(runtime.server.url, { waitUntil: 'load', timeout: 45_000 })
     await mobile.waitForFunction((expected) => document.body.innerText.includes(expected), deliveryText, { timeout: 45_000 })
     await mobile.screenshot({ path: join(runEvidenceRoot, 'mobile-terminal.png'), fullPage: true })
     await mobileContext.close()
     await browserInstance.close()
-    assert.deepEqual(consoleErrors, [])
+    assert.deepEqual(pageErrors, [])
+    const rosterReads = apiErrors.filter(error => error.path === '/api/projects/roster' && error.status === 404)
+    assert.deepEqual(apiErrors.filter(error => !rosterReads.includes(error)), [])
     assert.equal(upstream.inputRequestArguments.length, 1)
     assert.equal(upstream.completedArguments.length, 1)
     assert.equal((await fetch(`${runtime.server.url}/api/tasks`, { headers: { cookie } })).status, 200)
@@ -520,21 +472,32 @@ async function main() {
       requestId,
       expectedRevision,
       answerStatus: answerResponse.status(),
+      executionTaskId: answerBody.taskId.value,
+      operationId: answerBody.continuation.operationId.value,
+      requester: decision.request.requester,
+      grantWrites: grantWrites.length,
+      browserClosed: !browserInstance.isConnected(),
       inputRequestArgument: upstream.inputRequestArguments[0],
       completedArgument: upstream.completedArguments[0],
-      consoleErrors,
+      pageErrors,
+      rosterReads,
     }, null, 2))
     for (const name of ['desktop-waiting.png', 'desktop-terminal.png', 'mobile-terminal.png', 'receipt.json']) {
       await copyFile(join(runEvidenceRoot, name), join(evidenceRoot, name))
     }
     console.log(JSON.stringify({ status: 'PASS', taskId, requestId }, null, 2))
+  } catch (error) {
+    await writeFile(join(evidenceRoot, 'execution-failure.txt'), String(error?.stack ?? error))
+    throw error
   } finally {
+    await browserInstance?.close()
     upstream.restore()
     await runtime?.close()
+    await lease.release()
     for (const name of ['desktop-waiting.png', 'desktop-terminal.png', 'mobile-terminal.png', 'receipt.json']) {
       try { await copyFile(join(runEvidenceRoot, name), join(evidenceRoot, name)) } catch {}
     }
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 }
 

@@ -1,5 +1,6 @@
 import { element, formatTime } from './runtime-api.js'
 import { renderProductSessionView, disposeProductSessionView, scopedProductToolEvents } from './product-session-view.js'
+import { taskBlocker } from './task-blocker.js'
 
 export const taskValue = id => typeof id === 'string' ? id : id?.value
 const roleLabel = role => ({ orchestration: '编排 Agent', execution: '执行 Agent', planner: '规划 Agent', reviewer: '审查 Agent', interaction: '交互 Agent' }[role] || '角色未记录')
@@ -28,6 +29,20 @@ export function dispatchState(task, observation, executionObserved = false) {
   return observed ? '跟踪中' : '等待接手'
 }
 
+export function applyTaskCardResult(card, task, observation, executionObserved) {
+  const state = dispatchState(task, observation, executionObserved)
+  const title = task.title || '已交办任务'
+  card.dataset.result = state === '完成' ? 'success' : state === '受阻' ? 'error' : 'neutral'
+  card.setAttribute('aria-label', [title, state, task.error?.code].filter(Boolean).join('，'))
+  if (state === '受阻') {
+    const { code, reason, next } = taskBlocker(task)
+    card.append(element('span', code ? `${reason} ${code}` : reason, 'dispatch-error'))
+    if (next) card.append(element('span', next, 'dispatch-next'))
+  } else if (state !== '完成') {
+    card.append(element('span', state, 'dispatch-state'))
+  }
+}
+
 // Execution is observable independently of a receipt accepting the delivery.
 export function executionIdentity(session, scope) {
   return [...new Set(scopedProductToolEvents({ ...session, toolScope: scope }).map(event => event.execution?.runtimeId).filter(Boolean))]
@@ -49,9 +64,9 @@ export function renderDispatchCard(turn, task, { onOpen, observation, executionO
   card.dataset.dispatchTaskId = taskValue(task.taskId)
   if (task.sourceInteractionId) card.dataset.interactionId = task.sourceInteractionId
   const copy = element('div', undefined, 'dispatch-card-copy')
-  copy.append(element('strong', '任务来源 Jenny · 投递给 编排 Agent'), element('span', task.title || '已交办任务'))
-  copy.append(element('span', `已投递 · ${dispatchState(task, observation, executionObserved)}`, 'dispatch-state'))
-  if (task.error) copy.append(element('p', `任务执行链受阻${task.error.code ? `（${task.error.code}）` : ''} · 发生角色：${roleLabel(observation?.currentNode?.ownerAgentRole)} · 恢复状态：${task.error.retryable ? '可重试，恢复回执未记录' : '未读到恢复完成回执'}`, 'dispatch-error'))
+  copy.append(element('strong', task.title || '已交办任务'), element('span', '已投递给 编排 Agent', 'dispatch-state'))
+  applyTaskCardResult(copy, task, observation, executionObserved)
+  card.dataset.result = copy.dataset.result
   const detail = element('button', '查看执行链', 'button conversation-status-detail')
   detail.type = 'button'
   detail.addEventListener('click', () => onOpen?.(detail, task, turn))
@@ -125,16 +140,13 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
       if (previous?.signature !== signature) renderProductSessionView(node, data, options)
       return node
     }
-    host.replaceChildren(element('p', '任务来源 Jenny · 投递给 编排 Agent', 'dispatch-chain'))
-    host.append(element('p', `任务状态：${dispatchState(record.task, record.children?.[0]?.observation, hasExecution(record))} · 接单情况：未读到明确接单回执`))
-    if (record.error) host.append(element('p', `执行链读取失败${record.error.code ? `（${record.error.code}）` : ''}，已保留任务，可重新打开。`))
+    host.replaceChildren()
+    applyTaskCardResult(host, record.task, record.children?.[0]?.observation, hasExecution(record))
+    if (record.error) host.append(element('p', `暂时无法读取执行步骤${record.error.code ? `（${record.error.code}）` : ''}`, 'dispatch-error'))
     for (const child of record.children || []) {
       const section = element('section', undefined, 'dispatch-execution')
       section.dataset.executionTaskId = child.scope.taskId
       section.append(element('h3', '执行链'))
-      const identities = executionIdentity(child.session, child.scope)
-      const observed = scopedProductToolEvents({ ...child.session, toolScope: child.scope }).length || observationTools(child.observation).length
-      section.append(element('p', `实际执行方：${identities.length ? identities.join('、') : '身份未记录'} · ${observed ? '已观察到执行' : '尚无执行记录'}`))
       const nodes = element('details')
       nodes.append(element('summary', '编排节点与状态'))
       for (const node of child.observation?.nodes || []) {
@@ -143,8 +155,6 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
         nodes.append(line)
       }
       section.append(nodes)
-      const modelMessages = (child.session?.messages || []).filter(message => message.actor?.sourceRef === 'provider.model')
-      if (modelMessages.length) section.append(element('p', `模型请求已有记录 · 最近记录 ${formatTime(modelMessages.at(-1).occurredAt)}`, 'dispatch-model-state'))
       view.readers ??= new Map()
       const readerKey = JSON.stringify(child.scope)
       if (!view.readers.has(readerKey)) view.readers.set(readerKey, address => api.readScopedToolOutput(address, child.scope))
@@ -175,9 +185,6 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
       for (const failure of child.failures) section.append(element('p', `部分执行信息暂不可读${failure.code ? `（${failure.code}）` : ''}`))
       host.append(section)
     }
-    const doc = element('details')
-    doc.append(element('summary', '任务文档与诊断'), element('pre', record.turn?.text || record.task.title || ''), element('pre', JSON.stringify({ taskId: record.scope.taskId, interactionId: record.task.sourceInteractionId, error: record.task.error, readError: record.error?.message }, null, 2)))
-    host.append(doc)
     for (const { node } of sessions.values()) if (!reused.has(node)) disposeProductSessionView(node)
     view.sessions = nextSessions
     for (const node of host.querySelectorAll('details')) if (disclosures.get(disclosureKey(node))) node.open = true

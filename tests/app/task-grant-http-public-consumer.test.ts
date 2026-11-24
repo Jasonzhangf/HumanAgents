@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -671,6 +671,14 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
       const childDashboard = await childRead.json() as { semanticTitle?: string; taskTitle: string };
       assert.equal(childDashboard.semanticTitle, 'HTTP grant task');
       assert.equal(childDashboard.taskTitle, `计划执行 ${occurrenceId}`, 'the original child title remains available as source data');
+      const parentScope = new URLSearchParams({ projectKey: schedulerPaths.projectKey, mode: 'rcc', taskId: prepared.taskId.value });
+      const pendingResponse = await fetch(`${active.runtime.server.url}/api/product/decision?${parentScope}`, { headers: { cookie } });
+      assert.equal(pendingResponse.status, 200);
+      const pending = await pendingResponse.json() as { kind: string; parentTaskId?: { value: string };
+        target?: { taskRef: { value: string } }; presentation?: { requesterName?: string } };
+      assert.equal(pending.kind, 'task-grant');
+      assert.equal(pending.parentTaskId?.value, prepared.taskId.value);
+      assert.equal(pending.target?.taskRef.value, resolvedChildTaskId);
       const childGrant = async (body?: unknown) => {
         const url = `${active.runtime.server.url}/api/tasks/${resolvedChildTaskId}/control/grant?${new URLSearchParams({ projectKey: schedulerPaths.projectKey, mode: 'rcc' })}`;
         const response = await fetch(url, {
@@ -684,8 +692,101 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
           readonly execution?: { readonly state: string; readonly current?: { readonly operationId?: string; readonly state: string } };
         };
       };
-      const grantInput = { requestId: 'once-child-grant', expectedRevision: 0 };
-      const granted = await childGrant(grantInput);
+      let grantInput = { requestId: 'once-child-grant', expectedRevision: 0 };
+      const browserEvidence = process.env.TASK_GRANT_BROWSER_EVIDENCE;
+      let granted: Awaited<ReturnType<typeof childGrant>>;
+      if (browserEvidence) {
+        const playwright = (await import(process.env.HUMANAGENT_PLAYWRIGHT_PATH ?? '/opt/homebrew/lib/node_modules/playwright/index.js')).default;
+        const browser = await playwright.chromium.launch({ headless: true });
+        await mkdir(browserEvidence, { recursive: true });
+        let otherRuntime: UiRuntime | undefined;
+        try {
+          const context = await browser.newContext({ viewport: { width: 1152, height: 900 } });
+          const authenticate = (value: string) => context.addCookies([{
+            name: value.slice(0, value.indexOf('=')), value: value.slice(value.indexOf('=') + 1),
+            domain: '127.0.0.1', path: '/',
+          }]);
+          await authenticate(cookie);
+          const page = await context.newPage();
+          const query = new URLSearchParams({ projectKey: schedulerPaths.projectKey, mode: 'rcc', task: prepared.taskId.value });
+          await page.goto(`${active.runtime.server.url}/task-dashboard.html?${query}`);
+          const prompt = page.locator('dialog.task-decision-prompt[open]');
+          await prompt.getByRole('button', { name: '持续允许此任务' }).waitFor();
+          const grantRequester = pending.presentation?.requesterName;
+          assert.ok(grantRequester);
+          assert.equal(grantRequester, 'HumanAgent · 任务执行控制');
+          assert.ok((await prompt.innerText()).includes(grantRequester));
+          assert.match(await prompt.innerText(), /scheduler-workspace · Jenny/);
+          assert.match(await prompt.innerText(), /HTTP grant task/);
+          assert.equal(await prompt.evaluate((dialog: HTMLElement) => dialog.matches(':modal')), false);
+          await page.screenshot({ path: join(browserEvidence, 'parent-pending-grant.png') });
+          const otherRoot = join(root, 'independent-project');
+          const otherProjectKey = 'independent-project';
+          const otherBinding: ProviderBinding = {
+            bindingId: 'independent-project', providerId: 'fake', protocol: 'responses',
+            endpointRef: 'fixture:independent', modelRef: 'fixture', configDigest: 'sha256:fixture', capabilityDigest: 'sha256:fixture',
+          };
+          await mkdir(otherRoot, { recursive: true, mode: 0o700 });
+          const otherAccess = await AccessControlService.open({ credentialPath: join(otherRoot, 'web-access.json'), create: true });
+          const otherChallenge = await otherAccess.issuePairingChallenge();
+          const otherSession = await otherAccess.consumePairingCode(otherChallenge.code);
+          otherRuntime = await startUiRuntime({
+            mode: 'fake', organId: id('organ', otherProjectKey), binding: otherBinding,
+            accessControl: otherAccess,
+            port: new FakeReplayExecutionRuntimePort({ binding: otherBinding }),
+            productRoot: otherRoot, workspaceRoot: otherRoot, projectKey: otherProjectKey,
+            checkpointRoot: join(otherRoot, 'checkpoints'), evidenceRoot: join(otherRoot, 'assets'),
+            uiRoot: join(process.cwd(), 'docs', 'ui'), portNumber: 0,
+            memory: { coordinator: new MemoryCoordinator(), backend: new DeterministicMemoryBackend(), projectKey: otherProjectKey, roleId: 'execution' },
+            explicitBrainInterpreter: { async interpret(input) {
+              return { kind: 'answer', normalizedInput: input.rawInput, answer: '独立项目会话响应', knownFacts: [], decisionRefs: [] };
+            } },
+          });
+          await authenticate(otherAccess.sessionCookie(otherSession).split(';')[0]!);
+          await page.goto(otherRuntime.server.url);
+          assert.equal(await prompt.count(), 0);
+          await page.locator('textarea[name="rawInput"]').fill('验证独立项目会话');
+          await page.getByRole('button', { name: '发送给 Jenny' }).click();
+          await page.getByText('独立项目会话响应', { exact: true }).first().waitFor();
+          assert.equal(await prompt.count(), 0);
+          assert.equal((await childGrant()).readback.grant, null);
+          assert.equal(posts, 0);
+          await page.screenshot({ path: join(browserEvidence, 'other-project-conversation.png') });
+          await authenticate(cookie);
+          await page.goto(`${active.runtime.server.url}/task-dashboard.html?${query}`);
+          await prompt.getByRole('button', { name: '持续允许此任务' }).waitFor();
+          await prompt.getByRole('button', { name: '稍后处理' }).click();
+          assert.equal((await childGrant()).readback.grant, null);
+          assert.equal(posts, 0);
+          await page.goto(`${active.runtime.server.url}/task.html?${query}`);
+          await prompt.getByRole('button', { name: '持续允许此任务' }).waitFor();
+          await page.screenshot({ path: join(browserEvidence, 'task-detail-pending-grant.png') });
+          await prompt.getByRole('button', { name: '稍后处理' }).click();
+          assert.equal((await childGrant()).readback.grant, null);
+          await page.getByRole('button', { name: '处理待回复事项' }).click();
+          const responsePromise = page.waitForResponse((response: { url(): string; request(): { method(): string } }) =>
+            response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith(`/${resolvedChildTaskId}/control/grant`));
+          await prompt.getByRole('button', { name: '持续允许此任务' }).click();
+          const response = await responsePromise;
+          assert.equal(response.status(), 200);
+          grantInput = response.request().postDataJSON() as typeof grantInput;
+          granted = await response.json() as typeof granted;
+          assert.deepEqual((await childGrant()).readback, granted.readback);
+          await writeFile(join(browserEvidence, 'parent-grant-receipt.json'), JSON.stringify({
+            parentTaskId: prepared.taskId.value, executionTaskId: resolvedChildTaskId,
+            operationId: child.operationId, releasedOperationId: granted.execution?.current?.operationId,
+            persisted: granted.readback.grant?.state,
+            independentProjectKey: otherProjectKey,
+            requester: grantRequester,
+          }, null, 2));
+        } finally {
+          await browser.close();
+          assert.equal(browser.isConnected(), false);
+          await otherRuntime?.close();
+        }
+      } else {
+        granted = await childGrant(grantInput);
+      }
       assert.equal(granted.readback.grant?.state, 'granted');
       assert.equal(granted.execution?.state, 'released');
       assert.equal(granted.execution?.current?.operationId, child.operationId);
@@ -788,6 +889,36 @@ test(`HTTP prepared execution keeps one responsibility; case=${label}`, async ()
       assert.equal(duplicate.execution?.state, 'blocked');
       assert.equal(factories, 1, 'refusal must not automatically reprepare');
       assert.equal(posts, 0);
+      const browserEvidence = process.env.TASK_GRANT_BROWSER_EVIDENCE;
+      if (browserEvidence) {
+        const playwright = (await import(process.env.HUMANAGENT_PLAYWRIGHT_PATH ?? '/opt/homebrew/lib/node_modules/playwright/index.js')).default;
+        const browser = await playwright.chromium.launch({ headless: true });
+        try {
+          const context = await browser.newContext({ viewport: { width: 1152, height: 900 } });
+          await context.addCookies([{ name: cookie.split('=')[0], value: cookie.slice(cookie.indexOf('=') + 1), domain: '127.0.0.1', path: '/' }]);
+          const page = await context.newPage();
+          const query = new URLSearchParams({ projectKey: schedulerPaths.projectKey, mode: 'rcc', task: prepared.taskId.value });
+          await page.goto(`${active.runtime.server.url}/task-dashboard.html?${query}`);
+          const blocker = page.locator('.task-blocker');
+          await blocker.getByText('runtime.execution.failure', { exact: true }).waitFor();
+          assert.match(await blocker.innerText(), /controlled release refusal/);
+          assert.match(await blocker.innerText(), /查看执行错误，再从新一轮执行重试。/);
+          assert.equal(await page.locator('dialog.task-decision-prompt[open]').count(), 0);
+          await mkdir(browserEvidence, { recursive: true });
+          await page.screenshot({ path: join(browserEvidence, 'execution-refusal.png') });
+          await page.getByText('运行与连接详情', { exact: true }).click();
+          await page.getByRole('button', { name: '技术详情', exact: true }).click();
+          await page.getByText('恢复动作原文', { exact: true }).waitFor();
+          await page.getByText('inspect the runtime error and retry from a new operation', { exact: true }).waitFor();
+          await page.screenshot({ path: join(browserEvidence, 'execution-refusal-details.png') });
+          await writeFile(join(browserEvidence, 'refusal-receipt.json'), JSON.stringify({
+            taskId: prepared.taskId.value, state: receipt.execution.state, error: receipt.execution.current?.error,
+          }, null, 2));
+        } finally {
+          await browser.close();
+          assert.equal(browser.isConnected(), false);
+        }
+      }
     } else {
       assert.equal(receipt.execution.state, 'released');
       await Promise.race([posted, new Promise<never>((_, reject) => {

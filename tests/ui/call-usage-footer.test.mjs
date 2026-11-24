@@ -84,6 +84,18 @@ test('missing, empty, pending and error are explicit; known zero differs from un
   assert.equal(displayed['输出速度'], '未知（响应总耗时）')
 })
 
+test('a pending call keeps the last recorded token and cache counts visible', () => {
+  const pending = call({ callId: 'awaiting-usage', inputTokens: null, outputTokens: null,
+    cacheReadTokens: null, cacheWriteTokens: null, context: { used: null, limit: null, percent: null },
+    currentCallCacheHitRate: null, outputSpeed: { tokensPerSecond: null, basis: 'response-elapsed' } })
+  const footer = usageUI.renderCallUsageFooter(usage([call({ inputTokens: 15891, outputTokens: 324, cacheReadTokens: 0 }), pending]))
+  const summary = text(footer.querySelector('.call-usage-summary'))
+  assert.match(summary, /输入 15891 · 输出 324/)
+  assert.match(summary, /缓存读取 0/)
+  assert.match(summary, /本次调用尚无统计/)
+  assert.equal(footer.querySelectorAll('.call-usage-call').length, 2)
+})
+
 test('refresh reuses footer/disclosure, replaces same call, retains expansion and clears stale scope', () => {
   const footer = usageUI.renderCallUsageFooter(usage([call()]))
   const details = footer.querySelector('dialog')

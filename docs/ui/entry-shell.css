@@ -94,3 +94,6 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 .member-roster-detail p { margin: 8px 0; }
 .member-roster-identifiers { margin-top: 24px; padding-top: 8px; border-top: 1px solid #dce2d9; color: #59655c; font-size: 12px; }
 .member-roster-project-settings { align-content: start; overflow-wrap: anywhere; }
+.entry-workspace-folder{margin-block-end:8px}
+.entry-workspace-projects{margin-inline-start:8px;padding-inline-start:8px;border-inline-start:1px solid var(--line)}
+.entry-toolbar [hidden]{display:none}

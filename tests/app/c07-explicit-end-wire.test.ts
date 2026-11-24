@@ -418,9 +418,9 @@ test('C07 actual wire Skill selection precedes the complex end and executes no b
   assert.equal(tools[2]!.requestId, tools[3]!.requestId);
   assert.deepEqual(tools.map(step => step.tool), [
     { callId: 'call-0', kind: 'select-skills' },
-    { callId: 'call-0', kind: 'select-skills', status: 'succeeded' },
+    { callId: 'call-0', kind: 'select-skills', status: 'succeeded', detail: { kind: 'skills', skills: ['task-intake'] } },
     { callId: 'call-1', kind: 'submit-turn' },
-    { callId: 'call-1', kind: 'submit-turn', status: 'succeeded' },
+    { callId: 'call-1', kind: 'submit-turn', status: 'succeeded', detail: { kind: 'decision', decision: 'create', title: '报告' } },
   ]);
   assert.equal(/整理报告|Selected Skill|blockingGaps|skillIds/.test(JSON.stringify(tools)), false);
 });

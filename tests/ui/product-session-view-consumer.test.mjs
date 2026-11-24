@@ -163,8 +163,9 @@ test('T1 keeps agent and authenticated human actors distinct and keeps their sou
   const humanNode = messages[1]
   assert.equal(humanNode.getAttribute('data-actor-kind'), 'human')
   assert.match(text(role(humanNode, 'message-actor')[0]), /人类/)
-  assert.match(text(humanNode), /authenticated-principal/)
-  assert.match(text(humanNode), /principal-42/)
+  assert.equal(role(humanNode, 'message-source').length, 0)
+  assert.match(text(role(humanNode, 'message-diagnostics')[0]), /authenticated-principal/)
+  assert.match(text(role(humanNode, 'message-diagnostics')[0]), /principal-42/)
   assert.match(text(humanNode), /HUMAN-BODY-SENTINEL/)
 
   assert.match(text(role(agentNode, 'message-diagnostics')[0]), /event-agent/)

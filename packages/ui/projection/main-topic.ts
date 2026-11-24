@@ -443,7 +443,8 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
     const task = tasksByInteraction.get(interaction.interactionId)
     const group = [
       ...(turnsByInteraction.get(interaction.interactionId) ?? []),
-      ...(task === undefined ? [] : turns.filter((turn) => turn.taskId?.value === task.taskId.value)),
+      ...(task === undefined ? [] : turns.filter((turn) =>
+        turn.interactionId === undefined && turn.taskId?.value === task.taskId.value)),
     ]
     const answer = [...group].reverse().find((turn) => turn.role === 'jenny' && turn.kind === 'message')
     const result = group.find((turn) => turn.kind === 'result')

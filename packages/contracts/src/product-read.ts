@@ -248,10 +248,20 @@ const PRODUCT_PENDING_DECISION_ACTIONS: ReadonlySet<string> = new Set<ProductPen
  * Attention preserves the real O2 state: the fact may exist, but no public
  * disposal route exists. It therefore carries no action and an explicit reason.
  */
+export interface ProductDecisionPresentation {
+  readonly taskTitle: string;
+  readonly projectName?: string;
+  readonly recipientName: string;
+  readonly requesterName?: string;
+}
+
 export type ProductPendingDecision =
   | {
       readonly kind: 'task-grant';
       readonly target: Extract<ProductTargetRef, { readonly kind: 'interaction' }>;
+      /** Business task through which the exact execution grant is presented. */
+      readonly parentTaskId?: TaskId;
+      readonly presentation?: ProductDecisionPresentation;
       readonly question: string;
       readonly actions: readonly ProductPendingDecisionAction[];
       readonly state: 'waiting' | 'resolved' | 'revoked' | 'unknown';
@@ -266,6 +276,7 @@ export type ProductPendingDecision =
       readonly kind: 'task-input-request';
       readonly target: Extract<ProductTargetRef, { readonly kind: 'interaction' }>;
       readonly request: TaskInputRequest;
+      readonly presentation?: ProductDecisionPresentation;
       readonly question: string;
       readonly actions: readonly ['answer'];
       readonly state: 'waiting' | 'resolved' | 'expired' | 'unknown';
@@ -609,8 +620,8 @@ function validateTaskInputRequest(request: TaskInputRequest, target: ProductTarg
   record(request, 'product pending decision request');
   onlyKeys(
     request,
-    ['requestId', 'taskId', 'schemaRef', 'reason', 'impact', 'question', 'turnId', 'operationId',
-      'executionEpoch', 'expectedRevision', 'expiresAt'],
+    ['requestId', 'taskId', 'schemaRef', 'reason', 'impact', 'question', 'requester', 'turnId', 'operationId',
+      'executionEpoch', 'expectedRevision', 'expiresAt', 'options'],
     'product pending decision request',
   );
   text(request.requestId, 'product pending decision requestId');
@@ -619,6 +630,16 @@ function validateTaskInputRequest(request: TaskInputRequest, target: ProductTarg
   text(request.reason, 'product pending decision reason');
   text(request.impact, 'product pending decision impact');
   text(request.question, 'product pending decision request question');
+  if (request.requester !== undefined) {
+    record(request.requester, 'product input requester');
+    onlyKeys(request.requester, ['roleId', 'agentId'], 'product input requester');
+    text(request.requester.roleId, 'product input requester role');
+    optionalText(request.requester.agentId, 'product input requester agent');
+  }
+  if (request.options !== undefined) {
+    if (!Array.isArray(request.options)) throw new ContractError('product pending decision options must be an array');
+    for (const option of request.options) text(option, 'product pending decision option');
+  }
   text(request.turnId, 'product pending decision request turnId');
   assertScope(request.operationId, 'operation');
   nonNegativeInteger(request.executionEpoch, 'product pending decision request executionEpoch');
@@ -655,15 +676,29 @@ export function validateProductPendingDecision(decision: ProductPendingDecision)
   record(decision, 'product pending decision');
   text(decision.question, 'product pending decision question');
   text(decision.recoveryOwner, 'product pending decision recoveryOwner');
+  if ((decision.kind === 'task-grant' || decision.kind === 'task-input-request') && decision.presentation !== undefined) {
+    record(decision.presentation, 'product decision presentation');
+    onlyKeys(decision.presentation, ['taskTitle', 'projectName', 'recipientName', 'requesterName'], 'product decision presentation');
+    text(decision.presentation.taskTitle, 'product decision task title');
+    optionalText(decision.presentation.projectName, 'product decision project');
+    text(decision.presentation.recipientName, 'product decision recipient');
+    optionalText(decision.presentation.requesterName, 'product decision requester');
+  }
   if (decision.kind === 'task-grant') {
     onlyKeys(
       decision,
-      ['kind', 'target', 'question', 'actions', 'state', 'revision', 'readback', 'recoveryOwner'],
+      ['kind', 'target', 'parentTaskId', 'presentation', 'question', 'actions', 'state', 'revision', 'readback', 'recoveryOwner'],
       'task grant pending decision',
     );
     validateProductTargetRef(decision.target);
     if (decision.target.kind !== 'interaction') {
       throw new ContractError('task grant pending decision requires an interaction target');
+    }
+    if (decision.parentTaskId !== undefined) {
+      assertScope(decision.parentTaskId, 'task');
+      if (decision.parentTaskId.value === decision.target.taskRef.value) {
+        throw new ContractError('task grant parent must differ from the execution target');
+      }
     }
     if (!['waiting', 'resolved', 'revoked', 'unknown'].includes(decision.state)) {
       throw new ContractError('task grant pending decision state is invalid');
@@ -706,7 +741,7 @@ export function validateProductPendingDecision(decision: ProductPendingDecision)
   if (decision.kind === 'task-input-request') {
     onlyKeys(
       decision,
-      ['kind', 'target', 'request', 'question', 'actions', 'state', 'recoveryOwner'],
+      ['kind', 'target', 'request', 'presentation', 'question', 'actions', 'state', 'recoveryOwner'],
       'task input request pending decision',
     );
     validateProductTargetRef(decision.target);

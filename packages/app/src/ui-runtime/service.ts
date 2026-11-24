@@ -5790,7 +5790,9 @@ export class UiRuntimeService {
 
   async productPendingDecision(scope: ProductReadRequestScope): Promise<ProductPendingDecision | null> {
     const selection = this.productSelectionForRequest(scope);
-    const runtimeTasks = this.coordinator.taskSnapshots();
+    const viewOwner = this.defaultBoardOwner();
+    const runtimeTasks = this.coordinator.taskSnapshots().filter(task =>
+      task.boardOwner === undefined || this.sameBoardOwner(task.boardOwner, viewOwner));
     // The execution-time input request is the first pending decision: the task
     // settled into a visible waiting state and the user must answer it before
     // the same task can continue. It is read from the Runtime's own open
@@ -5799,28 +5801,33 @@ export class UiRuntimeService {
       if (selection.taskId !== undefined && task.taskId.value !== selection.taskId.value) continue;
       const request = task.inputRequest;
       if (request === undefined) continue;
-      return this.taskInputRequestDecision(task.taskId, request, selection);
+      return this.taskInputRequestDecision(task.taskId, task.title, request, selection);
     }
     // The new-task flow surfaces a user-facing parent Task and executes a child
     // occurrence. The Runtime opens the request on that child, so the parent
     // detail page must still receive the exact same typed request under its own
     // identity; the answer facade resolves the child that owns the request.
+    const childIds = new Set<string>();
     if (selection.taskId !== undefined) {
       const snapshots = await this.snapshotsWithIdentitySource();
-      const childIds = new Set(snapshots
-        .filter((snapshot) => snapshot.executionLineage?.parentTaskId.value === selection.taskId!.value)
-        .map((snapshot) => snapshot.taskId.value));
+      for (const snapshot of snapshots) {
+        if (snapshot.executionLineage?.parentTaskId.value === selection.taskId.value) childIds.add(snapshot.taskId.value);
+      }
       const child = runtimeTasks.find((task) =>
         childIds.has(task.taskId.value) && task.inputRequest !== undefined);
       if (child?.inputRequest !== undefined) {
-        return this.taskInputRequestDecision(selection.taskId, child.inputRequest, selection);
+        const title = runtimeTasks.find(task => task.taskId.value === selection.taskId?.value)?.title ?? child.title;
+        return this.taskInputRequestDecision(selection.taskId, title, child.inputRequest, selection);
       }
     }
     const port = this.options.taskGrantPort;
     // Without the durable grant readback no task can be proven grant-blocked.
     if (port === undefined) return null;
-    for (const task of runtimeTasks) {
-      if (selection.taskId !== undefined && task.taskId.value !== selection.taskId.value) continue;
+    const candidates = selection.taskId === undefined ? runtimeTasks : [
+      ...runtimeTasks.filter(task => task.taskId.value === selection.taskId?.value),
+      ...runtimeTasks.filter(task => childIds.has(task.taskId.value)),
+    ];
+    for (const task of candidates) {
       // A retained prepared operation is the real admission wait. A waiting
       // row without that custody, or with any recorded grant fact, is not a
       // pending grant decision.
@@ -5840,6 +5847,16 @@ export class UiRuntimeService {
       const decision: ProductPendingDecision = {
         kind: 'task-grant',
         target,
+        ...(selection.taskId !== undefined && task.taskId.value !== selection.taskId.value
+          ? { parentTaskId: selection.taskId }
+          : {}),
+        presentation: {
+          ...this.taskDecisionPresentation(
+            runtimeTasks.find(candidate => candidate.taskId.value === selection.taskId?.value)?.title ?? task.title,
+            selection,
+          ),
+          requesterName: 'HumanAgent · 任务执行控制',
+        },
         question: '是否批准继续执行这个任务？',
         actions: ['grant'],
         state: 'waiting',
@@ -5859,6 +5876,7 @@ export class UiRuntimeService {
    */
   private taskInputRequestDecision(
     facingTaskId: TaskId,
+    taskTitle: string,
     request: Extract<ProductPendingDecision, { readonly kind: 'task-input-request' }>['request'],
     selection: ProductReadSelection,
   ): ProductPendingDecision {
@@ -5879,6 +5897,7 @@ export class UiRuntimeService {
       kind: 'task-input-request',
       target,
       request: projectedRequest,
+      presentation: this.taskDecisionPresentation(taskTitle, selection),
       question: request.question,
       actions: ['answer'],
       state: 'waiting',
@@ -5886,6 +5905,16 @@ export class UiRuntimeService {
     };
     validateProductPendingDecision(decision);
     return decision;
+  }
+
+  private taskDecisionPresentation(taskTitle: string, selection: ProductReadSelection) {
+    const workspace = this.options.workspaceRoot ?? this.options.runtimePaths?.workspaceCwd ?? '';
+    const owner = this.defaultBoardOwner();
+    return {
+      taskTitle: taskTitle.trim() || '当前任务',
+      ...(owner.scope === 'project' ? { projectName: basename(workspace) || selection.projectKey } : {}),
+      recipientName: owner.scope === 'ceo' ? 'Alex · CEO' : owner.actorId,
+    };
   }
 
   /**
@@ -5987,13 +6016,13 @@ export class UiRuntimeService {
         const lineage = executionLineageByChildId(snapshots.map(toRuntimeTaskSnapshotInput), identities,
           await this.subscriptionControl.list());
         const children = snapshots.filter(snapshot => lineage.get(snapshot.taskId.value)?.parentTaskId.value === taskId.value);
-        if (children.length > 1) return { taskId: rawTaskId, status: task.state,
+        if (children.length > 1) return { taskId: rawTaskId, title: task.title, status: task.state,
           publicationState: 'ambiguous', executionTaskIds: children.map(child => child.taskId.value), commits: [] };
         if (children[0] !== undefined) execution = children[0];
       }
       const binding = publicOutputBindingFor(execution, this.options.organId);
       const result = selectProductOutput(await this.authoritativePublicOutputForTask(execution.taskId), binding);
-      return { taskId: rawTaskId, executionTaskId: execution.taskId.value, status: execution.state,
+      return { taskId: rawTaskId, title: task.title, executionTaskId: execution.taskId.value, status: execution.state,
         publicationState: result.publication?.state ?? 'unavailable', ...result };
     };
   }
@@ -6679,6 +6708,7 @@ export class UiRuntimeService {
       surface: 'runtime-project',
       scope: { kind: 'project', projectKey: source.projectKey },
       label: basename(source.workspaceCwd),
+      workspaceCwd: source.workspaceCwd,
       observedAt: this.now().toISOString(),
       tasks: rows,
       taskCount: rows.length,

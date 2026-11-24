@@ -158,11 +158,11 @@ function evidenceText(evidence) {
   return parts.length > 0 ? parts.join(' · ') : '证据引用未完整提供'
 }
 
-function renderMessageDiagnostics(make, message) {
+function renderMessageDiagnostics(make, message, actorSource) {
   const eventId = nonEmpty(message.ref?.eventId) ? message.ref.eventId : undefined
   const sourceId = nonEmpty(message.ref?.sourceId) ? message.ref.sourceId : undefined
   const evidenceRefs = Array.isArray(message.evidenceRefs) ? message.evidenceRefs : []
-  if (eventId === undefined && sourceId === undefined && evidenceRefs.length === 0) {
+  if (eventId === undefined && sourceId === undefined && evidenceRefs.length === 0 && actorSource === undefined) {
     return undefined
   }
 
@@ -171,6 +171,9 @@ function renderMessageDiagnostics(make, message) {
   markRole(disclosure.root,
     'message-diagnostics',
   )
+  if (actorSource !== undefined) {
+    details.append(make('p', actorSource, 'product-session-diagnostic-line'))
+  }
   if (eventId !== undefined || sourceId !== undefined) {
     const parts = []
     if (eventId !== undefined) parts.push(`eventId ${eventId}`)
@@ -192,18 +195,21 @@ function renderMessage(make, message) {
   }
 
   const header = make('header', undefined, 'product-session-message-head')
+  const source = actorSourceText(message?.actor)
   header.append(markRole(make('span', ACTOR_LABELS[kind], 'product-session-actor'), 'message-actor'))
-  header.append(markRole(
-    make('span', actorSourceText(message?.actor), 'product-session-source'),
-    'message-source',
-  ))
+  if (kind !== 'human') {
+    header.append(markRole(
+      make('span', source, 'product-session-source'),
+      'message-source',
+    ))
+  }
   header.append(renderMessageTime(make, message ?? {}))
   item.append(header)
 
   const bodyText = messageBodyText(message)
   item.append(markRole(make('div', bodyText, 'product-session-message-body'), 'message-body'))
 
-  const diagnostics = renderMessageDiagnostics(make, message ?? {})
+  const diagnostics = renderMessageDiagnostics(make, message ?? {}, kind === 'human' ? source : undefined)
   if (diagnostics !== undefined) item.append(diagnostics)
   return item
 }

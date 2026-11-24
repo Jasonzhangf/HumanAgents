@@ -13,7 +13,7 @@
     "resultBoundary": "控制回执只说明控制命令结果，不改写 Task 状态。最新读回失败时保留已记录回执，不推断 denied，不自动重提。",
     "singleWriter": "任务控制领域状态仍由既有控制 owner 写入；本图只表达 UI 导航、目标验证、请求和结果收敛。",
     "interfaceMap": "docs/goals/ux-repair-interface-map-2026-10-21.md",
-    "decisionContract": "可展示问题与决策来自真实控制对象 TaskGrant/TaskInputRequest/Attention；只有有 question/options 的对象才能要求决定。blocked 保留真实 blocker、owner 与恢复入口，不泛化为等待人。",
+    "decisionContract": "普通 MVP 任务确认后自动投递执行。正式待答的 TaskInputRequest 与显式待授权的 TaskGrant 使用同一优先弹窗，按当前任务与修订匹配。业务父任务可以呈现已提交任务关联指向的执行授权，写入始终使用持有待放行操作的确切执行任务。blocked 直接显示原因、原错误码和已知下一步，只有真实待处理对象才打开弹窗。",
     "receiptContract": "正式决定提交返回 typed receipt/readback；批准后实际继续沿既有 release/恢复路径。关闭、收起、导航离开与刷新不写拒绝，回执与最新读回分别保存。",
     "exclusions": [
       "只读 Observation",

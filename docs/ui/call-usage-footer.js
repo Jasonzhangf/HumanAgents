@@ -49,6 +49,8 @@ export function updateCallUsageFooter(footer, usage, options = {}) {
   const { make, summary, content } = parts
   const calls = usage?.calls ?? []
   const latest = calls.at(-1)
+  const measured = calls.findLast(call => [call.inputTokens, call.outputTokens, call.cacheReadTokens, call.cacheWriteTokens,
+    call.context.used, call.context.limit].some(value => value != null))
   const pending = Boolean(options.pending && usage === undefined && !options.error)
   const failure = options.error
   const errorMessage = typeof failure === 'string' ? failure : failure?.message
@@ -59,11 +61,14 @@ export function updateCallUsageFooter(footer, usage, options = {}) {
   const scroll = content.scrollTop
   const dialogScroll = parts.dialog?.scrollTop
   summary.replaceChildren()
-  const labels = latest ? [
-    '最新调用', `输入 ${number(latest.inputTokens)} · 输出 ${number(latest.outputTokens)} tokens`,
-    `缓存命中 ${rate(latest.currentCallCacheHitRate)}`,
-    `上下文 ${percent(latest.context.percent)}`,
+  const labels = measured ? [
+    latest === measured ? '最新调用' : `第 ${calls.indexOf(measured) + 1} 次调用的统计`,
+    `输入 ${number(measured.inputTokens)} · 输出 ${number(measured.outputTokens)} tokens`,
+    `缓存读取 ${number(measured.cacheReadTokens)} · 写入 ${number(measured.cacheWriteTokens)}`,
+    `缓存命中 ${rate(measured.currentCallCacheHitRate)}`,
+    `上下文 ${percent(measured.context.percent)}`,
   ] : failure || pending ? [] : ['暂无调用统计']
+  if (latest && latest !== measured) labels.push('本次调用尚无统计')
   if (pending) labels.push('统计加载中…')
   labels.push('调用明细')
   if (options.error) {

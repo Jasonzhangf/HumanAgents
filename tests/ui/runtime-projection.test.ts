@@ -311,6 +311,7 @@ test('main topic shows one linked task and relays its child ask to the user-faci
       rawInput: '比较甲乙报价并给出最低价。',
       occurredAt: '2026-11-22T10:00:00.000Z',
       state: 'confirmed',
+      draftProposal: '核对两份报价的最低价',
       taskId: parentTaskId,
     }],
     tasks: [{
@@ -341,9 +342,13 @@ test('main topic shows one linked task and relays its child ask to the user-faci
   assert.deepEqual(projection.turns.map((turn) => turn.taskId?.value), [
     undefined,
     parentTaskId.value,
+    parentTaskId.value,
   ]);
-  assert.equal(projection.turns[1]?.kind, 'input-request');
-  assert.equal(projection.turns[1]?.taskId?.value, parentTaskId.value);
+  assert.equal(projection.turns[2]?.kind, 'input-request');
+  assert.equal(projection.turns[2]?.taskId?.value, parentTaskId.value);
+  assert.deepEqual(projection.rounds[0]?.messageRefs, [
+    'user:main-topic-interaction-1', 'draft:main-topic-interaction-1', 'input-request:main-topic-request-1',
+  ]);
   assert.equal(projection.openInputRequest?.taskId.value, parentTaskId.value);
   assert.equal(projection.openInputRequest?.requestId, request.requestId);
   assert.deepEqual(projection.openInputRequest?.options, request.options);

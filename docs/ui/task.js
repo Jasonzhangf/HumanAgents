@@ -25,6 +25,8 @@ import {
 import { renderProductSessionView, disposeProductSessionView } from './product-session-view.js'
 import { createDetailDisclosure } from './detail-disclosure.js'
 import {
+  createTaskDecisionPrompt,
+  decisionMatchesTaskScope,
   openDecisionModal,
   renderPendingDecision,
 } from './product-control-view.js'
@@ -107,6 +109,8 @@ export function createTaskProductController(options = {}) {
     taskId,
     onActivity,
     onError,
+    priorityDecisions = false,
+    decisionHostRoot,
   } = options
   const productScope = productScopeOf(scope)
   const readTaskToolOutput = target => transport.readScopedToolOutput(target, productScope)
@@ -140,12 +144,15 @@ export function createTaskProductController(options = {}) {
   }
   let selectionVersion = 0
   let disposed = false
+  const decisionPrompt = priorityDecisions
+    ? createTaskDecisionPrompt({ api: transport, host: decisionHostRoot, onReceipt: () => void refresh().catch(showError) })
+    : null
 
   function mount() {
     attach(host, section)
     attach(host, interactionHost)
     attach(host, decisionHost)
-    attach(host, modalHost)
+    if (!decisionPrompt) attach(host, modalHost)
     return controller
   }
 
@@ -153,6 +160,7 @@ export function createTaskProductController(options = {}) {
     disposed = true
     disposeProductSessionView(sessionHost)
     selectionVersion += 1
+    decisionPrompt?.dismiss()
     if (state.modal && typeof state.modal.close === 'function') state.modal.close()
     state.modal = undefined
     section.remove?.()
@@ -481,6 +489,11 @@ export function createTaskProductController(options = {}) {
 
   function renderDecision(pending) {
     if (!decisionHost) return
+    if (decisionPrompt) {
+      if (pending?.state !== 'waiting' || !decisionMatchesTaskScope(pending, productScope)
+        || !['task-input-request', 'task-grant'].includes(pending.kind)) pending = undefined
+      decisionPrompt.sync(pending, productScope)
+    }
     if (!pending) {
       state.lastDecision = undefined
       decisionHost.replaceChildren()
@@ -489,6 +502,7 @@ export function createTaskProductController(options = {}) {
     state.lastDecision = pending
     renderPendingDecision(decisionHost, pending, {
       element: make,
+      ...(decisionPrompt ? { onOpen: selected => openDecision(selected) } : {}),
       onIntent: (_intent, selected) => {
         openDecision(selected ?? pending)
       },
@@ -515,6 +529,10 @@ export function createTaskProductController(options = {}) {
 
   function openDecision(pending = state.lastDecision) {
     if (!pending || state.modal) return undefined
+    if (decisionPrompt) {
+      if (pending === state.lastDecision) decisionPrompt.sync(pending, productScope, undefined, { reopen: true })
+      return undefined
+    }
     state.modal = openDecisionModal({
       host: modalHost,
       element: make,
@@ -554,6 +572,18 @@ export function createTaskProductController(options = {}) {
       ? { projectKey: productScope.projectKey, mode: productScope.mode, sessionId: state.interactionId }
       : productScope
     const query = productScopeQuery(readScope)
+    const readDecision = async () => {
+      try {
+        return typeof transport.readProductDecision === 'function'
+          ? await transport.readProductDecision(productScope)
+          : await readProductJson('/api/product/decision', productScopeQuery(productScope))
+      } catch {
+        return undefined
+      }
+    }
+    const earlyDecision = decisionPrompt ? readDecision().then(pending => {
+      if (isCurrent()) renderDecision(pending)
+    }) : null
     let sessionRead
     let sessionError
     try {
@@ -578,14 +608,7 @@ export function createTaskProductController(options = {}) {
       resolvedOutput = undefined
     }
     if (!isCurrent()) return undefined
-    let pendingDecision
-    try {
-      pendingDecision = typeof transport.readProductDecision === 'function'
-        ? await transport.readProductDecision(productScope)
-        : await readProductJson('/api/product/decision', productScopeQuery(productScope))
-    } catch {
-      pendingDecision = undefined
-    }
+    const pendingDecision = earlyDecision ? await earlyDecision : await readDecision()
     if (!isCurrent()) return undefined
     const publication = outputPublication(resolvedOutput)
     renderProductSessionView(sessionHost, {
@@ -603,7 +626,7 @@ export function createTaskProductController(options = {}) {
         publicOutput: resolvedOutput.publication ?? resolvedOutput,
       }, { element: make })
     }
-    renderDecision(pendingDecisionOf({ pendingDecision }))
+    if (!earlyDecision) renderDecision(pendingDecisionOf({ pendingDecision }))
     return { session: sessionRead, output: resolvedOutput }
   }
 
@@ -655,6 +678,8 @@ const productController = createTaskProductController({
   make: (tag, text, className) => element(tag, text, className),
   transport: api,
   scope: taskReadScope,
+  priorityDecisions: true,
+  decisionHostRoot: template.hosts.page,
   taskId: requestedTask,
   onActivity: (activity) => appendCardEvent(
     activity.kind,
@@ -1055,6 +1080,7 @@ async function renderInteraction(interactionId, currentTaskId) {
   clearNode(primary)
   clearNode(composer)
   attachInteractionCardHost()
+  productController.mount()
   // Keep the human's source text even when the interaction read fails, so an
   // error cannot replace the input with a blank primary layer.
   if (currentTaskId && currentTaskId !== 'new' && !detail) {
@@ -1122,6 +1148,7 @@ function renderTask() {
   actions.append(dashboardLink, observationLink)
   primary.append(actions)
   attachInteractionCardHost()
+  productController.mount()
   void productController.refresh().catch(() => {})
   void loadTaskHistory()
   void refreshTaskDashboard()

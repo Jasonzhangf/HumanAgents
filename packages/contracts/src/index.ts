@@ -772,6 +772,8 @@ export interface TaskInputRequest {
   readonly reason: string;
   readonly impact: string;
   readonly question: string;
+  /** Identity bound by the executor that accepted the native turn end. */
+  readonly requester?: { readonly roleId: string; readonly agentId?: string };
   /** Enumerable answers the asking model offered, in its own words. */
   readonly options?: readonly string[];
   readonly turnId: string;
@@ -954,6 +956,10 @@ export interface ExplicitInteractionToolActivity {
   readonly kind: 'select-skills' | 'read-task-result' | 'submit-turn';
   readonly status?: ProviderToolStatus;
   readonly errorCode?: string;
+  readonly detail?:
+    | { readonly kind: 'skills'; readonly skills: readonly string[] }
+    | { readonly kind: 'task-result'; readonly title?: string; readonly taskState?: string; readonly publicationState?: string }
+    | { readonly kind: 'decision'; readonly decision: 'answer' | 'status-query' | 'clarification' | 'create' | 'append' | 'change' | 'partial'; readonly title?: string };
 }
 export type ProviderSubmitStatus = 'accepted' | 'completed' | 'blocked' | 'failed' | 'unknown';
 export type AgentRuntimeId = string;

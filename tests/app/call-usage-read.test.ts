@@ -10,6 +10,7 @@ import {
   UiRuntimeJournal,
   UiRuntimeService,
 } from '../../packages/app/src/ui-runtime/index.js';
+import type { UiRuntimeServiceOptions } from '../../packages/app/src/ui-runtime/service.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
 import { id } from '../../packages/contracts/src/index.js';
@@ -60,7 +61,7 @@ test('cache and context rates stay undefined for zero or missing denominators', 
 test('ordinary session reads isolate task and interaction usage and retain messages on statistics failure', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-call-usage-read-'));
   try {
-  const reads: Array<{ readonly interactionId?: string; readonly taskId?: string }> = [];
+  const reads: Array<Parameters<NonNullable<UiRuntimeServiceOptions['callUsage']>['read']>[0]> = [];
   let offline = false;
   const binding = {
     bindingId: 'usage-binding', providerId: 'usage-provider', protocol: 'responses' as const,

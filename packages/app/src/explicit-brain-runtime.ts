@@ -1380,6 +1380,7 @@ export function createProviderExplicitBrainInterpreter(input: {
       let freshMultipleIntakeDecisions = false;
       let endResult: ExplicitEndSubmission | undefined = continuation?.acceptedEnd ?? continuation?.partialDrain;
       let selectedSkillIds: readonly IntakeSkillId[] = [];
+      const toolDetails = new Map<string, NonNullable<import('../../contracts/src/index.js').ExplicitInteractionToolActivity['detail']>>();
       let live: NonNullable<typeof retained>;
       try {
         if (continuation !== undefined && (owned === undefined
@@ -1528,6 +1529,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           } }),
           executeTool: {
             async execute({ call, requestId }): Promise<ProviderToolExecutionResult> {
+              const key = JSON.stringify([requestId, call.callId]);
               if (call.toolId === TASK_RESULT_READ_TOOL.toolId && request.readTaskResult !== undefined) {
                 const args = call.arguments;
                 const rejected = (code: string, message: string): ProviderToolExecutionResult => ({
@@ -1543,7 +1545,16 @@ export function createProviderExplicitBrainInterpreter(input: {
                   return rejected('task.read_result.invalid-arguments', 'task.read_result requires only a non-empty taskId');
                 }
                 try {
-                  return { output: JSON.stringify(await request.readTaskResult(args.taskId)),
+                  const value = await request.readTaskResult(args.taskId);
+                  if (value !== null && typeof value === 'object') {
+                    const result = value as Record<string, unknown>;
+                    toolDetails.set(key, { kind: 'task-result',
+                      ...(typeof result.title === 'string' && result.title !== args.taskId ? { title: result.title.slice(0, 160) } : {}),
+                      ...(typeof result.status === 'string' ? { taskState: result.status } : {}),
+                      ...(typeof result.publicationState === 'string' ? { publicationState: result.publicationState } : {}),
+                    });
+                  }
+                  return { output: JSON.stringify(value),
                     outputRefs: [], evidenceRefs: [], status: 'succeeded' };
                 } catch (error) {
                   if (error instanceof RuntimeTaskControlError && error.code === 'task.not.found') {
@@ -1559,6 +1570,14 @@ export function createProviderExplicitBrainInterpreter(input: {
                   journal: input.parentJournal, attempt: endAttempt, requestId,
                   callId: call.callId, arguments: call.arguments,
                 });
+                if (endResult.kind === 'accepted') {
+                  const decision = endResult.decision;
+                  toolDetails.set(key, decision.kind === 'requirement'
+                    ? { kind: 'decision', decision: decision.proposal.intent, title: decision.proposal.title.slice(0, 160) }
+                    : { kind: 'decision', decision: decision.kind });
+                } else if (endResult.kind === 'partial') {
+                  toolDetails.set(key, { kind: 'decision', decision: 'partial' });
+                }
                 return { output: JSON.stringify(endResult), outputRefs: [], evidenceRefs: [],
                   status: endResult.kind === 'rejected' ? 'failed' : 'succeeded' };
               }
@@ -1575,6 +1594,7 @@ export function createProviderExplicitBrainInterpreter(input: {
                   );
                 }
                 selectedSkillIds = args.skillIds;
+                toolDetails.set(key, { kind: 'skills', skills: selectedSkillIds });
                 return {
                   output: JSON.stringify({ selectedSkillIds }),
                   outputRefs: [],
@@ -1616,6 +1636,9 @@ export function createProviderExplicitBrainInterpreter(input: {
               : call?.toolId === TASK_RESULT_READ_TOOL.toolId ? 'read-task-result'
               : call?.toolId === EXPLICIT_END_TOOL.toolId ? 'submit-turn' : undefined;
             if (kind !== undefined && call !== undefined) {
+              const key = JSON.stringify([providerEvent.requestId, call.callId]);
+              const detail = result === undefined ? undefined : toolDetails.get(key);
+              if (detail !== undefined) toolDetails.delete(key);
               request.onStep?.({
                 kind: result === undefined ? 'tool.started' : 'tool.finished',
                 summary: result === undefined ? '内置工具已调用' : '内置工具已返回',
@@ -1626,6 +1649,7 @@ export function createProviderExplicitBrainInterpreter(input: {
                   callId: call.callId,
                   ...(result === undefined ? {} : { status: result.status }),
                   ...(result?.error === undefined ? {} : { errorCode: result.error.code }),
+                  ...(detail === undefined ? {} : { detail }),
                 },
               });
             }

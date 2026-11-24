@@ -429,6 +429,7 @@ export interface RuntimeProjectReadProjection {
   readonly surface: 'runtime-project';
   readonly scope: Extract<RuntimeReadScope, { readonly kind: 'project' }>;
   readonly label: string;
+  readonly workspaceCwd?: string;
   readonly observedAt: string;
   readonly tasks: readonly RuntimeProjectTaskReadRow[];
   readonly taskCount: number;

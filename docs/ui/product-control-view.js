@@ -36,7 +36,7 @@
  * owner, authority or confirmed-by field.
  */
 
-import { createRuntimeApi } from './runtime-api.js'
+import { createRuntimeApi, element } from './runtime-api.js'
 
 export const FORMAL_CONTROL_ACTIONS = Object.freeze(['grant', 'revoke'])
 
@@ -160,6 +160,15 @@ export function isExactControllableTarget(target) {
       && isTaskScope(target.scope, target.taskRef)
   }
   return false
+}
+
+export function decisionMatchesTaskScope(decision, scope) {
+  const target = decision?.target
+  if (!scope || target?.kind !== 'interaction' || !isExactControllableTarget(target)
+    || target.scope.projectKey !== scope.projectKey || target.scope.mode !== scope.mode) return false
+  const parent = decision.kind === 'task-grant' ? decision.parentTaskId : undefined
+  const taskId = parent === undefined ? target.taskRef.value : isTaskId(parent) ? parent.value : undefined
+  return taskId !== undefined && taskId === scope.taskId
 }
 
 function runtimeTarget(target) {
@@ -421,6 +430,13 @@ function taskInputRequestControls(make, decision, handlers) {
   const canSubmit = taskId !== undefined && requestId !== undefined
     && expectedRevision !== undefined && typeof handlers?.onAnswer === 'function'
   const button = makeButton(make, '提交回答', !canSubmit, 'task-input-answer-submit', 'answer')
+  if (handlers.showOptions && Array.isArray(request?.options)) {
+    for (const option of request.options.filter(nonEmptyText)) {
+      const choice = makeButton(make, option, !canSubmit, 'task-input-option', 'select')
+      choice.addEventListener('click', () => { field.value = option; button.click() })
+      container.insertBefore(choice, field)
+    }
+  }
   button.addEventListener('click', () => {
     if (button.disabled) return
     const answer = typeof field.value === 'string' ? field.value.trim() : ''
@@ -450,15 +466,20 @@ export function renderPendingDecision(host, decision, handlers = {}) {
     ? decision.question
     : '该对象未提供问题或选项，因此不能在此批准。'
   root.append(make('p', question, 'product-control-decision-question'))
-  root.append(decisionStateNode(make, decision))
-
-  if (decision?.kind === 'task-grant') {
+  if (handlers.onOpen) {
+    const button = makeButton(make, '处理待回复事项', false, 'open-decision', 'open')
+    button.addEventListener('click', () => handlers.onOpen(decision))
+    root.append(button)
+  } else if (decision?.kind === 'task-grant') {
+    root.append(decisionStateNode(make, decision))
     root.append(targetNode(make, decision.target))
     root.append(readbackNode(make, readbackState(decision.readback)))
     root.append(actionControls(make, decision, handlers))
   } else if (decision?.kind === 'task-input-request') {
+    root.append(decisionStateNode(make, decision))
     root.append(taskInputRequestControls(make, decision, handlers))
   } else {
+    root.append(decisionStateNode(make, decision))
     if (nonEmptyText(decision?.unavailableReason)) {
       root.append(make('p', decision.unavailableReason, 'product-control-unavailable'))
     }
@@ -621,17 +642,24 @@ export function openDecisionModal(options = {}) {
   let handle
 
   const root = make('div', undefined, 'product-control-modal')
-  root.setAttribute('role', 'dialog')
-  root.setAttribute('aria-modal', 'true')
+  if (!options.compact) {
+    root.setAttribute('role', 'dialog')
+    root.setAttribute('aria-modal', 'true')
+  }
   const titleId = `product-control-title-${++modalSerial}`
   root.setAttribute('aria-labelledby', titleId)
 
   const title = make('h2', options.title ?? '审批执行授权', 'product-control-modal-title')
   title.setAttribute('id', titleId)
   root.append(title)
+  if (options.context) root.append(options.context)
   root.append(make('p', subject.question ?? '对该任务执行人工介入？', 'product-control-question'))
-  root.append(targetNode(make, subject.target))
-  root.append(readbackNode(make, readback, 'control-readback-preview'))
+  if (options.compact) {
+    root.append(make('p', '授权仅适用于这个任务。批准后保留授权，可在任务控制中撤销。', 'muted'))
+  } else {
+    root.append(targetNode(make, subject.target))
+    root.append(readbackNode(make, readback, 'control-readback-preview'))
+  }
 
   const status = make('p', '', 'product-control-status')
   status.setAttribute('role', 'status')
@@ -653,18 +681,19 @@ export function openDecisionModal(options = {}) {
       || readback.kind === 'unknown'
       || !nonEmptyText(subject.question)
       || transportMethod(transport, action) === null
-    const button = makeButton(make, decisionActionLabel(action), disabled, `decision-${action}`, action)
-    button.setAttribute('aria-label', `${decisionActionLabel(action)}（正式动作 ${action}）`)
+    const label = options.compact && action === 'grant' ? '持续允许此任务' : decisionActionLabel(action)
+    const button = makeButton(make, label, disabled, `decision-${action}`, action)
+    button.setAttribute('aria-label', options.compact ? label : `${label}（正式动作 ${action}）`)
     button.addEventListener('click', () => {
       if (button.disabled) return
-      void confirm(DECISION_ACTION_INTENTS[action])
+      void confirm(DECISION_ACTION_INTENTS[action]).catch(() => {})
     })
     actionButtons.push({ action, button, revision })
     actions.append(button)
   }
 
-  const closeButton = makeButton(make, '关闭', false, 'close-control-modal', 'close')
-  closeButton.setAttribute('aria-label', '关闭审批，不写任何决定')
+  const closeButton = makeButton(make, options.compact ? '稍后处理' : '关闭', false, 'close-control-modal', 'close')
+  if (!options.compact) closeButton.setAttribute('aria-label', '关闭审批，不写任何决定')
   closeButton.addEventListener('click', () => handle.close())
   actions.append(closeButton)
   root.append(actions)
@@ -846,6 +875,107 @@ export function openDecisionModal(options = {}) {
   const focusTarget = actionButtons.find(({ button }) => !button.disabled)?.button ?? closeButton
   if (typeof focusTarget.focus === 'function') focusTarget.focus()
   return handle
+}
+
+/** Both task decisions share the same scoped dialog and dismissal lifecycle. */
+export function createTaskDecisionPrompt({ api, host, onReceipt }) {
+  const seen = new Set()
+  let active
+  function dismiss() {
+    active?.close()
+  }
+  function sync(decision, scope, title, { reopen = false, recipient, project } = {}) {
+    const target = decision?.target
+    const grant = decision?.kind === 'task-grant' && decision.actions?.includes('grant')
+    const question = decision?.kind === 'task-input-request' && decision.actions?.includes('answer')
+      && !!decision.request?.requestId && Number.isSafeInteger(decision.request.expectedRevision)
+      && decision.request.taskId?.value === target?.taskRef?.value
+    if ((!grant && !question) || decision.state !== 'waiting' || !nonEmptyText(decision.question)
+      || !decisionMatchesTaskScope(decision, scope)) {
+      dismiss()
+      return
+    }
+    const key = JSON.stringify([scope.projectKey, scope.mode, target.taskRef.value, decision.kind,
+      question ? [decision.request.requestId, decision.request.expectedRevision] : decision.readback?.grant?.revision ?? 0])
+    if (active?.key === key) return
+    dismiss()
+    if (!reopen && seen.has(key)) return
+    const dialog = document.createElement('dialog')
+    if (typeof dialog.show !== 'function') return
+    dialog.className = 'task-decision-prompt'
+    dialog.dataset.projectKey = scope.projectKey
+    const container = host ?? document.body
+    container.append(dialog)
+    const taskTitle = title || decision.presentation?.taskTitle
+    const recipientName = recipient || decision.presentation?.recipientName
+    const projectName = project || decision.presentation?.projectName
+    const requester = decision.request?.requester
+    const requesterRole = requester && {
+      orchestration: '编排 Agent',
+      execution: '执行 Agent',
+      review: '审查 Agent',
+    }[requester.roleId]
+    const sender = grant ? decision.presentation?.requesterName
+      : [requesterRole, requester?.agentId].filter(Boolean).join(' · ')
+    const context = element('dl', undefined, 'task-decision-context')
+    for (const [label, value] of [
+      ['发起方', sender || '未记录'],
+      ['接收会话', [projectName, recipientName].filter(Boolean).join(' · ')],
+      ['任务', taskTitle],
+      ['请求', grant ? '允许任务继续执行' : '回答问题后继续任务'],
+    ]) {
+      if (value) context.append(element('dt', label), element('dd', value))
+    }
+    const closeDialog = () => {
+      dialog.close()
+      dialog.remove()
+      if (active?.dialog === dialog) active = undefined
+    }
+    if (grant) {
+      const modal = openDecisionModal({ decision, transport: api, host: dialog, compact: true,
+        title: '任务需要执行授权', context, onReceipt, onClose: closeDialog })
+      dialog.setAttribute('aria-labelledby', modal.element.querySelector('h2').id)
+      active = { key, dialog, close: modal.close }
+    } else {
+      const heading = element('h2', '任务需要你的回答')
+      heading.id = `task-decision-title-${++modalSerial}`
+      dialog.setAttribute('aria-labelledby', heading.id)
+      const status = element('p', '', 'product-control-status')
+      status.setAttribute('role', 'status')
+      const controls = taskInputRequestControls(element, decision, {
+        showOptions: true,
+        async onAnswer({ taskId, requestId, expectedRevision, answer }) {
+          const buttons = [...controls.querySelectorAll('button')]
+          buttons.forEach(button => { button.disabled = true })
+          status.textContent = '正在提交回答…'
+          try {
+            const receipt = await api.answerTaskInputRequest(taskId, requestId, { answer, expectedRevision })
+            closeDialog()
+            safeCall(onReceipt, receipt)
+          } catch (error) {
+            status.textContent = `回答提交失败，仍可重试。${error?.code ? ` ${error.code}` : ''}`
+            buttons.forEach(button => { button.disabled = false })
+          }
+        },
+      })
+      const later = makeButton(element, '稍后处理', false, 'close-control-modal', 'close')
+      later.addEventListener('click', closeDialog)
+      dialog.append(heading, context, element('p', decision.question), controls, status, later)
+      active = { key, dialog, close: closeDialog }
+    }
+    seen.add(key)
+    const close = active.close
+    dialog.addEventListener('close', close, { once: true })
+    dialog.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        close()
+      }
+    })
+    dialog.show()
+    dialog.querySelector('[data-product-role="close-control-modal"]')?.focus({ preventScroll: true })
+  }
+  return { sync, dismiss }
 }
 
 function renderControlFailure(host, error, make) {

@@ -3955,6 +3955,7 @@ export class RuntimeTaskCoordinator {
   openTaskInputRequest(input: {
     readonly taskId: TaskId;
     readonly question: string;
+    readonly requester?: TaskInputRequest['requester'];
     readonly schemaRef: string;
     readonly reason: string;
     readonly impact: string;
@@ -4001,6 +4002,7 @@ export class RuntimeTaskCoordinator {
       reason: input.reason,
       impact: input.impact,
       question: input.question,
+      ...(input.requester === undefined ? {} : { requester: { ...input.requester } }),
       ...(input.options === undefined ? {} : { options: [...input.options] }),
       turnId: input.turnId,
       operationId: input.operationId,

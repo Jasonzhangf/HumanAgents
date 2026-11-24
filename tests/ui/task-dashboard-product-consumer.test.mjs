@@ -288,6 +288,19 @@ const {
   taskReadScopeFromQuery,
   writePageProductLocation,
 } = await import('../../docs/ui/task-dashboard.js')
+const { taskBlocker } = await import('../../docs/ui/task-blocker.js')
+
+test('execution refusal retains its real reason, code and published recovery action', () => {
+  assert.deepEqual(taskBlocker({ state: 'blocked', error: {
+    code: 'runtime.execution.failure',
+    message: 'controlled release refusal',
+    nextAction: 'inspect the runtime error and retry from a new operation',
+  } }), {
+    code: 'runtime.execution.failure',
+    reason: 'controlled release refusal',
+    next: '查看执行错误，再从新一轮执行重试。',
+  })
+})
 
 test('a project explicit session boots without a Task and rejects mixed page identities', async () => {
   const scope = { kind: 'project', projectKey: 'project-7' }
@@ -363,6 +376,7 @@ function harness({
   answerTaskInputRequest,
   stopControl,
   onSessionRendered,
+  decisionPrompt,
 } = {}) {
   const centerHost = createElement('section')
   const relationHost = createElement('aside')
@@ -406,6 +420,7 @@ function harness({
     replaceLocation: (next) => replaces.push(next),
     closeRelationLayer: closeRelationLayer ?? (() => closes.push('closed')),
     ...(onSessionRendered === undefined ? {} : { onSessionRendered }),
+    decisionPrompt,
   })
   return {
     controller,
@@ -419,6 +434,32 @@ function harness({
     decisionReads,
   }
 }
+
+test('task dashboard prompts an exact pending question before unrelated session reads settle', async () => {
+  const prompts = []
+  let releaseSession
+  const session = new Promise(resolve => { releaseSession = resolve })
+  const decision = pendingInputDecision()
+  const { controller } = harness({
+    sessionRead: () => session,
+    decisionRead: async () => decision,
+    decisionPrompt: {
+      sync: (value, scope) => prompts.push({ value, scope }),
+      dismiss() {},
+    },
+  })
+  const load = controller.load()
+  try {
+    await new Promise(setImmediate)
+    assert.equal(controller.state().sessionRead, 'pending')
+    assert.deepEqual(prompts, [{ value: decision, scope: { projectKey: 'project-7', mode: 'rcc', taskId: 'task-1' } }])
+    assert.equal(controller.state().controlWrites, 0)
+  } finally {
+    releaseSession({ messages: [] })
+    await load
+    controller.dispose()
+  }
+})
 
 const callUsage = (callId, inputTokens) => ({
   calls: [{ callId, turnId: 'business-turn', inputTokens, outputTokens: 0,

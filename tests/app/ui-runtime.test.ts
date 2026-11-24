@@ -11619,7 +11619,7 @@ test('public tool readback fails closed for a mismatched persisted fact and pres
       assert.deepEqual(await response.json(), report);
       const sessionResponse = await fetch(`${server.url}/api/product/session?${query}&taskId=${taskId.value}`);
       assert.equal(sessionResponse.status, 200);
-      const body = await sessionResponse.json() as { toolEvents: unknown[] };
+      const body = await sessionResponse.json() as { toolEvents: readonly unknown[] };
       assert.deepEqual(body.toolEvents, session.toolEvents);
       for (const [suffix, status] of [
         ['?projectKey=another-project&mode=fake', 404],

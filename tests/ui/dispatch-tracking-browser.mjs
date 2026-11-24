@@ -10,7 +10,8 @@ await mkdir(evidence, { recursive: true })
 const writes = [], checks = [], errors = []
 const originalEndpoint = process.env.DISPATCH_ORIGINAL_READ_URL
 const project = { projectKey: 'dispatch-proof', projectName: '交办验收', agentName: 'Jenny', mode: 'fake', workspaceCwd: '/isolated/dispatch-proof' }
-const tasks = [], turns = [], interactions = new Map()
+const tasks = [], turns = [], interactions = new Map(), controlWrites = []
+let waitingDecision
 let phase = 'fixture'
 const scope = id => ({ kind: 'task', projectKey: project.projectKey, mode: project.mode, taskId: { scope: 'task', value: id } })
 const ref = id => ({ kind: 'interaction', taskRef: { scope: 'task', value: id }, scope: scope(id) })
@@ -22,6 +23,22 @@ const fixture = async (req, url) => {
   if (url.pathname === '/api/runtime/status') return { mode: 'fake', state: 'ready' }
   if (url.pathname === '/api/dashboard') return { projects: [{ scope: { projectKey: project.projectKey }, label: project.projectName }] }
   if (url.pathname === '/api/main-topic') return { ...project, turns, tasks }
+  if (url.pathname === '/api/product/decision') {
+    const decision = waitingDecision
+    if ((decision?.parentTaskId ?? decision?.target.taskRef)?.value !== url.searchParams.get('taskId')) return null
+    if (decision.kind === 'task-input-request') await new Promise(resolve => setTimeout(resolve, 1900))
+    return decision
+  }
+  if (req.method === 'POST' && (url.pathname.endsWith('/answer') || url.pathname.endsWith('/control/grant'))) {
+    const decision = waitingDecision
+    assert.ok(decision, 'only a live decision accepts a write')
+    assert.equal(url.pathname.split('/')[3], decision.target.taskRef.value)
+    assert.equal(input.expectedRevision, decision.request?.expectedRevision ?? 0)
+    controlWrites.push({ path: url.pathname, body: input })
+    tasks.find(task => task.taskId.value === (decision.parentTaskId ?? decision.target.taskRef).value).state = 'running'
+    waitingDecision = undefined
+    return { execution: { state: 'released' }, readback: { grant: { state: 'granted', revision: 1 }, commit: {} } }
+  }
   if (url.pathname === '/api/tasks') return { draft: [], waiting: [], running: tasks, completed: [], stopped: [], failed: [] }
   if (url.pathname === '/api/explicit/inputs') {
     const id = `interaction-proof-${interactions.size + 1}`
@@ -137,9 +154,8 @@ try {
   check('board opens exact formal child tools', await page.locator('[data-execution-task-id]').getAttribute('data-execution-task-id') === `child-${tasks[0].taskId.value}`)
   check('the actual scoped child tool call is visible in the task drawer before completion', tasks[0].state === 'running')
   const detailText = await page.locator('.dispatch-detail').innerText()
-  check('peer delivery and acceptance are separate facts', detailText.includes('任务来源 Jenny · 投递给 编排 Agent')
-    && detailText.includes('接单情况：未读到明确接单回执') && detailText.includes('已观察到执行')
-    && !detailText.includes('编排 Agent → 执行 Agent') && !detailText.includes('已接手'))
+  check('drawer shows execution without inventing an acceptance receipt', detailText.includes('跟踪中')
+    && detailText.includes('read-before-turn-end.txt') && !detailText.includes('已接手'))
   await page.getByText('模型与操作生命周期', { exact: true }).click()
   await page.getByText('模型开始处理', { exact: false }).waitFor()
   await page.getByText('模型与操作生命周期', { exact: true }).focus()
@@ -150,13 +166,60 @@ try {
   await page.screenshot({ path: resolve(evidence, 'isolated-task-chain.png') })
   await page.keyboard.press('Escape')
   check('close retains draft and restores composer focus', await input.inputValue() === '抽屉关闭后保留这条输入' && await input.evaluate(node => document.activeElement === node))
-  tasks[0].state = 'blocked'; tasks[0].error = { code: 'fixture.execution-failed', retryable: false, message: 'raw original failure', ownerId: 'execution' }
-  await page.waitForFunction(() => document.querySelector('.dispatch-card')?.textContent.includes('fixture.execution-failed'))
-  check('error is Chinese and task-owned', !(await page.locator('.dispatch-card').first().innerText()).includes('raw original failure'))
+  check('ordinary dispatch never opens a decision or asks for a grant', await page.locator('dialog.task-decision-prompt[open]').count() === 0 && controlWrites.length === 0)
+  const first = tasks[0]
+  const taskId = first.taskId.value
+  const modal = page.locator('dialog.task-decision-prompt[open]')
+  first.state = 'waiting'
+  waitingDecision = { kind: 'task-input-request', target: ref(taskId), state: 'waiting', actions: ['answer'],
+    question: '请选择报告格式', request: { taskId: first.taskId, requestId: 'report-format',
+      expectedRevision: 2, question: '请选择报告格式', options: ['CSV', 'Markdown'],
+      requester: { roleId: 'execution', agentId: 'report-agent' } } }
+  await modal.getByText('请选择报告格式').waitFor()
+  await page.screenshot({ path: resolve(evidence, 'question-prompt.png') })
+  check('decision shows the requester, receiving project conversation and affected task',
+    (await modal.innerText()).includes('执行 Agent · report-agent')
+    && (await modal.innerText()).includes('交办验收 · Jenny')
+    && (await modal.innerText()).includes(first.title))
+  const scopedPage = await browser.newPage()
+  await scopedPage.goto(`${base}/?projectKey=${project.projectKey}&mode=fake`)
+  await scopedPage.locator('dialog.task-decision-prompt[open]').waitFor()
+  check('decision does not make other conversations inert', await scopedPage.locator('dialog.task-decision-prompt').evaluate(dialog => !dialog.matches(':modal')))
+  await scopedPage.getByRole('link', { name: 'Alex · CEO', exact: true }).click()
+  await scopedPage.waitForURL('**/?scope=system')
+  check('switching to the CEO entry does not carry the project decision', await scopedPage.locator('dialog.task-decision-prompt[open]').count() === 0
+    && controlWrites.length === 0)
+  await scopedPage.close()
+  await modal.getByRole('button', { name: '稍后处理' }).click()
+  await modal.waitFor({ state: 'hidden' })
+  check('deferring a real question makes no write', controlWrites.length === 0)
+  await page.locator('.task-decision-notice button').click()
+  await modal.getByRole('button', { name: 'Markdown' }).click()
+  await modal.waitFor({ state: 'hidden' })
+  check('answer posts only the selected option and the original revision',
+    controlWrites.length === 1 && controlWrites[0].path.endsWith('/input-requests/report-format/answer')
+    && controlWrites[0].body.answer === 'Markdown' && controlWrites[0].body.expectedRevision === 2)
+  first.state = 'waiting'
+  waitingDecision = { kind: 'task-grant', parentTaskId: first.taskId, target: ref(`child-${taskId}`), state: 'waiting', actions: ['grant'],
+    question: '是否批准继续执行这个任务？', readback: { grant: null, commit: null } }
+  await modal.getByText('授权仅适用于这个任务。批准后保留授权，可在任务控制中撤销。').waitFor()
+  await page.screenshot({ path: resolve(evidence, 'authorization-prompt.png') })
+  await modal.getByRole('button', { name: '持续允许此任务' }).click()
+  await modal.waitFor({ state: 'hidden' })
+  check('explicit scoped approval persists once using the same modal', controlWrites.length === 2
+    && controlWrites[1].path === `/api/tasks/child-${taskId}/control/grant` && controlWrites[1].body.expectedRevision === 0)
+  tasks[0].state = 'blocked'
+  tasks[0].nextStep = '确认外部变更结果后执行恢复或停止任务'
+  tasks[0].error = { code: 'unknown.event', retryable: false, message: 'raw original failure', ownerId: 'execution' }
+  await page.waitForFunction(() => document.querySelector('.dispatch-card')?.textContent.includes('unknown.event'))
+  check('protocol failure exposes cause, code and next step without an approval', await modal.count() === 0
+    && (await page.locator('.dispatch-card').first().innerText()).includes('模型服务返回了无法识别的响应事件')
+    && (await page.locator('.dispatch-card').first().innerText()).includes('确认外部变更结果后执行恢复或停止任务'))
   tasks[1].state = 'succeeded'
   turns.push({ turnId: 'result-second', role: 'jenny', kind: 'result', taskId: tasks[1].taskId, text: '第二个项目检查完成' })
   await page.getByText('第二个项目检查完成', { exact: true }).waitFor()
-  check('completed result stays with second task', (await page.locator('.dispatch-card').nth(1).innerText()).includes('完成')
+  check('completed result stays with second task and changes only card border', (await page.locator('.dispatch-card').nth(1).getAttribute('data-result')) === 'success'
+    && await page.locator('.dispatch-card').nth(1).getByText('完成', { exact: true }).count() === 0
     && await page.locator('[data-turn-id="result-second"] .mt-turn-head strong').innerText() === '任务执行链')
   const before = writes.length
   await page.getByRole('button', { name: '任务板', exact: true }).click()
@@ -177,11 +240,23 @@ try {
     await page.screenshot({ path: resolve(evidence, 'original-dispatch-card.png') })
     await page.getByRole('button', { name: '任务板', exact: true }).click()
     await page.locator('.dispatch-board-entry[data-dispatch-task-id="ui-task-implicit-draft-2"]').click()
-    await page.getByText('执行 Agent · 列出文件', { exact: true }).waitFor()
-    await page.getByText('执行 Agent · 读取文件', { exact: true }).waitFor()
+    await page.locator('.dispatch-detail .tool-card[data-tool-id="file.list"]').waitFor()
+    await page.locator('.dispatch-detail .tool-card[data-tool-id="file.read"]').waitFor()
     check('old reader opens real execution child', await page.locator('[data-execution-task-id]').getAttribute('data-execution-task-id') === 'scheduled-task-665227213af5adf02045')
-    check('old reader shows structured completed steps', (await page.locator('.dispatch-tool-step').allTextContents()).every(text => text.includes('已完成')))
+    check('old reader shows structured completed tools', await page.locator('.dispatch-detail .tool-card[data-status="succeeded"]').count() > 1)
     await page.screenshot({ path: resolve(evidence, 'original-tool-chain.png') })
+    const originalProjection = await fetch(new URL('/api/main-topic', originalEndpoint)).then(response => response.json())
+    const params = new URLSearchParams({ task: 'ui-task-implicit-draft-2', projectKey: originalProjection.projectKey, mode: originalProjection.mode })
+    await page.setViewportSize({ width: 1152, height: 900 })
+    await page.goto(`${base}/task-dashboard.html?${params}`)
+    const blocker = page.locator('.task-blocker')
+    await blocker.getByText('unknown.event', { exact: true }).waitFor()
+    await page.getByRole('heading', { name: '当前会话' }).waitFor()
+    check('original real dashboard places blocker ahead of session with readable geometry',
+      (await blocker.innerText()).includes('确认外部变更结果后执行恢复或停止任务')
+      && (await blocker.boundingBox()).width > 320 && await modal.count() === 0
+      && await page.getByText('这次读取没有成功', { exact: true }).count() === 0)
+    await page.screenshot({ path: resolve(evidence, 'original-blocker-dashboard.png') })
   }
   check('no page or HTTP errors', errors.length === 0)
 } finally {

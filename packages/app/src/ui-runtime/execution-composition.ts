@@ -368,6 +368,7 @@ export function createDefaultExecutionComposition(input: {
   readonly openTaskInputRequest?: (input: {
     readonly taskId: RuntimeExecutionAllocation['taskId'];
     readonly question: string;
+    readonly requester?: import('../../../contracts/src/index.js').TaskInputRequest['requester'];
     readonly schemaRef: string;
     readonly reason: string;
     readonly impact: string;
@@ -1723,6 +1724,10 @@ export function createDefaultExecutionComposition(input: {
             await input.openTaskInputRequest({
               taskId: allocation.taskId,
               question: modelRequest.question,
+              requester: {
+                roleId: composition?.roleId ?? allocation.role ?? 'execution',
+                ...(composition?.configuredAgentId === undefined ? {} : { agentId: composition.configuredAgentId }),
+              },
               schemaRef: modelRequest.schemaRef,
               reason: modelRequest.reason,
               impact: modelRequest.impact,
