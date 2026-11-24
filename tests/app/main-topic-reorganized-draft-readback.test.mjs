@@ -70,11 +70,21 @@ test('reorganized new-task receipt owns its result despite an old matched task c
       await t.test('exact new-task identity wins; result appears once and old failure remains', async () => {
         const first = await service.readMainTopic();
         assert.equal(first.tasks.find((task) => task.taskId.value === original.taskId.value).sourceInteractionId, 'interaction-3');
+        const session = await service.productSessionRead({
+          projectKey, mode: 'rcc', sessionId: 'interaction-3', taskId: original.taskId.value,
+        });
+        assert.ok(session.messages.some(message =>
+          message.ref.sourceId === 'explicit-intake' && message.ref.eventId === 'interaction-3'),
+        'the exact committed new task must also own its ordinary session messages');
         const results = first.turns.filter((turn) => turn.kind === 'result' && turn.taskId?.value === original.taskId.value);
         assert.equal(results.length, 1);
         assert.equal(results[0].text, original.output);
         const old = first.tasks.find((task) => task.taskId.value === 'ui-task-implicit-draft-3');
         assert.equal(old.sourceInteractionId, 'interaction-2');
+        const stale = await service.productSessionRead({
+          projectKey, mode: 'rcc', sessionId: 'interaction-3', taskId: old.taskId.value,
+        });
+        assert.deepEqual(stale.messages, []);
         assert.equal(old.state, 'blocked');
         assert.equal(old.error.code, 'transport.failure');
         assert.deepEqual(await service.readMainTopic(), first);

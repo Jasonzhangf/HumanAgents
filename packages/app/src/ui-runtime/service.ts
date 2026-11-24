@@ -5051,11 +5051,10 @@ export class UiRuntimeService {
     return projectRuntimeTaskList({ mode: this.mode, tasks: await this.snapshotsWithIdentitySource() });
   }
 
-  /** Rebuild the Jenny conversation from persisted interactions and task facts. */
-  async readMainTopic(): Promise<MainTopicProjection> {
-    const snapshots = await this.snapshotsWithIdentitySource();
-    const coordinatorSnapshots = new Map(this.coordinator.taskSnapshots().map((snapshot) => [snapshot.taskId.value, snapshot]));
-    const interactions = this.explicitIntake.exportState().interactions;
+  private explicitInteractionTaskRefs(
+    interactions: ExplicitIntakeState['interactions'],
+    snapshots: readonly RuntimeTaskSnapshotInput[],
+  ): ReadonlyMap<string, TaskId> {
     const finalReceipts = this.requirementSubmissions.finalReceipts();
     const taskRefs = new Map<string, TaskId>();
     for (const interaction of interactions) {
@@ -5093,6 +5092,15 @@ export class UiRuntimeService {
       const taskId = receipts.length === 1 ? submitted : direct;
       if (taskId !== undefined) taskRefs.set(interaction.interactionId, taskId);
     }
+    return taskRefs;
+  }
+
+  /** Rebuild the Jenny conversation from persisted interactions and task facts. */
+  async readMainTopic(): Promise<MainTopicProjection> {
+    const snapshots = await this.snapshotsWithIdentitySource();
+    const coordinatorSnapshots = new Map(this.coordinator.taskSnapshots().map((snapshot) => [snapshot.taskId.value, snapshot]));
+    const interactions = this.explicitIntake.exportState().interactions;
+    const taskRefs = this.explicitInteractionTaskRefs(interactions, snapshots);
     const interactionFacts = interactions.map((interaction) => {
       const taskId = taskRefs.get(interaction.interactionId);
       const firstResponses = new Set<string>();
@@ -5280,10 +5288,13 @@ export class UiRuntimeService {
   private explicitInteractionMessages(
     selection: ProductReadSelection,
     organId: OrganId,
+    snapshots: readonly RuntimeTaskSnapshotInput[],
   ): readonly ProductMessageFact[] {
     const scope = productSelectionScope(selection);
-    return this.explicitIntake.exportState().interactions.flatMap((interaction) => {
-      const recordedTaskRef = this.explicitInteractionTaskRef(interaction);
+    const interactions = this.explicitIntake.exportState().interactions;
+    const taskRefs = this.explicitInteractionTaskRefs(interactions, snapshots);
+    return interactions.flatMap((interaction) => {
+      const recordedTaskRef = taskRefs.get(interaction.interactionId);
       // A task session only carries interactions the owner actually bound to
       // that task. An unbound draft, clarification or status query stays in the
       // project overview; the selected task id is never a fallback owner.
@@ -5587,7 +5598,7 @@ export class UiRuntimeService {
     const messages = [...composeProductSessionMessages({
       selection,
       organId: this.options.organId,
-      messages: this.explicitInteractionMessages(selection, this.options.organId),
+      messages: this.explicitInteractionMessages(selection, this.options.organId, facts.snapshots),
       taskEvents,
     }), ...toolEvents.map(toolEvent => ({
       ref: { eventId: toolEvent.eventId, sourceId: 'runtime-task-event', scope: { organId: this.options.organId, taskId: toolEvent.scope.taskId } },
