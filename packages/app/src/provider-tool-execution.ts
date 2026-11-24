@@ -508,6 +508,10 @@ function reportOutputRef(outputId: string): string {
   return `asset://provider-tool/output/${encodeURIComponent(outputId)}`;
 }
 
+export function isProviderToolReportRef(ref: string | undefined): ref is string {
+  return ref !== undefined && outputIdFromRef(ref) !== undefined;
+}
+
 /**
  * The asset id is derived from the descriptor (output id + content digest), so
  * the readback route can resolve a report without any in-process bookkeeping.

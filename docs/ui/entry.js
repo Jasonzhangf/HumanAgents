@@ -489,7 +489,6 @@ function paintSubmission() {
     onOpenDispatch: dispatchTracking.open,
     dispatchObservation: dispatchTracking.observation,
     dispatchExecutionObserved: dispatchTracking.executionObserved,
-    dispatchActivity: dispatchTracking.activity,
   })
 }
 

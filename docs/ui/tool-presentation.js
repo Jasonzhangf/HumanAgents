@@ -64,6 +64,7 @@ export function toolOutputText(toolId, report) {
 function visibleText(value) { return value === '' ? '（空字符串）' : value }
 
 const STATUS = Object.freeze({ succeeded: '执行成功', failed: '执行失败', blocked: '执行受阻', cancelled: '已取消', unknown: '结果状态未知' })
+const ACTOR = Object.freeze({ orchestration: '编排 Agent', execution: '执行 Agent', reviewer: '审查 Agent', planner: '规划 Agent' })
 const bodies = new WeakMap()
 
 function toolCard(row, readOutput, previous) {
@@ -74,6 +75,9 @@ function toolCard(row, readOutput, previous) {
   let observer
   card.dataset.toolKey = row.key
   const toolId = row.call?.toolId ?? row.result?.toolId
+  const execution = row.call?.execution ?? row.result?.execution
+  if (toolId) card.dataset.toolId = toolId
+  if (execution?.runtimeId) card.dataset.runtimeId = execution.runtimeId
   const semantic = element('div', undefined, 'tool-semantic')
   function present(report) {
     const value = toolSemantics(toolId, row.call?.arguments, report)
@@ -96,6 +100,7 @@ function toolCard(row, readOutput, previous) {
     const error = row.result.error
     card.append(element('p', `${error.code || ''} ${error.message || ''}${error.ownerId ? ` · 错误负责人：${error.ownerId}` : ''}`.trim(), 'tool-error'))
   }
+  if (Object.hasOwn(ACTOR, execution?.role)) card.append(element('span', ACTOR[execution.role], 'tool-actor muted'))
   card.append(semantic)
   const state = row.result
     ? toolId === 'bash' && row.result.status === 'succeeded' ? '工具已返回 · 命令退出情况见结果' : (STATUS[row.result.status] || '结果状态未提供')
@@ -118,6 +123,7 @@ function toolCard(row, readOutput, previous) {
       executionEpoch: (row.call ?? row.result).executionEpoch,
       callId: (row.call ?? row.result).callId, calledAt: row.call?.occurredAt,
       returnedAt: row.result?.occurredAt, outputRef: row.result?.outputRef,
+      execution,
       evidenceRefs: row.result?.evidenceRefs,
     }, null, 2)))
   })

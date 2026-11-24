@@ -170,7 +170,8 @@ export interface ProductTaskToolEvent {
   readonly seq: number;
   readonly kind: string;
   readonly state: string;
-  readonly occurredAt: string;
+  readonly occurredAt?: string;
+  readonly occurredAtUnavailableReason?: string;
   readonly summary: string;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly callId?: string;

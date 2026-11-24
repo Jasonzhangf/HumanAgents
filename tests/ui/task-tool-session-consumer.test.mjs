@@ -54,6 +54,35 @@ test('execution focus cannot pair identical call ids from another epoch or task'
   assert.doesNotMatch(text(host), /WRONG EPOCH/)
 })
 
+test('a nested file read remains visibly attributable to its recorded instance', async () => {
+  const host = new Node('main')
+  const child = { runtimeId: 'runtime-child', assignmentId: 'assignment-child', role: 'execution' }
+  const childEvent = (kind, extra) => event(kind, {
+    toolId: 'file.read', operationId: 'child-op', execution: child,
+    ...extra,
+  })
+  const parent = event('provider.tool', { toolId: 'child.call', arguments: { purpose: '读取 marker.txt' } })
+  renderProductSessionView(host, {
+    toolScope: scope, toolEvents: [
+      parent, childEvent('provider.tool', { arguments: { path: 'marker.txt' } }),
+      childEvent('provider.tool-result', { status: 'succeeded', outputRef: 'child-ref', outputDigest: 'recorded' }),
+    ],
+  }, { element: make, readToolOutput: async target => {
+    assert.equal(target.operationId, 'child-op')
+    return { path: 'marker.txt', content: 'observed file contents' }
+  } })
+  const cards = walk(host).filter(node => node.className === 'tool-card')
+  assert.deepEqual(cards.map(node => [node.dataset.toolId, node.dataset.runtimeId]), [
+    ['child.call', 'runtime-a'], ['file.read', 'runtime-child'],
+  ])
+  assert.match(text(cards[0]), /委派执行/)
+  assert.match(text(cards[1]), /读取文件/)
+  assert.match(text(cards[1]), /执行 Agent/)
+  await walk(cards[1]).find(node => node.className === 'tool-read-output').listeners.click()
+  assert.match(text(cards[1]), /observed file contents/)
+  assert.doesNotMatch(text(cards[0]), /observed file contents/)
+})
+
 test('scoped tool reader keeps project/mode and allocation selectors on exact GET', async () => {
   const urls = []
   const original = globalThis.fetch

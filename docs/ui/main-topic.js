@@ -268,15 +268,14 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     }
     detailReadError.textContent = turn.detailReadError.message
   } else detailReadError?.remove()
-  const activity = turn.dispatchTask && topicState.dispatchActivity?.(turn.dispatchTask)
-  const events = activity?.events.length ? activity.events : turn.toolEvents
+  const events = turn.taskId || turn.dispatchTask ? undefined : turn.toolEvents
   let tools = bubble.querySelector('.tool-body')
   if (events?.length) {
     if (!tools) {
       tools = element('div', undefined, 'tool-body')
       bubble.append(tools)
     }
-    renderToolBody(tools, events, activity?.events.length ? activity.readOutput : api.readToolOutput)
+    renderToolBody(tools, events, api.readToolOutput)
   } else if (tools) {
     disposeToolBody(tools)
     tools.remove()
@@ -400,7 +399,7 @@ export function mainTopicTurnGroups(projection) {
   }
 }
 
-export function renderMainTopic(host, projection, { onAnswer, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved, dispatchActivity } = {}) {
+export function renderMainTopic(host, projection, { onAnswer, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved } = {}) {
   projection = { ...projection, turns: ownedMainTopicTurns(projection) }
   if (!(host instanceof HTMLElement)) throw new Error('main topic requires a host element')
   const activeControl = host.contains(document.activeElement) ? document.activeElement : undefined
@@ -421,7 +420,6 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDetail, onOp
   if (onOpenDispatch !== undefined) topicState.onOpenDispatch = onOpenDispatch
   if (dispatchObservation !== undefined) topicState.dispatchObservation = dispatchObservation
   if (dispatchExecutionObserved !== undefined) topicState.dispatchExecutionObserved = dispatchExecutionObserved
-  if (dispatchActivity !== undefined) topicState.dispatchActivity = dispatchActivity
   if (topicState.detail && topicState.detail.scope !== scope) topicState.detail = undefined
   const bindings = []
   const previousTurns = new Map(

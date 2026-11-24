@@ -44,10 +44,6 @@ export function observationTools(observation) {
   }))
 }
 
-export function dispatchToolEvents(children = []) {
-  return children.flatMap(child => scopedProductToolEvents({ ...child.session, toolScope: child.scope }))
-}
-
 export function renderDispatchCard(turn, task, { onOpen, observation, executionObserved } = {}) {
   const card = element('div', undefined, 'dispatch-card')
   card.dataset.dispatchTaskId = taskValue(task.taskId)
@@ -231,15 +227,5 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
     dispose() { disposed = true; clearTimeout(timer); opened = undefined },
     observation(task) { return records.get(keyFor(task, scope()))?.children?.[0]?.observation },
     executionObserved(task) { return hasExecution(records.get(keyFor(task, scope()))) },
-    activity(task) {
-      const record = records.get(keyFor(task, scope()))
-      if (!record) return undefined
-      record.readActivityOutput ??= async address => {
-        const child = current(record) && record.children?.find(child => child.scope.taskId === taskValue(address.taskId))
-        if (!child) throw new Error('执行详情所属任务已切换')
-        return api.readScopedToolOutput(address, child.scope)
-      }
-      return { events: dispatchToolEvents(record.children), readOutput: record.readActivityOutput }
-    },
   }
 }

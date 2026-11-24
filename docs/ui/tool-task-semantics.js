@@ -32,7 +32,36 @@ export function taskSemantics(toolId, args, report) {
   let summary
   let explained = false
 
-  if (['get_goal', 'create_goal', 'update_goal'].includes(toolId)) {
+  if (toolId === 'child.call') {
+    const review = input.kind === 'review' || body.kind === 'review'
+    title = review ? '请求审查' : '委派执行'
+    const purpose = string(input.purpose)
+    if (purpose) subject = clip(purpose)
+    field('接收方', input.agentId)
+    if (body.state === 'returned') {
+      summary = review ? '审查结果已返回' : '执行结果已返回'
+      field('结果', body.summary)
+      if (Number.isSafeInteger(body.findings)) add(`发现 ${body.findings} 项`)
+      field('受阻原因', body.reason)
+      explained = true
+    }
+  } else if (toolId === 'child.adopt' || toolId === 'child.not_select') {
+    title = toolId === 'child.adopt' ? '采纳返回结果' : '记录不采纳决定'
+    if (toolId === 'child.adopt' && body.state === 'adopted') {
+      summary = '已采纳返回结果'
+      explained = true
+    } else if (toolId === 'child.not_select' && body.state === 'not-selected') {
+      summary = '已记录不采纳决定'
+      explained = true
+    }
+  } else if (toolId === 'humanagent_child_deliver') {
+    title = '提交委派结果'
+    field('提交内容', input.body)
+    if (body.state === 'delivered') {
+      summary = '执行方的交付已记录'
+      explained = true
+    }
+  } else if (['get_goal', 'create_goal', 'update_goal'].includes(toolId)) {
     title = toolId === 'get_goal' ? '读取目标' : toolId === 'create_goal' ? '创建目标' : ownLabel(GOAL_ACTION, input.action, '更新目标')
     const goal = record(body.goal)
     subject = string(goal.objective) ?? string(input.objective)

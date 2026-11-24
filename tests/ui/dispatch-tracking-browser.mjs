@@ -106,8 +106,8 @@ try {
   await page.locator('.dispatch-card').waitFor()
   await page.waitForFunction(() => !document.querySelector('#entry-form button[type=submit]').disabled)
   check('formal dispatch releases composer before task completion', tasks[0].state === 'running')
-  await page.locator('.mt-turn--dispatch .tool-card').filter({ hasText: 'read-before-turn-end.txt' }).waitFor()
-  check('the actual scoped child tool call is visible in chat before the task finishes', tasks[0].state === 'running')
+  check('Jenny chat shows tracking without embedding the implicit agent tools',
+    await page.locator('.mt-turn--dispatch .tool-card').count() === 0)
   const beforeRetry = writes.filter(path => path.endsWith('/confirmation')).length
   for (const [index, message] of ['重试', '追加要求'].entries()) {
     await input.fill(message)
@@ -135,6 +135,7 @@ try {
   try { await page.locator('.dispatch-detail .tool-card').filter({ hasText: 'read-before-turn-end.txt' }).waitFor({ timeout: 7000 }) }
   catch (error) { await writeFile(resolve(evidence, 'failed-detail.txt'), await page.locator('body').innerText()); throw error }
   check('board opens exact formal child tools', await page.locator('[data-execution-task-id]').getAttribute('data-execution-task-id') === `child-${tasks[0].taskId.value}`)
+  check('the actual scoped child tool call is visible in the task drawer before completion', tasks[0].state === 'running')
   const detailText = await page.locator('.dispatch-detail').innerText()
   check('peer delivery and acceptance are separate facts', detailText.includes('任务来源 Jenny · 投递给 编排 Agent')
     && detailText.includes('接单情况：未读到明确接单回执') && detailText.includes('已观察到执行')

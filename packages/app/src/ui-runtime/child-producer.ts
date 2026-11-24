@@ -1747,6 +1747,7 @@ interface AppChildParent {
     readonly childTurnId: string;
     readonly checkpointReceiptRef: string;
     readonly binding: ChildCallBinding;
+    readonly incarnation?: TaskRuntimeIncarnation;
   }): Promise<ChildInvocationRecord>;
   recordChildReturn(input: ParentChildReturnInput): Promise<AcceptedChildDelivery>;
   recordChildAdoption(invocationId: string, delivery: AcceptedChildDelivery): Promise<void>;
@@ -1876,6 +1877,7 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
                 ...(inspection === undefined ? {} : { inspection }),
               }
             : { kind: 'review', assignment: prepareInput.assignment },
+          ...(prepareInput.lease === undefined ? {} : { incarnation: prepareInput.lease.incarnation }),
         });
         input.onChildLifecycle?.({ state: 'child.prepared', kind: prepareInput.kind, invocationId: prepareInput.invocationId, turnId });
         return { invocationId: prepareInput.invocationId, checkpointReceiptRef };

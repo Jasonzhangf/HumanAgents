@@ -22,6 +22,21 @@ const end = {
   deliveryRefs: ['asset:report'],
 }
 
+test('orchestration cards distinguish dispatch, return and adoption without quoting raw instructions', () => {
+  const args = { agentId: 'execution-default', purpose: '核对标记文件', instructions: '内部执行约束' }
+  const request = taskSemantics('child.call', args)
+  assert.equal(request.title, '委派执行')
+  assert.match(text(request), /核对标记文件.*接收方：execution-default/s)
+  assert.doesNotMatch(text(request), /内部执行约束|已返回/)
+  const returned = taskSemantics('child.call', args, { state: 'returned', kind: 'execution', status: 'completed', summary: '已核对唯一一行' })
+  assert.match(text(returned), /执行结果已返回.*已核对唯一一行/s)
+  assert.doesNotMatch(text(returned), /已采纳|任务已完成/)
+  assert.match(text(taskSemantics('child.call', { ...args, kind: 'review' })), /请求审查/)
+  assert.match(text(taskSemantics('child.adopt', {}, { state: 'adopted' })), /已采纳返回结果/)
+  assert.match(text(taskSemantics('child.not_select', {}, { state: 'not-selected' })), /已记录不采纳决定/)
+  assert.match(text(taskSemantics('humanagent_child_deliver', { body: '文件原文' }, { state: 'delivered' })), /执行方的交付已记录/)
+})
+
 test('goal calls distinguish requested action from returned goal phase and absence', () => {
   assert.match(text(taskSemantics('create_goal', { objective: goal.objective })), /创建目标/)
   assert.match(text(taskSemantics('create_goal', { objective: goal.objective })), /尚无结果正文/)

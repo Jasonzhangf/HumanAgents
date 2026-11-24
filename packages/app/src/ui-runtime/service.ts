@@ -183,7 +183,8 @@ import { TaskIdentityConsumer } from '../../../runtime/src/orchestration/task-id
 import { TaskPlanRevisionConsumer } from '../../../runtime/src/orchestration/task-plan-revisions.js';
 import { JsonlTaskPlanRevisionJournal } from '../../../adapters/jsonl/src/task-plan-revisions.js';
 import { JsonlTaskIdentityJournal } from '../../../adapters/jsonl/src/task-identities.js';
-import { createJsonlActiveTurnJournal, createJsonlActiveTurnSegmentJournal } from '../../../adapters/jsonl/src/active-turn.js';
+import { createJsonlActiveTurnJournal, createJsonlActiveTurnSegmentJournal, decodeActiveTurnRecords, listTaskActiveTurnBindings } from '../../../adapters/jsonl/src/active-turn.js';
+import { childToolEventRecords, childToolSources, type ChildToolReadSource } from './child-tool-read.js';
 import { JsonlOperationCompletionJournal } from '../../../adapters/jsonl/src/operation-completion.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
@@ -638,6 +639,7 @@ export interface UiRuntimeServiceOptions {
    */
   readonly providerToolRoundLimit?: number;
   readonly toolOutputStore?: import('../provider-tool-execution.js').UiRuntimeToolOutputStore;
+  readonly childToolOutputStore?: Pick<import('../provider-tool-execution.js').UiRuntimeToolOutputStore, 'readReport'>;
   readonly explicitBrainAgentMessage?: (input: {
     readonly recipientRef: string;
     readonly messageRef: string;
@@ -4001,11 +4003,70 @@ export class UiRuntimeService {
   ): Promise<unknown> {
     const resolved = await this.resolveTaskReadScope(taskId, scope?.projectKey, scope?.mode);
     const task = resolved.kind === 'bound' ? this.coordinatorOrQueuedTaskSnapshot(taskId) : resolved.entry.snapshot;
-    const event = task.events.find((candidate) => (
+    const parentEvent = task.events.find((candidate) => (
       candidate.operationId === operationId.value
       && candidate.executionEpoch === executionEpoch
       && candidate.seq === seq
     ));
+    let childSelection: ProductTaskToolEvent | undefined;
+    let event: RuntimeTaskEvent | undefined = parentEvent;
+    if (event === undefined && resolved.kind === 'bound') {
+      const source = resolved.source;
+      const projectKey = scope?.projectKey ?? source?.projectKey;
+      const mode = scope?.mode ?? resolved.mode;
+      if (projectKey !== undefined && (mode === 'fake' || mode === 'rcc')) {
+        const selection = this.productSelectionForRequest({ projectKey, mode, taskId: taskId.value });
+        const childEvents = await this.productChildToolEvents(selection);
+        const childMatches = childEvents.filter((candidate) => candidate.operationId === operationId.value
+          && candidate.executionEpoch === executionEpoch
+          && candidate.seq === seq);
+        if (childMatches.length > 1) {
+          throw new UiRuntimeApiError('tool-output.binding-ambiguous', RUNTIME_OWNER,
+            'the selected child event has more than one committed child binding',
+            'repair the authoritative child invocation and binding records', 409);
+        }
+        const child = childMatches[0];
+        if (child !== undefined) {
+          childSelection = child;
+          if (scope?.configuredAgentId !== undefined) {
+            throw new UiRuntimeApiError('tool-output.binding-unavailable', RUNTIME_OWNER,
+              'a child tool event has no unique recorded member allocation',
+              'restore the authoritative member allocation before selecting this member', 409);
+          }
+          if (scope?.roleId !== undefined && child.execution?.role !== scope.roleId) {
+            throw new UiRuntimeApiError('tool-output.scope-mismatch', RUNTIME_OWNER,
+              'the selected child event is outside the requested role',
+              'select a child event in the requested role scope', 404);
+          }
+          event = {
+            eventId: child.eventId,
+            seq: child.seq,
+            // The public child projection omits time when the accepted fact
+            // carries none. This internal copy is never returned; it only
+            // satisfies descriptor validation, which does not consume time.
+            occurredAt: child.occurredAt ?? '',
+            taskId: child.scope.taskId,
+            operationId: child.operationId,
+            executionEpoch: child.executionEpoch,
+            kind: child.kind as RuntimeTaskEvent['kind'],
+            state: child.state,
+            summary: child.summary,
+            evidenceRefs: child.evidenceRefs,
+            ...(child.turnId === undefined ? {} : { turnId: child.turnId }),
+            ...(child.requestId === undefined ? {} : { requestId: child.requestId }),
+            ...(child.parentRequestId === undefined ? {} : { parentRequestId: child.parentRequestId }),
+            ...(child.callId === undefined ? {} : { callId: child.callId }),
+            ...(child.toolId === undefined ? {} : { toolId: child.toolId }),
+            ...(child.arguments === undefined ? {} : { arguments: child.arguments }),
+            ...(child.status === undefined ? {} : { status: child.status }),
+            ...(child.error === undefined ? {} : { error: child.error as RuntimeTaskEvent['error'] }),
+            ...(child.outputRef === undefined ? {} : { outputRef: child.outputRef }),
+            ...(child.outputDigest === undefined ? {} : { outputDigest: child.outputDigest }),
+            ...(child.executionFact === undefined ? {} : { executionFact: child.executionFact }),
+          };
+        }
+      }
+    }
     if (event === undefined) {
       throw new UiRuntimeApiError(
         'tool-output.event-not-found',
@@ -4015,7 +4076,7 @@ export class UiRuntimeService {
         404,
       );
     }
-    if (scope?.roleId !== undefined || scope?.configuredAgentId !== undefined) {
+    if ((scope?.roleId !== undefined || scope?.configuredAgentId !== undefined) && childSelection === undefined) {
       const journal = resolved.kind === 'bound' ? this.options.journal?.replay()
         : readUiRuntimeTaskJournal(resolved.source.checkpointsRoot, resolved.mode).records;
       const allocations = (journal ?? []).flatMap(record => record.kind === 'operation.prepared'
@@ -4060,7 +4121,8 @@ export class UiRuntimeService {
         error,
       );
     }
-    if (this.options.toolOutputStore === undefined) {
+    const outputStore = childSelection === undefined ? this.options.toolOutputStore : this.options.childToolOutputStore;
+    if (outputStore === undefined) {
       throw new UiRuntimeApiError(
         'tool-output.reader-unavailable',
         RUNTIME_OWNER,
@@ -4071,7 +4133,7 @@ export class UiRuntimeService {
     }
     let report: unknown;
     try {
-      report = await this.options.toolOutputStore.readReport({
+      report = await outputStore.readReport({
         outputRef: event.outputRef,
         outputDigest: event.outputDigest,
       });
@@ -5472,6 +5534,42 @@ export class UiRuntimeService {
     }
   }
 
+  /**
+   * Read child tool facts from the Runtime-owned active-turn journals. A child
+   * is eligible only when its committed parent invocation carries the acquired
+   * incarnation and exactly one child binding matches that full identity.
+   */
+  private async productChildToolEvents(
+    selection: ProductReadSelection,
+  ): Promise<readonly ProductTaskToolEvent[]> {
+    const selectedTaskId = selection.taskId;
+    const { mode } = selection;
+    if (selectedTaskId === undefined || (mode !== 'fake' && mode !== 'rcc')) return [];
+    const source = await this.findProjectSource(selection.projectKey);
+    if (source === undefined) return [];
+    const controlPath = uiRuntimeControlJournalPath(uiRuntimeModeRoot(source.checkpointsRoot, selection.mode));
+    const controlJournal = openUiRuntimeOrganJournal(controlPath);
+    const taskScope = await this.canonicalTaskIdentityScope(controlJournal, selectedTaskId, 'tool-observation');
+    if (!taskScope.ok) {
+      const { code, ownerId, message, nextAction } = taskScope.failure;
+      if (code === 'tool-observation.scope-unavailable') return [];
+      throw new UiRuntimeApiError(code, ownerId, message, nextAction, code === 'tool-observation.scope-mismatch' ? 409 : 503);
+    }
+    const committed = await controlJournal.replay();
+    const bindings = await listTaskActiveTurnBindings({ journal: { replay: async () => committed }, scope: taskScope.value });
+    const turns: ChildToolReadSource[] = bindings.map(({ binding }) => ({
+      binding,
+      records: decodeActiveTurnRecords(committed, binding.admittedTurn.turnId),
+    }));
+    const parentRecords = turns.flatMap(({ records }) => records);
+    const selected = childToolSources(parentRecords, turns, selectedTaskId.value);
+    return childToolEventRecords(selected).map((event) => ({
+      ...event,
+      scope: { kind: 'task', projectKey: selection.projectKey, mode, taskId: selectedTaskId },
+      occurredAtUnavailableReason: 'child active-turn raw facts do not carry a public event timestamp',
+    }));
+  }
+
   private async productBoardReadFacts(
     selection: ProductReadSelection,
     relationRead?: {
@@ -5547,6 +5645,7 @@ export class UiRuntimeService {
         'role/member tool reads require an exact task', 'send taskId with the role/member selection', 400);
     }
     const toolEvents: ProductTaskToolEvent[] = [];
+    let unboundToolEvents = false;
     if (selection.taskId !== undefined) {
       const task = this.coordinatorOrQueuedTaskSnapshot(selection.taskId);
       // Legacy task/session consumers without tool facts keep their existing
@@ -5568,8 +5667,8 @@ export class UiRuntimeService {
         if (options.roleId !== undefined || options.configuredAgentId !== undefined) {
           if (allocation === undefined || (options.roleId !== undefined && allocation.role === undefined)
             || (options.configuredAgentId !== undefined && allocation.configuredAgentId === undefined)) {
-            throw new UiRuntimeApiError('tool-output.binding-unavailable', RUNTIME_OWNER,
-              'a tool event has no unique recorded role/member allocation', 'restore the authoritative allocation before selecting this role/member', 409);
+            unboundToolEvents = true;
+            continue;
           }
           if ((options.roleId !== undefined && allocation.role !== options.roleId)
             || (options.configuredAgentId !== undefined && allocation.configuredAgentId !== options.configuredAgentId)) continue;
@@ -5585,6 +5684,14 @@ export class UiRuntimeService {
           } }),
         });
       }
+      if (options.configuredAgentId === undefined && this.isBoundScope(selection.projectKey, selection.mode)) {
+        const childEvents = await this.productChildToolEvents(selection);
+        toolEvents.push(...childEvents.filter(event => options.roleId === undefined || event.execution?.role === options.roleId));
+      }
+    }
+    if (unboundToolEvents && toolEvents.length === 0) {
+      throw new UiRuntimeApiError('tool-output.binding-unavailable', RUNTIME_OWNER,
+        'no matching tool event has a unique recorded role/member allocation', 'restore the authoritative allocation before selecting this role/member', 409);
     }
     const facts = await this.productBoardReadFacts(selection);
     const boardIndex = composeProductBoardIndex(facts.input);
@@ -5604,7 +5711,8 @@ export class UiRuntimeService {
       ref: { eventId: toolEvent.eventId, sourceId: 'runtime-task-event', scope: { organId: this.options.organId, taskId: toolEvent.scope.taskId } },
       targetRef: { kind: 'interaction' as const, taskRef: toolEvent.scope.taskId, scope: toolEvent.scope },
       actor: { kind: 'unknown' as const, sourceKind: 'runtime-task-event', sourceRef: toolEvent.kind },
-      occurredAt: toolEvent.occurredAt, text: toolEvent.summary, evidenceRefs: toolEvent.evidenceRefs, toolEvent,
+      ...(toolEvent.occurredAt === undefined ? { occurredAtUnavailableReason: toolEvent.occurredAtUnavailableReason } : { occurredAt: toolEvent.occurredAt }),
+      text: toolEvent.summary, evidenceRefs: toolEvent.evidenceRefs, toolEvent,
     }))];
     const sessionId = 'kind' in scope ? undefined : scope.sessionId;
     const occurrenceTaskIds = selectedTaskId === undefined ? [] : facts.snapshots
@@ -7021,13 +7129,13 @@ export class UiRuntimeService {
   private async canonicalTaskIdentityScope(
     journal: JsonlOrganJournal,
     taskId: TaskId,
-    family: 'checkpoint-history' | 'i2-history' = 'checkpoint-history',
+    family: 'checkpoint-history' | 'i2-history' | 'tool-observation' = 'checkpoint-history',
   ): Promise<RuntimeReadResult<TaskIdentityScope>> {
     try {
       const identities = (await new JsonlTaskIdentityJournal(journal).replay())
         .filter((identity) => identity.scope.taskId.value === taskId.value);
       if (identities.length === 0 || new Set(identities.map((identity) => identity.scope.organId.value)).size !== 1) {
-        const targetLabel = family === 'i2-history' ? 'I2 history' : 'checkpoint history';
+        const targetLabel = family === 'i2-history' ? 'I2 history' : family === 'tool-observation' ? 'tool activity' : 'checkpoint history';
         return { ok: false, failure: {
           code: identities.length === 0 ? `${family}.scope-unavailable` : `${family}.scope-mismatch`,
           ownerId: APP_OWNER,

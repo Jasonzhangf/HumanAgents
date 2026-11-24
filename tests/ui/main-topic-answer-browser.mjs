@@ -156,6 +156,10 @@ function mainTopicProjection(project) {
         role: 'jenny',
         kind: 'input-request',
         text: task.inputRequest.question,
+        toolEvents: [{
+          kind: 'provider.tool', seq: 1, taskId: task.taskId, operationId: 'implicit-test-operation',
+          executionEpoch: 1, callId: 'implicit-test-call', toolId: 'file.read', arguments: { path: 'prior-input.txt' },
+        }],
         occurredAt: task.updatedAt,
         taskId: task.taskId,
         requestId: task.inputRequest.requestId,
@@ -597,6 +601,7 @@ try {
   const beta = page.locator('[data-turn-id="input-request:request-beta"]')
   check('two questions render independently', await alpha.count() === 1 && await beta.count() === 1)
   for (const question of [alpha, beta]) {
+    check('relay card keeps task tools in the task drawer', await question.locator('.tool-card').count() === 0)
     check('open question shows that its own task is waiting for the user',
       await question.locator('.mt-turn-kind').innerText() === '等待你的回答'
       && !(await question.innerText()).includes('发出请求等待响应'))

@@ -95,6 +95,7 @@ import {
 } from '../explicit-brain-runtime.js';
 import { AppLifecycleError } from '../errors.js';
 import {
+  createProviderToolOutputStore,
   createResponsesFileToolExecutor,
   RESPONSES_BASH_TOOL,
   RESPONSES_CREATE_GOAL_TOOL,
@@ -705,6 +706,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
     ...(options.providerRetryConfig === undefined ? {} : { providerRetryConfig: options.providerRetryConfig }),
     ...(options.executionBudget === undefined ? {} : { executionBudget: options.executionBudget }),
+    childToolOutputStore: createProviderToolOutputStore(options.evidenceRoot),
     ...(providerToolExecutor === undefined ? {} : {
       providerTools: [...nativeProviderToolsFor(options.webSearchProviderConfig)],
       providerToolExecutor: providerToolExecutor.executor,
