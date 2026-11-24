@@ -10,7 +10,9 @@ export interface ConversationStatusFacts {
 }
 
 export interface ConversationStatusEvent extends Pick<RuntimeSseEvent,
-  'seq' | 'occurredAt' | 'taskId' | 'operationId' | 'executionEpoch' | 'kind' | 'state' | 'callId' | 'status' | 'error' | 'terminalPhase'> {
+  'seq' | 'occurredAt' | 'taskId' | 'operationId' | 'executionEpoch' | 'kind' | 'state' | 'summary'
+  | 'callId' | 'toolId' | 'status' | 'error' | 'attemptNumber' | 'maxAttempts' | 'retryDeadlineAt' | 'retryDelayMs'
+  | 'terminalPhase'> {
   readonly requestId?: string
   readonly turnId?: string
 }
@@ -350,7 +352,7 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
   for (const task of input.tasks) {
     const parent = task.parentTaskId === undefined ? undefined : tasksById.get(task.parentTaskId.value)
     if (parent === undefined) continue
-    if (task.inputRequest !== undefined && parent.inputRequest === undefined) {
+    if (task.state === 'waiting' && task.inputRequest !== undefined && parent.inputRequest === undefined) {
       relayedRequests.set(parent.taskId.value, { ...task.inputRequest, taskId: parent.taskId })
     }
   }
@@ -358,14 +360,18 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
   // evidence for that parent, never a second conversation item.
   const visibleTaskInputs = input.tasks
     .filter((task) => task.parentTaskId === undefined || !tasksById.has(task.parentTaskId.value))
-    .map((task) => {
-      const relayedRequest = relayedRequests.get(task.taskId.value)
+    .map(({ inputRequest, ...task }) => {
+      // An execution can retain an open request as evidence after it fails to
+      // close. Only a task waiting for the answer can solicit it.
+      const pendingRequest = task.state === 'waiting'
+        ? inputRequest ?? relayedRequests.get(task.taskId.value)
+        : undefined
       const consumedInputRequests = input.tasks
         .filter((child) => child.parentTaskId?.value === task.taskId.value)
         .flatMap((child) => child.consumedInputRequests ?? [])
       return {
         ...task,
-        ...(relayedRequest === undefined ? {} : { inputRequest: relayedRequest }),
+        ...(pendingRequest === undefined ? {} : { inputRequest: pendingRequest }),
         ...((task.consumedInputRequests?.length ?? 0) + consumedInputRequests.length === 0
           ? {} : { consumedInputRequests: [...(task.consumedInputRequests ?? []), ...consumedInputRequests] }),
       }
@@ -506,9 +512,11 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
       toolEvents: (task.events ?? []).filter((event) => event.kind === 'provider.tool' || event.kind === 'provider.tool-result'),
       statusFacts: {
       state: task.state,
-      events: (task.events ?? []).map(({ seq, occurredAt, taskId, operationId, executionEpoch, kind, state,
-        requestId, turnId, callId, status, error, terminalPhase }) => ({ seq, occurredAt, taskId, operationId,
-        executionEpoch, kind, state, requestId, turnId, callId, status, error, terminalPhase })),
+      events: (task.events ?? []).map(({ seq, occurredAt, taskId, operationId, executionEpoch, kind, state, summary,
+        requestId, turnId, callId, toolId, status, error, attemptNumber, maxAttempts, retryDeadlineAt, retryDelayMs,
+        terminalPhase }) => ({ seq, occurredAt, taskId, operationId, executionEpoch, kind, state, summary,
+        requestId, turnId, callId, toolId, status, error, attemptNumber, maxAttempts, retryDeadlineAt, retryDelayMs,
+        terminalPhase })),
       waitingForUser: task.inputRequest !== undefined,
       ...(task.error === undefined ? {} : { error: task.error }),
     } }

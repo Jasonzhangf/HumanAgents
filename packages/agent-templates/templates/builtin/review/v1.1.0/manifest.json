@@ -36,6 +36,7 @@
     "common/control-boundaries.md",
     "review/v1.1.0/prompts/identity.md",
     "review/v1.1.0/prompts/mission.md",
+    "review/skills/runtime-patrol/SKILL.md",
     "review/v1.1.0/prompts/input-output.md",
     "review/v1.1.0/prompts/failure.md",
     "review/v1.1.0/prompts/boundaries.md"

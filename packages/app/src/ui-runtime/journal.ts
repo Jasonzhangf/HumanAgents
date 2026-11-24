@@ -369,6 +369,22 @@ function validateEvidenceRefs(value: unknown, filePath: string, line: number): v
   }
 }
 
+function validateRuntimeTaskError(value: unknown, filePath: string, line: number): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: error is required`);
+  }
+  const error = value as Record<string, unknown>;
+  requireRecordString(error, 'code', filePath, line);
+  requireRecordString(error, 'ownerId', filePath, line);
+  requireRecordString(error, 'message', filePath, line);
+  if (typeof error.retryable !== 'boolean') {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: error.retryable is invalid`);
+  }
+  requireRecordString(error, 'nextAction', filePath, line);
+  if (error.evidenceRefs !== undefined) validateEvidenceRefs(error.evidenceRefs, filePath, line);
+  if (error.cleanupError !== undefined) validateRuntimeTaskError(error.cleanupError, filePath, line);
+}
+
 function validateRuntimeEvent(value: unknown, filePath: string, line: number): void {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.event event is required`);
@@ -555,14 +571,7 @@ function validateJournalRecord(
     if (record.taskOutput !== undefined && typeof record.taskOutput !== 'string') {
       throw new Error(`corrupt UI runtime journal ${filePath}:${line}: taskOutput must be a string`);
     }
-    if (record.error !== undefined) {
-      const taskError = requireRecordObject(record, 'error', filePath, line);
-      requireRecordString(taskError, 'code', filePath, line);
-      requireRecordString(taskError, 'ownerId', filePath, line);
-      requireRecordString(taskError, 'message', filePath, line);
-      if (typeof taskError.retryable !== 'boolean') throw new Error(`corrupt UI runtime journal ${filePath}:${line}: error.retryable is invalid`);
-      requireRecordString(taskError, 'nextAction', filePath, line);
-    }
+    if (record.error !== undefined) validateRuntimeTaskError(record.error, filePath, line);
     if (record.zeroEffectAdmissionDenial !== undefined) {
       if (record.zeroEffectAdmissionDenial !== true) {
         throw new Error(`corrupt UI runtime journal ${filePath}:${line}: zeroEffectAdmissionDenial must be true when present`);
@@ -584,6 +593,78 @@ function validateJournalRecord(
     }
     context.eventIdentities.set(identityKey, eventRecord);
     return { record: eventRecord, duplicate: false };
+  }
+  if (kind === 'operation.stop-settlement') {
+    requireScopedId(record, 'taskId', 'task', filePath, line);
+    requireScopedId(record, 'operationId', 'operation', filePath, line);
+    requirePositiveInteger(record, 'executionEpoch', filePath, line);
+    const scope = requireRecordObject(record, 'scope', filePath, line);
+    requireScopedId(scope, 'organId', 'organ', filePath, line);
+    requireScopedId(scope, 'taskId', 'task', filePath, line);
+    requireScopedId(scope, 'cycleId', 'cycle', filePath, line);
+    requireScopedId(scope, 'operationId', 'operation', filePath, line);
+    const operationId = record.operationId as { readonly value: string };
+    const taskId = record.taskId as { readonly value: string };
+    const operationIdentity = context.operationIdentities.get(operationId.value);
+    if (operationIdentity === undefined) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.stop-settlement references unknown operation ${operationId.value}`);
+    }
+    if (operationIdentity.taskId.value !== taskId.value
+      || operationIdentity.executionEpoch !== record.executionEpoch) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.stop-settlement identity does not match operation ${operationId.value}`);
+    }
+    if (!['pending', 'checkpoint-committed', 'provider-closed', 'settled'].includes(String(record.state))) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: stop settlement state is invalid`);
+    }
+    const allowedObligations = [
+      'stopped-checkpoint',
+      'inspection-stop-settlement',
+      'provider-close',
+      'stopped-terminal',
+    ];
+    if (!Array.isArray(record.obligations)
+      || record.obligations.some((entry) => typeof entry !== 'string' || !allowedObligations.includes(entry))) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: stop settlement obligations are invalid`);
+    }
+    const expectedObligations = record.state === 'pending'
+      ? allowedObligations
+      : record.state === 'checkpoint-committed'
+        ? allowedObligations.slice(1)
+        : record.state === 'provider-closed'
+          ? allowedObligations.slice(3)
+          : [];
+    if (JSON.stringify(record.obligations) !== JSON.stringify(expectedObligations)) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: stop settlement obligations do not match state`);
+    }
+    if (record.providerClose !== undefined) {
+      const providerClose = requireRecordObject(record, 'providerClose', filePath, line);
+      if (providerClose.state !== 'closed') {
+        throw new Error(`corrupt UI runtime journal ${filePath}:${line}: providerClose.state must be closed`);
+      }
+      if (providerClose.retained !== true && providerClose.retained !== false) {
+        throw new Error(`corrupt UI runtime journal ${filePath}:${line}: providerClose.retained must be boolean`);
+      }
+      validateEvidenceRefs(providerClose.evidenceRefs, filePath, line);
+      if (providerClose.ownerId !== undefined) requireRecordString(providerClose, 'ownerId', filePath, line);
+      if (providerClose.nextAction !== undefined) {
+        const nextAction = requireRecordObject(providerClose, 'nextAction', filePath, line);
+        if (!['continue', 'wait', 'stop', 'recover'].includes(String(nextAction.kind))) {
+          throw new Error(`corrupt UI runtime journal ${filePath}:${line}: providerClose.nextAction.kind is invalid`);
+        }
+        if (nextAction.ref !== undefined) requireRecordString(nextAction, 'ref', filePath, line);
+      }
+    }
+    if (record.state === 'provider-closed' && record.providerClose === undefined) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: provider-closed settlement requires providerClose`);
+    }
+    const stopControl = requireRecordObject(record, 'stopControl', filePath, line);
+    requireRecordString(stopControl, 'reason', filePath, line);
+    if (stopControl.actorKind !== 'human-operator' && stopControl.actorKind !== 'harness-control') {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: stopControl.actorKind is invalid`);
+    }
+    validateRuntimeTaskError(record.failure, filePath, line);
+    requireRecordString(record, 'occurredAt', filePath, line);
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
   if (kind === 'explicit-brain.state') {
     const state = requireRecordObject(record, 'state', filePath, line);

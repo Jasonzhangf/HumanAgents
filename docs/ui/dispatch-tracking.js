@@ -1,10 +1,25 @@
 import { element, formatTime } from './runtime-api.js'
 import { renderProductSessionView, disposeProductSessionView, scopedProductToolEvents } from './product-session-view.js'
+import { encodeProductLocation } from './product-location.js'
+import { taskDashboardHref } from './runtime-shell.js'
 import { taskBlocker } from './task-blocker.js'
 
 export const taskValue = id => typeof id === 'string' ? id : id?.value
 const roleLabel = role => ({ orchestration: '编排 Agent', execution: '执行 Agent', planner: '规划 Agent', reviewer: '审查 Agent', interaction: '交互 Agent' }[role] || '角色未记录')
 const terminal = new Set(['succeeded', 'completed', 'failed', 'blocked', 'stopped', 'cancelled', 'stale'])
+
+export function workSessionHref(scope) {
+  const taskId = taskValue(scope?.taskId)
+  if (!taskId || !scope?.projectKey || !scope?.mode) return undefined
+  const taskRef = { scope: 'task', value: taskId }
+  const taskScope = { kind: 'task', projectKey: scope.projectKey, mode: scope.mode, taskId: taskRef }
+  const location = encodeProductLocation({
+    board: 'interaction', lane: 'live',
+    focus: { kind: 'interaction', taskRef, scope: taskScope },
+    scope: taskScope,
+  })
+  return `${taskDashboardHref(taskRef, taskScope)}${location}`
+}
 
 // Only the task's formal source interaction can join turns; text is never a key.
 export function taskForTurn(turn, tasks = []) {
@@ -147,13 +162,17 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
       const section = element('section', undefined, 'dispatch-execution')
       section.dataset.executionTaskId = child.scope.taskId
       section.append(element('h3', '执行链'))
+      const workSession = workSessionHref(child.scope)
+      if (workSession) {
+        const link = element('a', '打开工作会话', 'button dispatch-work-session')
+        link.href = workSession
+        section.append(link)
+      }
       const nodes = element('details')
       nodes.append(element('summary', '编排节点与状态'))
-      for (const node of child.observation?.nodes || []) {
-        const line = element('p', `${roleLabel(node.ownerAgentRole)} · ${node.stateDisplay || '状态未记录'}`)
-        line.dataset.nodeId = node.nodeId
-        nodes.append(line)
-      }
+      const roleStates = new Set((child.observation?.nodes ?? [])
+        .map(node => `${roleLabel(node.ownerAgentRole)} · ${node.stateDisplay || '状态未记录'}`))
+      for (const state of roleStates) nodes.append(element('p', state))
       section.append(nodes)
       view.readers ??= new Map()
       const readerKey = JSON.stringify(child.scope)

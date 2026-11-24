@@ -1494,6 +1494,8 @@ async function handleRequest(
       const inputRevision = body.inputRevision === undefined ? 1 : requirePositiveInteger(body, 'inputRevision');
       const requestKind = optionalInteractionRequestKind(body);
       const occurredAt = optionalString(body, 'occurredAt') ?? new Date().toISOString();
+      const idempotencyKey = optionalString(body, 'idempotencyKey');
+      const topicRef = optionalString(body, 'topicRef');
       const interactionId = await service.receiveExplicitInput({
         sourceRef: requireString(body, 'sourceRef'),
         rawInput: requireString(body, 'rawInput'),
@@ -1505,9 +1507,12 @@ async function handleRequest(
         },
         occurredAt,
         ...(requestKind === undefined ? {} : { requestKind }),
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        ...(topicRef === undefined ? {} : { topicRef }),
         ...(body.workspace === undefined ? {} : { workspaceRequest: requireString(body, 'workspace') }),
       }, inputRevision);
-      writeJson(response, 201, { interactionId, occurredAt });
+      const accepted = await service.inspectExplicitInteraction(interactionId);
+      writeJson(response, 201, { interactionId, occurredAt: accepted.occurredAt ?? occurredAt });
       return;
     }
     if (path === '/api/explicit/decision' && method === 'POST') {

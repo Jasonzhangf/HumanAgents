@@ -85,7 +85,7 @@ import { JsonlInteractionParentTurnJournal } from '../../../adapters/jsonl/src/i
 import { DraftRevisionError } from '../../../core/src/draft-revision.js';
 import { directTaskCreateIdentitySource } from '../../../core/src/task-identity.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
-import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
+import { loadBuiltinAgentTemplate, managementRoleForAgent, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import { submitInteractionClosure, type SubmittedInteractionClosure } from '../../../runtime/src/checkpoints/submission.js';
@@ -369,6 +369,8 @@ import { type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runt
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
 import { createJsonlCheckpointJournal, createJsonlContextHistoryPort, createJsonlSemanticHistoryReader } from '../checkpoint-journal.js';
 import { AppLifecycleError } from '../errors.js';
+import { readRunManifest } from '../run-manifest.js';
+import { SessionStore } from '../session-store.js';
 import {
   createExplicitBrainRuntime,
   type ExplicitBrainRuntime,
@@ -495,6 +497,7 @@ type ServiceExecutionPorts = Pick<
   RuntimeTaskCoordinatorOptions,
   'admitExecution' | 'createDriver' | 'coldExecution' | 'currentStatePort' | 'currentStateFacts' | 'preparedExecutionStop'
   | 'inspectionStop' | 'executionPlanRevisionPort' | 'roleModelBindings' | 'orchestratorDecisionPort'
+  | 'closeRetainedTransientRetryProvider'
 > & {
   /**
    * The one canonical cold-resume selector. The launch execution composition
@@ -604,6 +607,7 @@ export interface UiRuntimeTaskControlTarget {
 
 export interface UiRuntimeServiceOptions {
   readonly mode: 'fake' | 'rcc';
+  readonly agentRoster?: readonly Pick<import('../../../config/src/index.js').AgentConfig, 'agentId' | 'roleId' | 'managementRole'>[];
   readonly maxConcurrentTasks?: number;
   readonly organId: OrganId;
   readonly principalOwner?: string;
@@ -717,6 +721,8 @@ export interface UiRuntimeServiceOptions {
     readonly executionPlanRevisionPort?: RuntimeTaskCoordinatorOptions['executionPlanRevisionPort'];
     readonly roleModelBindings?: RuntimeTaskCoordinatorOptions['roleModelBindings'];
     readonly orchestratorDecisionPort?: RuntimeTaskCoordinatorOptions['orchestratorDecisionPort'];
+    /** Same cancellable transient-retry wait contract used by the coordinator. */
+    readonly transientRetryWaiter?: RuntimeTaskCoordinatorOptions['transientRetryWaiter'];
     /**
      * Launch assembly of the full native execution ports. It is called exactly
      * once, before the coordinator is constructed; the supplied callbacks only
@@ -3437,6 +3443,9 @@ export class UiRuntimeService {
       ...(options.runtimeComposition?.roleModelBindings === undefined ? {} : {
         roleModelBindings: options.runtimeComposition.roleModelBindings,
       }),
+      ...(options.runtimeComposition?.transientRetryWaiter === undefined ? {} : {
+        transientRetryWaiter: options.runtimeComposition.transientRetryWaiter,
+      }),
       orchestratorDecisionPort: this.wrapOrchestratorDecisionPort(
         options.runtimeComposition?.orchestratorDecisionPort
           ?? executionPorts?.orchestratorDecisionPort
@@ -5241,7 +5250,8 @@ export class UiRuntimeService {
       }).map((event) => ({
         eventId: event.eventId, seq: event.seq, occurredAt: event.occurredAt,
         taskId: event.taskId, operationId: event.operationId, executionEpoch: event.executionEpoch,
-        kind: event.kind, state: event.state, summary: '', evidenceRefs: event.evidenceRefs,
+        kind: event.kind, state: event.state,
+        summary: event.kind === 'execution.retry' ? event.summary : '', evidenceRefs: event.evidenceRefs,
         ...(event.requestId === undefined ? {} : { requestId: event.requestId }),
         ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
         ...(event.callId === undefined ? {} : { callId: event.callId }),
@@ -5251,6 +5261,10 @@ export class UiRuntimeService {
         ...(event.outputDigest === undefined ? {} : { outputDigest: event.outputDigest }),
         ...(event.status === undefined ? {} : { status: event.status }),
         ...(event.error === undefined ? {} : { error: event.error }),
+        ...(event.attemptNumber === undefined ? {} : { attemptNumber: event.attemptNumber }),
+        ...(event.maxAttempts === undefined ? {} : { maxAttempts: event.maxAttempts }),
+        ...(event.retryDeadlineAt === undefined ? {} : { retryDeadlineAt: event.retryDeadlineAt }),
+        ...(event.retryDelayMs === undefined ? {} : { retryDelayMs: event.retryDelayMs }),
         ...(event.terminalPhase === undefined ? {} : { terminalPhase: event.terminalPhase }),
       }));
       return {
@@ -5821,7 +5835,7 @@ export class UiRuntimeService {
     for (const task of runtimeTasks) {
       if (selection.taskId !== undefined && task.taskId.value !== selection.taskId.value) continue;
       const request = task.inputRequest;
-      if (request === undefined) continue;
+      if (task.state !== 'waiting' || request === undefined) continue;
       return this.taskInputRequestDecision(task.taskId, task.title, request, selection);
     }
     // The new-task flow surfaces a user-facing parent Task and executes a child
@@ -5835,7 +5849,7 @@ export class UiRuntimeService {
         if (snapshot.executionLineage?.parentTaskId.value === selection.taskId.value) childIds.add(snapshot.taskId.value);
       }
       const child = runtimeTasks.find((task) =>
-        childIds.has(task.taskId.value) && task.inputRequest !== undefined);
+        childIds.has(task.taskId.value) && task.state === 'waiting' && task.inputRequest !== undefined);
       if (child?.inputRequest !== undefined) {
         const title = runtimeTasks.find(task => task.taskId.value === selection.taskId?.value)?.title ?? child.title;
         return this.taskInputRequestDecision(selection.taskId, title, child.inputRequest, selection);
@@ -6025,6 +6039,24 @@ export class UiRuntimeService {
     }
     const taskId = id('task', rawTaskId);
     const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+    const boundProjectKey = this.options.projectKey;
+    const taskBelongsToBoundProject = (candidate: RuntimeTaskSnapshot): boolean => {
+      // Unassigned tasks retain their existing visibility rule. A bound project
+      // only excludes tasks with an explicit Board in another project.
+      if (boundProjectKey === undefined || candidate.boardOwner === undefined) return true;
+      return candidate.boardOwner.scope === 'project'
+        && candidate.boardOwner.projectId === boundProjectKey;
+    };
+    const rejectOutOfScopeTask = (): never => {
+      throw new UiRuntimeApiError(
+        'explicit-brain.task-outside-serve-scope',
+        APP_OWNER,
+        'task is outside the serve-bound project Board',
+        'use a task from the serve-bound project',
+        403,
+      );
+    };
+    if (!taskBelongsToBoundProject(task)) rejectOutOfScopeTask();
     let execution = task;
     if (!hasOwnExecutionOrFailure(task) && this.options.taskIdentity !== undefined && this.subscriptionControl !== undefined) {
       const snapshots = this.coordinator.taskSnapshots();
@@ -6036,9 +6068,11 @@ export class UiRuntimeService {
       const lineage = executionLineageByChildId(snapshots.map(toRuntimeTaskSnapshotInput), identities,
         await this.subscriptionControl.list());
       const children = snapshots.filter(snapshot => lineage.get(snapshot.taskId.value)?.parentTaskId.value === taskId.value);
+      if (children.some(child => !taskBelongsToBoundProject(child))) rejectOutOfScopeTask();
       if (children.length > 1) return { task, ambiguous: children.map(child => child.taskId.value) };
       if (children[0] !== undefined) execution = children[0];
     }
+    if (!taskBelongsToBoundProject(execution)) rejectOutOfScopeTask();
     return { task, execution };
   }
 
@@ -6063,6 +6097,134 @@ export class UiRuntimeService {
       const result = selectProductOutput(await this.authoritativePublicOutputForTask(execution.taskId), binding);
       return { taskId: rawTaskId, title: task.title, executionTaskId: execution.taskId.value, status: execution.state,
         publicationState: result.publication?.state ?? 'unavailable', ...result, blocker: this.explicitTaskBlocker(execution) };
+    };
+  }
+
+  private explicitProjectSnapshotReader(interaction: ExplicitInteractionSnapshot):
+    ((members?: readonly string[]) => Promise<unknown>) | undefined {
+    const projectKey = this.options.projectKey;
+    const roster = this.options.agentRoster;
+    if (projectKey === undefined || roster === undefined
+      || roster.filter(agent => managementRoleForAgent(agent) === 'project-lead').length !== 1
+      || (interaction.workspace !== undefined && interaction.workspace.projectKey !== projectKey)) return undefined;
+
+    const declared = roster.filter(agent => managementRoleForAgent(agent) !== 'ceo').map(agent => ({
+      agent,
+      memberRef: managementRoleForAgent(agent) === 'project-lead' ? this.defaultBoardOwner().actorId : agent.agentId,
+    }));
+    if (new Set(declared.map(member => member.memberRef)).size !== declared.length) return undefined;
+    return async (requested) => {
+      const selected = requested === undefined ? declared : requested.map(ref => {
+        const matches = declared.filter(member => member.memberRef === ref);
+        if (matches.length !== 1) {
+          throw new UiRuntimeApiError('project.snapshot.member-unavailable', APP_OWNER,
+            'member is absent or ambiguous in the authorized project roster', 'select an exact member from the project snapshot', 404);
+        }
+        return matches[0]!;
+      });
+      const observedAt = this.now().toISOString();
+      const tasks = this.coordinator.taskSnapshots();
+      const allocations = (this.options.journal?.replay() ?? []).flatMap(record =>
+        record.kind === 'operation.prepared' ? [record.allocation] : []);
+      const active = allocations.flatMap(allocation => {
+        const task = tasks.find(task => task.taskId.value === allocation.taskId.value
+          && task.operationId === allocation.operationId.value && task.executionEpoch === allocation.executionEpoch
+          && (task.boardOwner === undefined || (task.boardOwner.scope === 'project' && task.boardOwner.projectId === projectKey))
+          && (task.state === 'running' || task.state === 'settling'));
+        return task === undefined ? [] : [{ allocation, task }];
+      });
+      const paths = this.readResources?.runtimePaths ?? this.options.runtimePaths;
+      const sessionFacts = paths?.projectKey === projectKey && active.length > 0 ? await (async () => {
+        try {
+          const sessions = await new SessionStore(paths).list();
+          return { sessions: await Promise.allSettled(sessions.map(async session => ({
+            session, run: await readRunManifest(paths, session.sessionId),
+          }))) };
+        } catch {
+          return { failure: 'session-store-unavailable' };
+        }
+      })() : { failure: 'session-source-unavailable' };
+      const actor = interaction.actor;
+      const requesterTasks = new Set<string>();
+      let requesterSource: 'available' | 'identity-unavailable' | 'task-source-unavailable' =
+        'identity-unavailable';
+      if (actor?.kind === 'human' && actor.sourceKind === 'product-principal'
+        && actor.sourceRef === this.options.principalOwner) {
+        try {
+          requesterSource = 'task-source-unavailable';
+          const snapshots = await this.snapshotsWithIdentitySource();
+          const identities = new Map(snapshots.map(task => [task.taskId.value, task.identitySource]));
+          const interactions = this.explicitIntake.exportState().interactions.filter(candidate =>
+            candidate.actor?.kind === 'human' && candidate.actor.sourceKind === 'product-principal'
+            && candidate.actor.sourceRef === actor.sourceRef
+            && candidate.confirmation?.intent === 'create'
+            && (candidate.workspace === undefined || candidate.workspace.projectKey === projectKey));
+          const refs = this.explicitInteractionTaskRefs(interactions, snapshots);
+          for (const candidate of interactions) {
+            const taskId = refs.get(candidate.interactionId)?.value;
+            const source = taskId === undefined ? undefined : identities.get(taskId);
+            const confirmation = candidate.confirmation;
+            if (taskId !== undefined && source !== undefined && confirmation !== undefined
+              && source.draftId === confirmation.draftId && source.inputRevision === confirmation.inputRevision
+              && source.confirmationRef === confirmation.confirmationRef) requesterTasks.add(taskId);
+          }
+          for (const snapshot of snapshots) {
+            const parentId = snapshot.executionLineage?.parentTaskId.value;
+            if (parentId !== undefined && requesterTasks.has(parentId)) requesterTasks.add(snapshot.taskId.value);
+          }
+          if (this.options.taskIdentity !== undefined) requesterSource = 'available';
+        } catch {
+          requesterSource = 'task-source-unavailable';
+        }
+      }
+      const currentTasks = new Map(this.coordinator.taskSnapshots().map(task => [task.taskId.value, task]));
+      const sessionReadFailed = sessionFacts.sessions?.some(result => result.status === 'rejected'
+        && (!(result.reason instanceof AppLifecycleError) || result.reason.code !== 'run-manifest-missing'));
+      const summarize = (task: RuntimeTaskSnapshot) => ({
+        taskId: task.taskId.value, title: task.title, state: task.state, updatedAt: task.updatedAt,
+        requesterRelation: requesterTasks.has(task.taskId.value) ? 'same-requester' : 'unverified',
+      });
+      const members = selected.map(({ agent, memberRef }) => {
+        const board = this.taskBoard({ scope: 'project', projectId: projectKey, actorId: memberRef });
+        const executions = active.filter(({ allocation }) => allocation.configuredAgentId === agent.agentId).map(({ allocation, task }) => {
+          const stillCurrent = currentTasks.get(task.taskId.value);
+          if (stillCurrent === undefined || stillCurrent.operationId !== task.operationId || stillCurrent.executionEpoch !== task.executionEpoch
+            || (stillCurrent.boardOwner !== undefined && (stillCurrent.boardOwner.scope !== 'project' || stillCurrent.boardOwner.projectId !== projectKey))
+            || (stillCurrent.state !== 'running' && stillCurrent.state !== 'settling')) return undefined;
+          const events = stillCurrent.recentEvents.filter(event => event.operationId === allocation.operationId.value
+            && event.executionEpoch === allocation.executionEpoch);
+          const activity = events.at(-1);
+          const turns = new Set(events.flatMap(event => event.turnId === undefined ? [] : [event.turnId]));
+          const matchingSessions = sessionFacts.sessions?.flatMap(result => result.status === 'fulfilled'
+            && result.value.run.agentId === agent.agentId
+            && result.value.run.scope.organId.value === this.options.organId.value
+            && result.value.run.runtimeId === allocation.runtimeId
+            && result.value.run.operationId.value === allocation.operationId.value
+            && result.value.run.executionEpoch === allocation.executionEpoch
+            && result.value.run.taskId.value === task.taskId.value ? [result.value.session] : []);
+          const session = matchingSessions?.length === 1 ? matchingSessions[0] : undefined;
+          return {
+            ...summarize(stillCurrent), runtimeId: allocation.runtimeId, executionEpoch: allocation.executionEpoch,
+            operationId: allocation.operationId.value, assignmentId: allocation.assignmentId,
+            ...(turns.size === 1 ? { turnId: [...turns][0] } : {}),
+            activity: activity === undefined ? null : { kind: activity.kind, state: activity.state, occurredAt: activity.occurredAt },
+            session: session === undefined ? { state: 'unknown', reason: sessionFacts.failure
+              ?? (matchingSessions?.length ? 'multiple-session-bindings'
+                : sessionReadFailed ? 'session-binding-read-failed' : 'no-current-session-binding') } : {
+              sessionId: session.sessionId, state: session.state, observedAt: session.records.at(-1)?.occurredAt,
+            },
+          };
+        }).filter(entry => entry !== undefined);
+        return {
+          memberRef, configuredAgentId: agent.agentId, role: agent.roleId,
+          status: executions.length > 0 ? 'busy' : 'unknown',
+          ...(executions.length > 0 ? {} : { statusReason: 'member-runtime-presence-unbound' }),
+          board: { current: board.current.map(entry => summarize(entry.task)), history: board.history.map(entry => summarize(entry.task)) },
+          executions,
+        };
+      });
+      return { projectKey, observedAt, members, requesterSource, coverage: 'configured-roster-and-bound-task-executions',
+        unassigned: tasks.filter(task => task.boardOwner === undefined).map(summarize) };
     };
   }
 
@@ -8239,6 +8401,16 @@ export class UiRuntimeService {
       this.persistExplicitBrainState();
       return interactionId;
     } catch (error) {
+      if (error instanceof ExplicitIntakeError
+        && (error.code === 'idempotency-conflict' || error.code === 'idempotency-scope-incomplete')) {
+        throw new UiRuntimeApiError(
+          `explicit-brain.${error.code}`,
+          error.owner,
+          error.message,
+          error.nextAction,
+          409,
+        );
+      }
       throw apiError(error);
     }
   }
@@ -8254,7 +8426,21 @@ export class UiRuntimeService {
   private async resolveExplicitInputWorkspace(input: ExplicitInputSubmission): Promise<ExplicitInput> {
     const requested = input.workspaceRequest === undefined ? input.workspace : input.workspaceRequest;
     const { workspace: _workspace, workspaceRequest: _workspaceRequest, ...plain } = input;
-    if (requested === undefined) return plain;
+    if (requested === undefined) {
+      if (input.idempotencyKey === undefined) return plain;
+      const workspaceCwd = this.options.workspaceRoot ?? this.options.runtimePaths?.workspaceCwd;
+      const projectKey = this.options.projectKey ?? this.options.runtimePaths?.projectKey;
+      if (workspaceCwd === undefined || projectKey === undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.idempotency-scope-unavailable',
+          APP_OWNER,
+          'the stable receive key cannot be bound without the serve-bound workspace',
+          'start the runtime with its project workspace before accepting stable submissions',
+          503,
+        );
+      }
+      return { ...plain, workspace: { workspaceCwd, projectKey } };
+    }
     const target = typeof requested === 'string'
       ? await this.resolveRequestedWorkspace(requested)
       : requested;
@@ -8420,6 +8606,7 @@ export class UiRuntimeService {
       clarifications: snapshot.clarifications ?? [],
       taskCandidates,
       readTaskResult: this.explicitTaskResultReader(snapshot),
+      readProjectSnapshot: this.explicitProjectSnapshotReader(snapshot),
       onStep: (step: ExplicitInteractionStepInput) => this.recordExplicitStep(snapshot.interactionId, step),
       ...(snapshot.workspace === undefined ? {} : {
         workspaceCwd: snapshot.workspace.workspaceCwd,
@@ -8660,6 +8847,7 @@ export class UiRuntimeService {
         clarifications: snapshot.clarifications ?? [],
         taskCandidates,
         readTaskResult: this.explicitTaskResultReader(snapshot),
+        readProjectSnapshot: this.explicitProjectSnapshotReader(snapshot),
         onStep: (step) => this.recordExplicitStep(snapshot.interactionId, step),
         ...(snapshot.workspace === undefined ? {} : {
           workspaceCwd: snapshot.workspace.workspaceCwd,

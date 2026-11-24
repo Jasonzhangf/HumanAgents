@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { taskForTurn, childExecutionIds, dispatchState, observationTools, createDispatchTracking, executionIdentity } from '../../docs/ui/dispatch-tracking.js'
+import { taskForTurn, childExecutionIds, dispatchState, observationTools, createDispatchTracking, executionIdentity, workSessionHref } from '../../docs/ui/dispatch-tracking.js'
 import { ownedMainTopicTurns } from '../../docs/ui/main-topic.js'
+import { decodeProductLocation } from '../../docs/ui/product-location.js'
 
 const task = { taskId: { scope: 'task', value: 'parent-a' }, sourceInteractionId: 'interaction-a', title: '检查项目', state: 'running' }
 const other = { ...task, taskId: { scope: 'task', value: 'parent-b' }, sourceInteractionId: 'interaction-b' }
@@ -18,6 +19,23 @@ test('runtime identity comes only from actual tool execution records', () => {
     { actor: { name: 'Invented Member' } },
   ].map((event, seq) => ({ ...event, seq, scope: eventScope })) }, scope), ['runtime-a', 'runtime-b'])
   assert.deepEqual(executionIdentity({ toolEvents: [{ scope: { ...eventScope, projectKey: 'foreign' }, execution: { runtimeId: 'foreign' } }] }, scope), [])
+})
+test('work session keeps the exact task scope and omits an unverified agent selection', () => {
+  const href = workSessionHref({ kind: 'task', projectKey: 'p', mode: 'fake', taskId: 'child-a' })
+  const url = new URL(href, 'http://humanagent.invalid/task-dashboard.html')
+  assert.equal(url.pathname, '/task-dashboard.html')
+  assert.equal(url.searchParams.get('task'), 'child-a')
+  assert.equal(url.searchParams.get('projectKey'), 'p')
+  assert.equal(url.searchParams.get('mode'), 'fake')
+  assert.equal([...url.searchParams.keys()].some(key => key.startsWith('agent')), false)
+  assert.equal(url.searchParams.has('control'), false)
+  const location = decodeProductLocation(url.hash)
+  assert.equal(location.kind, 'valid')
+  assert.deepEqual(location.location.scope, { kind: 'task', projectKey: 'p', mode: 'fake', taskId: { scope: 'task', value: 'child-a' } })
+  assert.deepEqual(location.location.focus, {
+    kind: 'interaction', taskRef: { scope: 'task', value: 'child-a' }, scope: location.location.scope,
+  })
+  assert.equal(workSessionHref({ kind: 'task', projectKey: 'p', mode: 'fake', taskId: undefined }), undefined)
 })
 test('task and turn ownership uses exact task or source interaction, never matching text', () => {
   assert.equal(taskForTurn({ interactionId: 'interaction-b', text: '检查项目' }, [task, other]), other)

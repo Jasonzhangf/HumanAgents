@@ -354,6 +354,12 @@ export interface RuntimeTaskEventProjection {
   readonly arguments?: unknown;
   readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
   readonly error?: RuntimeTaskErrorProjection;
+  /** The provider attempt that follows the declared transient-error backoff. */
+  readonly attemptNumber?: number;
+  readonly maxAttempts?: number;
+  /** Typed ISO deadline and elapsed basis for the visible retry wait. */
+  readonly retryDeadlineAt?: string;
+  readonly retryDelayMs?: number;
   readonly outputRef?: string;
   readonly outputDigest?: string;
   readonly ownerId?: string;
@@ -1005,6 +1011,10 @@ export interface RuntimeSseEvent {
   readonly arguments?: unknown;
   readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
   readonly error?: RuntimeTaskErrorProjection;
+  readonly attemptNumber?: number;
+  readonly maxAttempts?: number;
+  readonly retryDeadlineAt?: string;
+  readonly retryDelayMs?: number;
   readonly outputRef?: string;
   readonly outputDigest?: string;
   readonly ownerId?: string;

@@ -206,6 +206,11 @@ test('real tools → scoped reader → action mapper, including same callId acro
         get textContent() { return this.value; }
         set innerHTML(_) { assert.fail('report must never enter an HTML parser'); }
         append(...nodes) { for (const n of nodes) { n.remove(); n.parent = this; this.children.push(n); } }
+        insertBefore(node, reference) {
+          node.remove();
+          node.parent = this;
+          this.children.splice(this.children.indexOf(reference), 0, node);
+        }
         remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = undefined; }
         setAttribute() {}
         addEventListener(name, fn) { this.listeners[name] = fn; }

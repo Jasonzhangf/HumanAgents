@@ -12,6 +12,7 @@ import {
   parseInterpreterOutput,
   type ExplicitBrainInputInterpreter,
 } from '../../packages/app/src/explicit-brain-runtime.js';
+import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import {
   publishInteractionProviderSettlement,
   readInteractionProviderSettlement,
@@ -3292,7 +3293,7 @@ test('provider explicit brain recovers a drifted original input on the public HT
 // freeze a genuinely streaming answer. Cost: one real daemon lease, one
 // controlled Provider stream held open, and two public interpret calls.
 // Probability: any scope whose user types again while the first answer streams.
-test('provider explicit brain interpreter keeps a streaming turn when a second input overlaps it', async () => {
+test('provider explicit brain interpreter admits one synchronous turn per interaction scope', async () => {
   const root = join(parentFixtureRoot, `live-overlap-${randomUUID()}`);
   await mkdir(root, { recursive: true });
   const binding: ProviderBinding = {
@@ -3325,22 +3326,28 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
       decisionRefs: [],
     });
     const firstAnswer = decision('正在输出的第一个请求', '第一个请求');
+    const thirdAnswer = decision('首个回合结束后的续办请求', '续办请求');
     const port = new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [],
       stream: async function* () {
         providerRequests += 1;
-        if (providerRequests === 2) {
+        const response = Math.floor((providerRequests - 1) / 2);
+        const currentAnswer = [firstAnswer, thirdAnswer][response];
+        if (providerRequests === 2 || providerRequests === 4) {
+          if (currentAnswer === undefined) throw new Error('unexpected Provider continuation request');
           yield* explicitDecisionEndFrames([
-            { type: 'response.output_text.done', item_id: 'text-live', text: firstAnswer },
-          ], { action: '整理第一个请求', result: '第一个请求已整理' });
+            { type: 'response.output_text.done', item_id: 'text-' + response, text: currentAnswer },
+          ], { action: '整理第' + (response + 1) + '个请求', result: '第' + (response + 1) + '个请求已整理' });
           return;
         }
-        assert.equal(providerRequests, 1, 'only Skill selection and end submission may dispatch');
-        yield { type: 'response.output_text.delta', item_id: 'text-live', delta: '{"kind":"requirement",' };
-        firstDeltaFlushed();
-        await firstMayFinish;
-        yield { type: 'response.output_text.done', item_id: 'text-live', text: firstAnswer };
+        if (currentAnswer === undefined) throw new Error('unexpected Provider request');
+        if (providerRequests === 1) {
+          yield { type: 'response.output_text.delta', item_id: 'text-live', delta: '{"kind":"requirement",' };
+          firstDeltaFlushed();
+          await firstMayFinish;
+        }
+        yield { type: 'response.output_text.done', item_id: 'text-' + response, text: currentAnswer };
         yield { type: 'response.output_item.done', output_index: 1, item: {
-          type: 'function_call', call_id: 'overlap-select-skills', name: 'interaction_select_skills',
+          type: 'function_call', call_id: 'overlap-select-skills-' + response, name: 'interaction_select_skills',
           arguments: JSON.stringify({ skillIds: ['task-intake'] }),
         } };
       } });
@@ -3360,11 +3367,21 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
       }),
     });
 
-    // The first interpret is a real call that stays open mid-answer.
-    const live = interpreter.interpret({
+    // Start both calls at the first await boundary. The synchronous scope
+    // admission must be claimed before either durable opened-turn read resumes.
+    const firstRequest = {
       interactionId: 'interaction-overlap-first', inputRevision: 1, sourceRef: 'ui:overlap-first',
       rawInput: '正在输出的第一个请求', clarifications: [], taskCandidates: [],
+    } as const;
+    const live = interpreter.interpret(firstRequest);
+    const duplicate = interpreter.interpret({ ...firstRequest, sourceRef: 'ui:overlap-duplicate' });
+    const different = interpreter.interpret({
+      interactionId: 'interaction-overlap-second', inputRevision: 1, sourceRef: 'ui:overlap-second',
+      rawInput: '同时到达的第二个输入', clarifications: [], taskCandidates: [],
     });
+    const conflict = (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'explicit-brain.interaction-scope-busy';
+    await Promise.all([assert.rejects(() => duplicate, conflict), assert.rejects(() => different, conflict)]);
     await firstDelta;
     const openedWhileLive = await parentJournal.readScopeOpenedTurns(scope);
     assert.equal(openedWhileLive.length, 1, 'the streaming call owns one opened turn');
@@ -3377,23 +3394,14 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
     assert.equal(liveSnapshot.acceptedFacts.some(({ fact }) =>
       fact.envelope.fact.kind === 'request-complete'), false, 'the live request has no terminal fact yet');
 
-    // A second, different input arrives while the first is still streaming. It
-    // must be refused without abandoning the live turn.
-    await assert.rejects(
-      () => interpreter.interpret({
-        interactionId: 'interaction-overlap-second', inputRevision: 1, sourceRef: 'ui:overlap-second',
-        rawInput: '同时到达的第二个输入', clarifications: [], taskCandidates: [],
-      }),
-      (error: unknown) => error instanceof Error
-        && error.message.includes('exact prior input')
-        && /still the current active lease owner/.test(error.message),
-    );
+    // Same and different inputs arriving together share one typed refusal and
+    // never inspect or replace the live turn.
     assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
       'an overlapping input never freezes the streaming turn');
-    assert.equal(providerRequests, 1, 'the refused input never dispatches a Provider request');
-    assert.equal(stops, 0, 'rejecting the second input must not stop the first');
+    assert.equal(providerRequests, 1, 'both refused inputs never dispatch a Provider request');
+    assert.equal(stops, 0, 'rejecting overlapping inputs must not stop the first');
     assert.equal((await parentJournal.readScopeOpenedTurns(scope)).length, 1,
-      'the refused input never opens a second turn');
+      'the refused inputs never open a second turn');
 
     // Release the first request: it must finish normally with its own durable end.
     releaseFirst();
@@ -3409,6 +3417,16 @@ test('provider explicit brain interpreter keeps a streaming turn when a second i
       'the released request commits its own semantic checkpoint');
     assert.deepEqual(await parentJournal.readScopeAbandonedTurns(scope), [],
       'a normally finished turn is never abandoned');
+
+    // Once the first turn settles and releases its admission, the same scope
+    // accepts the next input normally.
+    const servedNext = await interpreter.interpret({
+      interactionId: 'interaction-overlap-third', inputRevision: 1, sourceRef: 'ui:overlap-third',
+      rawInput: '首个回合结束后的续办请求', clarifications: [], taskCandidates: [],
+    });
+    assert.equal(servedNext.kind, 'requirement');
+    assert.equal(providerRequests, 4, 'the next input uses its own initial and end requests');
+    assert.equal((await helperJournal.readScopeSemanticCheckpoints(scope)).length, 2);
   } finally {
     await lease?.release();
     await rm(root, { recursive: true, force: true });

@@ -30,6 +30,7 @@ import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/inde
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
   createResponsesFileToolExecutor,
+  RESPONSES_FILE_READ_TOOL,
   RESPONSES_FILE_LIST_TOOL,
   RESPONSES_FILE_SEARCH_TOOL,
   type ProviderToolAdmissionInput,
@@ -1402,4 +1403,140 @@ function fileListProviderAdapter(root: string): ProviderAdapter {
   };
   const transport = createV3ProviderHttpTransport({ binding, baseUrl: 'http://127.0.0.1:4444', evidence, fetch });
   return new ProviderAdapter({ binding, routeRef: 'fixture-route', codec: new ResponsesProviderCodec(), transport, evidence });
+}
+
+test('a rejected file.read path returns its typed result to the model and continues the same operation', async () => {
+  const root = await mkdtemp('/private/tmp/humanagent-native-file-read-escape-');
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(join(workspaceRoot, 'staging.txt'), 'staging payload\n', 'utf8');
+  const projectKey = 'native-file-read-escape-project';
+  const journal = new UiRuntimeJournal(join(root, 'projection', 'ui-runtime-journal.jsonl'));
+  const admission = nativeConsumerAdmission({ root, preparedJournal: journal, now: () => new Date() });
+  const executor = createResponsesFileToolExecutor({
+    workspaceRoot, projectKey, artifactRoot: join(root, 'evidence'), admission: admission.toolAdmission,
+  });
+  const { adapter, requests } = fileReadProviderAdapter(root);
+  const runtime = service({
+    root, adapter, journal, executor: executor.executor, toolOutputs: executor.toolOutputs,
+    workspaceRoot, projectKey, runtimeComposition: admission.runtimeComposition,
+    providerTools: [RESPONSES_FILE_READ_TOOL],
+  });
+  const rejectedCallId = 'call-file-read-escape';
+  const acceptedCallId = 'call-file-read-staging';
+  try {
+    const task = runtime.createTask({ title: 'read staging result', directive: 'read staging.txt after correcting an invalid path' });
+    const started = await runtime.startExecution(task.taskId, { prompt: 'read staging.txt' });
+    await waitForTerminal(runtime, task.taskId);
+    const dashboard = runtime.taskDashboard(task.taskId);
+    assert.equal(
+      dashboard.state,
+      'succeeded',
+      `the corrected file.read must finish the original operation, got ${dashboard.state}: ${dashboard.error?.code} ${dashboard.error?.message}`,
+    );
+    assert.equal(dashboard.error, undefined);
+
+    const results = journal.replay().filter((record): record is Extract<typeof record, { kind: 'operation.event' }> => (
+      record.kind === 'operation.event'
+      && record.operationId.value === started.operationId.value
+      && record.event.kind === 'provider.tool-result'
+      && record.event.toolId === 'file.read'
+    ));
+    assert.equal(results.length, 2, 'the rejected and corrected file.read calls must both pair under the original operation');
+    const [rejected, accepted] = results;
+    if (!rejected || !accepted) throw new Error('both file.read results are required');
+    assert.equal(rejected.event.taskId.value, task.taskId.value);
+    assert.equal(rejected.event.operationId, started.operationId.value);
+    assert.equal(rejected.event.executionEpoch, started.executionEpoch);
+    assert.equal(rejected.event.callId, rejectedCallId);
+    assert.equal(rejected.event.status, 'failed');
+    assert.equal(rejected.event.error?.code, 'tool.argument.invalid');
+    assert.equal(rejected.event.error?.retryable, true);
+    assert.equal(rejected.event.error?.nextAction, 'continue:file.read');
+    assert.equal(rejected.event.executionFact, undefined);
+
+    assert.equal(accepted.event.taskId.value, task.taskId.value);
+    assert.equal(accepted.event.operationId, started.operationId.value);
+    assert.equal(accepted.event.executionEpoch, started.executionEpoch);
+    assert.equal(accepted.event.callId, acceptedCallId);
+    assert.equal(accepted.event.status, 'succeeded');
+    assert.equal(typeof accepted.event.outputRef, 'string');
+    assert.equal(typeof accepted.event.outputDigest, 'string');
+    assert.deepEqual(
+      await runtime.toolOutput(task.taskId, started.operationId, accepted.event.executionEpoch, accepted.event.seq),
+      { workspaceRef: `workspace:${projectKey}`, path: 'staging.txt', content: 'staging payload\n' },
+    );
+
+    assert.equal(requests.length, 3, 'the Provider must receive the rejected turn, the corrected turn and the final answer turn');
+    const continuation = requests[1]?.input;
+    if (!Array.isArray(continuation)) throw new Error('the second Responses request must carry the tool continuation input');
+    const rejectedOutput = continuation.find((item) => (
+      typeof item === 'object' && item !== null
+      && 'type' in item && item.type === 'function_call_output'
+      && 'call_id' in item && item.call_id === rejectedCallId
+    ));
+    if (!rejectedOutput || typeof rejectedOutput !== 'object' || !('output' in rejectedOutput) || typeof rejectedOutput.output !== 'string') {
+      throw new Error('the rejected call_id must return a function_call_output on the next Provider request');
+    }
+    assert.match(rejectedOutput.output, /"code":"tool.argument.invalid"/);
+    assert.match(rejectedOutput.output, /"recoverable":true/);
+  } finally {
+    await runtime.quiesceImplicitConsumption().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function fileReadProviderAdapter(root: string): {
+  readonly adapter: ProviderAdapter;
+  readonly requests: Array<Record<string, unknown>>;
+} {
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'provider-evidence')));
+  const requests: Array<Record<string, unknown>> = [];
+  let responseCount = 0;
+  const fetch: V3ProviderFetch = async (url, init) => {
+    if (url.endsWith('/health')) return { status: 200, body: null, text: async () => '{"status":"ok","version":"fixture"}' };
+    if (url.endsWith('/v1/models')) return { status: 200, body: null, text: async () => '{"data":[{"id":"scripted-model"}]}' };
+    if (!url.endsWith('/v1/responses')) throw new Error(`unexpected scripted provider URL: ${url}`);
+    requests.push(JSON.parse(init.body ?? '{}') as Record<string, unknown>);
+    responseCount += 1;
+    if (responseCount === 1) {
+      return sse([
+        { protocol: 'responses', type: 'response.created', response: { id: 'response-file-read-rejected' } },
+        {
+          protocol: 'responses', type: 'response.output_item.done', output_index: 0,
+          item: {
+            type: 'function_call', call_id: 'call-file-read-escape', name: 'file_read',
+            arguments: JSON.stringify({ path: '../outside-workspace.txt' }),
+          },
+        },
+        { protocol: 'responses', type: 'response.completed', response: { id: 'response-file-read-rejected' } },
+      ]);
+    }
+    if (responseCount === 2) {
+      return sse([
+        { protocol: 'responses', type: 'response.created', response: { id: 'response-file-read-corrected' } },
+        {
+          protocol: 'responses', type: 'response.output_item.done', output_index: 0,
+          item: {
+            type: 'function_call', call_id: 'call-file-read-staging', name: 'file_read',
+            arguments: JSON.stringify({ path: 'staging.txt' }),
+          },
+        },
+        { protocol: 'responses', type: 'response.completed', response: { id: 'response-file-read-corrected' } },
+      ]);
+    }
+    if (responseCount === 3) {
+      return sse([
+        { protocol: 'responses', type: 'response.created', response: { id: 'response-file-read-final' } },
+        { protocol: 'responses', type: 'response.output_text.done', item_id: 'message-final', text: 'Read staging payload.' },
+        { protocol: 'responses', type: 'response.completed', response: { id: 'response-file-read-final' } },
+      ]);
+    }
+    throw new Error(`unexpected extra scripted Responses request ${responseCount}`);
+  };
+  const transport = createV3ProviderHttpTransport({ binding, baseUrl: 'http://127.0.0.1:4444', evidence, fetch });
+  return {
+    requests,
+    adapter: new ProviderAdapter({ binding, routeRef: 'fixture-route', codec: new ResponsesProviderCodec(), transport, evidence }),
+  };
 }

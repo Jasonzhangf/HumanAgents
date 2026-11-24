@@ -14,6 +14,14 @@ const toolLabels = Object.freeze({
   'web.search': '搜索网页',
   bash: '执行命令',
 })
+const explicitToolLabels = Object.freeze({
+  'select-skills': '加载本轮技能',
+  'read-task-result': '读取任务结果',
+  'project-snapshot': '查看项目进展',
+  'resume-task': '继续原任务',
+  'submit-turn': '提交本轮结果',
+})
+export const explicitToolLabel = kind => Object.hasOwn(explicitToolLabels, kind) ? explicitToolLabels[kind] : undefined
 const toolResultLabels = Object.freeze({
   succeeded: '已完成',
   failed: '失败',
@@ -30,11 +38,22 @@ export function elapsedSeconds(row, now = Date.now()) {
   return Math.floor((end - Date.parse(row.startedAt)) / 1000)
 }
 
-export function conversationStatus(facts = {}) {
+export function conversationStatusTime(row, now = Date.now()) {
+  const elapsed = elapsedSeconds(row, now)
+  if (elapsed === undefined) return ''
+  if (!validTime(row.retryDeadlineAt)) return `${elapsed} 秒`
+  const waited = `已等 ${elapsed} 秒`
+  if (!row.running) return waited
+  const remaining = Math.ceil((Date.parse(row.retryDeadlineAt) - now) / 1000)
+  return `${waited} · ${remaining > 0 ? `${remaining} 秒后重试` : '等待重试发出'}`
+}
+
+export function conversationStatus(facts = {}, { allRequests = false } = {}) {
   const rows = []
   const models = new Map()
   const tools = new Map()
   const executions = new Map()
+  const finishing = new Map()
   const retries = new Map()
   const finished = terminalStates.has(facts.state) || (facts.steps !== undefined && explicitFinished.has(facts.state))
   const add = (key, phase, label, at, tone = 'warning') => {
@@ -62,13 +81,20 @@ export function conversationStatus(facts = {}) {
     if (!group.response) group.response = add(`response:${rows.length}`, 'streaming', '模型正在处理', at, 'active')
     if (output) group.response.label = '正在接收模型响应'
   }
-  const respondWithTool = (group, at) => {
-    if (!group || group.settled || group.returnedTool) return
-    respond(group, at, false)
-    group.returnedTool = true
-    close(group.response, at)
-    group.response.label = '模型已返回工具调用'
-    group.response.tone = 'success'
+  const respondWithTool = (group, at, action) => {
+    if (!group || group.settled) return
+    if (!group.returnedTool) {
+      respond(group, at, false)
+      group.returnedTool = true
+      close(group.response, at)
+      group.response.label = '模型已返回工具调用'
+      group.response.tone = 'success'
+    }
+    if (action) {
+      group.actions ??= new Set()
+      group.actions.add(action)
+      group.response.statusLabel = [...group.actions].join('、')
+    }
   }
   const dispatch = (key, at) => {
     const group = models.get(key)
@@ -90,22 +116,43 @@ export function conversationStatus(facts = {}) {
     const group = models.get(key)
     if (['provider.model', 'provider.output', 'execution.terminal'].includes(e.kind)) {
       const retry = retries.get(executionKey(e))
-      if (retry && retry.endedAt === undefined) { close(retry, e.occurredAt); retry.label = '已继续重试当前任务' }
+      if (retry && retry.endedAt === undefined) {
+        close(retry, e.occurredAt)
+        retry.statusLabel = e.kind === 'execution.terminal' ? '重试已结束' : '已发出重试请求'
+      }
     }
     if (e.kind === 'execution.started' && !executions.has(executionKey(e))) {
       executions.set(executionKey(e), add(`${executionKey(e)}:total`, 'total', '本轮总耗时', e.occurredAt, 'active'))
     }
-    if (e.kind === 'execution.terminal' && e.terminalPhase === 'final') close(executions.get(executionKey(e)), e.occurredAt)
+    const execution = executionKey(e)
+    if (e.kind === 'execution.settling' && !finishing.has(execution)) {
+      finishing.set(execution, add(`${execution}:finishing`, 'task-settling', '正在收尾', e.occurredAt, 'active'))
+    }
+    if (e.kind === 'execution.terminal' && e.terminalPhase === 'final') {
+      close(executions.get(execution), e.occurredAt)
+      close(finishing.get(execution), e.occurredAt)
+    }
     if (e.kind === 'provider.model') {
       if (e.state === 'dispatching') model(key, e.occurredAt, true)
       else if (e.state === 'dispatched') dispatch(key, e.occurredAt)
       else if (e.state === 'settled') settle(group, e.occurredAt)
       else if (e.state === 'waiting') { if (!group?.wait) dispatch(key, undefined) }
       else if (e.state === undefined) model(key, e.occurredAt)
+      else if (e.state === 'planner.aligning' && finishing.get(execution)?.phase !== 'task-verification') {
+        close(finishing.get(execution), e.occurredAt)
+        finishing.set(execution, add(`${execution}:verification`, 'task-verification', '正在核对交付结果', e.occurredAt, 'active'))
+      } else if (e.state === 'planner.aligned') {
+        const verification = finishing.get(execution)
+        if (verification?.phase === 'task-verification') {
+          close(verification, e.occurredAt)
+          verification.label = '交付结果已核对'
+          verification.tone = 'success'
+        }
+      }
     }
     if (e.kind === 'provider.output') respond(group, e.occurredAt)
     if (e.kind === 'provider.tool' && e.callId) {
-      respondWithTool(group, e.occurredAt)
+      respondWithTool(group, e.occurredAt, e.toolId && toolLabel(e))
       const key = toolKey(e)
       if (!tools.has(key)) tools.set(key, add(key, 'tool', toolLabel(e), e.occurredAt, 'active'))
     }
@@ -128,7 +175,23 @@ export function conversationStatus(facts = {}) {
       row.error = e.error
       row.running = false
     }
-    if (e.kind === 'execution.retry') retries.set(executionKey(e), add(`${key}:retry:${e.seq}`, 'retry', '正在重试当前任务', e.occurredAt))
+    if (e.kind === 'execution.retry' && (e.state === undefined || e.state === 'retrying')) {
+      const timed = validTime(e.retryDeadlineAt) && validTime(e.occurredAt)
+      const attempt = Number.isSafeInteger(e.attemptNumber) ? `第 ${e.attemptNumber} 次尝试` : undefined
+      const row = add(`${key}:retry:${e.seq}`, 'retry', attempt || e.summary || '正在重试当前任务', timed ? e.occurredAt : undefined)
+      row.running = timed && !finished
+      if (timed) row.retryDeadlineAt = e.retryDeadlineAt
+      row.error = e.error
+      retries.set(executionKey(e), row)
+    } else if (e.kind === 'execution.retry' && e.state === 'blocked') {
+      const row = retries.get(executionKey(e))
+      if (row) {
+        row.label = e.maxAttempts ? '自动重试已用尽' : e.summary || row.label
+        row.tone = 'danger'
+        close(row, e.occurredAt)
+        row.error = e.error
+      }
+    }
   }
   for (const step of facts.steps ?? []) {
     // Unidentified steps can describe a phase, but cannot close another request.
@@ -145,7 +208,7 @@ export function conversationStatus(facts = {}) {
     if (step.kind === 'response.reasoning' || step.kind === 'response.streaming') {
       respond(group, step.occurredAt, step.kind === 'response.streaming')
     }
-    if (step.kind === 'tool.started' && step.tool) respondWithTool(group, step.occurredAt)
+    if (step.kind === 'tool.started' && step.tool) respondWithTool(group, step.occurredAt, explicitToolLabel(step.tool.kind))
     if (step.kind === 'request.settled') {
       settle(group, step.occurredAt)
       if (key) close(executions.get(key), step.occurredAt)
@@ -159,13 +222,15 @@ export function conversationStatus(facts = {}) {
   const toolRows = [...tools.values()]
   const visibleTools = new Set(toolRows)
   const latestTotal = [...executions.values()].at(-1)
+  const latestFinishing = [...finishing.values()].at(-1)
   const latestRetry = [...retries.values()].at(-1)
   const latestError = [...rows].reverse().find((row) => row.phase === 'error')
   const visible = rows.filter((row) => {
-    if (['sending', 'model-wait', 'streaming'].includes(row.phase)) return modelRows.has(row)
+    if (['sending', 'model-wait', 'streaming'].includes(row.phase)) return allRequests || modelRows.has(row)
     if (row.phase === 'tool') return visibleTools.has(row)
-    if (row.phase === 'total') return row === latestTotal
-    if (row.phase === 'retry') return row === latestRetry
+    if (row.phase === 'total') return allRequests || row === latestTotal
+    if (row.phase === 'task-settling' || row.phase === 'task-verification') return allRequests || row === latestFinishing
+    if (row.phase === 'retry') return allRequests || row === latestRetry
     if (row.phase === 'error') return row === latestError
     return true
   })
@@ -188,10 +253,11 @@ export function createConversationStatusClock(host, { now = Date.now, schedule =
   let timer
   let bindings = []
   const paint = () => {
+    const time = now()
     for (const { row, node } of bindings) {
-      const seconds = elapsedSeconds(row, now())
-      node.textContent = seconds === undefined ? '' : `${seconds} 秒`
-      node.hidden = seconds === undefined
+      const text = conversationStatusTime(row, time)
+      node.textContent = text
+      node.hidden = text === ''
     }
   }
   const dispose = () => { if (timer !== undefined) cancel(timer); timer = undefined; bindings = [] }

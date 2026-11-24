@@ -10,7 +10,11 @@ import {
   computeToolIdempotencyKey,
   deriveToolEffectPolicy,
 } from '../../../runtime/src/checkpoints/effect-ledger-recovery.js';
-import type { RuntimeExecutionAllocation, RuntimeTaskJournalPort } from '../../../runtime/src/ui-runtime/coordinator.js';
+import {
+  RuntimeTaskControlError,
+  type RuntimeExecutionAllocation,
+  type RuntimeTaskJournalPort,
+} from '../../../runtime/src/ui-runtime/coordinator.js';
 import { taskStepPublisherForPool } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { OperationStopSettlementPort, OperationTaskBoundaryPort } from '../../../runtime/src/gateway/ports.js';
 import { createToolExecutionGateway } from '../tool-execution-gateway.js';
@@ -1351,19 +1355,28 @@ export function createDefaultExecutionComposition(input: {
           'recover the same boundary through its recorded owner stage', allocation.ownerId);
       }
       let closed: Promise<import('../../../contracts/src/index.js').ProviderCloseResult> | undefined;
-      let providerClosed: Promise<import('../../../contracts/src/index.js').ProviderCloseResult> | undefined;
+      let providerReleased: import('../../../contracts/src/index.js').ProviderCloseResult | undefined;
+      let providerCloseInFlight: Promise<import('../../../contracts/src/index.js').ProviderCloseResult> | undefined;
       let capturedStop = false;
-      function closeOwnedProvider() {
+      function closeOwnedProvider(): Promise<import('../../../contracts/src/index.js').ProviderCloseResult> {
+        if (providerReleased !== undefined) return Promise.resolve(providerReleased);
+        if (providerCloseInFlight !== undefined) return providerCloseInFlight;
         if (!('driver' in native)) missing('historical boundary has no owned live Provider');
         // A fresh Task Provider is owned by the prepared-stop producer, so its
         // close reads the durable closure through the same lease instead of
         // running a second physical transport close. Cold and boundary paths
         // keep the driver-owned close.
-        if (taskPreparation !== undefined && composition !== undefined) {
-          const owned = composition;
-          return providerClosed ??= preparedExecutionStop.closePreparationProvider(taskPreparation.lease, owned);
-        }
-        return providerClosed ??= native.driver.close();
+        const owned = taskPreparation !== undefined && composition !== undefined
+          ? preparedExecutionStop.closePreparationProvider(taskPreparation.lease, composition)
+          : native.driver.close();
+        const attempt = owned.then((result) => {
+          if (result.state === 'closed') providerReleased = result;
+          return result;
+        }).finally(() => {
+          if (providerCloseInFlight === attempt) providerCloseInFlight = undefined;
+        });
+        providerCloseInFlight = attempt;
+        return attempt;
       }
       let plannerInput: ClosedTurnPlannerCallInput | undefined;
       let revisionCall: Awaited<ReturnType<typeof configuredPlannerCall>> | undefined;
@@ -1880,7 +1893,9 @@ export function createDefaultExecutionComposition(input: {
           // A save persistence failure can resume its missing phases with the
           // retained intent. The actual Provider close remains a separate,
           // once-owned receipt and is never repeated by that retry.
-          void attempt.then(() => {}, () => { if (closed === attempt) closed = undefined; });
+          void attempt.then((result) => {
+            if (result.state !== 'closed' && closed === attempt) closed = undefined;
+          }, () => { if (closed === attempt) closed = undefined; });
           return attempt;
         },
       };
@@ -1902,7 +1917,16 @@ export function createDefaultExecutionComposition(input: {
   // keeps the App composition from drifting from `RuntimeColdExecutionProducer`.
   const coldProducer: RuntimeColdExecutionProducer = { readColdExecutionSource, admitSegment,
     readIncarnationBinding, recoverOriginalTurn, createResumedExecutionDriver };
-  return { currentStateFacts, admitExecution, createExecutionDriver, preparedExecutionStop, ...coldProducer, resolveColdExecutionResumeRequest, grants, context, checkpoints,
+  return { currentStateFacts, admitExecution, createExecutionDriver, preparedExecutionStop,
+    closeRetainedTransientRetryProvider: async (allocation: RuntimeExecutionAllocation) => {
+      try {
+        return await preparedExecutionStop.closeRetainedTransientRetryProvider(allocation);
+      } catch (error) {
+        if (!(error instanceof AppLifecycleError)) throw error;
+        throw new RuntimeTaskControlError(error.code, error.ownerId, error.message, error.nextAction);
+      }
+    },
+    ...coldProducer, resolveColdExecutionResumeRequest, grants, context, checkpoints,
     inspectionStop: createProductionInspectionStopPort({
       journal: input.journal,
       journalPath: input.filePath,

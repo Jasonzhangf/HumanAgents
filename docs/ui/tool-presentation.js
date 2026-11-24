@@ -3,6 +3,7 @@ import { fileSemantics } from './tool-file-semantics.js'
 import { shellSemantics } from './tool-shell-semantics.js'
 import { taskSemantics } from './tool-task-semantics.js'
 import { createDetailDisclosure } from './detail-disclosure.js'
+import { explainedToolErrorReason } from './task-blocker.js'
 
 const FILE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.search', 'file.list', 'web.search'])
 
@@ -66,7 +67,19 @@ function visibleText(value) { return value === '' ? '（空字符串）' : value
 
 const STATUS = Object.freeze({ succeeded: '执行成功', failed: '执行失败', blocked: '执行受阻', cancelled: '已取消', unknown: '结果状态未知' })
 const ACTOR = Object.freeze({ orchestration: '编排 Agent', execution: '执行 Agent', reviewer: '审查 Agent', planner: '规划 Agent' })
+const TURN_END_ACTION = Object.freeze({
+  completed: '已提交本轮结果', continue: '已提交后续执行安排', blocked: '已报告执行阻碍', 'input-required': '已提交待答问题',
+})
 const bodies = new WeakMap()
+const bodyPlaceholders = new Set(['尚无结果正文', '等待结果正文'])
+
+function explainsCompletedResult(value) {
+  const usefulSummary = typeof value.summary === 'string'
+    && value.summary.trim() !== '' && !bodyPlaceholders.has(value.summary)
+  const usefulLine = value.lines?.some(line => line.text && !bodyPlaceholders.has(line.text)
+    && !line.text.startsWith('调用参数：'))
+  return usefulSummary || usefulLine
+}
 
 function toolCard(row, readOutput, previous) {
   const card = previous?.node ?? element('section', undefined, 'tool-card')
@@ -76,13 +89,22 @@ function toolCard(row, readOutput, previous) {
   let observer
   card.dataset.toolKey = row.key
   const toolId = row.call?.toolId ?? row.result?.toolId
+  const completedTurnEnd = Boolean(row.call && row.result?.status === 'succeeded'
+    && (toolId === 'humanagent.turn.end' || toolId === 'humanagent_turn_end'))
   const execution = row.call?.execution ?? row.result?.execution
   if (toolId) card.dataset.toolId = toolId
   if (execution?.runtimeId) card.dataset.runtimeId = execution.runtimeId
   const semantic = element('div', undefined, 'tool-semantic')
+  let immediateSemantics
   function present(report) {
     const value = toolSemantics(toolId, row.call?.arguments, report)
+    if (report === undefined) immediateSemantics = value
     for (const child of [...semantic.children]) child.remove()
+    if (completedTurnEnd) {
+      const outcome = row.call.arguments?.outcome
+      semantic.append(element('strong', Object.hasOwn(TURN_END_ACTION, outcome) ? TURN_END_ACTION[outcome] : '已提交本轮安排', 'tool-title'))
+      return
+    }
     semantic.append(element('strong', value.title, 'tool-title'))
     if (value.subject) semantic.append(element('p', value.subject, 'tool-path'))
     if (value.summary && report !== undefined) semantic.append(element('p', value.summary, 'tool-summary'))
@@ -97,10 +119,13 @@ function toolCard(row, readOutput, previous) {
     }
   }
   present(undefined)
+  let explainedError = false
   if (row.result?.error) {
     const error = row.result.error
-    const message = error.code === 'active-turn.non-selection.unreturned'
-      ? '执行方尚未返回结果，暂时不能记录取舍。' : error.message
+    const explainedReason = explainedToolErrorReason(error)
+    explainedError = row.call !== undefined && explainedReason !== undefined
+    const message = explainedReason ?? (error.code === 'active-turn.non-selection.unreturned'
+      ? '执行方尚未返回结果，暂时不能记录取舍。' : error.message)
     card.append(element('p', [error.code, message].filter(Boolean).join(' · '), 'tool-error'))
   }
   if (Object.hasOwn(ACTOR, execution?.role)) card.append(element('span', ACTOR[execution.role], 'tool-actor muted'))
@@ -108,7 +133,7 @@ function toolCard(row, readOutput, previous) {
   const state = row.result
     ? toolId === 'bash' && row.result.status === 'succeeded' ? '工具已返回 · 命令退出情况见结果' : (STATUS[row.result.status] || '结果状态未提供')
     : '执行工具等待结果'
-  card.append(element('p', row.call ? state : `${state} · 结果关联缺失`, 'tool-state'))
+  if (!completedTurnEnd && !explainedError) card.append(element('p', row.call ? state : `${state} · 结果关联缺失`, 'tool-state'))
   card.dataset.status = row.result?.status || 'pending'
   const facts = createDetailDisclosure(element, '调用参数与证据', 'tool-facts')
   const details = facts.content
@@ -208,7 +233,7 @@ function toolCard(row, readOutput, previous) {
       observer.observe(card)
     }
     return { node: card, targetKey, stateCache, dispose() { active = false; observer?.disconnect(); rawDetail.dispose(); reportDetail.dispose(); facts.dispose() } }
-  } else if (row.result?.status === 'succeeded') {
+  } else if (row.result?.status === 'succeeded' && !explainsCompletedResult(immediateSemantics ?? {})) {
     card.append(element('p', '结果正文未提供', 'tool-read-feedback'))
   }
   return { node: card, targetKey, stateCache, dispose() { active = false; observer?.disconnect(); facts.dispose() } }
@@ -221,7 +246,7 @@ export function disposeToolBody(host) {
 
 // Keep open results and details through unchanged polling; no execution state.
 export function renderToolBody(host, events, readOutput) {
-  let previous = bodies.get(host) ?? new Map()
+  const previous = bodies.get(host) ?? new Map()
   const next = new Map()
   for (const row of toolPresentations(events)) {
     // Journal events are immutable; arguments need no eager JSON copy to poll.
@@ -229,7 +254,9 @@ export function renderToolBody(host, events, readOutput) {
     const old = previous.get(row.key)
     const item = old?.signature === signature && old.reader === readOutput ? old : { signature, reader: readOutput, ...toolCard(row, readOutput, old) }
     next.set(row.key, item)
-    host.append(item.node)
+    const atPosition = host.children[next.size - 1]
+    if (atPosition && atPosition !== item.node) host.insertBefore(item.node, atPosition)
+    else if (!atPosition) host.append(item.node)
   }
   for (const [key, item] of previous) if (!next.has(key)) { item.dispose(); item.node.remove() }
   bodies.set(host, next)

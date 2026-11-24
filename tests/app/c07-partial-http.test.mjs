@@ -101,3 +101,40 @@ if (!process.env.C07_BROWSER_SERVER) test('typed partial survives cold read and 
     assert.equal(final.data.tasks.length, 0)
   } finally { await f.close() }
 })
+
+if (!process.env.C07_BROWSER_SERVER) test('stable receive key deduplicates one accepted submission and rejects content replacement through HTTP', async () => {
+  const f = await fixture()
+  try {
+    const stable = {
+      sourceRef: 'ui:entry',
+      rawInput: '只受理一次的原输入',
+      channel: 'business',
+      idempotencyKey: 'ui-entry:stable-receive-proof',
+      topicRef: 'main',
+    }
+    const first = await f.request('/api/explicit/inputs', stable)
+    assert.equal(first.status, 201)
+    await f.reopen()
+    const duplicate = await f.request('/api/explicit/inputs', stable)
+    assert.equal(duplicate.status, 201)
+    assert.equal(duplicate.data.interactionId, first.data.interactionId)
+    assert.equal(duplicate.data.occurredAt, first.data.occurredAt)
+
+    const conflict = await f.request('/api/explicit/inputs', { ...stable, rawInput: '不得替换已受理内容' })
+    assert.equal(conflict.status, 409)
+    assert.equal(conflict.data.error.code, 'explicit-brain.idempotency-conflict')
+
+    const otherTopic = await f.request('/api/explicit/inputs', { ...stable, topicRef: 'side' })
+    assert.equal(otherTopic.status, 201)
+    assert.notEqual(otherTopic.data.interactionId, first.data.interactionId)
+
+    const legacyA = await f.request('/api/explicit/inputs', { sourceRef: 'ui:legacy', rawInput: '无稳定键', channel: 'business' })
+    const legacyB = await f.request('/api/explicit/inputs', { sourceRef: 'ui:legacy', rawInput: '无稳定键', channel: 'business' })
+    assert.equal(legacyA.status, 201)
+    assert.equal(legacyB.status, 201)
+    assert.notEqual(legacyA.data.interactionId, legacyB.data.interactionId)
+
+    const original = await f.request(`/api/explicit/interactions/${first.data.interactionId}`)
+    assert.equal(original.data.rawInput, stable.rawInput)
+  } finally { await f.close() }
+})

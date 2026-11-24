@@ -418,6 +418,10 @@ export function createRuntimeApi(options = {}) {
     }),
     inspectExplicitInteraction: (interactionId) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}`),
     interpretExplicitInput: (interactionId) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, { method: 'POST' }),
+    continueExplicitPartial: (interactionId, partialRef) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/continue`, {
+      method: 'POST',
+      body: JSON.stringify({ partialRef }),
+    }),
     answerExplicitClarification: (interactionId, answer) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/clarification`, {
       method: 'POST',
       body: JSON.stringify({ answer }),

@@ -19,6 +19,113 @@
   background: linear-gradient(135deg, #f7fbfa 0%, #eef5f3 100%);
 }
 
+.jenny-task-bar {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  max-inline-size: 100%;
+  margin: 0 0 10px;
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: 0 5px 16px #1d392518;
+  backdrop-filter: blur(10px);
+}
+
+.jenny-task-bar-toggle {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) minmax(0, auto) auto;
+  align-items: center;
+  gap: 8px;
+  inline-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 42px;
+  padding: 8px 11px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: start;
+  cursor: pointer;
+}
+
+.jenny-task-bar-toggle > span {
+  min-inline-size: 0;
+}
+
+.jenny-task-bar-mark {
+  inline-size: 8px;
+  block-size: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.jenny-task-bar[data-tone="success"] { border-color: color-mix(in srgb, var(--success) 38%, var(--line)); color: var(--success); }
+.jenny-task-bar[data-tone="danger"] { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); color: var(--danger); }
+.jenny-task-bar[data-tone="success"] .jenny-task-bar-mark { background: var(--success); }
+.jenny-task-bar[data-tone="danger"] .jenny-task-bar-mark { background: var(--danger); }
+.jenny-task-bar[data-tone="warning"] .jenny-task-bar-mark { background: var(--warning); }
+.jenny-task-bar[data-active="true"] .jenny-task-bar-mark { animation: jenny-task-breathe 1.4s ease-in-out infinite; }
+
+.jenny-task-bar-chevron {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jenny-task-bar-title { overflow: hidden; font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.jenny-task-bar-phase { max-inline-size: 13em; overflow: hidden; padding: 2px 8px; border-radius: 999px; color: inherit; background: var(--surface-soft); font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.jenny-task-bar-chevron { color: var(--accent); font-size: 11px; }
+.jenny-task-bar-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+
+.jenny-task-bar-detail {
+  display: grid;
+  position: absolute;
+  inset: 100% 0 auto;
+  gap: 8px;
+  max-block-size: min(48dvh, 360px);
+  min-inline-size: 0;
+  padding: 12px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  border-inline: 1px solid var(--line);
+  border-block-end: 1px solid var(--line);
+  border-radius: 0 0 12px 12px;
+  color: var(--text, #242b25);
+  background: var(--surface);
+  box-shadow: 0 12px 26px #1d392524;
+  font-size: 13px;
+}
+
+.jenny-task-bar-detail-head,
+.jenny-task-bar-route,
+.jenny-task-bar-reason,
+.jenny-task-bar-next {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.jenny-task-bar-detail-head { color: var(--muted); font-size: 12px; }
+.jenny-task-bar-detail-head strong { color: var(--text, #242b25); }
+.jenny-task-bar-route { color: var(--muted); font-size: 11px; }
+.jenny-task-bar-blocker { padding: 8px 10px; border-radius: 8px; background: var(--danger-soft); color: var(--danger); font-size: 12px; }
+.jenny-task-bar-blocker:empty { display: none; }
+.jenny-task-bar-next { color: var(--muted); font-size: 12px; }
+.jenny-task-bar-open { justify-self: start; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 8px; color: var(--accent); background: white; font: inherit; font-weight: 650; cursor: pointer; }
+.jenny-task-bar-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@keyframes jenny-task-breathe {
+  50% { opacity: .38; transform: scale(.72); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jenny-task-bar[data-active="true"] .jenny-task-bar-mark { animation: none; }
+}
+
 .mt-turn-kind,
 .mt-turn-time,
 .mt-active-label,
@@ -197,6 +304,7 @@
 .conversation-status-row[data-tone="success"] { color: var(--success); }
 .conversation-status-row[data-tone="danger"] { color: var(--danger); }
 .conversation-status-time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.conversation-status-error { color: var(--danger); overflow-wrap: anywhere; }
 .conversation-status-detail { padding: 2px 5px; font: inherit; color: var(--accent); background: none; border: 0; cursor: pointer; }
 .conversation-status-row[data-running="true"] .conversation-status-mark { display: inline-block; width: 11px; height: 11px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; font-size: 0; animation: conversation-spin 1s linear infinite; }
 @keyframes conversation-spin { to { transform: rotate(360deg); } }
@@ -365,8 +473,24 @@
 .tool-error { color: var(--danger); }
 .tool-card .tool-error { margin: 0 0 4px; font-size: .85rem; line-height: 1.35; }
 .tool-card[data-status="succeeded"] .tool-state { color: var(--success); }
-.tool-facts { margin-block: 10px; }
-.tool-facts summary { cursor: pointer; }
+.tool-facts { margin-block: 8px; }
+.tool-facts > .detail-disclosure-trigger {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: .85rem;
+  line-height: 1.35;
+}
+.tool-facts > .detail-disclosure-trigger:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+  color: var(--ink);
+  background: var(--surface);
+}
 .tool-card pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; font-size: .85rem; }
 .tool-output { max-height: 65vh; overflow-y: auto; padding: 10px; border: 1px solid var(--line); }
 .tool-read-output { cursor: pointer; padding: 7px 12px; }
@@ -380,6 +504,23 @@
 .tool-report-original { max-height: 65vh; overflow: auto; }
 
 @media (max-width: 720px) {
+  .jenny-task-bar {
+    margin-block-end: 8px;
+    border-radius: 10px;
+  }
+
+  .jenny-task-bar-toggle {
+    grid-template-columns: 8px minmax(0, 1fr) minmax(0, 112px) auto;
+    gap: 6px;
+    min-block-size: 36px;
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+
+  .jenny-task-bar-title { font-size: 12px; }
+  .jenny-task-bar-phase { max-inline-size: none; }
+  .jenny-task-bar-detail { max-block-size: min(44dvh, 320px); padding: 10px; }
+
   .mt-head,
   .mt-active {
     padding-inline: 16px;

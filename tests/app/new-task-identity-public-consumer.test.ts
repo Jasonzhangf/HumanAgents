@@ -19,6 +19,7 @@ import {
   type ProviderStartInput,
   type ProviderStartReceipt,
   type ScopeRef,
+  type StandardTurnEndPayload,
   type Task,
   type TaskId,
   type TaskFlowBinding,
@@ -357,6 +358,7 @@ function taskControlPathFor(root: string, mode: 'fake' | 'rcc' = 'fake'): string
 async function startRuntime(root: string, port: ExecutionRuntimePort, extra: {
   readonly projectKey: string;
   readonly mode?: 'fake' | 'rcc';
+  readonly agentRoster?: UiRuntimeLaunchOptions['agentRoster'];
   readonly providerSource?: 'rcc' | 'http';
   readonly binding?: ProviderBinding;
   readonly explicitBrainInterpreter?: ExplicitBrainInputInterpreter;
@@ -381,6 +383,7 @@ async function startRuntime(root: string, port: ExecutionRuntimePort, extra: {
     workspaceRoot: root,
     memory: memoryFor(extra.projectKey),
     accessControl: auth.accessControl,
+    ...(extra.agentRoster === undefined ? {} : { agentRoster: extra.agentRoster }),
     explicitBrainInterpreter: extra.explicitBrainInterpreter ?? createInterpreter,
     ...(extra.providerSource === undefined ? {} : { providerSource: extra.providerSource }),
     ...(extra.runtimeComposition === undefined ? {} : { runtimeComposition: extra.runtimeComposition }),
@@ -558,6 +561,43 @@ async function waitForAsync(assertion: () => Promise<void>, timeoutMs = 4000): P
   throw new Error('waitForAsync timed out');
 }
 
+async function waitForTaskFinal(
+  runtime: Awaited<ReturnType<typeof startUiRuntime>>,
+  taskId: TaskId,
+  timeoutMs = 4000,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let unsubscribe = (): void => {};
+    const isFinal = (event: { readonly kind: string; readonly terminalPhase?: string }): boolean =>
+      event.kind === 'execution.terminal' && event.terminalPhase === 'final';
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      unsubscribe();
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      reject(new Error(`task ${taskId.value} did not reach execution.terminal/final`));
+    }, timeoutMs);
+    try {
+      const subscription = runtime.service.subscribeTaskEvents(taskId, undefined, (event) => {
+        if (isFinal(event)) finish();
+      });
+      unsubscribe = subscription.unsubscribe;
+      if (subscription.replay.some(isFinal)) finish();
+    } catch (error) {
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    }
+  });
+}
+
 async function identityRecords(taskControlPath: string): Promise<readonly TaskIdentityRecord[]> {
   return new JsonlTaskIdentityJournal(new JsonlOrganJournal(taskControlPath)).replay();
 }
@@ -708,6 +748,186 @@ async function currentTaskPlanReceipt(
   if (receipt === null) throw new Error(`fixture lost the physical receipt for ${revisionId}`);
   return receipt;
 }
+
+test('manager snapshot reads per-member boards from the serve scope and rejects an undeclared member', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'manager-project-snapshot-'));
+  type TaskRead = { taskId: string; title: string; requesterRelation: string };
+  type Snapshot = { projectKey: string; requesterSource: string; members: readonly {
+    memberRef: string; status: string; board: { current: readonly TaskRead[]; history: readonly TaskRead[] };
+  }[] };
+  type ExplicitTaskRead = {
+    readonly title: string;
+    readonly executionTaskId?: string;
+    readonly publicationState: string;
+  };
+  const observed: {
+    read?: (members?: readonly string[]) => Promise<unknown>;
+    readResult?: (taskId: string) => Promise<unknown>;
+  } = {};
+  const runtime = await startRuntime(root, new CountingStartPort({ binding, stepDelayMs: 1 }), {
+    projectKey: 'project-snapshot',
+    agentRoster: [
+      { agentId: 'configured-manager', roleId: 'interaction', managementRole: 'project-lead' },
+      { agentId: 'control-domain-ceo', roleId: 'interaction', managementRole: 'ceo' },
+      { agentId: 'worker', roleId: 'execution' },
+    ],
+    explicitBrainInterpreter: { async interpret(input) {
+      observed.read = input.readProjectSnapshot;
+      observed.readResult = input.readTaskResult;
+      if (input.rawInput.startsWith('create the ')) return createInterpreter.interpret(input);
+      return { kind: 'answer', answer: 'snapshot fixture', normalizedInput: input.rawInput, knownFacts: [], decisionRefs: [] };
+    } },
+  });
+  const submittedTaskIds: TaskId[] = [];
+  try {
+    runtime.service.createTask({
+      title: 'Project worker task', directive: 'Project-only directive',
+      boardOwner: { scope: 'project', projectId: 'project-snapshot', actorId: 'worker' },
+    });
+    runtime.service.createTask({
+      title: 'Other project task', directive: 'Other project directive',
+      boardOwner: { scope: 'project', projectId: 'other-project', actorId: 'worker' },
+    });
+    const interactionId = await runtime.service.receiveExplicitInput({
+      sourceRef: 'ui:manager-snapshot', channel: 'business', rawInput: 'Show project members.',
+    });
+    await runtime.service.interpretExplicitInput({ interactionId });
+    const read = observed.read;
+    if (read === undefined) throw new Error('the Manager interpretation must receive a live snapshot reader');
+    const all = await read() as Snapshot;
+    assert.equal(all.projectKey, 'project-snapshot');
+    assert.equal(all.requesterSource, 'identity-unavailable');
+    assert.deepEqual(all.members.map(member => member.memberRef), ['Jenny', 'worker']);
+    assert.equal(JSON.stringify(all).includes('Other project'), false);
+    const batch = await read(['worker']) as Snapshot;
+    assert.equal(batch.members.length, 1);
+    assert.deepEqual(batch.members[0]?.board.current.map(task => task.title), ['Project worker task']);
+    assert.equal(batch.members[0]?.status, 'unknown');
+    assert.equal(batch.members[0]?.board.current[0]?.requesterRelation, 'unverified');
+    await assert.rejects(() => read(['unknown']), /absent or ambiguous in the authorized project roster/);
+
+    const submitted = await submitNewTask(runtime, 'requester relation');
+    await waitForAsync(async () => {
+      const records = await identityRecords(taskControlPathFor(root));
+      assert.ok(records.some(record => record.source.requirementId === submitted.receipt.requirement.requirementId));
+    });
+    const submittedIdentity = (await identityRecords(taskControlPathFor(root))).find(
+      record => record.source.requirementId === submitted.receipt.requirement.requirementId,
+    )!;
+    submittedTaskIds.push(submittedIdentity.scope.taskId);
+    const request = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sourceRef: 'ui:follow-up', rawInput: 'Show project members.', channel: 'business' }),
+    });
+    assert.equal(request.status, 201);
+    const { interactionId: followUp } = await request.json() as { interactionId: string };
+    await runtime.service.interpretExplicitInput({ interactionId: followUp });
+    const linked = await observed.read!() as Snapshot;
+    assert.equal(linked.requesterSource, 'available');
+    const visible = linked.members.flatMap(member => [...member.board.current, ...member.board.history]);
+    assert.equal(visible.find(task => task.taskId === submittedIdentity.scope.taskId.value)?.requesterRelation, 'same-requester');
+    assert.equal(visible.find(task => task.title === 'Project worker task')?.requesterRelation, 'unverified');
+
+    const projectTask = runtime.service.createTask({
+      title: 'same project direct result', directive: 'same project direct result',
+      boardOwner: { scope: 'project', projectId: 'project-snapshot', actorId: 'worker' },
+    });
+    const foreignTask = runtime.service.createTask({
+      title: 'foreign project direct result', directive: 'foreign project direct result',
+      boardOwner: { scope: 'project', projectId: 'other-project', actorId: 'worker' },
+    });
+    const parentTask = runtime.service.createTask({
+      title: 'same project delegated parent', directive: 'same project delegated parent',
+      boardOwner: { scope: 'project', projectId: 'project-snapshot', actorId: 'worker' },
+    });
+    const childTask = runtime.service.createTask({
+      title: 'same project delegated execution', directive: 'same project delegated execution',
+      boardOwner: { scope: 'project', projectId: 'project-snapshot', actorId: 'worker' },
+    });
+    const crossBoardParent = runtime.service.createTask({
+      title: 'cross board delegated parent', directive: 'cross board delegated parent',
+      boardOwner: { scope: 'project', projectId: 'project-snapshot', actorId: 'worker' },
+    });
+    const crossBoardChild = runtime.service.createTask({
+      title: 'cross board delegated execution', directive: 'cross board delegated execution',
+      boardOwner: { scope: 'project', projectId: 'other-project', actorId: 'worker' },
+    });
+    const identityWriter = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(
+      new JsonlOrganJournal(taskControlPathFor(root)),
+    ));
+    const establishIdentity = async (
+      task: { readonly taskId: TaskId; readonly title: string },
+      requirementId: string,
+    ): Promise<void> => {
+      await identityWriter.establish({
+        scope: { organId, taskId: task.taskId },
+        source: {
+          requirementId, inputRevision: 1, draftId: 'draft-' + requirementId,
+          draftRevisionVersion: 1, draftRevisionHash: 'hash-' + requirementId,
+          confirmationRef: 'confirmation-' + requirementId,
+        },
+        title: task.title,
+      });
+    };
+    const subscriptionsPath = join(root, 'checkpoints', 'fake', 'subscriptions.jsonl');
+    const subscriptions = new SubscriptionControlPort(
+      new JsonlOrganJournal(subscriptionsPath), { organId }, subscriptionsPath,
+    );
+    const claimExecution = async (taskId: TaskId, requirementId: string, suffix: string): Promise<void> => {
+      const subscriptionId = 'subscription:' + suffix;
+      const dueAt = '2026-11-01T17:00:00.000Z';
+      const schedule = await subscriptions.create({
+        subscriptionId, goalId: requirementId, scheduleRevision: 1, state: 'active',
+        busyPolicy: 'skip', currentOccurrenceOrdinal: 0,
+      }, onceExecutionPolicy, subscriptionId);
+      await subscriptions.schedule({
+        occurrence: { subscriptionId, scheduleRevision: schedule.subscription.scheduleRevision,
+          occurrenceOrdinal: 1, state: 'due', dueAt }, nowAt: dueAt,
+      });
+      await subscriptions.claim({
+        subscriptionId, scheduleRevision: schedule.subscription.scheduleRevision, occurrenceOrdinal: 1,
+        dueAt, taskId, operationId: id('operation', suffix),
+        inputArtifactDigest: 'sha256:' + suffix, schedulerInstanceId: suffix, leaseId: suffix,
+        generation: 1, executionEpoch: 1, nowAt: dueAt, leaseUntil: '2026-11-01T18:00:00.000Z',
+      });
+    };
+    const readTaskThroughExplicitTool = async (taskId: TaskId): Promise<ExplicitTaskRead> => {
+      const interactionId = await runtime.service.receiveExplicitInput({
+        sourceRef: 'ui:task-read-' + taskId.value, channel: 'business',
+        rawInput: 'read task ' + taskId.value,
+      });
+      await runtime.service.interpretExplicitInput({ interactionId });
+      if (observed.readResult === undefined) throw new Error('explicit task reader was not bound');
+      return await observed.readResult(taskId.value) as ExplicitTaskRead;
+    };
+
+    await establishIdentity(parentTask, 'requirement-same-board');
+    await establishIdentity(childTask, 'requirement-same-board');
+    await claimExecution(childTask.taskId, 'requirement-same-board', 'same-board-delegation');
+    await establishIdentity(crossBoardParent, 'requirement-cross-board');
+    await establishIdentity(crossBoardChild, 'requirement-cross-board');
+    await claimExecution(crossBoardChild.taskId, 'requirement-cross-board', 'cross-board-delegation');
+
+    const direct = await readTaskThroughExplicitTool(projectTask.taskId);
+    assert.equal(direct.executionTaskId, projectTask.taskId.value);
+    assert.equal(direct.title, projectTask.title);
+    await assert.rejects(
+      () => readTaskThroughExplicitTool(foreignTask.taskId),
+      (error: unknown) => (error as { readonly code?: string }).code === 'explicit-brain.task-outside-serve-scope',
+    );
+    const delegated = await readTaskThroughExplicitTool(parentTask.taskId);
+    assert.equal(delegated.executionTaskId, childTask.taskId.value);
+    await assert.rejects(
+      () => readTaskThroughExplicitTool(crossBoardParent.taskId),
+      (error: unknown) => (error as { readonly code?: string }).code === 'explicit-brain.task-outside-serve-scope',
+    );
+    await Promise.all(submittedTaskIds.map(taskId => waitForTaskFinal(runtime, taskId)));
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('public new-task submit binds the real typed source and cold-reads before and after execution', async () => {
   await mkdir(ROOT, { recursive: true });
@@ -884,7 +1104,7 @@ interface TerminalUpstream {
   readonly requests: CapturedUpstreamRequest[];
   readonly plannerRequests: ReadonlyArray<Record<string, unknown>>;
   readonly plannerSnapshots: readonly TaskPlanSnapshot[];
-  readonly endArguments: ReadonlyArray<Record<string, unknown>>;
+  readonly endArguments: readonly StandardTurnEndPayload[];
   restore(): void;
 }
 
@@ -898,7 +1118,7 @@ function captureTerminalUpstream(origin: string, deliveryText: string): Terminal
   const requests: CapturedUpstreamRequest[] = [];
   const plannerRequests: Array<Record<string, unknown>> = [];
   const plannerSnapshots: TaskPlanSnapshot[] = [];
-  const endArguments: Array<Record<string, unknown>> = [];
+  const endArguments: StandardTurnEndPayload[] = [];
   const original = globalThis.fetch;
   const capture = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1] = {}) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -952,14 +1172,14 @@ function captureTerminalUpstream(origin: string, deliveryText: string): Terminal
     }
 
     if (advertisesTurnEnd(body)) {
-      const args: Record<string, unknown> = {
+      const args: StandardTurnEndPayload = {
+        outcome: 'completed',
         summary: {
-          goal: { text: 'Deliver the confirmed B2 task result', evidenceRefs: [] },
-          actions: { text: 'Ran the configured real execution Provider', evidenceRefs: [] },
-          result: { text: deliveryText, evidenceRefs: [] },
-          expectedNextStep: { text: 'Close the turn so the Planner can decide', evidenceRefs: [] },
+          goal: 'Deliver the confirmed B2 task result',
+          actions: ['Ran the configured real execution Provider'],
+          result: { status: 'completed', text: deliveryText },
+          nextStep: 'Close the turn so the Planner can decide',
         },
-        deliveryText,
         deliveryRefs: [],
       };
       endArguments.push(args);
@@ -1123,7 +1343,7 @@ test('B2: one public confirmation composes identity, grant, real execution and t
     // closed-turn Planner consumed that accepted result once.
     assert.ok(upstream.endArguments.length >= 1, 'the real execution must accept a standard turn end');
     assert.equal(
-      (upstream.endArguments[0] as { readonly deliveryText?: string }).deliveryText,
+      upstream.endArguments[0]?.summary.result.text,
       deliveryText,
       'the accepted end must carry the exact delivery text',
     );
@@ -1266,6 +1486,7 @@ test('taskFlow intake fidelity preserves inferred and refined bindings without a
       },
     },
   });
+  const taskFlowTaskIds: TaskId[] = [];
   try {
     const direct = await prepareNewTaskConfirmation(runtime, 'task-flow-direct');
     const directResponse = await fetch(
@@ -1280,6 +1501,7 @@ test('taskFlow intake fidelity preserves inferred and refined bindings without a
     await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, 1));
     const directIdentity = (await identityRecords(taskControlPath))[0]!;
     assert.deepEqual(directIdentity.taskFlow, directTaskFlow);
+    taskFlowTaskIds.push(directIdentity.scope.taskId);
 
     const refined = await prepareNewTaskConfirmation(runtime, 'task-flow-refined');
     const refinedTaskFlow: TaskFlowBinding = {
@@ -1319,6 +1541,7 @@ test('taskFlow intake fidelity preserves inferred and refined bindings without a
     assert.equal(omittedResponse.status, 200);
     await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, 2));
     const refinedIdentity = (await identityRecords(taskControlPath))[1]!;
+    taskFlowTaskIds.push(refinedIdentity.scope.taskId);
     assert.deepEqual(refinedIdentity.taskFlow, refinedTaskFlow);
 
     const conflict = await prepareNewTaskConfirmation(runtime, 'task-flow-conflict');
@@ -1356,9 +1579,12 @@ test('taskFlow intake fidelity preserves inferred and refined bindings without a
     );
     assert.equal(conflictResponse.status, 200);
     await waitForAsync(async () => assert.equal((await identityRecords(taskControlPath)).length, identitiesBeforeConflict + 1));
-    assert.deepEqual((await identityRecords(taskControlPath)).at(-1)?.taskFlow, refinedTaskFlow);
+    const conflictIdentity = (await identityRecords(taskControlPath)).at(-1)!;
+    assert.deepEqual(conflictIdentity.taskFlow, refinedTaskFlow);
+    taskFlowTaskIds.push(conflictIdentity.scope.taskId);
 
     const target = runtime.service.createTask({ title: 'existing task-flow target' });
+    taskFlowTaskIds.push(target.taskId);
     const targetGrant = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(target.taskId.value)}/control/grant`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ requestId: 'task-flow-existing-fixture-grant', expectedRevision: 0 }),
@@ -1413,6 +1639,9 @@ test('taskFlow intake fidelity preserves inferred and refined bindings without a
     await waitForAsync(async () => assert.equal(runtime.service.listTasks().counts.total, tasksBeforeRejectedInjection));
     assert.equal((await identityRecords(taskControlPath)).length, identitiesBeforeRejectedInjection);
     await waitForAsync(async () => assert.equal(await pendingRequirementCount(taskControlPath), pendingBeforeRejectedInjection));
+    // The invalid override was ignored; the existing-task change still ran.
+    taskFlowTaskIds.push(target.taskId);
+    await Promise.all(taskFlowTaskIds.map(taskId => waitForTaskFinal(runtime, taskId)));
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });
@@ -1759,6 +1988,12 @@ test('taskFlow intake fidelity preserves confirmed template through task directi
     assert.equal(plannerPayload.task.title, semanticTitle);
     assert.equal(plannerPayload.task.directive, confirmedRevision.normalizedInput);
     assert.deepEqual(JSON.parse(plannerPayload.task.directive), expectedTemplate);
+    // The HTTP service can close while the released fixture task is still
+    // appending its final checkpoint. Let its real writer settle before rm.
+    await waitFor(() => {
+      const dashboard = runtime.service.taskDashboard(identity.scope.taskId);
+      assert.ok(dashboard.history.events.some(event => event.kind === 'execution.terminal' && event.terminalPhase === 'final'));
+    });
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });

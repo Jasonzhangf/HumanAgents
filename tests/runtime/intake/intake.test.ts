@@ -235,6 +235,50 @@ test('explicit input workspace target is recorded, persisted and validated', asy
   assert.equal(intake.exportState().interactions.length, 1);
 });
 
+test('stable receive identity is scoped by user, workspace and Topic without replacing accepted content', async () => {
+  const intake = new ExplicitIntake();
+  const workspace = {
+    workspaceCwd: '/tmp/humanagent-intake-idempotency-a',
+    projectKey: '-tmp-humanagent-intake-idempotency-a',
+  } as const;
+  const actor = {
+    kind: 'human' as const,
+    sourceKind: 'product-principal',
+    sourceRef: 'human:operator-a',
+  };
+  const stable: ExplicitInput = {
+    ...input(),
+    idempotencyKey: 'ui-entry:stable-scope',
+    topicRef: 'main',
+    workspace,
+    actor,
+  };
+
+  const original = await intake.receive(stable);
+  assert.equal(await intake.receive({ ...stable, occurredAt: '2026-11-24T12:00:00.000Z' }), original);
+
+  const otherUser = await intake.receive({
+    ...stable,
+    actor: { ...actor, sourceRef: 'human:operator-b' },
+  });
+  const otherWorkspace = await intake.receive({
+    ...stable,
+    workspace: {
+      workspaceCwd: '/tmp/humanagent-intake-idempotency-b',
+      projectKey: '-tmp-humanagent-intake-idempotency-b',
+    },
+  });
+  const otherTopic = await intake.receive({ ...stable, topicRef: 'side' });
+  assert.notEqual(otherUser, original);
+  assert.notEqual(otherWorkspace, original);
+  assert.notEqual(otherTopic, original);
+
+  await assert.rejects(() => intake.receive({ ...stable, rawInput: 'replacement content' }),
+    (error: unknown) => error instanceof ExplicitIntakeError && error.code === 'idempotency-conflict');
+  assert.equal((await intake.inspect(original)).rawInput, stable.rawInput);
+  assert.equal(intake.exportState().interactions.length, 4);
+});
+
 test('explicit confirmation rejects a stale input revision', async () => {
   const intake = new ExplicitIntake();
   const interactionId = await intake.receive(input(), 2);

@@ -591,6 +591,9 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.runtimeComposition?.createTaskAssembly === undefined ? {} : {
       createTaskAssembly: options.runtimeComposition.createTaskAssembly,
     }),
+    ...(options.runtimeComposition?.transientRetryWaiter === undefined ? {} : {
+      transientRetryWaiter: options.runtimeComposition.transientRetryWaiter,
+    }),
     ...(configuredNativeLaunch ? {
       createExecutionPorts: (coordinator) => {
         const composition = createDefaultExecutionComposition({
@@ -624,6 +627,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           admitExecution: composition.admitExecution,
           createDriver: composition.createExecutionDriver,
           preparedExecutionStop: composition.preparedExecutionStop,
+          closeRetainedTransientRetryProvider: composition.closeRetainedTransientRetryProvider,
           inspectionStop: composition.inspectionStop,
           coldExecution: {
             readColdExecutionSource: composition.readColdExecutionSource,
@@ -648,6 +652,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   };
   const runtimeService = new UiRuntimeService({
     mode: options.mode,
+    ...(options.agentRoster === undefined ? {} : { agentRoster: options.agentRoster }),
     maxConcurrentTasks: options.maxConcurrentTasks,
     organId: options.organId,
     principalOwner,

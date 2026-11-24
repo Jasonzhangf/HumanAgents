@@ -26,6 +26,13 @@ test('explicit rows retain each completed request and its independent timing', (
   assert.equal(rows[1].errorCode, 'task.read.failed')
 })
 
+test('project snapshots are rendered as scoped project reads in the live tool card', () => {
+  const [row] = explicitToolRows([step('tool.started', 1, 'project-request', 'read', { kind: 'project-snapshot' })])
+  assert.equal(row?.label, '查看项目进展')
+  assert.equal(row.status, '等待工具返回')
+  assert.equal(row.running, true)
+})
+
 test('continuation distinguishes the runtime blocker from a published result and a real release', () => {
   const read = { kind: 'task-result', title: '原任务', taskState: 'blocked', publicationState: 'committed', resultAvailable: false }
   const blocker = { code: 'unknown.event', reason: 'unknown responses wire event type', nextStep: '核实外部变更后恢复' }

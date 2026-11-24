@@ -9,13 +9,8 @@ import {
   openTechnicalDetail,
   renderPageError,
   renderRuntimeStatus,
-  renderTaskExecutions,
-  stateTone,
-  taskRowStateText,
-  taskRowTitle,
   taskFlowText,
   taskDashboardHref,
-  taskExecutionHref,
   technicalDetailTrigger,
 } from './runtime-shell.js'
 import { mountInteractionWorkCard } from './interaction-work-card.js'
@@ -29,7 +24,7 @@ import {
 } from './interaction-card-page.js'
 import { locationFromHash } from './product-location.js'
 import { entryWorkspaceSelection, entryProjectHref, mountEntryWorkspace } from './entry-workspace.js'
-import { submissionView, intakeFinished, draftReviewFromSnapshot, canContinueSubmission } from './send-lifecycle.js'
+import { submissionView, intakeFinished, draftReviewFromSnapshot, canContinueSubmission, submissionNeedsResolution } from './send-lifecycle.js'
 import { applyTaskCardResult, createDispatchTracking, taskValue } from './dispatch-tracking.js'
 import { createTaskDecisionPrompt, decisionMatchesTaskScope } from './product-control-view.js'
 
@@ -472,6 +467,8 @@ let mainTopicRefreshing = null
 let mainTopicRefreshQueued = false
 let mainTopicUsageForce = false
 let sendAttempt = null
+const queuedSubmissions = []
+let activeQueuedSubmission = null
 let mainTopicReadFailures = 0
 const pendingDrafts = new Map()
 const dispatchTracking = createDispatchTracking({ api, openDetail: openTechnicalDetail,
@@ -483,7 +480,8 @@ function paintSubmission() {
   const projection = latestMainTopic || { turns: [], agentName: 'Jenny' }
   const turns = (projection.turns || []).map(turn => turn.kind === 'draft' && pendingDrafts.has(turn.interactionId)
     ? { ...turn, draftReview: pendingDrafts.get(turn.interactionId) } : turn)
-  renderMainTopic(mainTopicHost, submissionView({ ...projection, turns }, sendAttempt), {
+  const attempts = [sendAttempt, ...queuedSubmissions.map(item => item.attempt)].filter(Boolean)
+  renderMainTopic(mainTopicHost, submissionView({ ...projection, turns }, attempts), {
     onOpenDecision: (request) => openEntryDecision(request),
     onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, latestMainTopic),
     onOpenHistoryDetail: openMainTopicHistoryDetail,
@@ -497,23 +495,76 @@ function acceptSubmission(id) {
   if (!sendAttempt || !id) return
   sendAttempt.interactionId = id
   sendAttempt.error = undefined
+  const form = document.querySelector('#entry-form')
+  const submitButton = form?.querySelector('button[type="submit"]')
+  if (submitButton) submitButton.disabled = false
   // Persist only the receipt identity for read-only reload recovery, never a
   // local phase start. A reload must obtain phase times from runtime facts.
-  window.history.replaceState({ ...window.history.state, entryReceipt: { interactionId: id, rawInput: sendAttempt.rawInput, key: sendAttempt.key } }, '', window.location.href)
+  window.history.replaceState({
+    ...window.history.state,
+    entryReceipt: {
+      interactionId: id,
+      rawInput: sendAttempt.rawInput,
+      key: sendAttempt.key,
+      ...(pendingSubmission === undefined ? {} : { submission: pendingSubmission }),
+    },
+  }, '', window.location.href)
   const input = document.querySelector('#entry-form textarea[name=rawInput]')
   if (input?.value === sendAttempt.rawDraft) { input.value = ''; retainEntryDraft() }
   paintSubmission()
 }
 
 async function recoverSubmission() {
-  await refreshMainTopic()
+  if (sendAttempt?.interactionId) {
+    await refreshMainTopic()
+    return
+  }
+  if (!sendAttempt?.error) return
+  const form = document.querySelector('#entry-form')
+  const input = form?.elements.namedItem('rawInput')
+  // Recovery belongs to the failed item. Restore its text only when the user
+  // has not already started a newer draft, then unlock the ordinary form.
+  const recoveredAttempt = sendAttempt
+  const recoveredSubmission = pendingSubmission
+  if (input && input.value.trim() === '') {
+    input.value = sendAttempt.rawDraft || sendAttempt.rawInput
+    retainEntryDraft()
+  }
+  if (recoveredAttempt && recoveredSubmission) {
+    queuedSubmissions.unshift({ attempt: { ...recoveredAttempt, error: undefined, processError: undefined, queued: true, recovered: true }, submission: recoveredSubmission })
+  }
+  sendAttempt = null
+  activeQueuedSubmission = null
+  pendingSubmission = undefined
+  interactionId = undefined
+  confirmation = undefined
+  clearEntryError()
+  paintSubmission()
+  const button = form?.querySelector('button[type="submit"]')
+  if (button) {
+    button.textContent = '↑'
+    button.setAttribute('aria-label', form.elements.namedItem('executionMode').value === 'once'
+      ? '发送给 Jenny' : '保存执行计划')
+  }
+  input?.focus()
 }
 
 async function continueSubmission() {
-  // Resume only from a fresh runtime snapshot that still permits processing
-  // the exact local receipt with its original idempotency key.
-  if (submissionGate.pending || !pendingSubmission || !interactionId
-    || !canContinueSubmission(sendAttempt?.snapshot) || !sendAttempt.processError) return
+  // A refreshed C07 interaction keeps its public interaction and partialRef;
+  // the page-local pendingSubmission may be gone and must not be required for
+  // resuming that exact turn.
+  const resumableSnapshot = sendAttempt?.interactionId && sendAttempt?.snapshot?.state === 'partial'
+    && typeof sendAttempt.snapshot.partial?.partialRef === 'string'
+    && sendAttempt.snapshot.partial.partialRef !== ''
+  if (submissionGate.pending || (!pendingSubmission && !resumableSnapshot)
+    || (!interactionId && !sendAttempt?.interactionId)
+    || !canContinueSubmission(sendAttempt?.snapshot, sendAttempt?.processError)) return
+  interactionId ??= sendAttempt?.interactionId
+  if (!pendingSubmission) {
+    const form = document.querySelector('#entry-form')
+    if (!(form instanceof HTMLFormElement)) return
+    pendingSubmission = prepareSubmission(sendAttempt.rawInput, form)
+  }
   sendAttempt.error = undefined
   sendAttempt.processError = undefined
   const run = submissionGate.begin(() => executeSubmission(pendingSubmission))
@@ -521,7 +572,7 @@ async function continueSubmission() {
   paintSubmission()
   try { completeSubmission(await run.result) }
   catch (error) { handleSubmissionError(error) }
-  finally { submitting = false; void refreshMainTopic() }
+  finally { submitting = false; void refreshMainTopic(); processQueuedSubmission() }
 }
 const mainTopicUsage = createSessionUsageReader({ api,
   onChange: ({ usage, ...options }) => updateMainTopicUsage(mainTopicHost, usage, options),
@@ -731,13 +782,28 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
       latestMainTopic = projection
       dispatchTracking.sync(projection.tasks || [], projection.turns || [])
       if (!sendAttempt && window.history.state?.entryReceipt) {
-        sendAttempt = { ...window.history.state.entryReceipt, onRecover: recoverSubmission }
+        const receipt = window.history.state.entryReceipt
+        interactionId = receipt.interactionId
+        pendingSubmission = receipt.submission
+        sendAttempt = { ...receipt, onRecover: recoverSubmission, onContinue: continueSubmission }
       }
       if (!sendAttempt && !submitting) {
-        const user = projection.turns?.findLast(turn => turn.role === 'user' &&
-          (turn.interactionId || turn.turnId.startsWith('user:interaction-')))
+        // Recover only an open user turn. A later result turn with the same
+        // interaction proves that the answer already settled; reconstructing
+        // the older user turn from the projection would turn that receipt into
+        // a false active sender and block the next real message.
+        const userIndex = projection.turns?.findLastIndex(turn => turn.role === 'user' &&
+          (turn.interactionId || turn.turnId.startsWith('user:interaction-'))) ?? -1
+        const user = userIndex === -1 ? undefined : projection.turns[userIndex]
         const id = user?.interactionId || user?.turnId.slice('user:'.length)
-        if (id) sendAttempt = { key: id, interactionId: id, rawInput: user.text, onRecover: recoverSubmission }
+        const settled = user && projection.turns.slice(userIndex + 1).some(turn =>
+          (turn.interactionId === id || turn.turnId === `user:${id}`)
+          && ['message', 'result', 'error', 'draft', 'clarification'].includes(turn.kind))
+        if (id && !settled) {
+          interactionId = id
+          sendAttempt = { key: id, interactionId: id, rawInput: user.text,
+            onRecover: recoverSubmission, onContinue: continueSubmission }
+        }
       }
       // Old services expose interaction snapshots/steps but no statusFacts.
       // Read those facts for this exact receipt; never resume writes on reload.
@@ -764,10 +830,17 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
       template.hosts.composer.hidden = false
       refreshEntryDecision(projection)
       paintSubmission()
-      if (sendAttempt && !submitting && intakeFinished.has(sendAttempt.snapshot?.state) && !sendAttempt.error) {
+      const needsUserAction = sendAttempt?.snapshot?.state === 'awaiting-clarification'
+        || sendAttempt?.snapshot?.state === 'awaiting-confirmation'
+      if (sendAttempt && !submitting && !needsUserAction && intakeFinished.has(sendAttempt.snapshot?.state) && !sendAttempt.error) {
+        activeQueuedSubmission = null
         sendAttempt = null
+        interactionId = undefined
+        confirmation = undefined
+        pendingSubmission = undefined
         const { entryReceipt, ...rest } = window.history.state || {}
         window.history.replaceState(rest, '', window.location.href)
+        processQueuedSubmission()
       }
       // Usage is an independent read: it must never delay the chat or submit.
       const force = mainTopicUsageForce
@@ -826,7 +899,9 @@ const cardState = { sequence: 0, entries: [] }
 // attempt or an intake clarification must still retry the same interaction.
 function completeSubmission(snapshot) {
   if (sendAttempt) { sendAttempt.snapshot = snapshot; sendAttempt.error = undefined; paintSubmission() }
-  if (snapshot.state === 'awaiting-clarification') return
+  if (snapshot.state === 'awaiting-clarification' || snapshot.state === 'awaiting-confirmation'
+    || snapshot.state === 'partial') return
+  activeQueuedSubmission = null
   interactionId = undefined
   confirmation = undefined
   pendingSubmission = undefined
@@ -841,9 +916,47 @@ function completeSubmission(snapshot) {
     'recurringFrequency', 'intervalMinutes', 'timeOfDay', 'weekDays']) {
     form.elements.namedItem(name).disabled = false
   }
-  form.querySelector('button[type="submit"]').textContent =
-    form.elements.namedItem('executionMode').value === 'once' ? '发送给 Jenny' : '保存执行计划'
+  form.querySelector('button[type="submit"]').setAttribute('aria-label',
+    form.elements.namedItem('executionMode').value === 'once' ? '发送给 Jenny' : '保存执行计划')
   retainEntryDraft()
+}
+
+function processQueuedSubmission() {
+  if (activeQueuedSubmission || submissionGate.pending || sendAttempt?.error
+    || submissionNeedsResolution(sendAttempt)
+    || queuedSubmissions.length === 0 || pageLeaving) return
+  const item = queuedSubmissions.shift()
+  activeQueuedSubmission = item
+  sendAttempt = item.attempt
+  sendAttempt.onRecover = recoverSubmission
+  sendAttempt.onContinue = continueSubmission
+  interactionId = undefined
+  confirmation = undefined
+  pendingSubmission = item.submission
+  item.attempt.queued = false
+  submitting = true
+  clearEntryError()
+  status.dataset.tone = 'warning'
+  submitBanner.mount()
+  submitBanner.text('正在发送排队消息…')
+  const form = document.querySelector('#entry-form')
+  if (form) form.querySelector('button[type="submit"]').disabled = true
+  paintSubmission()
+  const run = submissionGate.begin(() => executeSubmission(item.submission))
+  void run.result.then(completeSubmission).catch((error) => {
+    handleSubmissionError(error)
+  }).finally(() => {
+    submitting = false
+    const form = document.querySelector('#entry-form')
+    if (form) {
+      form.elements.namedItem('rawInput').readOnly = false
+      form.querySelector('button[type="submit"]').disabled = false
+    }
+    if (!liveTaskProgress) submitBanner.clear()
+    void refreshMainTopic()
+    paintSubmission()
+    if (!activeQueuedSubmission && !sendAttempt?.error) processQueuedSubmission()
+  })
 }
 
 function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
@@ -997,7 +1110,12 @@ function renderDraft(snapshot) {
       setClarificationControlsDisabled(true)
       clearEntryError()
       void run.result
-        .then(completeSubmission)
+        .then((snapshot) => {
+          completeSubmission(snapshot)
+          if (snapshot.state !== 'awaiting-clarification' && snapshot.state !== 'awaiting-confirmation') {
+            processQueuedSubmission()
+          }
+        })
         .catch((error) => handleSubmissionError(error, triggerButton ?? button))
         .finally(() => {
           submitting = false
@@ -1112,47 +1230,6 @@ function renderStatus(summary, tasks) {
   section.append(trigger)
 }
 
-// One task row is a link to the task dashboard. The entry page keeps its own
-// row rendering (title, status, time) and carries the exact task id on the
-// link, but reuses the shared shell-layer drawer so the primary column never
-// repeats the full Task List page.
-function taskListEntries(rows, openInputRequest) {
-  const fragment = document.createDocumentFragment()
-  for (const row of rows) {
-    const link = element('a', undefined, 'task-row-link')
-    const currentId = row.currentExecutionTaskId && typeof row.currentExecutionTaskId === 'object'
-      ? row.currentExecutionTaskId.value
-      : row.currentExecutionTaskId
-    const currentChild = currentId === undefined || currentId === null
-      ? undefined
-      : (Array.isArray(row.executions) ? row.executions : []).find((child) => {
-          const childId = child.taskId && typeof child.taskId === 'object' ? child.taskId.value : child.taskId
-          return childId === currentId
-        })
-    link.href = currentChild
-      ? taskExecutionHref(currentChild, false, row.scope)
-      : taskDashboardHref(row.taskId.value)
-    link.dataset.taskId = row.taskId.value
-    link.dataset.taskStatus = row.stateLabel || row.state || ''
-    const copy = element('div')
-    const waitingForAnswer = openInputRequest?.taskId?.value === row.taskId.value
-    copy.append(element('h3', taskRowTitle(row)))
-    copy.append(element('p', waitingForAnswer ? '等待你的回答 · 回答后继续同一任务' : taskRowStateText(row)))
-    const stateChip = element('span', waitingForAnswer ? '等待你的回答' : row.stateLabel, 'state-chip')
-    stateChip.dataset.tone = stateTone(row.executionState || row.state)
-    const meta = element('div', undefined, 'item-meta')
-    meta.append(element('time', formatTime(row.updatedAt)))
-    const taskType = taskFlowText(row.taskFlow)
-    if (taskType) meta.append(element('span', taskType))
-    link.append(copy, stateChip, meta)
-    link.style.textDecoration = 'none'
-    fragment.append(link)
-    const executions = renderTaskExecutions(row, row.scope)
-    if (executions) fragment.append(executions)
-  }
-  return fragment
-}
-
 // The entry task board reuses task rows and the shared shell-layer lifecycle.
 // Entry CSS makes it a right drawer without changing conversation geometry.
 function openActiveTasksDrawer(activeRows, trigger) {
@@ -1163,20 +1240,23 @@ function openActiveTasksDrawer(activeRows, trigger) {
     if (record.scope.projectKey === latestMainTopic?.projectKey && record.scope.mode === latestMainTopic?.mode)
       tracked.set(record.scope.taskId, record.task)
   }
+  const historyStates = new Set(['succeeded', 'completed', 'failed', 'blocked', 'stopped', 'cancelled', 'stale'])
+  const current = element('section', undefined, 'stack')
+  const history = element('section', undefined, 'stack')
+  current.append(element('h3', '当前任务'))
+  history.append(element('h3', '历史任务'))
   for (const task of tracked.values()) {
     const button = element('button', task.title || '已交办任务', 'button dispatch-board-entry')
     button.type = 'button'
     button.dataset.dispatchTaskId = taskValue(task.taskId)
     applyTaskCardResult(button, task, dispatchTracking.observation(task), dispatchTracking.executionObserved(task))
     button.addEventListener('click', () => dispatchTracking.open(button, task))
-    body.append(button)
+    const section = historyStates.has(task.state) ? history : current
+    section.append(button)
   }
-  if (latestRuntimeStatus?.implicitScheduling) {
-    const queue = latestRuntimeStatus.implicitScheduling
-    body.append(element('p', `队列进度：第 ${queue.fifoSeq} 位 · ${queue.state === 'executing' || queue.state === 'admitted' ? '正在执行' : '等待调度'}`))
-  }
-  if (activeRows.length === 0) body.append(element('p', '当前项目暂无任务。任务提交后会在这里显示真实状态。', 'empty'))
-  else if (!tracked.size) body.append(taskListEntries(activeRows, latestMainTopic?.openInputRequest))
+  if (current.childElementCount > 1) body.append(current)
+  if (history.childElementCount > 1) body.append(history)
+  if (tracked.size === 0) body.append(element('p', '当前项目暂无任务。', 'empty'))
   const allTasks = element('a', '查看全部任务', 'button button--quiet')
   allTasks.href = latestMainTopic?.projectKey ? entryProjectHref('tasks.html', latestMainTopic.projectKey, latestMainTopic.mode) : './tasks.html'
   allTasks.dataset.entryAllTasks = 'true'
@@ -1184,7 +1264,7 @@ function openActiveTasksDrawer(activeRows, trigger) {
   rememberEntryDrawer('tasks')
   openTechnicalDetail({
     eyebrow: '任务板',
-    title: `项目任务（${activeRows.length}）`,
+    title: '项目任务',
     content: body,
     trigger,
     onClose: () => rememberEntryDrawer(null),
@@ -1883,6 +1963,8 @@ async function executeSubmission(submission, clarificationAnswer) {
       rawInput: submission.rawInput,
       inputRevision: 1,
       requestKind: 'new-task-preview',
+      idempotencyKey: submission.idempotencyKey,
+      topicRef: 'main',
     })
     interactionId = received.interactionId
     acceptSubmission(interactionId)
@@ -1897,6 +1979,9 @@ async function executeSubmission(submission, clarificationAnswer) {
   }
 
   let snapshot = await api.inspectExplicitInteraction(interactionId)
+  if (snapshot.state === 'partial' && snapshot.partial?.partialRef) {
+    snapshot = await api.continueExplicitPartial(interactionId, snapshot.partial.partialRef)
+  }
   if (sendAttempt) { sendAttempt.snapshot = snapshot; paintSubmission() }
   if (snapshot.state === 'awaiting-clarification') {
     if (!clarificationAnswer) {
@@ -1915,9 +2000,11 @@ async function executeSubmission(submission, clarificationAnswer) {
     } finally {
       stopStepStream()
     }
+    if (sendAttempt) { sendAttempt.snapshot = snapshot; paintSubmission() }
   }
   latestState = snapshot.state
   renderDraft(snapshot)
+  if (snapshot.state === 'partial') return snapshot
   if (snapshot.state === 'awaiting-clarification') return snapshot
   // A simple answer and a status receipt are both the interaction's business
   // result. They end this submission: the reply is shown in the main status
@@ -2203,7 +2290,6 @@ function renderForm() {
     const requested = new URLSearchParams(window.location.search)
     if ((requested.has('projectKey') || requested.get('scope') === 'system')
       && !entryWorkspaceSelection(window.location.search, latestMainTopic).available) return
-    if (submissionGate.pending) return
     // An uncertain or interrupted request is recovered by reads from its card.
     // The send button cannot turn that recovery into a second POST.
     if (sendAttempt?.error || (sendAttempt && !sendAttempt.interactionId)) {
@@ -2219,7 +2305,30 @@ function renderForm() {
       }))
       return
     }
-    sendAttempt = { key: `${Date.now()}`, rawInput, rawDraft: textarea.value, startedAt: new Date().toISOString(), onRecover: recoverSubmission, onContinue: continueSubmission }
+    if (submissionGate.pending || activeQueuedSubmission || queuedSubmissions.length > 0
+      || submissionNeedsResolution(sendAttempt)) {
+      const recovered = queuedSubmissions[0]
+      const selection = selectionInputs(rawInput, form)
+      if (!submissionGate.pending && !activeQueuedSubmission && recovered?.attempt?.recovered
+        && recovered.attempt.rawDraft === textarea.value
+        && selectionsEqual(recovered.submission.selection, selection)) {
+        processQueuedSubmission()
+        return
+      }
+      let submission
+      try { submission = prepareSubmission(rawInput, form) }
+      catch (error) { setEntryError(error); return }
+      const attempt = { key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, rawInput,
+        rawDraft: textarea.value, startedAt: new Date().toISOString(), queued: true }
+      queuedSubmissions.push({ attempt, submission })
+      textarea.value = ''
+      retainEntryDraft()
+      clearEntryError()
+      paintSubmission()
+      processQueuedSubmission()
+      return
+    }
+    sendAttempt = { key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, rawInput, rawDraft: textarea.value, startedAt: new Date().toISOString(), onRecover: recoverSubmission, onContinue: continueSubmission }
     paintSubmission()
     scheduleMainTopicPoll(latestMainTopic)
     const run = submissionGate.begin(async () => {
@@ -2246,6 +2355,7 @@ function renderForm() {
       if (!liveTaskProgress) submitBanner.clear()
       textarea.readOnly = false
       void refreshMainTopic()
+      processQueuedSubmission()
     })
   })
 

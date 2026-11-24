@@ -33,6 +33,8 @@ import {
 } from '../../adapters/provider/src/index.js';
 import { BudgetedProviderObservations, DEFAULT_UI_EXECUTION_EVENT_BUDGET } from '../../runtime/src/ui-runtime/execution-budget.js';
 import { RuntimeTaskControlError } from '../../runtime/src/ui-runtime/coordinator.js';
+import { AppLifecycleError } from './errors.js';
+import { UiRuntimeApiError } from './ui-runtime/errors.js';
 import type { AgentIoEventBudget } from '../../runtime/src/agent-io/types.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
 import { prepareScopeSemanticHistory } from '../../runtime/src/context/interaction-semantic-context.js';
@@ -131,6 +133,12 @@ const TASK_RESULT_READ_TOOL: ProviderToolDefinition = {
     properties: { taskId: NONEMPTY_STRING_SCHEMA } },
 };
 const STRING_LIST_SCHEMA = { type: 'array', items: NONEMPTY_STRING_SCHEMA, uniqueItems: true };
+const PROJECT_SNAPSHOT_TOOL: ProviderToolDefinition = {
+  toolId: 'project.snapshot',
+  description: 'Read the authorized project roster, member boards, runtime status and latest session activity. Omit members for the full roster, or pass exact member references. Missing observations do not establish availability.',
+  inputSchema: { type: 'object', additionalProperties: false,
+    properties: { members: { ...STRING_LIST_SCHEMA, minItems: 1 } } },
+};
 const EXPLICIT_END_TOOL: ProviderToolDefinition = {
   toolId: STANDARD_TURN_END_WIRE_TOOL_ID,
   description: 'Finish explicit intake with a validated simple decision or a complex requirement and semantic capsule. This does not execute a task.',
@@ -185,6 +193,7 @@ const REGISTERED_TOOL_SURFACE = [
   '# Registered tools',
   'Use the current advertised schemas. Select all applicable standard Skill IDs together with interaction.select_skills when guidance is needed. This only loads guidance.',
   'When present, task.read_result accepts only taskId. Use it to read the exact existing task, its published result and its recovery condition. A read does not grant continuation or write authority.',
+  'A project Manager may use the advertised project.snapshot to read current project facts under the project-management Skill. The confirmed task flow owns dispatch and business execution.',
 ].join('\n');
 
 const INTAKE_OUTPUT_PROTOCOL = [
@@ -286,6 +295,7 @@ export interface ExplicitBrainInterpretationInput {
   readonly taskCandidates: readonly ExplicitBrainTaskCandidate[];
   /** Host-bound service read authority. Never serialized into business input. */
   readonly readTaskResult?: (taskId: string) => Promise<unknown>;
+  readonly readProjectSnapshot?: (members?: readonly string[]) => Promise<unknown>;
   /**
    * Conversation project target carried by the input. When present the explicit
    * brain treats this absolute project directory as the project context of the
@@ -1323,6 +1333,9 @@ export function createProviderExplicitBrainInterpreter(input: {
       const priorCheckpoints = continuation?.fact.priorCheckpoints
         ?? await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
       const owned = await input.prepareAgentProvider?.({ roleId: 'interaction' });
+      const configuredAgent = input.agentRoster?.find(agent => agent.agentId === owned?.configuredAgentId);
+      const readProjectSnapshot = configuredAgent !== undefined && managementRoleForAgent(configuredAgent) === 'project-lead'
+        ? request.readProjectSnapshot : undefined;
       // One selected binding for the whole turn: the raw owner freezes it, and
       // the driver uses the same value. A borrowed provider keeps its existing
       // non-closing ownership; only the original owner records a close fact.
@@ -1485,7 +1498,8 @@ export function createProviderExplicitBrainInterpreter(input: {
             }
           },
           ...(continuation?.acceptedEnd !== undefined || continuation?.partialDrain !== undefined ? {} : { tools: [SKILL_SELECTION_TOOL, ...(useEndProtocol ? [EXPLICIT_END_TOOL] : []),
-            ...(request.readTaskResult === undefined ? [] : [TASK_RESULT_READ_TOOL])] }),
+            ...(request.readTaskResult === undefined ? [] : [TASK_RESULT_READ_TOOL]),
+            ...(readProjectSnapshot === undefined ? [] : [PROJECT_SNAPSHOT_TOOL])] }),
           ...(!useEndProtocol ? {} : {
             onMalformedToolCallResult: async ({ requestId, call }) => {
               if (endAttempt === undefined || call.toolId !== EXPLICIT_END_TOOL.toolId || hasEndConclusion()) return;
@@ -1511,6 +1525,35 @@ export function createProviderExplicitBrainInterpreter(input: {
                     nextAction: { kind: 'continue', ref: EXPLICIT_END_TOOL.toolId } } };
               }
               const key = JSON.stringify([requestId, call.callId]);
+              if (call.toolId === PROJECT_SNAPSHOT_TOOL.toolId && readProjectSnapshot !== undefined) {
+                const nextAction = { kind: 'continue', ref: PROJECT_SNAPSHOT_TOOL.toolId } as const;
+                const rejected = (code: string, message: string): ProviderToolExecutionResult => ({
+                  output: JSON.stringify({ status: 'failed', code, callId: call.callId, toolId: call.toolId,
+                    message, recoverable: true, nextAction }),
+                  outputRefs: [], evidenceRefs: [], status: 'failed',
+                  error: { errorId: `${code}:${call.callId}`, code, message, category: 'validation',
+                    phase: 'tool', ownerId: 'humanagent.app', retryable: 'retryable', attention: 'foreground',
+                    evidenceRefs: [], nextAction },
+                });
+                const args = call.arguments;
+                const invalid = () => rejected('project.snapshot.invalid-arguments',
+                  'Pass an empty object for all members or only a non-empty list of unique member references');
+                if (args === null || typeof args !== 'object' || Array.isArray(args)
+                  || Object.keys(args).some(key => key !== 'members')) return invalid();
+                const members = 'members' in args ? args.members : undefined;
+                if (members !== undefined && (!Array.isArray(members) || members.length === 0
+                  || !members.every((ref): ref is string => typeof ref === 'string' && ref.trim().length > 0)
+                  || new Set(members).size !== members.length)) return invalid();
+                try {
+                  return { output: JSON.stringify(await readProjectSnapshot(members)),
+                    outputRefs: [], evidenceRefs: [], status: 'succeeded' };
+                } catch (error) {
+                  if (error instanceof UiRuntimeApiError && error.code === 'project.snapshot.member-unavailable') {
+                    return rejected(error.code, error.message);
+                  }
+                  throw error;
+                }
+              }
               if (call.toolId === TASK_RESULT_READ_TOOL.toolId && request.readTaskResult !== undefined) {
                 const args = call.arguments;
                 const rejected = (code: string, message: string): ProviderToolExecutionResult => ({
@@ -1546,6 +1589,11 @@ export function createProviderExplicitBrainInterpreter(input: {
                 } catch (error) {
                   if (error instanceof RuntimeTaskControlError && error.code === 'task.not.found') {
                     return rejected(`${call.toolId}.task-not-found`, 'No such task in the current host scope; select an available taskId or ask for clarification');
+                  }
+                  if (error instanceof UiRuntimeApiError
+                    && error.code === 'explicit-brain.task-outside-serve-scope') {
+                    return rejected(error.code,
+                      'Task result is outside this conversation project; select a task in the current project or ask for clarification');
                   }
                   throw error;
                 }
@@ -1621,6 +1669,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             const call = result ?? providerEvent.toolCall;
             const kind = call?.toolId === SKILL_SELECTION_TOOL.toolId ? 'select-skills'
               : call?.toolId === TASK_RESULT_READ_TOOL.toolId ? 'read-task-result'
+              : call?.toolId === PROJECT_SNAPSHOT_TOOL.toolId ? 'project-snapshot'
               : call?.toolId === EXPLICIT_END_TOOL.toolId ? 'submit-turn' : undefined;
             if (kind !== undefined && call !== undefined) {
               const key = JSON.stringify([providerEvent.requestId, call.callId]);
@@ -1864,22 +1913,36 @@ export function createProviderExplicitBrainInterpreter(input: {
       }
       return finish(live, effectiveRequest);
   };
+  // This interpreter is composed once for the interaction scope. Claim it
+  // before any asynchronous Journal reads so two fresh inputs cannot both
+  // see an empty scope and open concurrent parent turns.
+  let performingTurn = false;
   return {
     async interpret(request) {
-      const first = await interpretOnce(request, { allowReanswer: true, repair: false });
-      if (first.kind !== 'reanswer-needed') return first;
-      // The rejected batch is already durably closed; give the same committed
-      // input exactly one replacement generation on a brand-new parent turn.
-      const replacement = await interpretOnce(first.request, { allowReanswer: false, repair: true });
-      if (replacement.kind === 'reanswer-needed') {
-        // A repair attempt carries no re-answer allowance, so another retry
-        // request is an internal contract violation, never a third generation.
-        throw new ExplicitBrainOperationalToolError(
-          'unsupported-tool',
-          'interaction replacement generation requested a second re-answer',
+      if (performingTurn) {
+        throw new AppLifecycleError(
+          'explicit-brain.interaction-scope-busy',
+          '此会话正在处理上一条消息。',
+          '上一轮处理结束后继续此消息。',
+          'humanagent.runtime.explicit-brain',
         );
       }
-      return replacement;
+      performingTurn = true;
+      try {
+        const first = await interpretOnce(request, { allowReanswer: true, repair: false });
+        if (first.kind !== 'reanswer-needed') return first;
+        // Only the already-closed first batch may be replaced for this input.
+        const replacement = await interpretOnce(first.request, { allowReanswer: false, repair: true });
+        if (replacement.kind === 'reanswer-needed') {
+          throw new ExplicitBrainOperationalToolError(
+            'unsupported-tool',
+            'interaction replacement generation requested a second re-answer',
+          );
+        }
+        return replacement;
+      } finally {
+        performingTurn = false;
+      }
     },
   };
 }

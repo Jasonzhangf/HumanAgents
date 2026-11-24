@@ -24,7 +24,9 @@
     "turn_result": "packages/app"
   },
   "contracts": {
+    "managerSkill": "project-management Skill 向 Jenny 提供匹配指引，查询不作为普通交互或派发的强制步骤。实际快照由宿主核准，聚合原 Board、运行绑定及可公开会话。同请求人关联源自已核实的产品身份、原交互和任务关系；缺失来源显式标记。快照不授予恢复或派发权限。",
     "inputs": "一次用户提交携带原始输入、sourceRef 与 inputRevision，进入既有 explicit intake。",
+    "singleLiveTurn": "消息接收与解释相互独立。同一作用域的解释器在首次异步读取之前占用该作用域，忙时返回 typed conflict 并保留原输入；正常结束或失败收拢后释放。冷恢复仍由租约、Journal 和已提交 checkpoint 决定。页面允许继续输入，按会话顺序处理。",
     "progress": "提交进度步骤只来自真实 explicit.step 事件（seq、summary、occurredAt）。interpret 是长请求，页面必须能在等待期间看到真实推进；无真实 step 时只显示提交中与初始本步计时，不猜步骤、不伪造序号或总步数。",
     "time": "服务端 201 回执携带的真实 occurredAt 是服务端业务时间真源；页面提交观察计时只基于本地单调时钟：总耗时从 banner mount 起算，本步耗时从当前真实 step 到达时刻起算，不补算页面挂载前时间，不得用服务端 occurredAt 反算挂载前耗时。",
     "protocolTolerance": "Provider 真实流式事件可能省略 item_id。content 与 reasoning 类事件在 item_id 缺失时退化为稳定占位身份并继续消费；function-call 类事件仍要求 item_id 或 call_id 至少其一。单个非关键事件不得终止整轮 interpret。",

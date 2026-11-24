@@ -1,12 +1,14 @@
 import { element, formatTime } from './runtime-api.js'
-import { conversationStatus, elapsedSeconds } from './conversation-status.js'
+import { conversationStatus, conversationStatusTime } from './conversation-status.js'
 import { explicitToolActivityFinished, renderExplicitToolActivity } from './explicit-tool-activity.js'
 import { sanitizeUserVisibleText } from './step-labels.js'
 import { disposeToolBody, renderToolBody } from './tool-presentation.js'
 
 export function renderTurnProgressDetail(turn, { readOutput } = {}) {
   const content = element('div', undefined, 'stack progress-detail-body')
-  const statusRows = turn.localStatus ?? (turn.statusFacts ? conversationStatus(turn.statusFacts) : [])
+  const statusRows = turn.statusFacts && !turn.localStatus?.some(row => row.error)
+    ? conversationStatus(turn.statusFacts, { allRequests: true })
+    : turn.localStatus ?? []
   const list = element('ol', undefined, 'progress-step-list')
   for (const row of statusRows.filter(row => row.phase !== 'tool')) {
     const item = element('li', undefined, 'progress-step')
@@ -14,8 +16,8 @@ export function renderTurnProgressDetail(turn, { readOutput } = {}) {
     item.dataset.tone = row.tone
     item.dataset.running = String(row.running)
     item.append(element('span', row.label))
-    const seconds = elapsedSeconds(row)
-    if (seconds !== undefined) item.append(element('span', `${seconds} 秒`))
+    const time = conversationStatusTime(row)
+    if (time) item.append(element('span', time))
     if (row.statusLabel) item.append(element('span', row.statusLabel))
     if (row.error) {
       const message = sanitizeUserVisibleText([row.error.code, row.error.message].filter(Boolean).join('：'))

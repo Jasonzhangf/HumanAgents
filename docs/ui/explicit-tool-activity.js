@@ -1,13 +1,7 @@
 import { element } from './runtime-api.js'
-import { elapsedSeconds } from './conversation-status.js'
+import { elapsedSeconds, explicitToolLabel } from './conversation-status.js'
 import { taskBlocker } from './task-blocker.js'
 
-const tools = {
-  'select-skills': '加载本轮技能',
-  'read-task-result': '读取任务结果',
-  'resume-task': '继续原任务',
-  'submit-turn': '提交本轮结果',
-}
 const statuses = {
   succeeded: '已完成', failed: '失败', blocked: '受阻',
   cancelled: '已取消', unknown: '状态未知',
@@ -35,9 +29,10 @@ export function explicitToolRows(steps = [], finished = false) {
   const rows = new Map()
   for (const step of steps) {
     const tool = step.tool
-    if (!step.turnId || !step.requestId || !tool?.callId || !Object.hasOwn(tools, tool.kind)) continue
+    const action = explicitToolLabel(tool?.kind)
+    if (!step.turnId || !step.requestId || !tool?.callId || !action) continue
     const key = JSON.stringify([step.turnId, step.requestId, tool.callId])
-    const row = rows.get(key) || { label: tools[tool.kind], result: 'pending' }
+    const row = rows.get(key) || { label: action, result: 'pending' }
     if (step.kind === 'tool.started' && row.startedAt === undefined) row.startedAt = step.occurredAt
     if (step.kind === 'tool.finished') {
       row.endedAt = step.occurredAt

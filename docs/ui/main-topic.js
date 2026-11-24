@@ -4,7 +4,8 @@ import * as callUsageFooter from './call-usage-footer.js'
 import { renderToolBody, disposeToolBody } from './tool-presentation.js'
 import { taskForTurn, taskValue, renderDispatchCard } from './dispatch-tracking.js'
 import { explicitToolActivityFinished, renderExplicitToolActivity } from './explicit-tool-activity.js'
-import { taskBlocker } from './task-blocker.js'
+import { taskBlocker, userFacingErrorReason } from './task-blocker.js'
+import { disposeMainTopicTaskBar, renderMainTopicTaskBar } from './main-topic-task-bar.js'
 
 export function ownedMainTopicTurns(projection) {
   const turns = projection.turns || []
@@ -13,13 +14,16 @@ export function ownedMainTopicTurns(projection) {
     return task?.sourceInteractionId && turn.interactionId === task.sourceInteractionId ? task : undefined
   }
   const cardTasks = new Set(turns.map(dispatchTask).filter(Boolean).map(task => taskValue(task.taskId)))
-  return turns.filter(turn => turn.detailReadError || !(['status', 'error'].includes(turn.kind) && cardTasks.has(taskValue(turn.taskId)))).map(turn => {
+  const trackedExecution = turn => ['status', 'error'].includes(turn.kind) && cardTasks.has(taskValue(turn.taskId))
+  const executionFacts = turn => (turn.statusFacts?.events?.length ?? 0) > 0 || (turn.toolEvents?.length ?? 0) > 0
+  return turns.filter(turn => turn.detailReadError || !trackedExecution(turn) || executionFacts(turn)).map(turn => {
     const task = taskForTurn(turn, projection.tasks)
     if (!task || turn.role === 'user' || !['draft', 'status', 'error', 'result'].includes(turn.kind)) return turn
     if (turn.kind === 'draft' && !dispatchTask(turn)) return turn
     if (turn.kind === 'draft') return { ...turn, kind: 'dispatch', quote: undefined,
       dispatchTask: taskValue(projection.openInputRequest?.taskId) === taskValue(task.taskId) ? { ...task, inputRequest: projection.openInputRequest } : task,
       documentText: turn.text, text: '任务已交办' }
+    if (trackedExecution(turn) && !turn.detailReadError) return { ...turn, role: 'task', quote: undefined, text: '' }
     if (turn.kind === 'error') {
       const blocker = taskBlocker(task) || taskBlocker({ ...task, state: 'blocked' })
       return { ...turn, role: 'task', quote: undefined,
@@ -189,7 +193,7 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     // Provider tool facts have a dedicated semantic card below. Keeping their
     // generic phase row here duplicates the action and hides its result details.
     const rows = (turn.localStatus || conversationStatus(turn.statusFacts)).filter((row) => row.phase !== 'tool')
-    const signature = JSON.stringify(rows)
+    const signature = JSON.stringify([rows, Boolean(turn.onRecover), Boolean(turn.onContinue)])
     if (previousStatus?.dataset.signature === signature) {
       const lines = [...previousStatus.querySelectorAll('.conversation-status-row')]
       for (const [index, row] of rows.entries()) {
@@ -215,7 +219,8 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
         line.append(time)
         bindings.push({ row, node: time })
         if (row.error) {
-          line.append(element('span', `${row.error.code || ''} ${row.error.message || ''}`.trim(), 'conversation-status-error'))
+          const errorText = [userFacingErrorReason(row.error), row.error.code].filter(Boolean).join(' · ')
+          line.append(element('span', errorText, 'conversation-status-error'))
           appendPairingEntry(line, row.error)
         }
         status.append(line)
@@ -296,7 +301,9 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     }
     detailReadError.textContent = turn.detailReadError.message
   } else detailReadError?.remove()
-  const events = turn.toolEvents
+  // A relay question owns the decision, not the task's concurrent tools.
+  // Those remain on the task bar and in the task execution drawer.
+  const events = turn.kind === 'input-request' ? undefined : turn.toolEvents
   let tools = bubble.querySelector('.tool-body')
   if (events?.length) {
     if (!tools) {
@@ -339,6 +346,8 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     control.form.remove()
     answerControls.delete(article)
   }
+  text.hidden = text.textContent === ''
+  bubble.hidden = text.hidden && bubble.childElementCount === 1
   return article
 }
 
@@ -398,15 +407,19 @@ function renderHistoryRound(round, turns, topicState, scope, previous) {
   return row
 }
 
-function renderActiveTurns(stream, turns, projection, onAnswer, host, answeredRequestIds, topicState, bindings, previousTurns) {
-  for (const turn of turns) {
-    const current = updateTurn(previousTurns.get(turn.turnId) || element('article'),
-      turn, projection, onAnswer, host, answeredRequestIds, topicState, bindings)
-    stream.append(current)
+function syncStreamChildren(stream, next) {
+  if (typeof stream.insertBefore !== 'function') {
+    stream.replaceChildren(...next)
+    return
   }
+  for (const [index, node] of next.entries()) {
+    if (stream.children[index] !== node) stream.insertBefore(node, stream.children[index] ?? null)
+  }
+  while (stream.children.length > next.length) stream.lastElementChild.remove()
 }
 
 export function disposeMainTopic(host) {
+  disposeMainTopicTaskBar(host)
   for (const tools of host.querySelectorAll('.tool-body')) disposeToolBody(tools)
   topicStates.get(host)?.clock.dispose()
   topicStates.delete(host)
@@ -442,6 +455,7 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, on
   const scope = JSON.stringify([projection.projectKey, projection.mode, projection.workspaceCwd])
   let topicState = topicStates.get(host)
   if (topicState?.scope !== scope) {
+    disposeMainTopicTaskBar(host)
     for (const tools of host.querySelectorAll('.tool-body')) disposeToolBody(tools)
     topicState?.clock.dispose()
     clearNode(host)
@@ -468,6 +482,11 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, on
     section = element('section', undefined, 'section mt-shell')
     host.append(section)
   }
+  renderMainTopicTaskBar(host, projection, {
+    onOpenDispatch: topicState.onOpenDispatch,
+    readToolOutput: api.readToolOutput,
+    bindings,
+  })
   section.id = 'main-topic'
   const head = element('header', undefined, 'mt-head')
   const identity = element('div', undefined, 'mt-identity')
@@ -506,16 +525,18 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, on
   } else {
     const previousHistory = new Map([...stream.querySelectorAll('.mt-history-round')]
       .map(row => [row.dataset.historyRoundKey, row]))
-    clearNode(stream)
-    for (const { round, turns: roundTurns } of history) {
-      stream.append(renderHistoryRound(round, roundTurns, topicState, scope, previousHistory.get(round.roundKey)))
-    }
+    const next = history.map(({ round, turns: roundTurns }) =>
+      renderHistoryRound(round, roundTurns, topicState, scope, previousHistory.get(round.roundKey)))
     if (history.length && activeTurns.length) {
-      const divider = element('hr', undefined, 'mt-conversation-divider')
+      const divider = stream.querySelector('.mt-conversation-divider') ?? element('hr', undefined, 'mt-conversation-divider')
       divider.setAttribute('aria-hidden', 'true')
-      stream.append(divider)
+      next.push(divider)
     }
-    renderActiveTurns(stream, activeTurns, projection, onAnswer, host, answeredRequestIds, topicState, bindings, previousTurns)
+    for (const turn of activeTurns) {
+      next.push(updateTurn(previousTurns.get(turn.turnId) || element('article'),
+        turn, projection, onAnswer, host, answeredRequestIds, topicState, bindings))
+    }
+    syncStreamChildren(stream, next)
   }
   for (const article of previousTurns.values()) {
     if (!article.isConnected) for (const tools of article.querySelectorAll('.tool-body')) disposeToolBody(tools)

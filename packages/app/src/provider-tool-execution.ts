@@ -1061,7 +1061,9 @@ async function executeFileRead(
 ): Promise<ToolExecResult> {
   if (request.signal.aborted) throw Object.assign(new Error('file.read was stopped before admission'), { name: 'AbortError' });
   const path = request.call.arguments.path;
-  if (typeof path !== 'string' || path.trim() === '') throw new Error('file.read requires a non-empty path');
+  if (typeof path !== 'string' || path.trim() === '') {
+    return invalidToolArguments(request, RESPONSES_FILE_READ_TOOL.toolId, 'file.read requires a non-empty path');
+  }
   const cycleId = request.scope.cycleId ?? id('cycle', safeId(`provider-tool-${request.execution.taskId.value}`));
   const operationId = id('operation', safeId(`provider-tool-${request.execution.operationId.value}-${request.call.callId}`));
   const scope: Scope = {
@@ -1086,7 +1088,15 @@ async function executeFileRead(
     expectedOutput: { schemaRef: 'schema://file.read.report/v1', requiredEvidenceKinds: ['tool'] },
   };
   if (request.signal.aborted) throw Object.assign(new Error('file.read was stopped before admission'), { name: 'AbortError' });
-  const observation = await params.route.execute({ intent, effectiveScope: scope, executionEpoch: request.execution.executionEpoch });
+  let observation: Awaited<ReturnType<typeof params.route.execute>>;
+  try {
+    observation = await params.route.execute({ intent, effectiveScope: scope, executionEpoch: request.execution.executionEpoch });
+  } catch (error) {
+    if (isModelCorrectablePathError(error)) {
+      return invalidToolArguments(request, RESPONSES_FILE_READ_TOOL.toolId, error.message);
+    }
+    throw error;
+  }
   const result = await params.route.verify({ intent, effectiveScope: scope, observation });
   if (request.signal.aborted) {
     throw Object.assign(new Error('file.read was stopped'), { name: 'AbortError' });
@@ -1148,9 +1158,7 @@ async function executeFileList(
     // goes back to the model instead of ending the whole execution. Only errors
     // that name the requested path qualify, so a workspace-binding mismatch
     // stays a real fault instead of being reported as the model's mistake.
-    if (error instanceof CodeSearchHarnessError
-      && error.path !== undefined
-      && (error.code === 'path-escape' || error.code === 'path-not-found')) {
+    if (isModelCorrectablePathError(error)) {
       return invalidToolArguments(request, RESPONSES_FILE_LIST_TOOL.toolId, error.message);
     }
     throw error;
@@ -1590,4 +1598,12 @@ function invalidToolArguments(request: ToolExecRequest, toolId: string, message:
       nextAction: { kind: 'continue', ref: toolId },
     },
   };
+}
+
+/** A located workspace path denial is a model-correctable argument error. A
+ *  missing workspace/path binding carries no requested path and stays fatal. */
+function isModelCorrectablePathError(error: unknown): error is CodeSearchHarnessError {
+  return error instanceof CodeSearchHarnessError
+    && error.path !== undefined
+    && (error.code === 'path-escape' || error.code === 'path-not-found');
 }

@@ -6,6 +6,11 @@ import { renderToolBody, disposeToolBody, toolOutputText, toolSemantics } from '
 class Node {
   constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.textContent = ''; this.hidden = false; this.isConnected = true; this.listeners = {} }
   append(...nodes) { for (const node of nodes) { node.remove(); node.parent = this; this.children.push(node) } }
+  insertBefore(node, reference) {
+    node.remove()
+    node.parent = this
+    this.children.splice(this.children.indexOf(reference), 0, node)
+  }
   remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = undefined }
   setAttribute() {}
   addEventListener(name, fn) { this.listeners[name] = fn }
@@ -35,6 +40,24 @@ test('a changed scoped reader cannot retain another scope report for the same ev
   assert.equal(secondReads, 1)
   assert.doesNotMatch(text(host), /PROJECT-A/)
   assert.match(text(host), /PROJECT-B/)
+})
+
+// Real relay output repeated the question, internal action and impact in both
+// the task card and the question UI. Keep the completed control call compact.
+test('a completed turn end keeps its control contents behind call evidence', () => {
+  const host = new Node('main')
+  const toolId = 'humanagent_turn_end'
+  const args = { outcome: 'input-required', inputRequest: { question: '选择预发环境？' }, summary: {
+    goal: '核对配置文件', nextStep: '内部执行记录', result: { status: 'partial' }, actions: ['内部执行记录'],
+  } }
+  renderToolBody(host, [
+    { ...call('end'), toolId, arguments: args },
+    { ...result('end'), toolId, outputRef: undefined, outputDigest: undefined },
+  ])
+  assert.match(text(host), /已提交待答问题/)
+  assert.doesNotMatch(text(host), /选择预发环境|内部执行记录|执行成功/)
+  open(find(host, 'tool-facts'))
+  assert.match(text(find(host, 'tool-arguments')), /选择预发环境|内部执行记录/)
 })
 
 // Failure mode: the card stays generic after a real report, or a viewport read
@@ -210,6 +233,49 @@ test('command syntax stays literal, cwd is explicit, unknown tools stay generic'
   assert.match(text(host), /a \| b/)
 })
 
+// Failure mode: the observed workspace refusal renders its raw English and a
+// second generic failure line. Impact: the user cannot tell the path is invalid
+// or how to recover. Cost: one local DOM render; no runtime, model or browser.
+test('workspace path refusal has one readable error line above the file search semantics', () => {
+  const host = new Node('main')
+  const search = {
+    ...call('search'), toolId: 'file.search',
+    arguments: { path: '../outside', query: 'needle' },
+  }
+  const failed = {
+    ...result('search'), toolId: 'file.search', status: 'failed', outputRef: undefined, outputDigest: undefined,
+    error: {
+      code: 'tool.argument.invalid',
+      message: 'search path escapes the bound workspace',
+      category: 'validation',
+      retryable: 'retryable',
+      nextAction: { kind: 'continue' },
+    },
+  }
+  renderToolBody(host, [search, failed], () => assert.fail('failed result has no readable output target'))
+
+  const card = host.children[0]
+  const errorLine = find(card, 'tool-error')
+  assert.equal(errorLine.textContent, 'tool.argument.invalid · 路径无效；请改用项目工作区内的相对路径。')
+  assert.equal(find(card, 'tool-state'), undefined, 'explained failure does not repeat the generic failure label')
+  const semantic = text(find(card, 'tool-semantic'))
+  assert.match(semantic, /搜索文件/)
+  assert.match(semantic, /\.\.\/outside/)
+  assert.match(semantic, /needle/)
+
+  const unpairedHost = new Node('main')
+  renderToolBody(unpairedHost, [failed], () => assert.fail('failed result has no readable output target'))
+  assert.equal(find(unpairedHost, 'tool-error').textContent, 'tool.argument.invalid · 路径无效；请改用项目工作区内的相对路径。')
+  assert.equal(find(unpairedHost, 'tool-state').textContent, '执行失败 · 结果关联缺失',
+    'an unmatched explained result still reports its missing call')
+
+  open(find(card, 'tool-facts'))
+  const argumentsNode = find(card, 'tool-arguments')
+  const evidence = JSON.parse(argumentsNode.parent.children.at(-1).textContent)
+  assert.deepEqual(evidence.error, failed.error)
+  assert.deepEqual(JSON.parse(argumentsNode.textContent), search.arguments)
+})
+
 test('DOM output reads exact target, preserves literal text and loaded state, distinguishes missing and errors', async () => {
   const host = new Node('main'); let reads = 0
   const events = [call('a'), call('b'), result('b')]
@@ -246,6 +312,7 @@ test('DOM output reads exact target, preserves literal text and loaded state, di
   assert.match(text(host), /tool.denied.*拒绝执行/)
   assert.doesNotMatch(text(host), /gateway/)
   assert.equal(host.children[0].children[0].className, 'tool-error')
+  assert.equal(find(host, 'tool-state').textContent, '执行失败', 'unknown failures retain their state')
   assert.equal(text(host).split('拒绝执行').length, 2)
   assert.doesNotMatch(text(host), /等待结果正文|尚无结果正文|执行工具等待结果/)
   open(find(host, 'tool-facts'))

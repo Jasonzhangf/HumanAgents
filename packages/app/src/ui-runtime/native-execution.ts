@@ -189,7 +189,9 @@ export function createNativeExecution(input: NativeExecutionInput) {
         const drain = await driver.closeProductionAndDrain(value);
         // Settlement still owes its durable request registration. Keep the
         // Runtime producer lifetime open until that final accepted write.
-        await driver.settle(binding.execution);
+        // A rejected Provider start can leave durable request facts without a
+        // Provider execution. Drain the facts and close the binding in that case.
+        if (driver.hasAcquiredExecution()) await driver.settle(binding.execution);
         return drain;
       })();
     },

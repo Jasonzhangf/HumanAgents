@@ -49,14 +49,31 @@ try {
       const initial = host.querySelector('[data-phase="model-wait"] .conversation-status-time').textContent
       await new Promise((done) => setTimeout(done, 1150))
       const later = host.querySelector('[data-phase="model-wait"] .conversation-status-time').textContent
+      const log = host.querySelector('.mt-stream')
+      const observer = new MutationObserver(() => {})
+      observer.observe(log, { childList: true })
       paint()
       const results = {
         realClock: Number.parseInt(later) > Number.parseInt(initial),
         pollKeepsStart: host.querySelector('[data-phase="model-wait"] .conversation-status-time').textContent === later,
+        pollLeavesActiveCardsMounted: observer.takeRecords().every(change => !change.removedNodes.length && !change.addedNodes.length),
         draftAndFocus: host.querySelector('input') === input && input.value === '含税草稿' && document.activeElement === input,
       }
+      observer.disconnect()
       host.querySelector('.conversation-status-detail').click()
       results.detail = details === 1
+      const atOffset = seconds => new Date(Date.parse(start) + seconds * 1000).toISOString()
+      const verifyingTurn = { ...turn, statusFacts: { state: 'settling', events: [
+        ...facts.events,
+        event('provider.model', { state: 'settled', requestId: 'r', turnId: 't', occurredAt: atOffset(1) }),
+        event('execution.settling', { state: 'settling', occurredAt: atOffset(2) }),
+        event('provider.model', { state: 'planner.aligning', occurredAt: atOffset(3) }),
+      ] } }
+      renderMainTopic(host, { ...base, turns: [verifyingTurn, question] })
+      const verification = host.querySelector('[data-phase="task-verification"]')
+      results.verificationHasLiveTiming = verification?.innerText.includes('正在核对交付结果')
+        && !verification.querySelector('.conversation-status-time').hidden
+        && getComputedStyle(verification.querySelector('.conversation-status-mark')).animationName === 'conversation-spin'
       const end = new Date(Date.parse(start) + 3000).toISOString()
       facts.state = 'succeeded'
       facts.events.push(event('execution.terminal', { occurredAt: end, terminalPhase: 'final' }))

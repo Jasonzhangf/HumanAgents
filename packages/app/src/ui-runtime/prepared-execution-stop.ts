@@ -1343,6 +1343,91 @@ export class PreparedExecutionStop {
     return closed.fact.receipt;
   }
 
+  /**
+   * Closes the exact Provider resource retained for one cold stop obligation.
+   * The allocation comes from the Runtime's durable operation record and is
+   * checked against the Task Journal before any Organ Journal fact is used.
+   * A durable `resource-closed` is returned as-is; otherwise the same live
+   * custody path performs the only physical close. If the original binding or
+   * live custody cannot be proven, this owner preserves `close-unresolved`.
+   */
+  async closeRetainedTransientRetryProvider(
+    allocation: RuntimeExecutionAllocation,
+  ): Promise<ProviderCloseResult> {
+    readPreparedExecutionInput(this.taskJournal, allocation);
+    const entries = (await this.journal.replay())
+      .map(factEntry)
+      .filter((entry): entry is FactEntry => entry !== null);
+    const preparations = entries.filter(
+      (entry): entry is FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'preparation-entered' }>> =>
+        entry.fact.kind === 'preparation-entered' && sameAllocation(entry.fact.allocation, allocation),
+    );
+    if (preparations.length === 0) {
+      throw stopError(
+        'prepared-execution-stop.close-unresolved',
+        'the cold stop has no durable preparation entry for its exact allocation',
+        'retain the original Provider close obligation and recover its actual owner',
+      );
+    }
+    if (preparations.length > 1) {
+      throw stopError(
+        'prepared-execution-stop.preparation-conflict',
+        'the Organ Journal contains more than one preparation for the cold stop allocation',
+        'reconcile the duplicate preparation before closing the original Provider',
+      );
+    }
+    const preparation = preparations[0]!;
+    const acquisitions = entries.filter(
+      (entry): entry is FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'resource-acquired' }>> =>
+        entry.fact.kind === 'resource-acquired'
+        && sameRef(entry.fact.resource.preparation, preparation.ref),
+    );
+    if (acquisitions.length === 0) {
+      throw stopError(
+        'prepared-execution-stop.close-unresolved',
+        'the cold stop preparation has no durable Provider acquisition',
+        'retain the Provider close obligation until its original binding is durable',
+      );
+    }
+    if (acquisitions.length > 1) {
+      throw stopError(
+        'prepared-execution-stop.acquisition-conflict',
+        'the cold stop preparation owns more than one Provider acquisition',
+        'reconcile each original binding through its actual resource owner',
+      );
+    }
+    const acquisition = acquisitions[0]!;
+    let closed = entries.find(
+      (entry): entry is FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'resource-closed' }>> =>
+        entry.fact.kind === 'resource-closed' && sameRef(entry.fact.acquisition, acquisition.ref),
+    );
+    if (closed === undefined) {
+      const custody = this.liveCustody.get(acquisition.ref.commitId);
+      if (custody !== undefined
+        && (!sameAllocation(custody.lease.allocation, allocation)
+          || canonicalJsonStringify(custody.composition.binding) !== canonicalJsonStringify(acquisition.fact.resource.binding))) {
+        throw stopError(
+          'prepared-execution-stop.custody-conflict',
+          'the retained live composition does not match the original cold-stop binding',
+          'close only the actual original binding through its live owner',
+        );
+      }
+      await this.closeProvider(acquisition.ref);
+      closed = (await this.journal.replay())
+        .map(factEntry)
+        .find((entry): entry is FactEntry<Extract<PreparedExecutionStopFact, { readonly kind: 'resource-closed' }>> =>
+          entry?.fact.kind === 'resource-closed' && sameRef(entry.fact.acquisition, acquisition.ref));
+    }
+    if (closed === undefined) {
+      throw stopError(
+        'prepared-execution-stop.close-missing',
+        'the cold stop has no durable closure for its original Provider acquisition',
+        'retain the Provider close obligation and recover the actual closure',
+      );
+    }
+    return closed.fact.receipt;
+  }
+
   private async finishPreparation(
     lease: PreparedExecutionStopPreparationLease,
     outcome: 'failed' | 'prepared',

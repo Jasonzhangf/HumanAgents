@@ -78,6 +78,32 @@ test('explicit request has sourced wait before a task exists and settles without
   assert.equal(elapsedSeconds(rows.find((r) => r.phase === 'total')), 6)
   assert.equal(rows.some((r) => r.label === '任务已完成'), false)
 })
+// The RCC task journal reached planner.aligning and stayed there after the
+// provider response settled. The chat needs an active row during that wait.
+test('task finishing and result verification each use their own observed timing', () => {
+  const events = [
+    event('provider.model', 1, { state: 'dispatched', requestId: 'r', turnId: 't' }),
+    event('provider.output', 3, { requestId: 'r', turnId: 't' }),
+    event('provider.model', 5, { state: 'settled', requestId: 'r', turnId: 't' }),
+    event('execution.settling', 6, { state: 'settling' }),
+    event('provider.model', 10, { state: 'planner.aligning' }),
+  ]
+  const live = conversationStatus({ state: 'settling', events }, { allRequests: true })
+  const finishing = live.find(row => row.phase === 'task-settling')
+  const verification = live.find(row => row.phase === 'task-verification')
+  assert.equal(elapsedSeconds(finishing), 4)
+  assert.equal(verification.running, true)
+  assert.equal(verification.startedAt, at(10))
+  assert.equal(conversationStatus({ state: 'settling', events }).find(row => row.phase === 'task-verification').running, true)
+  assert.equal(live.find(row => row.phase === 'streaming').running, false)
+  const completed = conversationStatus({ state: 'succeeded', events: [
+    ...events,
+    event('provider.model', 18, { state: 'planner.aligned' }),
+    event('execution.terminal', 19, { state: 'succeeded', terminalPhase: 'final' }),
+  ] })
+  assert.equal(elapsedSeconds(completed.find(row => row.phase === 'task-verification')), 8)
+  assert.equal(completed.some(row => row.running), false)
+})
 test('request lifecycle updates preserve dispatch time and use settled time, not next polling time', () => {
   const rows = conversationStatus({ state: 'running', events: [
     event('provider.model', 1, { state: 'dispatching', requestId: 'r', turnId: 't' }),
@@ -120,4 +146,31 @@ test('clock uses wall time, cancels on terminal update and disposes on page tear
   clock.update([{ row: { startedAt: at(1), running: true }, node }])
   clock.dispose()
   assert.equal(active, 0)
+})
+
+test('retrying shows the real attempt summary and typed error; blocked stays terminal', () => {
+  const retry = event('execution.retry', 1, {
+    state: 'retrying',
+    summary: '第 2 次尝试（重试原因：HTTP 503）',
+    error: { code: 'http.503', message: 'HTTP 503' },
+  })
+  const rows = conversationStatus({ state: 'running', events: [retry] })
+  const retryRow = rows.find((row) => row.phase === 'retry')
+  assert.equal(retryRow.label, retry.summary)
+  assert.deepEqual(retryRow.error, retry.error)
+
+  const blocked = event('execution.retry', 2, {
+    state: 'blocked',
+    summary: '已达尝试上限（2 次），保留首次失败原因：HTTP 503',
+    error: { code: 'http.503', message: 'HTTP 503' },
+  })
+  const terminalRows = conversationStatus({
+    state: 'blocked',
+    events: [retry, blocked],
+    error: { code: 'http.503', message: 'HTTP 503' },
+  })
+  assert.equal(terminalRows.filter((row) => row.phase === 'retry').length, 1)
+  assert.equal(terminalRows.find((row) => row.phase === 'retry').label, blocked.summary)
+  assert.equal(terminalRows.find((row) => row.phase === 'terminal').error.code, 'http.503')
+  assert.equal(conversationStatus({ state: 'blocked', events: [blocked] }).some((row) => row.phase === 'retry'), false)
 })

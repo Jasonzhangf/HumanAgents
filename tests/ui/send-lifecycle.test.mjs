@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { submissionView, canContinueSubmission } from '../../docs/ui/send-lifecycle.js'
+import { submissionView, canContinueSubmission, submissionNeedsResolution } from '../../docs/ui/send-lifecycle.js'
 
 const user = { turnId: 'user:interaction-2', interactionId: 'interaction-2', role: 'user', kind: 'message', text: 'same text' }
 const attempt = { key: 'second', rawInput: 'same text', interactionId: 'interaction-2' }
@@ -58,6 +58,16 @@ test('interrupted new-task confirmation can continue on the same draft only', ()
     assert.equal(projection.turns.at(-1).onContinue, canContinue ? onContinue : undefined)
   }
   assert.equal(canContinueSubmission({ state: 'matching' }), false)
+  assert.equal(canContinueSubmission({ state: 'matching' }, { code: 'explicit-brain.interaction-scope-busy' }), true)
+})
+test('C07 partial offers continuation from its current interaction without inventing a send', () => {
+  const onContinue = () => {}
+  const snapshot = { state: 'partial', partial: { partialRef: 'partial:interaction-2' } }
+  assert.equal(canContinueSubmission(snapshot), true)
+  assert.equal(canContinueSubmission({ state: 'partial' }), false)
+  const projection = submissionView({ turns: [user] }, { ...attempt, snapshot, onContinue })
+  assert.equal(projection.turns.at(-1).onContinue, onContinue)
+  assert.equal(projection.turns.filter(turn => turn.kind === 'message' && turn.text === 'same text').length, 1)
 })
 test('a finish read or permission error stops stale official explicit clocks', () => {
   const status = { turnId: 'status:interaction-2', interactionId: 'interaction-2', role: 'jenny', kind: 'status',
@@ -83,4 +93,47 @@ test('an interrupted model request retains the dispatch but labels its response 
   assert.equal(model.running, false)
   assert.equal(model.endedAt, undefined)
   assert.equal(turns.at(-1).localStatus[0].error.code, error.code)
+})
+
+test('a queued message stays behind the active turn with explicit waiting semantics', () => {
+  const active = { ...attempt, snapshot: { state: 'matching' } }
+  const queued = { key: 'queued-3', rawInput: '第三条仍等待', startedAt: '2026-11-24T10:00:01Z', queued: true }
+  const projection = submissionView({ turns: [] }, [active, queued])
+  const users = projection.turns.filter(turn => turn.role === 'user').map(turn => turn.text)
+  assert.deepEqual(users, ['same text', '第三条仍等待'])
+  const queuedStatus = projection.turns.find(turn => turn.turnId === 'local-status:queued-3')
+  assert.equal(queuedStatus.localStatus[0].phase, 'queued')
+  assert.equal(queuedStatus.localStatus[0].label, '排队中，等待上一轮处理完成')
+})
+
+test('completion of the active turn cannot overwrite the queued draft or order', () => {
+  const active = { ...attempt, snapshot: { state: 'answered', reply: '第一条摘要' } }
+  const queued = { key: 'queued-4', rawInput: '用户第二条草稿', startedAt: '2026-11-24T10:00:02Z', queued: true }
+  const projection = submissionView({ turns: [user, { ...user, turnId: `reply:${user.interactionId}`, role: 'jenny', kind: 'message', text: '第一条摘要' }] }, [active, queued])
+  const local = projection.turns.filter(turn => turn.turnId.startsWith('local-'))
+  assert.deepEqual(local.map(turn => turn.turnId), ['local-user:queued-4', 'local-status:queued-4'])
+  assert.equal(local[0].text, '用户第二条草稿')
+  assert.equal(local.some(turn => turn.text === '第一条摘要'), false)
+})
+
+test('an active failure is rendered before the following queued draft', () => {
+  const failed = { key: 'failed-5', rawInput: '第一条失败内容', startedAt: '2026-11-24T10:00:01Z',
+    error: { code: 'transport.failure', message: '连接中断' } }
+  const queued = { key: 'queued-5', rawInput: '第二条新草稿', startedAt: '2026-11-24T10:00:02Z', queued: true }
+  const local = submissionView({ turns: [] }, [failed, queued]).turns
+    .filter(turn => turn.turnId.startsWith('local-'))
+  assert.deepEqual(local.map(turn => turn.turnId), [
+    'local-user:failed-5', 'local-status:failed-5', 'local-user:queued-5', 'local-status:queued-5',
+  ])
+  assert.equal(local[1].localStatus[0].error.code, 'transport.failure')
+  assert.equal(local[2].text, '第二条新草稿')
+})
+
+test('unfinished and user-owned states keep the next live turn queued', () => {
+  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1', snapshot: { state: 'matching' } }), true)
+  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1' }), true)
+  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1', snapshot: { state: 'awaiting-clarification' } }), true)
+  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1', snapshot: { state: 'awaiting-confirmation' } }), true)
+  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1', snapshot: { state: 'answered' } }), false)
+  assert.equal(submissionNeedsResolution({ error: { code: 'transport.failure' } }), false)
 })

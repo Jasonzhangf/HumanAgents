@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { id, type InteractionParentProviderExecutionIdentityRef, type ProviderBinding } from '../../packages/contracts/src/index.js';
 import { createProviderExplicitBrainInterpreter,
   type ExplicitBrainInterpretationInput } from '../../packages/app/src/explicit-brain-runtime.js';
+import { UiRuntimeApiError } from '../../packages/app/src/ui-runtime/errors.js';
 import { ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -42,6 +43,9 @@ async function runWire(attempts: readonly unknown[], options: {
   resumeWriter?: (taskId: string) => Promise<unknown>;
   readArguments?: unknown;
   correctRead?: boolean;
+  projectSnapshot?: (members?: readonly string[]) => Promise<unknown>;
+  snapshotActor?: 'ceo' | 'project-lead';
+  projectSnapshotCalls?: readonly unknown[];
   failedDrain?: boolean;
   failedDrains?: number;
   failSubmitAt?: number;
@@ -77,16 +81,26 @@ async function runWire(attempts: readonly unknown[], options: {
       return;
     }
     const index = modelRequestCount++;
-    const readRound = options.readTaskResult !== undefined && (index === 0 || (options.correctRead === true && index === 1));
+    const snapshotCalls = !options.projectSnapshot || options.snapshotActor === 'ceo'
+      ? [] : options.projectSnapshotCalls ?? [{}];
+    const readStart = (options.skills ? 1 : 0) + snapshotCalls.length;
+    const readRound = options.readTaskResult !== undefined
+      && (index === readStart || (options.correctRead === true && index === readStart + 1));
     const skillRound = options.skills && index === 0;
-    const prefixLength = options.skills || options.readTaskResult ? 1 : 0;
-    let argument = attempts[index - prefixLength];
-    if (options.readTaskResult && !readRound) {
-      const result = wire.input.find((entry: any) => entry.type === 'function_call_output' && entry.call_id === (options.correctRead ? 'call-1' : 'call-0'));
+    const snapshotStart = options.skills ? 1 : 0;
+    const snapshotRound = index >= snapshotStart && index < snapshotStart + snapshotCalls.length;
+    const snapshotIndex = index - snapshotStart;
+    const toolRoundCount = (options.skills ? 1 : 0)
+      + snapshotCalls.length
+      + (options.readTaskResult === undefined ? 0 : options.correctRead ? 2 : 1);
+    let argument = attempts[index - toolRoundCount];
+    if (options.readTaskResult && index >= toolRoundCount) {
+      const result = wire.input.find((entry: any) => entry.type === 'function_call_output'
+        && entry.call_id === `call-${readStart + (options.correctRead ? 1 : 0)}`);
       argument = options.readReply ?? { ...answer, decision: { ...answer.decision, answer: result?.output ?? 'missing result' } };
     }
     // A runaway request is an explicit test failure, never an endless fixture.
-    if (!readRound && !skillRound && argument === undefined) {
+    if (!readRound && !snapshotRound && !skillRound && argument === undefined) {
       response.writeHead(400, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { message: 'unexpected extra model request' } }));
       return;
@@ -95,8 +109,13 @@ async function runWire(attempts: readonly unknown[], options: {
       { type: 'response.created', response: { id: `c07-${index}` } },
       ...(options.textFirst && index === 0 ? [{ type: 'response.output_text.done', item_id: `text-${index}`, text: JSON.stringify(argument) }]
         : [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: `item-${index}`,
-          call_id: `call-${index}`, name: readRound ? 'task_read_result' : skillRound ? 'interaction_select_skills' : 'humanagent_turn_end',
-          arguments: options.malformed?.includes(index) ? '{' : JSON.stringify(readRound ? (index === 0 ? options.readArguments : undefined) ?? { taskId: 'published-parent' } : skillRound ? { skillIds: options.skills === true ? ['task-intake'] : options.skills } : argument) } }]),
+          call_id: `call-${index}`, name: readRound ? 'task_read_result'
+            : snapshotRound ? 'project_snapshot'
+            : skillRound ? 'interaction_select_skills' : 'humanagent_turn_end',
+          arguments: options.malformed?.includes(index) ? '{' : JSON.stringify(readRound
+            ? (index === readStart ? options.readArguments : undefined) ?? { taskId: 'published-parent' }
+            : snapshotRound ? snapshotCalls[snapshotIndex]
+            : skillRound ? { skillIds: options.skills === true ? ['task-intake'] : options.skills } : argument) } }]),
       ...(options.correctedEndAt === index ? [{ type: 'response.output_item.done', output_index: 1,
         item: { type: 'function_call', id: 'item-corrected', call_id: 'call-corrected', name: 'humanagent_turn_end',
           arguments: JSON.stringify(answer) } }] : []),
@@ -157,7 +176,8 @@ async function runWire(attempts: readonly unknown[], options: {
     turnHelperJournal: helpers, rawEvidence: evidence, rawContent: providerRawContentReader(evidence),
     clock: { now: () => new Date().toISOString() }, helperFactory: async () => { throw new Error('business execution is forbidden'); },
     templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
-    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+    agentRoster: [{ agentId: 'intake', roleId: 'interaction', managementRole: options.snapshotActor ?? 'project-lead' }],
+    prepareAgentProvider: async () => ({ roleId: 'interaction', configuredAgentId: 'intake', source: 'http', binding, port,
       provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
         model: binding.modelRef, route: 'controlled', baseUrl } }),
     ...overrides,
@@ -168,7 +188,8 @@ async function runWire(attempts: readonly unknown[], options: {
     sourceRef: 'test:c07', rawInput: '你好', clarifications: [], taskCandidates: [],
     onStep: (step: ExplicitInteractionStepInput) => { steps.push(step); },
     ...(options.readTaskResult === undefined ? {} : { readTaskResult: options.readTaskResult }),
-    ...(options.resumeWriter === undefined ? {} : { resumeTask: options.resumeWriter }) };
+    ...(options.resumeWriter === undefined ? {} : { resumeTask: options.resumeWriter }),
+    ...(options.projectSnapshot === undefined ? {} : { readProjectSnapshot: options.projectSnapshot }) };
   const interpreter = createInterpreter();
   const append = helpers.appendSemanticCheckpoint.bind(helpers);
   if (options.coldAccepted) helpers.appendSemanticCheckpoint = async () => { throw new Error('controlled checkpoint write interruption'); };
@@ -248,10 +269,18 @@ async function runWire(attempts: readonly unknown[], options: {
     assert.equal(wire.instructions.includes('Dispatch a helper only'), false);
     assert.equal(wire.instructions.includes('read them only to match'), false);
     assert.deepEqual(wire.tools.map((tool: any) => tool.name).sort(),
-      ['humanagent_turn_end', 'interaction_select_skills', ...(options.readTaskResult ? ['task_read_result'] : [])].sort());
+      ['humanagent_turn_end', 'interaction_select_skills', ...(options.readTaskResult ? ['task_read_result'] : []),
+        ...(options.projectSnapshot && options.snapshotActor !== 'ceo' ? ['project_snapshot'] : [])].sort());
     if (options.readTaskResult) {
       assert.deepEqual(wire.tools.find((tool: any) => tool.name === 'task_read_result').parameters,
         { type: 'object', additionalProperties: false, required: ['taskId'], properties: { taskId: { type: 'string', minLength: 1 } } });
+    }
+    if (options.projectSnapshot && options.snapshotActor !== 'ceo') {
+      assert.deepEqual(wire.tools.find((tool: any) => tool.name === 'project_snapshot').parameters, {
+        type: 'object', additionalProperties: false,
+        properties: { members: { type: 'array', minItems: 1, uniqueItems: true,
+          items: { type: 'string', minLength: 1 } } },
+      });
     }
     assert.equal(wire.tools.some((tool: any) => /execute|dispatch|shell/.test(tool.name)), false);
   }
@@ -355,6 +384,60 @@ test('published task result enters the real next wire and survives cold accepted
   assert.ok(checkpoint);
 });
 
+test('scoped task result reads pair direct and lineage scope results while foreign content stays outside the model wire', async () => {
+  const cases = [
+    { label: 'same-project direct', taskId: 'project-direct', code: undefined,
+      value: { taskId: 'project-direct', title: 'direct result', executionTaskId: 'project-direct',
+        publicationState: 'committed', marker: 'same-project-direct-content' } },
+    { label: 'same-project lineage', taskId: 'project-lineage-parent', code: undefined,
+      value: { taskId: 'project-lineage-parent', title: 'lineage result', executionTaskId: 'project-lineage-child',
+        publicationState: 'committed', marker: 'same-project-lineage-content' } },
+    { label: 'foreign project direct', taskId: 'foreign-direct', code: 'explicit-brain.task-outside-serve-scope',
+      secret: 'foreign-direct-private-content' },
+    { label: 'foreign project lineage', taskId: 'cross-board-parent', code: 'explicit-brain.task-outside-serve-scope',
+      secret: 'cross-board-lineage-private-content' },
+  ] as const;
+
+  for (const scenario of cases) {
+    const { result, wires } = await runWire([answer], {
+      readArguments: { taskId: scenario.taskId },
+      readTaskResult: async taskId => {
+        assert.equal(taskId, scenario.taskId);
+        if (scenario.code !== undefined) {
+          throw new UiRuntimeApiError(scenario.code, 'humanagent.app', scenario.secret,
+            'select a task from this conversation project', 403);
+        }
+        return scenario.value;
+      },
+      readReply: answer,
+    });
+    assert.equal(result.kind, 'answer', `${scenario.label} rejection cannot end the whole model turn`);
+    assert.equal(wires.filter((wire: any) => wire.tools !== undefined).length, 2,
+      `${scenario.label} tool result must enter a continued model request`);
+
+    const pair = wires[1].input.filter((entry: any) => entry.call_id === 'call-0');
+    assert.deepEqual(pair.map((entry: any) => entry.type), ['function_call', 'function_call_output']);
+    assert.equal(pair[0].call_id, 'call-0');
+    assert.equal(pair[1].call_id, 'call-0');
+    assert.equal(pair[0].name, 'task_read_result');
+    assert.deepEqual(JSON.parse(pair[0].arguments), { taskId: scenario.taskId });
+    const output = JSON.parse(pair[1].output);
+    if (scenario.code === undefined) {
+      assert.deepEqual(output, scenario.value);
+    } else {
+      assert.equal(output.status, 'failed');
+      assert.equal(output.code, scenario.code);
+      assert.equal(output.callId, 'call-0');
+      assert.equal(output.toolId, 'task.read_result');
+      assert.equal(output.recoverable, true);
+      assert.equal(JSON.stringify(output).includes(scenario.secret), false,
+        `${scenario.label} must not expose out-of-scope content`);
+      assert.equal(JSON.stringify(wires).includes(scenario.secret), false,
+        `${scenario.label} must not leak the hidden foreign task through any wire`);
+    }
+  }
+});
+
 test('blocked task read keeps its original blocker in the paired public tool step', async () => {
   const blocker = {
     code: 'unknown.event',
@@ -436,6 +519,103 @@ test('explicit result read preserves publication failures instead of making them
   await assert.rejects(() => runWire([answer], {
     readTaskResult: async () => { throw new Error('controlled publication read failure'); },
   }), /controlled publication read failure/);
+});
+
+test('Manager snapshot is absent without a reader and follows the real selected Skill wire with its reader', async () => {
+  const withoutReader = await runWire([answer]);
+  const wrongActor = await runWire([answer], { snapshotActor: 'ceo',
+    projectSnapshot: async () => { throw new Error('CEO must not use the project Manager reader'); } });
+  for (const wire of [...withoutReader.wires, ...wrongActor.wires].filter(wire => wire.tools !== undefined)) {
+    assert.equal(wire.tools.some((tool: any) => tool.name === 'project_snapshot'), false);
+  }
+
+  const full = { roster: [{ agentRef: 'Alice', role: 'manager' }], boards: { Alice: [{ taskId: 't1', state: 'working' }] },
+    sessions: { Alice: { state: 'present', generation: 3 } }, gaps: [] };
+  const batch = { roster: [{ agentRef: 'Alice' }, { agentRef: 'Bob' }], boards: {},
+    sessions: {}, gaps: [{ member: 'Bob', source: 'runtime', state: 'unknown' }] };
+  const reads: (readonly string[] | undefined)[] = [];
+  const { result, wires, checkpoint, steps } = await runWire([answer], {
+    skills: ['project-management'],
+    projectSnapshot: async members => { reads.push(members); return reads.length === 1 ? full : batch; },
+    projectSnapshotCalls: [{}, { members: ['Alice', 'Bob'] }],
+  });
+
+  assert.equal(result.kind, 'answer');
+  assert.ok(checkpoint);
+  assert.deepEqual(reads, [undefined, ['Alice', 'Bob']]);
+  assert.deepEqual(wires[0].tools.map((tool: any) => tool.name).sort(),
+    ['humanagent_turn_end', 'interaction_select_skills', 'project_snapshot']);
+  assert.match(wires[0].instructions, /# Project leader/);
+  assert.match(wires[1].instructions, /Selected Skill: project-management/);
+  assert.match(wires[1].instructions, /project\.snapshot\(\{\}\)/,
+    'the selected Skill text must come from the registered template loader');
+  assert.equal(JSON.stringify(wires[0].input).includes('readProjectSnapshot'), false,
+    'the host reader is authority, not business input');
+
+  const firstPair = wires[2].input.filter((entry: any) => entry.call_id === 'call-1');
+  assert.deepEqual(firstPair.map((entry: any) => entry.type), ['function_call', 'function_call_output']);
+  assert.deepEqual(JSON.parse(firstPair[1].output), full);
+  const secondPair = wires[3].input.filter((entry: any) => entry.call_id === 'call-2');
+  assert.deepEqual(secondPair.map((entry: any) => entry.type), ['function_call', 'function_call_output']);
+  assert.deepEqual(JSON.parse(secondPair[1].output), batch);
+  for (const callId of ['call-1', 'call-2']) {
+    const activities = steps.filter(step => step.tool?.callId === callId);
+    assert.deepEqual(activities.map(step => [step.kind, step.tool?.kind]), [
+      ['tool.started', 'project-snapshot'], ['tool.finished', 'project-snapshot'],
+    ]);
+    assert.ok(activities[0]?.requestId);
+    assert.equal(activities[0]?.requestId, activities[1]?.requestId);
+    assert.equal(activities[1]?.tool?.status, 'succeeded');
+  }
+});
+
+test('project snapshot rejects unauthorized or invalid arguments and allows correction in the same turn', async () => {
+  const invalid = [
+    { project: 'foreign' },
+    { members: ['Alice'], path: '/tmp/foreign' },
+    { members: [''] },
+    { members: ['Alice', 'Alice'] },
+    { members: ['Unavailable'] },
+  ];
+  let reads = 0;
+  const { result, wires, checkpoint } = await runWire([answer], {
+    projectSnapshot: async members => {
+      reads++;
+      if (members?.[0] === 'Unavailable') throw new UiRuntimeApiError(
+        'project.snapshot.member-unavailable', 'humanagent.app', 'member unavailable', 'choose an available member', 404);
+      assert.deepEqual(members, ['Alice', 'Bob']);
+      return { roster: [{ agentRef: 'Alice' }, { agentRef: 'Bob' }], gaps: [] };
+    },
+    projectSnapshotCalls: [...invalid, { members: ['Alice', 'Bob'] }],
+  });
+
+  assert.equal(reads, 2);
+  assert.equal(result.kind, 'answer');
+  assert.ok(checkpoint);
+  for (let index = 0; index < invalid.length; index++) {
+    const pair = wires[index + 1].input.filter((entry: any) => entry.call_id === `call-${index}`);
+    assert.deepEqual(pair.map((entry: any) => entry.type), ['function_call', 'function_call_output']);
+    const failure = JSON.parse(pair[1].output);
+    assert.equal(failure.status, 'failed');
+    assert.equal(failure.callId, `call-${index}`);
+    assert.equal(failure.code, index === invalid.length - 1
+      ? 'project.snapshot.member-unavailable' : 'project.snapshot.invalid-arguments');
+    assert.equal(failure.recoverable, true);
+    assert.deepEqual(failure.nextAction, { kind: 'continue', ref: 'project.snapshot' });
+  }
+  const corrected = wires[invalid.length + 1].input.find((entry: any) =>
+    entry.call_id === `call-${invalid.length}` && entry.type === 'function_call_output');
+  assert.match(corrected.output, /Alice/);
+  assert.match(corrected.output, /Bob/);
+});
+
+test('Manager can submit a task decision without reading the optional project snapshot', async () => {
+  const { result, checkpoint } = await runWire([requirement], {
+    projectSnapshot: async () => { throw new Error('no snapshot read is needed for this decision'); },
+    projectSnapshotCalls: [],
+  });
+  assert.equal(result.kind, 'requirement');
+  assert.ok(checkpoint);
 });
 
 test('C07 actual wire accepts a simple end and ignores transport drain text', async () => {

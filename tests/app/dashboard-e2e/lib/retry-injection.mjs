@@ -37,7 +37,7 @@
  * carries `interaction.propose` / `interaction.ask` / `task.match`, while the
  * execution turn carries `file.search` / `file.read` and never carries an
  * `interaction.*` tool. The proxy fails only requests that look like the
- * execution turn, and only once.
+ * execution turn. By default it fails one attempt.
  */
 
 import { createServer } from 'node:http';
@@ -92,7 +92,7 @@ export const INJECTED_FAILURE_STATUS = 503;
 /**
  * Start an attempt-aware proxy in front of the real RCC endpoint.
  *
- * The first request that matches `isExecutionTurnBody` is answered with
+ * The configured number of requests that match `isExecutionTurnBody` are answered with
  * `INJECTED_FAILURE_STATUS` and never forwarded, so the real provider is not
  * asked to serve a request the harness intends to fail. Every other request is
  * forwarded byte-for-byte, including the `text/event-stream` response, so the
@@ -101,6 +101,7 @@ export const INJECTED_FAILURE_STATUS = 503;
  */
 export async function startRetryInjectionProxy(options) {
   const upstream = options.upstream.replace(/\/$/, '');
+  const failureCount = options.failureCount ?? 1;
   const record = {
     upstream,
     injectedCount: 0,
@@ -121,7 +122,7 @@ export async function startRetryInjectionProxy(options) {
     }
     const body = Buffer.concat(chunks);
     const path = request.url ?? '/';
-    const injectionAvailable = record.injectedCount === 0
+    const injectionAvailable = record.injectedCount < failureCount
       && request.method === 'POST'
       && isExecutionTurnBody(body.toString('utf8'));
 
@@ -134,7 +135,7 @@ export async function startRetryInjectionProxy(options) {
       response.end(JSON.stringify({
         error: {
           type: 'harness_injected_retryable_failure',
-          message: `deterministic attempt-1 failure injected by ${'retry-injection.mjs'} at the transport boundary`,
+          message: `deterministic attempt-${record.injectedCount} failure injected at the transport boundary`,
         },
       }));
       return;

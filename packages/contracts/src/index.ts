@@ -953,7 +953,7 @@ export type ProviderToolStatus = 'succeeded' | 'failed' | 'blocked' | 'cancelled
 
 export interface ExplicitInteractionToolActivity {
   readonly callId: string;
-  readonly kind: 'select-skills' | 'read-task-result' | 'resume-task' | 'submit-turn';
+  readonly kind: 'select-skills' | 'read-task-result' | 'project-snapshot' | 'resume-task' | 'submit-turn';
   readonly status?: ProviderToolStatus;
   readonly errorCode?: string;
   readonly detail?:

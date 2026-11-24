@@ -301,7 +301,7 @@ test('main topic shows one linked task and relays its child ask to the user-faci
     executionEpoch: 2,
     expectedRevision: 1,
   };
-  const projection = projectMainTopic({
+  const input: Parameters<typeof projectMainTopic>[0] = {
     projectKey: 'main-topic-project',
     projectName: '报价项目',
     workspaceCwd: '/tmp/main-topic-project',
@@ -336,7 +336,8 @@ test('main topic shows one linked task and relays its child ask to the user-faci
       parentTaskId,
       inputRequest: request,
     }],
-  });
+  };
+  const projection = projectMainTopic(input);
 
   assert.deepEqual(projection.tasks.map((task) => task.taskId.value), [parentTaskId.value]);
   assert.deepEqual(projection.turns.map((turn) => turn.taskId?.value), [
@@ -352,6 +353,20 @@ test('main topic shows one linked task and relays its child ask to the user-faci
   assert.equal(projection.openInputRequest?.taskId.value, parentTaskId.value);
   assert.equal(projection.openInputRequest?.requestId, request.requestId);
   assert.deepEqual(projection.openInputRequest?.options, request.options);
+
+  // An execution can open a question before its closing operation fails.
+  // Its saved request remains evidence, but the chat must show the blocker.
+  const failed = projectMainTopic({
+    ...input,
+    tasks: input.tasks.map(task => ({
+      ...task, state: 'blocked', stateLabel: '受阻',
+      error: { code: 'runtime.execution.failure', message: '执行收尾失败', ownerId: 'runtime', retryable: false, nextAction: '核对原执行' },
+    })),
+  });
+  assert.equal(failed.openInputRequest, undefined);
+  assert.equal(failed.turns.at(-1)?.kind, 'error');
+  assert.equal(failed.turns.at(-1)?.statusFacts?.waitingForUser, false);
+  assert.equal(failed.turns.at(-1)?.statusFacts?.error?.code, 'runtime.execution.failure');
 });
 
 test('an explicit turn keeps its real request and tool steps after the task is linked', () => {
@@ -370,6 +385,12 @@ test('an explicit turn keeps its real request and tool steps after the task is l
     tasks: [{
       taskId, title: '读取预算', state: 'running', stateLabel: '执行中', currentNode: 'provider.tool', nextStep: '等待读取结果',
       output: '', updatedAt: '2026-11-22T10:00:04.000Z', sourceInteractionId: 'main-topic-tool-interaction',
+      events: [{
+        seq: 1, kind: 'provider.tool', occurredAt: '2026-11-22T10:00:04.000Z', taskId,
+        eventId: 'delegated-tool-event', evidenceRefs: [],
+        operationId: 'delegated-operation', executionEpoch: 1, state: 'tool', summary: '读取文件',
+        callId: 'delegated-call', requestId: 'delegated-request', turnId: 'delegated-turn', toolId: 'file.read',
+      }],
     }],
   });
 
@@ -379,6 +400,8 @@ test('an explicit turn keeps its real request and tool steps after the task is l
     ['request-1', 'turn-1', 'call-1'],
     ['request-1', 'turn-1', 'call-1'],
   ]);
+  const delegated = projection.turns.find(turn => turn.kind === 'status');
+  assert.equal(delegated?.statusFacts?.events?.[0]?.toolId, 'file.read');
 });
 
 test('main topic retains each consumed request and exact answer once in user turn order', () => {

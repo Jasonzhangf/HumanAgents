@@ -99,6 +99,10 @@ export interface ExplicitInput {
   readonly rawInput: string;
   readonly channel: 'business' | 'control';
   readonly controlCommand?: 'steer' | 'stop' | 'revoke-permission';
+  /** Stable idempotency for a real client submission; absent keeps legacy receive semantics. */
+  readonly idempotencyKey?: string;
+  /** Topic that owns this input. Stable-key submissions must bind it explicitly. */
+  readonly topicRef?: string;
   /**
    * Typed creation/query identity carried from the real entry point. A
    * `new-task-preview` must never be collapsed into a generic status query;
@@ -271,6 +275,7 @@ interface ExplicitInteractionRecordState {
   readonly occurredAt?: string;
   readonly actor?: ProductMessageActor;
   readonly workspace?: ExplicitInputWorkspace;
+  readonly idempotency?: ExplicitInteractionIdempotency;
   readonly state: ExplicitInteractionState;
   readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   readonly nextAction: string;
@@ -300,6 +305,7 @@ interface InteractionRecord {
   readonly occurredAt?: string;
   readonly actor?: ProductMessageActor;
   readonly workspace?: ExplicitInputWorkspace;
+  readonly idempotency?: ExplicitInteractionIdempotency;
   state: ExplicitInteractionState;
   owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   nextAction: string;
@@ -317,6 +323,14 @@ interface InteractionRecord {
   confirmation?: ConfirmedRequirementDraft;
   steps: ExplicitInteractionStep[];
   readonly history: ExplicitInteractionState[];
+}
+
+interface ExplicitInteractionIdempotency {
+  readonly key: string;
+  readonly requestDigest: string;
+  readonly userRef: string;
+  readonly workspaceRef: string;
+  readonly topicRef: string;
 }
 
 interface RevisionEditRecord {
@@ -488,8 +502,65 @@ export class ExplicitIntake {
       }
     }
 
+    const idempotencyKey = input.idempotencyKey?.trim();
+    const topicRef = input.topicRef?.trim();
+    const idempotencyUserRef = input.actor?.kind === 'human' ? input.actor.sourceRef : undefined;
+    if (input.idempotencyKey !== undefined
+      && (!idempotencyKey || !topicRef || !idempotencyUserRef || input.workspace === undefined)) {
+      throw new ExplicitIntakeError(
+        'idempotency-scope-incomplete',
+        'a stable receive key requires the submitting user, workspace and Topic',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'provide-the-verified-user-workspace-and-topic',
+          condition: 'complete-idempotency-scope',
+        },
+      );
+    }
+    if (idempotencyKey !== undefined && topicRef !== undefined) {
+      const requestDigest = `sha256:${createHash('sha256').update(canonicalJsonStringify({
+        inputRevision,
+        sourceRef: input.sourceRef,
+        rawInput: input.rawInput,
+        requestKind: input.requestKind,
+      })).digest('hex')}`;
+      const userRef = idempotencyUserRef;
+      const workspaceRef = canonicalJsonStringify(input.workspace);
+      const existing = [...this.interactions.values()].find((interaction) =>
+        interaction.idempotency?.key === idempotencyKey
+        && interaction.idempotency.userRef === userRef
+        && interaction.idempotency.workspaceRef === workspaceRef
+        && interaction.idempotency.topicRef === topicRef);
+      if (existing !== undefined) {
+        if (existing.idempotency!.requestDigest !== requestDigest) {
+          throw new ExplicitIntakeError(
+            'idempotency-conflict',
+            'the stable receive key was already accepted with different content',
+            {
+              owner: 'explicit-intake',
+              nextAction: 'reuse-the-original-content-or-provide-a-new-stable-key',
+              condition: `interaction-${existing.interactionId}-owns-idempotency-key`,
+            },
+          );
+        }
+        return existing.interactionId;
+      }
+    }
+
     const interactionId = `interaction-${this.nextInteractionSeq}`;
     const occurredAt = input.occurredAt ?? this.now().toISOString();
+    const idempotency = idempotencyKey === undefined || topicRef === undefined ? undefined : {
+      key: idempotencyKey,
+      requestDigest: `sha256:${createHash('sha256').update(canonicalJsonStringify({
+        inputRevision,
+        sourceRef: input.sourceRef,
+        rawInput: input.rawInput,
+        requestKind: input.requestKind,
+      })).digest('hex')}`,
+      userRef: idempotencyUserRef!,
+      workspaceRef: canonicalJsonStringify(input.workspace),
+      topicRef,
+    };
     this.persistMutation(() => {
       this.nextInteractionSeq += 1;
       this.interactions.set(interactionId, {
@@ -500,6 +571,7 @@ export class ExplicitIntake {
         ...(input.requestKind === undefined ? {} : { requestKind: input.requestKind }),
         occurredAt,
         ...(input.workspace === undefined ? {} : { workspace: structuredClone(input.workspace) }),
+        ...(idempotency === undefined ? {} : { idempotency }),
         ...(input.actor === undefined ? {} : { actor: structuredClone(input.actor) }),
         state: 'received',
         owner: 'explicit-intake',

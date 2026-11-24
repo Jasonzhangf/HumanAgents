@@ -3,6 +3,7 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
 import { createServer } from 'node:http'
 import playwright from '/opt/homebrew/lib/node_modules/playwright/index.js'
+import { decodeProductLocation } from '../../docs/ui/product-location.js'
 
 const root = resolve(import.meta.dirname, '../../docs/ui')
 const evidence = process.env.DISPATCH_EVIDENCE_DIR || resolve(import.meta.dirname, '../../docs/verification/dispatch-tracking-20261123')
@@ -170,6 +171,40 @@ try {
   catch (error) { await writeFile(resolve(evidence, 'failed-detail.txt'), await page.locator('body').innerText()); throw error }
   check('board opens exact formal child tools', await page.locator('[data-execution-task-id]').getAttribute('data-execution-task-id') === `child-${tasks[0].taskId.value}`)
   check('the actual scoped child tool call is visible in the task drawer before completion', tasks[0].state === 'running')
+  const workSession = page.getByRole('link', { name: '打开工作会话', exact: true })
+  check('the execution chain shows one work-session entry', await workSession.count() === 1)
+  const workSessionHref = new URL(await workSession.getAttribute('href'), base)
+  check('the work-session entry keeps the exact execution task and read scope without inventing an agent instance',
+    workSessionHref.pathname === '/task-dashboard.html'
+    && workSessionHref.searchParams.get('task') === `child-${tasks[0].taskId.value}`
+    && workSessionHref.searchParams.get('projectKey') === project.projectKey
+    && workSessionHref.searchParams.get('mode') === 'fake'
+    && ![...workSessionHref.searchParams.keys()].some(key => key.startsWith('agent'))
+    && workSessionHref.searchParams.get('control') === null)
+  const writesBeforeWorkSession = writes.length
+  const workSessionPage = page.context().waitForEvent('page')
+  await workSession.click({ modifiers: ['Meta'] })
+  const openedSession = await workSessionPage
+  await openedSession.waitForURL(url => url.pathname === '/task-dashboard.html')
+  await openedSession.waitForLoadState('domcontentloaded')
+  const openedUrl = new URL(openedSession.url())
+  const openedLocation = decodeProductLocation(openedUrl.hash)
+  await writeFile(resolve(evidence, 'work-session-navigation.json'), JSON.stringify({
+    expected: workSessionHref.href,
+    opened: openedUrl.href,
+    decodedLocation: openedLocation,
+  }, null, 2))
+  check('clicking the work-session entry opens the same exact task dashboard',
+    openedUrl.pathname === workSessionHref.pathname
+    && openedUrl.searchParams.get('task') === workSessionHref.searchParams.get('task')
+    && openedUrl.searchParams.get('projectKey') === workSessionHref.searchParams.get('projectKey')
+    && openedUrl.searchParams.get('mode') === workSessionHref.searchParams.get('mode')
+    && openedLocation.kind === 'valid'
+    && openedLocation.location.scope.projectKey === project.projectKey
+    && openedLocation.location.scope.mode === project.mode
+    && openedLocation.location.scope.taskId.value === `child-${tasks[0].taskId.value}`
+    && writes.length === writesBeforeWorkSession)
+  await openedSession.close()
   const detailText = await page.locator('.dispatch-detail').innerText()
   check('drawer shows execution without inventing an acceptance receipt', detailText.includes('跟踪中')
     && detailText.includes('read-before-turn-end.txt') && !detailText.includes('已接手'))

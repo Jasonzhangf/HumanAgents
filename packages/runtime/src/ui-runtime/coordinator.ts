@@ -133,6 +133,9 @@ import { planBlockedRecovery } from '../../../core/src/tool-execution-lifecycle.
 const STEP_OWNER = 'humanagent.runtime';
 type TaskStepPublisher = (input: { readonly state: string; readonly summary: string }) => void;
 const taskStepPublishers = new WeakMap<AgentRuntimePoolManager, TaskStepPublisher>();
+const NATIVE_START_RETRY_LIMIT = 10;
+const NATIVE_START_MAX_ATTEMPTS = NATIVE_START_RETRY_LIMIT + 1;
+const NATIVE_START_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
 /**
  * The App's closed-turn Planner receives the task's existing runtime pool. This
@@ -154,6 +157,30 @@ export type RuntimeTaskError = {
   readonly evidenceRefs?: readonly EvidenceRef[];
   readonly cleanupError?: RuntimeTaskError;
 };
+
+/** A single cancellable wait before a fresh Provider start attempt. */
+export interface RuntimeTransientRetryWaitInput {
+  readonly delayMs: number;
+  readonly deadlineAt: string;
+  readonly attemptNumber: number;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly signal: AbortSignal;
+}
+
+export type RuntimeTransientRetryWaiter = (input: RuntimeTransientRetryWaitInput) => Promise<void>;
+
+export type RuntimeTransientRetryStopObligation =
+  | 'stopped-checkpoint'
+  | 'inspection-stop-settlement'
+  | 'provider-close'
+  | 'stopped-terminal';
+
+type RuntimeTransientRetryProviderClose = Pick<
+  ProviderCloseResult,
+  'state' | 'evidenceRefs' | 'ownerId' | 'nextAction'
+> & { readonly retained: boolean };
 
 type MutableRuntimeTaskError = Omit<RuntimeTaskError, 'evidenceRefs' | 'cleanupError'> & {
   evidenceRefs?: readonly EvidenceRef[];
@@ -203,6 +230,14 @@ export interface RuntimeTaskEvent {
   readonly arguments?: unknown;
   readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
   readonly error?: RuntimeTaskError;
+  /** The provider attempt that follows the declared transient-error backoff. */
+  readonly attemptNumber?: number;
+  /** Total attempts, including the initial attempt and its bounded retries. */
+  readonly maxAttempts?: number;
+  /** Typed ISO deadline for the current backoff. */
+  readonly retryDeadlineAt?: string;
+  /** The exact declared wait before the next provider attempt. */
+  readonly retryDelayMs?: number;
   /**
    * Provider wire identity, when the provider reported one. This is diagnostic
    * provenance only and never substitutes for the operation identity above.
@@ -599,6 +634,24 @@ export type RuntimeTaskJournalRecord =
       readonly zeroEffectAdmissionDenial?: true;
     }
   | {
+      /**
+       * Typed stop-control state for an execution interrupted between native
+       * attempts. An append-only successor distinguishes an uncommitted stop
+       * from a stopped checkpoint whose inspection/close path is unfinished.
+       */
+      readonly kind: 'operation.stop-settlement';
+      readonly taskId: TaskId;
+      readonly operationId: OperationId;
+      readonly executionEpoch: number;
+      readonly scope: ScopeRef;
+      readonly state: 'pending' | 'checkpoint-committed' | 'provider-closed' | 'settled';
+      readonly obligations: readonly RuntimeTransientRetryStopObligation[];
+      readonly stopControl: NonNullable<TaskRecord['stopControl']>;
+      readonly failure: RuntimeTaskError;
+      readonly providerClose?: RuntimeTransientRetryProviderClose;
+      readonly occurredAt: string;
+    }
+  | {
       readonly kind: 'explicit-brain.state';
       readonly state: RuntimeExplicitBrainJournalState;
     }
@@ -707,6 +760,14 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly defaultBoardOwner?: RuntimeTaskBoardOwner;
   readonly createDriver: RuntimeExecutionDriverFactory;
   /**
+   * Cold stop recovery has the durable allocation but no in-memory driver.
+   * Bind the App's retained resource owner here; Runtime never re-enters the
+   * preparation path merely to obtain a driver for close.
+   */
+  readonly closeRetainedTransientRetryProvider?: (
+    allocation: RuntimeExecutionAllocation,
+  ) => Promise<ProviderCloseResult>;
+  /**
    * Same App composition's mandatory cold owners (source, grant, incarnation
    * config, original-turn recovery and native v2 composition). Absence keeps a
    * cold resume held; it never fabricates an empty producer.
@@ -745,6 +806,8 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly hookRegistry?: AgentHookRegistry;
   readonly taskIdPrefix?: string;
   readonly now?: () => Date;
+  /** Test seam for the same cancellable wait used by production execution. */
+  readonly transientRetryWaiter?: RuntimeTransientRetryWaiter;
   /**
    * The declared request budget applied to one provider attempt observed as
    * normalized provider events. Streamed partials are activity only; a
@@ -1060,6 +1123,16 @@ export interface TaskRecord {
   orchestrated: boolean;
   running: boolean;
   stopping: boolean;
+  /** Wakes the current transient-retry wait when execution stop is requested. */
+  transientRetryCancel?: () => void;
+  /** Recovery facts for a stop interrupted while waiting between native attempts. */
+  transientRetryStopRecovery?: {
+    readonly failure: RuntimeTaskError;
+    readonly scope: ScopeRef;
+    readonly providerClose?: RuntimeTransientRetryProviderClose;
+  };
+  /** One in-process owner for an overlapping retry-stop request. */
+  transientRetryStopCompletion?: Promise<void>;
   /**
    * The single typed stop control that owns this task's pending settlement.
    * `retryStop` reuses this reason and actor instead of re-labelling the stop,
@@ -1276,6 +1349,26 @@ export interface TaskJournalReplayState {
   deletedTaskIds: Set<string>;
   deletedBoardHistory: Map<string, TaskRecord>;
   boardHistory: RuntimeTaskBoardHistoryEntry[];
+}
+
+function applyPersistedTransientRetryStopFact(
+  task: TaskRecord,
+  record: Extract<RuntimeTaskJournalRecord, { readonly kind: 'operation.stop-settlement' }>,
+): void {
+  task.stopControl = structuredClone(record.stopControl);
+  if (record.state === 'settled') {
+    task.transientRetryStopRecovery = undefined;
+    task.error = undefined;
+    task.postCommitRecoveryPending = false;
+    return;
+  }
+  task.transientRetryStopRecovery = {
+    failure: structuredClone(record.failure),
+    scope: structuredClone(record.scope),
+    ...(record.providerClose === undefined ? {} : { providerClose: structuredClone(record.providerClose) }),
+  };
+  task.error = structuredClone(record.failure);
+  task.postCommitRecoveryPending = record.state === 'checkpoint-committed' || record.state === 'provider-closed';
 }
 
 /**
@@ -1527,6 +1620,30 @@ export function replayTaskJournalRecords(
         }
         if (record.event.kind === 'provider.tool') task.currentNode = RUNTIME_NODE_MARKERS.providerTool;
         if (record.event.kind === 'provider.model') task.currentNode = RUNTIME_NODE_MARKERS.providerModel;
+        if (record.event.kind === 'execution.terminal'
+          && record.event.state === 'stopped'
+          && record.event.terminalPhase === 'final') {
+          task.transientRetryStopRecovery = undefined;
+          task.postCommitRecoveryPending = false;
+        }
+        break;
+      }
+      case 'operation.stop-settlement': {
+        const operation = state.operations.get(record.operationId.value);
+        if (!operation || !state.tasks.has(record.taskId.value)) break;
+        if (operation.taskId.value !== record.taskId.value
+          || operation.executionEpoch !== record.executionEpoch
+          || !sameScope(operation.allocation?.scope ?? record.scope, record.scope)) {
+          throw new RuntimeTaskControlError(
+            'journal.corrupt',
+            RUNTIME_OWNER,
+            `journal stop settlement ${record.operationId.value} identity does not match its operation`,
+            'repair or discard the UI runtime journal before restarting',
+          );
+        }
+        const task = state.tasks.get(record.taskId.value)!;
+        applyPersistedTransientRetryStopFact(task, record);
+        task.updatedAt = record.occurredAt;
         break;
       }
       case 'explicit-brain.state': {
@@ -1984,6 +2101,22 @@ function retryableNativeStartFailure(error: unknown): {
     failure,
     retryable: providerError?.phase === 'start' && /^http\.5\d\d$/.test(providerError.code),
   };
+}
+
+function waitForTransientRetryTimer(input: RuntimeTransientRetryWaitInput): Promise<void> {
+  if (input.signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      done();
+    };
+    const timer = setTimeout(done, input.delayMs);
+    function done(): void {
+      input.signal.removeEventListener('abort', onAbort);
+      resolve();
+    }
+    input.signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function recoveryProjection(recovery: StopSettlementRecovery): RuntimeTaskError {
@@ -4216,8 +4349,46 @@ export class RuntimeTaskCoordinator {
     if ((!record.running && record.release?.state !== 'prepared') || record.stopping || !record.operationId || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'task has no running execution to stop', 'start an execution first');
     }
-    record.stopControl = { reason: stopReason, actorKind };
+    const transientRetryWasActive = record.transientRetryCancel !== undefined;
+    const stopControl = { reason: stopReason, actorKind } as const;
+    if (transientRetryWasActive && record.operationId) {
+      const operation = this.operations.get(record.operationId.value);
+      const scope = this.scopes.get(record.operationId.value);
+      if (operation && scope?.cycleId) {
+        const failure = record.error ?? {
+          code: 'stop.requested',
+          ownerId: RUNTIME_OWNER,
+          message: 'stop requested while retry backoff was active',
+          retryable: false,
+          nextAction: 'continue the persisted stop settlement',
+        };
+        const recovery = { failure, scope };
+        this.persistTransientRetryStopSettlement(
+          record,
+          operation,
+          recovery,
+          'pending',
+          ['stopped-checkpoint', 'inspection-stop-settlement', 'provider-close', 'stopped-terminal'],
+          stopControl,
+        );
+        record.transientRetryStopRecovery = recovery;
+      }
+    }
+    record.stopControl = stopControl;
     record.stopping = true;
+    record.transientRetryCancel?.();
+    if (transientRetryWasActive) {
+      const completion = this.operations.get(record.operationId.value)?.executionCompletion;
+      if (completion !== undefined) await completion;
+      if (record.state === 'stopped') return { state: 'stopped', operationId: record.operationId.value };
+      const failure = record.error;
+      throw new RuntimeTaskControlError(
+        failure?.code ?? 'stop.failed',
+        failure?.ownerId ?? RUNTIME_OWNER,
+        failure?.message ?? 'transient retry stop did not settle',
+        failure?.cleanupError?.nextAction ?? failure?.nextAction ?? 'inspect the stopped retry checkpoint',
+      );
+    }
     if (record.release?.state === 'prepared' && !record.releasePending) {
       const state = await this.stopPreparedExecution(record, this.operations.get(record.operationId.value)!);
       return { state: state === 'pending' ? 'settling' : 'stopped', operationId: record.operationId.value };
@@ -4328,6 +4499,23 @@ export class RuntimeTaskCoordinator {
 
   async retryStop(taskId: TaskId): Promise<{ readonly state: string; readonly operationId?: string }> {
     const record = this.requireTask(taskId);
+    const transientRetryRecovery = record.transientRetryStopRecovery;
+    if (transientRetryRecovery && record.operationId) {
+      const operation = this.operations.get(record.operationId.value);
+      if (!operation) throw new RuntimeTaskControlError('operation.recovery.missing', RUNTIME_OWNER, 'pending stop operation is missing', 'start a new execution');
+      try {
+        await this.recoverTransientRetryStopOnce(record, operation, transientRetryRecovery);
+        return { state: 'stopped', operationId: operation.operationId.value };
+      } catch {
+        const primary = record.error!;
+        throw new RuntimeTaskControlError(
+          primary.code,
+          primary.ownerId,
+          primary.message,
+          primary.cleanupError?.nextAction ?? primary.nextAction,
+        );
+      }
+    }
     if (record.stopping && record.release?.state === 'prepared' && record.operationId) {
       const prepared = this.operations.get(record.operationId.value)!;
       const state = await this.stopPreparedExecution(record, prepared);
@@ -6310,6 +6498,14 @@ export class RuntimeTaskCoordinator {
             currentAssignment = remediation;
             record.assignment = currentAssignment;
             attemptNumber += 1;
+            const retryError: RuntimeTaskError | undefined = problem === undefined ? undefined : {
+              code: problem.code,
+              ownerId: problem.ownerId,
+              message: retryReason,
+              retryable: dispatched.status === 'retryable',
+              nextAction: toNextActionText(problem.nextAction) ?? `recover:assignment.retry.${currentAssignment.assignmentId}`,
+              evidenceRefs: problem.evidenceRefs,
+            };
             this.pushEvent(
               record,
               operation,
@@ -6320,6 +6516,7 @@ export class RuntimeTaskCoordinator {
               STEP_OWNER,
               true,
               toNextActionText({ kind: 'recover', ref: `assignment.retry.${currentAssignment.assignmentId}` }),
+              retryError === undefined ? undefined : { error: retryError },
             );
             dispatched = activeTurn
               ? await activeTurn.runProducer(() => runDispatch(currentAssignment))
@@ -6426,9 +6623,34 @@ export class RuntimeTaskCoordinator {
         await composition!.start();
         let submission = orchestratedStepPrompt;
         let nativeAttemptObserved = false;
+        let nativePendingFailure: RuntimeTaskError | undefined;
+        let nativePendingAttemptNumber: number | undefined;
+        let nativePendingDelayMs: number | undefined;
+        let nativePendingMaxAttempts: number | undefined;
         const completedOrchestratedSteps: OrchestratorCompletedStepOutcome[] = [];
-        const nativeAttempt = async () => {
+        const nativeAttempt = async (): Promise<{
+          readonly closure: AgentRuntimeClosure | undefined;
+          readonly status: 'succeeded' | 'failed' | 'blocked' | 'cancelled';
+        }> => {
           while (true) {
+            if (record.stopping) {
+              if (nativePendingFailure !== undefined
+                && nativePendingAttemptNumber !== undefined
+                && nativePendingDelayMs !== undefined
+                && nativePendingMaxAttempts !== undefined) {
+                await this.completeTransientRetryStop(
+                  record,
+                  operation,
+                  scope,
+                  nativePendingFailure,
+                  nativePendingAttemptNumber,
+                  nativePendingDelayMs,
+                  nativePendingMaxAttempts,
+                );
+              }
+              return { closure: undefined, status: 'cancelled' as const };
+            }
+            record.transientRetryCancel = undefined;
             await composition!.submit(submission);
             completeExecutionReady(true);
             if (record.stopping || record.postCommitRecoveryPending) {
@@ -6516,7 +6738,7 @@ export class RuntimeTaskCoordinator {
           }
           return { closure: settled, status: settled.state === 'succeeded' ? 'succeeded' as const : 'failed' as const };
         };
-        const nativeMaxAttempts = 2;
+        const nativeMaxAttempts = NATIVE_START_MAX_ATTEMPTS;
         let nativeAttemptNumber = 1;
         let nativeFirstFailure: RuntimeTaskError | undefined;
         while (true) {
@@ -6544,14 +6766,59 @@ export class RuntimeTaskCoordinator {
               this.pushEvent(record, operation, 'execution.retry', 'blocked',
                 `已达尝试上限（${nativeMaxAttempts} 次），保留首次失败原因：${exhaustedFailure.message}`,
                 exhaustedFailure.evidenceRefs ?? [], exhaustedFailure.ownerId, false, exhaustedFailure.nextAction,
-                { error: exhaustedFailure });
+                { error: exhaustedFailure, retry: { maxAttempts: nativeMaxAttempts } });
               throw error;
             }
             nativeFirstFailure ??= failure;
+            // The first real Provider request already crossed the release
+            // boundary. A stop must be able to interrupt the following wait
+            // instead of being mistaken for a pre-release cancellation.
+            completeExecutionReady(true);
             submission = `${orchestratedStepPrompt}\n\n纠正说明：第 ${nativeAttemptNumber} 次尝试执行失败，原因：${failure.message}。请根据上一轮失败原因修正后再次执行。`;
+            const retryDelayMs = NATIVE_START_RETRY_DELAYS_MS[
+              Math.min(nativeAttemptNumber - 1, NATIVE_START_RETRY_DELAYS_MS.length - 1)
+            ]!;
+            const retryStartedAt = this.now();
+            const retryDeadlineAt = new Date(retryStartedAt.getTime() + retryDelayMs).toISOString();
+            const nextAttemptNumber = nativeAttemptNumber + 1;
+            nativePendingFailure = failure;
+            nativePendingAttemptNumber = nextAttemptNumber;
+            nativePendingDelayMs = retryDelayMs;
+            nativePendingMaxAttempts = nativeMaxAttempts;
             this.pushEvent(record, operation, 'execution.retry', 'retrying',
-              `第 ${nativeAttemptNumber + 1} 次尝试（重试原因：${failure.message}）`, failure.evidenceRefs ?? [],
-              STEP_OWNER, true, `recover:execution.retry.${record.taskId.value}`);
+              `第 ${nextAttemptNumber} 次尝试，等待 ${retryDelayMs / 1_000} 秒后开始（重试原因：${failure.message}）`,
+              failure.evidenceRefs ?? [],
+              STEP_OWNER, true, `recover:execution.retry.${record.taskId.value}`,
+              {
+                error: failure,
+                occurredAt: retryStartedAt.toISOString(),
+                retry: { attemptNumber: nextAttemptNumber, maxAttempts: nativeMaxAttempts,
+                  retryDeadlineAt, retryDelayMs },
+              });
+            const retryReady = await this.waitForTransientRetry(record, operation, scope, {
+              delayMs: retryDelayMs,
+              deadlineAt: retryDeadlineAt,
+              attemptNumber: nextAttemptNumber,
+            });
+            if (!retryReady) {
+              if (record.stopping) {
+                try {
+                  await this.completeTransientRetryStop(
+                    record,
+                    operation,
+                    scope,
+                    failure,
+                    nativeAttemptNumber + 1,
+                    retryDelayMs,
+                    nativeMaxAttempts,
+                  );
+                } catch (stopFailure) {
+                  record.error = errorFromUnknown(stopFailure);
+                  throw stopFailure;
+                }
+              }
+              return;
+            }
             nativeAttemptNumber += 1;
             continue;
           }
@@ -6965,6 +7232,373 @@ export class RuntimeTaskCoordinator {
     }
   }
 
+  private async waitForTransientRetry(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    input: Pick<RuntimeTransientRetryWaitInput, 'delayMs' | 'deadlineAt' | 'attemptNumber'>,
+  ): Promise<boolean> {
+    if (!this.transientRetryIdentityCurrent(record, operation, scope)) return false;
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    record.transientRetryCancel = cancel;
+    const wait = this.options.transientRetryWaiter ?? waitForTransientRetryTimer;
+    try {
+      const scheduled = wait({
+        ...input,
+        taskId: record.taskId,
+        operationId: operation.operationId,
+        executionEpoch: operation.executionEpoch,
+        signal: controller.signal,
+      }).then(() => true, (error: unknown) => {
+        if (controller.signal.aborted) return false;
+        throw error;
+      });
+      await Promise.race([
+        scheduled,
+        new Promise<false>((resolve) => {
+          if (controller.signal.aborted) resolve(false);
+          else controller.signal.addEventListener('abort', () => resolve(false), { once: true });
+        }),
+      ]);
+    } finally {
+      if (record.transientRetryCancel === cancel) {
+        record.transientRetryCancel = undefined;
+      }
+    }
+    return this.transientRetryIdentityCurrent(record, operation, scope) && !controller.signal.aborted;
+  }
+
+  /**
+   * Completes a stop requested during backoff before any retry request exists.
+   * The failed start proved that no Provider session was acquired for the retry,
+   * so the checkpoint owner records a stopped execution without inventing a
+   * Provider stop receipt or settling an absent session.
+   */
+  private async completeTransientRetryStop(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    failure: RuntimeTaskError,
+    cancelledAttemptNumber: number,
+    retryDelayMs: number,
+    maxAttempts: number,
+  ): Promise<void> {
+    const stopReason = record.stopControl?.reason ?? 'operator-stop';
+    const failureEvidence = failure.evidenceRefs ?? [];
+    this.pushEvent(
+      record,
+      operation,
+      'execution.retry',
+      'cancelled',
+      `已停止等待，第 ${cancelledAttemptNumber} 次请求未发送（上次失败：${failure.message}）`,
+      failureEvidence,
+      failure.ownerId,
+      false,
+      'inspect the stopped execution',
+      {
+        error: failure,
+        occurredAt: this.now().toISOString(),
+        retry: { retryDelayMs, maxAttempts },
+      },
+    );
+    const recovery = { failure, scope };
+    record.transientRetryStopRecovery = recovery;
+    try {
+      await this.recoverTransientRetryStopOnce(record, operation, recovery);
+    } catch {
+      // A failed settle is retained below the original Provider failure by the
+      // shared recovery owner; the execution tail still has to finish so the
+      // public stop call observes that typed blocked state.
+    }
+  }
+
+  /**
+   * Claims the recovery before yielding. Overlapping public retry-stop calls
+   * await this exact promise, so only one close/terminal owner can exist for an
+   * operation even when both callers entered before the first await resolved.
+   */
+  private recoverTransientRetryStopOnce(
+    record: TaskRecord,
+    operation: OperationRecord,
+    recovery: NonNullable<TaskRecord['transientRetryStopRecovery']>,
+  ): Promise<void> {
+    const existing = record.transientRetryStopCompletion;
+    if (existing !== undefined) return existing;
+    let completion!: Promise<void>;
+    completion = this.recoverTransientRetryStop(record, operation, recovery)
+      .catch((error: unknown) => {
+        this.retainTransientRetryStopFailure(record, operation, recovery, error);
+        throw error;
+      })
+      .finally(() => {
+        if (record.transientRetryStopCompletion === completion) {
+          record.transientRetryStopCompletion = undefined;
+        }
+      });
+    record.transientRetryStopCompletion = completion;
+    return completion;
+  }
+
+  private persistTransientRetryStopSettlement(
+    record: TaskRecord,
+    operation: OperationRecord,
+    recovery: NonNullable<TaskRecord['transientRetryStopRecovery']>,
+    state: Extract<RuntimeTaskJournalRecord, { readonly kind: 'operation.stop-settlement' }>['state'],
+    obligations: readonly RuntimeTransientRetryStopObligation[],
+    stopControl: NonNullable<TaskRecord['stopControl']> = record.stopControl
+      ?? { reason: 'operator-stop', actorKind: 'human-operator' },
+    providerClose?: RuntimeTransientRetryProviderClose,
+  ): void {
+    this.journal?.append({
+      kind: 'operation.stop-settlement',
+      taskId: record.taskId,
+      operationId: operation.operationId,
+      executionEpoch: operation.executionEpoch,
+      scope: recovery.scope,
+      state,
+      obligations: [...obligations],
+      stopControl,
+      failure: structuredClone(recovery.failure),
+      ...(providerClose === undefined ? {} : { providerClose: structuredClone(providerClose) }),
+      occurredAt: this.now().toISOString(),
+    });
+  }
+
+  /** Shared stop-owner path for the initial cancellation and its public recovery. */
+  private async recoverTransientRetryStop(
+    record: TaskRecord,
+    operation: OperationRecord,
+    recovery: NonNullable<TaskRecord['transientRetryStopRecovery']>,
+  ): Promise<void> {
+    const scope = recovery.scope;
+    const stoppedCheckpoint = record.checkpoint?.outcome === 'stopped'
+      && sameCheckpointBusinessScope(scope, record.checkpoint.scope)
+      ? record.checkpoint
+      : undefined;
+    record.checkpointBoundary ??= new ContextCheckpointBoundary(
+      this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+      this.now,
+    );
+    if (!stoppedCheckpoint) {
+      await this.commitBusinessCheckpoint(
+        record,
+        scope,
+        'stopped',
+        [],
+        record.stopControl?.reason ?? 'operator-stop',
+      );
+    }
+    const checkpoint = record.checkpoint!;
+    if (recovery.providerClose === undefined) {
+      this.persistTransientRetryStopSettlement(
+        record,
+        operation,
+        recovery,
+        'checkpoint-committed',
+        ['inspection-stop-settlement', 'provider-close', 'stopped-terminal'],
+      );
+      await this.settleInspectionStopAfterCommit(record, operation, checkpoint.evidenceRefs, 'regular');
+    }
+    let closed = recovery.providerClose;
+    if (closed === undefined) {
+      const allocation = operation.allocation;
+      let candidate: RuntimeTransientRetryProviderClose;
+      const retainedClose = this.options.closeRetainedTransientRetryProvider;
+      if (record.driver !== undefined) {
+        try {
+          if (retainedClose === undefined) {
+            candidate = await this.closeForExecution(operation.operationId, record.driver, checkpoint.evidenceRefs);
+          } else {
+            // The live driver still owns the original acquisition and its
+            // prepareCapture/close sequence. Remove only this operation so an
+            // unrelated active execution does not suppress this close.
+            this.activeExecutions.delete(operation.operationId.value);
+            const result = await record.driver.close();
+            candidate = {
+              state: result.state,
+              evidenceRefs: result.evidenceRefs,
+              ownerId: result.ownerId,
+              nextAction: result.nextAction,
+              retained: false,
+            };
+          }
+        } catch (error) {
+          const projection = errorFromUnknown(error);
+          throw new RuntimeTaskControlError(
+            'provider.close.failed',
+            projection.ownerId,
+            projection.message,
+            projection.nextAction,
+          );
+        }
+      } else if (retainedClose !== undefined) {
+        if (allocation === undefined) {
+          throw new RuntimeTaskControlError(
+            'provider.close.allocation.missing',
+            RUNTIME_OWNER,
+            'stopped retry execution has no durable allocation for provider close',
+            'inspect the stopped retry resource',
+          );
+        }
+        try {
+          const result = await retainedClose(allocation);
+          candidate = {
+            state: result.state,
+            evidenceRefs: result.evidenceRefs,
+            ownerId: result.ownerId,
+            nextAction: result.nextAction,
+            retained: false,
+          };
+        } catch (error) {
+          if (error instanceof RuntimeTaskControlError) throw error;
+          const projection = errorFromUnknown(error);
+          throw new RuntimeTaskControlError(
+            'provider.close.failed',
+            projection.ownerId,
+            projection.message,
+            projection.nextAction,
+          );
+        }
+      } else {
+        throw new RuntimeTaskControlError(
+          'provider.close.port.missing',
+          RUNTIME_OWNER,
+          'cold stopped retry execution has no retained provider close port',
+          'bind closeRetainedTransientRetryProvider for the original allocation',
+        );
+      }
+      if (candidate.state !== 'closed' || candidate.retained) {
+        throw new RuntimeTaskControlError(
+          'provider.close.failed',
+          candidate.ownerId ?? RUNTIME_OWNER,
+          candidate.retained
+            ? `provider close retained active executions in state ${candidate.state}`
+            : `provider close is ${candidate.state}`,
+          toNextActionText(candidate.nextAction) ?? 'inspect provider close evidence',
+        );
+      }
+      this.persistTransientRetryStopSettlement(
+        record,
+        operation,
+        recovery,
+        'provider-closed',
+        ['stopped-terminal'],
+        undefined,
+        candidate,
+      );
+      record.transientRetryStopRecovery = { ...recovery, providerClose: candidate };
+      closed = candidate;
+    }
+    const hasTerminal = operation.events.some((event) =>
+      event.kind === 'execution.terminal'
+      && event.state === 'stopped'
+      && event.terminalPhase === 'final',
+    );
+    if (!hasTerminal) {
+      this.pushEvent(
+        record,
+        operation,
+        'execution.terminal',
+        'stopped',
+        `execution stopped during transient retry backoff (${record.stopControl?.reason ?? 'operator-stop'})`,
+        [...checkpoint.evidenceRefs, ...closed.evidenceRefs],
+        undefined,
+        false,
+        undefined,
+        undefined,
+        'final',
+      );
+    }
+    this.persistTransientRetryStopSettlement(record, operation, recovery, 'settled', []);
+    record.transientRetryStopRecovery = undefined;
+    record.postCommitRecoveryPending = false;
+    this.finalize(record, 'stopped');
+  }
+
+  private retainTransientRetryStopFailure(
+    record: TaskRecord,
+    operation: OperationRecord,
+    recovery: NonNullable<TaskRecord['transientRetryStopRecovery']>,
+    failure: unknown,
+  ): void {
+    const cleanup = errorFromUnknown(failure);
+    const durableRecovery = record.transientRetryStopRecovery?.providerClose !== undefined
+      ? record.transientRetryStopRecovery
+      : recovery;
+    const previousCleanup = durableRecovery.failure.cleanupError;
+    const primary: RuntimeTaskError = {
+      ...durableRecovery.failure,
+      cleanupError: previousCleanup === undefined
+        ? cleanup
+        : appendInspectionError(cleanup, previousCleanup),
+    };
+    const checkpointCommitted = record.checkpoint?.outcome === 'stopped'
+      && sameCheckpointBusinessScope(durableRecovery.scope, record.checkpoint.scope);
+    record.transientRetryStopRecovery = {
+      failure: primary,
+      scope: durableRecovery.scope,
+      ...(durableRecovery.providerClose === undefined ? {} : { providerClose: durableRecovery.providerClose }),
+    };
+    record.error = primary;
+    record.state = 'blocked';
+    record.running = false;
+    record.stopping = true;
+    record.allowedActions = ['retry-stop'];
+    record.nextStep = cleanup.nextAction;
+    record.updatedAt = this.now().toISOString();
+    if (checkpointCommitted) {
+      this.markCommittedCheckpointRecovery(record, cleanup.nextAction);
+      record.stopping = true;
+      record.allowedActions = ['retry-stop'];
+      record.currentState = durableRecovery.providerClose !== undefined
+        ? '停止与资源已提交，终态待发布'
+        : '停止已提交，资源收拢未完成';
+    } else {
+      record.postCommitRecoveryPending = false;
+      record.currentState = '停止未提交，可重试收拢';
+    }
+    this.persistTransientRetryStopSettlement(
+      record,
+      operation,
+      record.transientRetryStopRecovery,
+      durableRecovery.providerClose !== undefined
+        ? 'provider-closed'
+        : checkpointCommitted ? 'checkpoint-committed' : 'pending',
+      durableRecovery.providerClose !== undefined
+        ? ['stopped-terminal']
+        : checkpointCommitted
+          ? ['inspection-stop-settlement', 'provider-close', 'stopped-terminal']
+          : ['stopped-checkpoint', 'inspection-stop-settlement', 'provider-close', 'stopped-terminal'],
+      undefined,
+      durableRecovery.providerClose,
+    );
+    this.pushEvent(
+      record,
+      operation,
+      'provider.error',
+      'blocked',
+      cleanup.message,
+      cleanup.evidenceRefs ?? [],
+      cleanup.ownerId,
+      true,
+      cleanup.nextAction,
+      { error: primary },
+    );
+  }
+
+  private transientRetryIdentityCurrent(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+  ): boolean {
+    return !record.stopping
+      && !record.postCommitRecoveryPending
+      && record.operationId?.value === operation.operationId.value
+      && record.executionEpoch === operation.executionEpoch
+      && record.cycleId?.value === scope.cycleId?.value;
+  }
+
   private async closeForExecution(
     operationId: OperationId,
     driver: RuntimeExecutionDriver,
@@ -7230,8 +7864,14 @@ export class RuntimeTaskCoordinator {
     }
   }
 
-  private async commitBusinessCheckpoint(record: TaskRecord, executionScope: ScopeRef, outcome: string, extraEvidenceRefs: readonly EvidenceRef[] = []): Promise<void> {
-    const checkpointOutcome = (['succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'unknown'] as const).find((candidate) => candidate === outcome) ?? 'unknown';
+  private async commitBusinessCheckpoint(
+    record: TaskRecord,
+    executionScope: ScopeRef,
+    outcome: string,
+    extraEvidenceRefs: readonly EvidenceRef[] = [],
+    stopReason?: string,
+  ): Promise<void> {
+    const checkpointOutcome = (['succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'stopped', 'unknown'] as const).find((candidate) => candidate === outcome) ?? 'unknown';
     // A checkpoint committed out of band (stop-control cleanup or a child
     // assembly) can be the real predecessor even though this record has not
     // observed it yet. Locate it first, then derive the business scope from the
@@ -7278,8 +7918,8 @@ export class RuntimeTaskCoordinator {
       ? { kind: 'wait', ref: `recovery-${record.operationId?.value ?? 'none'}` }
       : checkpointOutcome === 'failed' || checkpointOutcome === 'blocked' || checkpointOutcome === 'unknown'
         ? { kind: 'recover', ref: `task://${record.taskId.value}/recovery` }
-        : checkpointOutcome === 'cancelled'
-          ? { kind: 'stop', ref: `task://${record.taskId.value}/terminal` }
+        : checkpointOutcome === 'cancelled' || checkpointOutcome === 'stopped'
+          ? { kind: 'stop', ref: stopReason ?? `task://${record.taskId.value}/terminal` }
           : { kind: 'continue', ref: `task://${record.taskId.value}/next` };
     const checkpoint: Checkpoint = {
       // The checkpoint sequence is per task, but execution epochs reuse the
@@ -7574,6 +8214,14 @@ export class RuntimeTaskCoordinator {
     details?: {
       readonly taskOutput?: string;
       readonly error?: RuntimeTaskError;
+      /** Typed control-clock occurrence for retry backoff; never provider time. */
+      readonly occurredAt?: string;
+      readonly retry?: {
+        readonly attemptNumber?: number;
+        readonly maxAttempts?: number;
+        readonly retryDeadlineAt?: string;
+        readonly retryDelayMs?: number;
+      };
       /**
        * Real provider-reported request identity and occurrence time. Only the
        * provider binding may produce these; the runtime never invents them.
@@ -7602,11 +8250,11 @@ export class RuntimeTaskCoordinator {
     terminalPhase?: 'provider' | 'final',
     deferEmission = false,
   ): RuntimeTaskEvent {
-    operation.seq += 1;
+    const nextSeq = operation.seq + 1;
     const event: RuntimeTaskEvent = {
-      eventId: `${operation.operationId.value}-${operation.seq}`,
-      seq: operation.seq,
-      occurredAt: this.now().toISOString(),
+      eventId: `${operation.operationId.value}-${nextSeq}`,
+      seq: nextSeq,
+      occurredAt: details?.occurredAt ?? this.now().toISOString(),
       taskId: record.taskId,
       operationId: operation.operationId.value,
       executionEpoch: operation.executionEpoch,
@@ -7617,6 +8265,13 @@ export class RuntimeTaskCoordinator {
       ownerId,
       retryable,
       nextAction,
+      ...(details?.error === undefined ? {} : { error: details.error }),
+      ...(details?.retry === undefined ? {} : {
+        ...(details.retry.attemptNumber === undefined ? {} : { attemptNumber: details.retry.attemptNumber }),
+        ...(details.retry.maxAttempts === undefined ? {} : { maxAttempts: details.retry.maxAttempts }),
+        ...(details.retry.retryDeadlineAt === undefined ? {} : { retryDeadlineAt: details.retry.retryDeadlineAt }),
+        ...(details.retry.retryDelayMs === undefined ? {} : { retryDelayMs: details.retry.retryDelayMs }),
+      }),
       ...(terminalPhase === undefined ? {} : { terminalPhase }),
       ...(details?.turn?.turnId === undefined ? {} : { turnId: details.turn.turnId }),
       ...(details?.turn?.requestId === undefined ? {} : { requestId: details.turn.requestId }),
@@ -7638,9 +8293,9 @@ export class RuntimeTaskCoordinator {
       ...(operation.boundPlanRevisionId === undefined ? {} : { boundPlanRevisionId: operation.boundPlanRevisionId }),
       ...(operation.boundPlanStepId === undefined ? {} : { boundPlanStepId: operation.boundPlanStepId }),
     };
-    operation.events.push(event);
-    record.events.push(event);
-    record.updatedAt = event.occurredAt;
+    // The Journal is the durability owner. A failed append must leave the
+    // in-memory sequence unchanged so a retry rebuilds the same event identity
+    // and the Journal can recognize an already committed line as a duplicate.
     this.journal?.append({
       kind: 'operation.event',
       operationId: operation.operationId,
@@ -7649,6 +8304,10 @@ export class RuntimeTaskCoordinator {
       error: details?.error,
       ...(details?.zeroEffectAdmissionDenial === undefined ? {} : { zeroEffectAdmissionDenial: details.zeroEffectAdmissionDenial }),
     });
+    operation.seq = nextSeq;
+    operation.events.push(event);
+    record.events.push(event);
+    record.updatedAt = event.occurredAt;
     if (!deferEmission) {
       this.listeners.emit(operation.operationId.value, event);
       this.listeners.emit(`task:${record.taskId.value}`, event);
@@ -7873,6 +8532,30 @@ export class RuntimeTaskCoordinator {
           }
           if (record.event.kind === 'provider.tool') task.currentNode = RUNTIME_NODE_MARKERS.providerTool;
           if (record.event.kind === 'provider.model') task.currentNode = RUNTIME_NODE_MARKERS.providerModel;
+          if (record.event.kind === 'execution.terminal'
+            && record.event.state === 'stopped'
+            && record.event.terminalPhase === 'final') {
+            task.transientRetryStopRecovery = undefined;
+            task.postCommitRecoveryPending = false;
+          }
+          break;
+        }
+        case 'operation.stop-settlement': {
+          const operation = this.operations.get(record.operationId.value);
+          const task = this.tasks.get(record.taskId.value);
+          if (!operation || !task) break;
+          if (operation.taskId.value !== record.taskId.value
+            || operation.executionEpoch !== record.executionEpoch
+            || !sameScope(operation.allocation?.scope ?? record.scope, record.scope)) {
+            throw new RuntimeTaskControlError(
+              'journal.corrupt',
+              RUNTIME_OWNER,
+              `journal stop settlement ${record.operationId.value} identity does not match its operation`,
+              'repair or discard the UI runtime journal before restarting',
+            );
+          }
+          applyPersistedTransientRetryStopFact(task, record);
+          task.updatedAt = record.occurredAt;
           break;
         }
         case 'explicit-brain.state': {
@@ -7925,6 +8608,53 @@ export class RuntimeTaskCoordinator {
           cycleId: scope.cycleId,
         };
         const latest = await store.readLatest(scope) ?? await store.readLatest(businessScope);
+        const pendingTransientStop = task.transientRetryStopRecovery
+          && task.operationId?.value === operation.operationId.value
+          && task.executionEpoch === operation.executionEpoch
+          && task.transientRetryStopRecovery.scope.operationId?.value === operation.operationId.value
+          ? task.transientRetryStopRecovery
+          : undefined;
+        if (pendingTransientStop !== undefined) {
+          const stopped = latest !== null
+            && latest.checkpoint.outcome === 'stopped'
+            && sameCheckpointBusinessScope(scope, latest.checkpoint.scope)
+            && latest.checkpoint.scope.operationId?.value === operation.operationId.value;
+          if (stopped) {
+            const recalled = await recallCheckpoint(store, { ownerId: RUNTIME_OWNER, scope: latest.checkpoint.scope });
+            if (!recalled
+              || recalled.checkpoint.id.value !== latest.checkpoint.id.value
+              || !sameCheckpointBusinessScope(scope, recalled.checkpoint.scope)) {
+              this.markRecoveryRequired(task);
+              continue;
+            }
+            task.checkpoint = recalled.checkpoint;
+            task.checkpointSeq = recalled.checkpoint.seq;
+            const exactRecord = await store.readCommitted(recalled.checkpoint.scope, recalled.checkpoint.id);
+            task.checkpointReceipt = exactRecord === null
+              ? undefined
+              : (await readDurableCheckpointReceipt(store, exactRecord)) ?? undefined;
+          } else {
+            task.checkpoint = latest !== null && sameCheckpointBusinessScope(scope, latest.checkpoint.scope)
+              ? latest.checkpoint
+              : undefined;
+            task.checkpointSeq = task.checkpoint?.seq ?? 0;
+            task.checkpointReceipt = undefined;
+          }
+          task.error = structuredClone(pendingTransientStop.failure);
+          task.state = 'blocked';
+          task.running = false;
+          task.stopping = true;
+          task.allowedActions = ['retry-stop'];
+          task.currentState = pendingTransientStop.providerClose !== undefined
+            ? '停止与资源已提交，终态待发布'
+            : stopped ? '停止已提交，资源收拢未完成' : '停止未提交，可重试收拢';
+          task.nextStep = pendingTransientStop.failure.cleanupError?.nextAction
+            ?? pendingTransientStop.failure.nextAction;
+          task.postCommitRecoveryPending = stopped;
+          task.currentNode = RUNTIME_NODE_MARKERS.checkpointCommit;
+          task.updatedAt = this.now().toISOString();
+          continue;
+        }
         if (this.options.effectLedgerFor) {
           const isTerminalCheckpoint =
             latest !== null
