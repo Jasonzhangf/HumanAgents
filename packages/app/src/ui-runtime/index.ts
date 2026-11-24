@@ -648,6 +648,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   };
   const runtimeService = new UiRuntimeService({
     mode: options.mode,
+    ...(options.agentRoster === undefined ? {} : { agentRoster: options.agentRoster }),
     maxConcurrentTasks: options.maxConcurrentTasks,
     organId: options.organId,
     principalOwner,

@@ -85,7 +85,7 @@ import { JsonlInteractionParentTurnJournal } from '../../../adapters/jsonl/src/i
 import { DraftRevisionError } from '../../../core/src/draft-revision.js';
 import { directTaskCreateIdentitySource } from '../../../core/src/task-identity.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
-import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
+import { loadBuiltinAgentTemplate, managementRoleForAgent, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import { submitInteractionClosure, type SubmittedInteractionClosure } from '../../../runtime/src/checkpoints/submission.js';
@@ -369,6 +369,8 @@ import { type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runt
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
 import { createJsonlCheckpointJournal, createJsonlContextHistoryPort, createJsonlSemanticHistoryReader } from '../checkpoint-journal.js';
 import { AppLifecycleError } from '../errors.js';
+import { readRunManifest } from '../run-manifest.js';
+import { SessionStore } from '../session-store.js';
 import {
   createExplicitBrainRuntime,
   type ExplicitBrainRuntime,
@@ -596,6 +598,7 @@ export interface UiRuntimeTaskControlTarget {
 
 export interface UiRuntimeServiceOptions {
   readonly mode: 'fake' | 'rcc';
+  readonly agentRoster?: readonly Pick<import('../../../config/src/index.js').AgentConfig, 'agentId' | 'roleId' | 'managementRole'>[];
   readonly maxConcurrentTasks?: number;
   readonly organId: OrganId;
   readonly principalOwner?: string;
@@ -6027,6 +6030,96 @@ export class UiRuntimeService {
     };
   }
 
+  private explicitProjectSnapshotReader(interaction: ExplicitInteractionSnapshot):
+    ((members?: readonly string[]) => Promise<unknown>) | undefined {
+    const projectKey = this.options.projectKey;
+    const roster = this.options.agentRoster;
+    if (projectKey === undefined || roster === undefined
+      || roster.filter(agent => managementRoleForAgent(agent) === 'project-lead').length !== 1
+      || (interaction.workspace !== undefined && interaction.workspace.projectKey !== projectKey)) return undefined;
+
+    const declared = roster.filter(agent => managementRoleForAgent(agent) !== 'ceo').map(agent => ({
+      agent,
+      memberRef: managementRoleForAgent(agent) === 'project-lead' ? this.defaultBoardOwner().actorId : agent.agentId,
+    }));
+    if (new Set(declared.map(member => member.memberRef)).size !== declared.length) return undefined;
+    return async (requested) => {
+      const selected = requested === undefined ? declared : requested.map(ref => {
+        const matches = declared.filter(member => member.memberRef === ref);
+        if (matches.length !== 1) {
+          throw new UiRuntimeApiError('project.snapshot.member-unavailable', APP_OWNER,
+            'member is absent or ambiguous in the authorized project roster', 'select an exact member from the project snapshot', 404);
+        }
+        return matches[0]!;
+      });
+      const observedAt = this.now().toISOString();
+      const tasks = this.coordinator.taskSnapshots();
+      const allocations = (this.options.journal?.replay() ?? []).flatMap(record =>
+        record.kind === 'operation.prepared' ? [record.allocation] : []);
+      const active = allocations.flatMap(allocation => {
+        const task = tasks.find(task => task.taskId.value === allocation.taskId.value
+          && task.operationId === allocation.operationId.value && task.executionEpoch === allocation.executionEpoch
+          && (task.boardOwner === undefined || (task.boardOwner.scope === 'project' && task.boardOwner.projectId === projectKey))
+          && (task.state === 'running' || task.state === 'settling'));
+        return task === undefined ? [] : [{ allocation, task }];
+      });
+      const paths = this.options.runtimePaths;
+      const sessionFacts = paths !== undefined && active.length > 0 ? await (async () => {
+        try {
+          const sessions = await new SessionStore(paths).list();
+          return { sessions: await Promise.allSettled(sessions.map(async session => ({
+            session, run: await readRunManifest(paths, session.sessionId),
+          }))) };
+        } catch {
+          return { failure: 'session-store-unavailable' };
+        }
+      })() : { failure: 'session-source-unavailable' };
+      const currentTasks = new Map(this.coordinator.taskSnapshots().map(task => [task.taskId.value, task]));
+      const sessionReadFailed = sessionFacts.sessions?.some(result => result.status === 'rejected'
+        && (!(result.reason instanceof AppLifecycleError) || result.reason.code !== 'run-manifest-missing'));
+      const summarize = (task: RuntimeTaskSnapshot) => ({
+        taskId: task.taskId.value, title: task.title, state: task.state, updatedAt: task.updatedAt,
+      });
+      const members = selected.map(({ agent, memberRef }) => {
+        const board = this.taskBoard({ scope: 'project', projectId: projectKey, actorId: memberRef });
+        const executions = active.filter(({ allocation }) => allocation.configuredAgentId === agent.agentId).map(({ allocation, task }) => {
+          const stillCurrent = currentTasks.get(task.taskId.value);
+          if (stillCurrent === undefined || stillCurrent.operationId !== task.operationId || stillCurrent.executionEpoch !== task.executionEpoch
+            || (stillCurrent.boardOwner !== undefined && (stillCurrent.boardOwner.scope !== 'project' || stillCurrent.boardOwner.projectId !== projectKey))
+            || (stillCurrent.state !== 'running' && stillCurrent.state !== 'settling')) return undefined;
+          const activity = task.recentEvents.filter(event => event.operationId === allocation.operationId.value
+            && event.executionEpoch === allocation.executionEpoch).at(-1);
+          const matchingSessions = sessionFacts.sessions?.flatMap(result => result.status === 'fulfilled'
+            && result.value.run.agentId === agent.agentId
+            && result.value.run.scope.organId.value === this.options.organId.value
+            && result.value.run.runtimeId === allocation.runtimeId
+            && result.value.run.operationId.value === allocation.operationId.value
+            && result.value.run.executionEpoch === allocation.executionEpoch
+            && result.value.run.taskId.value === task.taskId.value ? [result.value.session] : []);
+          const session = matchingSessions?.length === 1 ? matchingSessions[0] : undefined;
+          return {
+            ...summarize(task), runtimeId: allocation.runtimeId, executionEpoch: allocation.executionEpoch,
+            activity: activity === undefined ? null : { kind: activity.kind, state: activity.state, occurredAt: activity.occurredAt },
+            session: session === undefined ? { state: 'unknown', reason: sessionFacts.failure
+              ?? (matchingSessions?.length ? 'multiple-session-bindings'
+                : sessionReadFailed ? 'session-binding-read-failed' : 'no-current-session-binding') } : {
+              sessionId: session.sessionId, state: session.state, observedAt: session.records.at(-1)?.occurredAt,
+            },
+          };
+        }).filter(entry => entry !== undefined);
+        return {
+          memberRef, configuredAgentId: agent.agentId, role: agent.roleId,
+          status: executions.length > 0 ? 'busy' : 'unknown',
+          ...(executions.length > 0 ? {} : { statusReason: 'member-runtime-presence-unbound' }),
+          board: { current: board.current.map(entry => summarize(entry.task)), history: board.history.map(entry => summarize(entry.task)) },
+          executions,
+        };
+      });
+      return { projectKey, observedAt, members, coverage: 'configured-roster-and-bound-task-executions',
+        unassigned: tasks.filter(task => task.boardOwner === undefined).map(summarize) };
+    };
+  }
+
   taskDashboard(taskId: TaskId, authoritativePublication?: PublicOutputPublicationProjection): RuntimeTaskDashboardView {
     try {
       const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
@@ -8350,6 +8443,7 @@ export class UiRuntimeService {
       clarifications: snapshot.clarifications ?? [],
       taskCandidates,
       readTaskResult: this.explicitTaskResultReader(snapshot),
+      readProjectSnapshot: this.explicitProjectSnapshotReader(snapshot),
       onStep: (step: ExplicitInteractionStepInput) => this.recordExplicitStep(snapshot.interactionId, step),
       ...(snapshot.workspace === undefined ? {} : {
         workspaceCwd: snapshot.workspace.workspaceCwd,
@@ -8590,6 +8684,7 @@ export class UiRuntimeService {
         clarifications: snapshot.clarifications ?? [],
         taskCandidates,
         readTaskResult: this.explicitTaskResultReader(snapshot),
+        readProjectSnapshot: this.explicitProjectSnapshotReader(snapshot),
         onStep: (step) => this.recordExplicitStep(snapshot.interactionId, step),
         ...(snapshot.workspace === undefined ? {} : {
           workspaceCwd: snapshot.workspace.workspaceCwd,

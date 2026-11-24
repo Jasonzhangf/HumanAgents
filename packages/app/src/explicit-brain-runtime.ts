@@ -33,6 +33,7 @@ import {
 } from '../../adapters/provider/src/index.js';
 import { BudgetedProviderObservations, DEFAULT_UI_EXECUTION_EVENT_BUDGET } from '../../runtime/src/ui-runtime/execution-budget.js';
 import { RuntimeTaskControlError } from '../../runtime/src/ui-runtime/coordinator.js';
+import { UiRuntimeApiError } from './ui-runtime/errors.js';
 import type { AgentIoEventBudget } from '../../runtime/src/agent-io/types.js';
 import type { ProviderEvidenceSink } from '../../adapters/provider/src/evidence.js';
 import { prepareScopeSemanticHistory } from '../../runtime/src/context/interaction-semantic-context.js';
@@ -134,6 +135,12 @@ const TASK_RESULT_READ_TOOL: ProviderToolDefinition = {
     properties: { taskId: NONEMPTY_STRING_SCHEMA } },
 };
 const STRING_LIST_SCHEMA = { type: 'array', items: NONEMPTY_STRING_SCHEMA, uniqueItems: true };
+const PROJECT_SNAPSHOT_TOOL: ProviderToolDefinition = {
+  toolId: 'project.snapshot',
+  description: 'Read the authorized project roster, member boards, runtime status and latest session activity. Omit members for the full roster, or pass exact member references. Missing observations do not establish availability.',
+  inputSchema: { type: 'object', additionalProperties: false,
+    properties: { members: { ...STRING_LIST_SCHEMA, minItems: 1 } } },
+};
 const EXPLICIT_END_TOOL: ProviderToolDefinition = {
   toolId: STANDARD_TURN_END_WIRE_TOOL_ID,
   description: 'Finish explicit intake with a validated simple decision or a complex requirement and semantic capsule. This does not execute a task.',
@@ -187,7 +194,7 @@ const EXPLICIT_END_TOOL: ProviderToolDefinition = {
 const REGISTERED_TOOL_SURFACE = [
   '# Registered tools',
   'This request provides interaction.select_skills and humanagent_turn_end. When the host also registers task.read_result, pass only taskId to read existing published task results before answering follow-up questions. Correct invalid arguments or an unknown task using the paired tool error in this same turn. Skill selection loads guidance. The end tool validates and records your decision; it never executes business work.',
-  'Other role tool names are capability metadata. They are not executable in this bounded intake request; business execution stays behind the confirmed task flow.',
+  'In this bounded intake request, use only the tools advertised in the request. A project Manager can use the advertised project.snapshot for current project status under the project-management Skill. Business execution stays behind the confirmed task flow.',
 ].join('\n');
 
 const INTAKE_OUTPUT_PROTOCOL = [
@@ -195,7 +202,7 @@ const INTAKE_OUTPUT_PROTOCOL = [
   'This is one intake decision, not one turn of task execution. Produce exactly one decision object for the current input and claim no task execution.',
   'For a simple question you can answer from the supplied context, call humanagent_turn_end with kind=simple and your structured decision.',
   'For a request that needs registered Skill guidance, call interaction.select_skills once with every relevant registered Skill ID. The tool only loads prompt guidance; it does not perform project, agent, or communication operations.',
-  'After any Skill result, call humanagent_turn_end. Do not dispatch helpers or execute business work. Text alone cannot finish this turn.',
+  'After reading selected Skill guidance, use any advertised internal read tool needed to resolve the current input. When the decision is ready, call humanagent_turn_end. Do not dispatch helpers or execute business work. Text alone cannot finish this turn.',
   'The end arguments contain kind=simple or complex, a decision object, and checkpointRecord.index with one-sentence action and result. decision.kind must be requirement, status-query, clarification, or answer. A requirement uses complex and must include capsule with summary, goal, process (string array), findings (string array), nextStep and optional detailRefs. All other decisions use simple with no capsule; the answer is its detail.',
   'Inside decision, always include kind, normalizedInput, knownFacts (string array), and decisionRefs (string array). Add proposal, optional taskFlow and matchedTaskId for requirement; answer for status-query and answer; or question and optional options (string array) for clarification. Proposal fields belong only inside proposal.',
   'Put the complete decision under decision in the end tool arguments. Do not put control state, selected actions, tool intents or user-input flags in it.',
@@ -211,7 +218,7 @@ const INTAKE_OUTPUT_PROTOCOL = [
   `Complex end shape: {"kind":"complex","decision":{"kind":"requirement","normalizedInput":"requested work","knownFacts":[],"decisionRefs":[],"proposal":{"revision":CURRENT_INPUT_REVISION,"intent":"create","title":"task title","objective":"goal","deliverable":"deliverable","deliveryConditions":["acceptance"],"evidenceRefs":[],"blockingGaps":[]},"taskFlow":{"kind":"one-shot","definitionVersion":${TASK_FLOW_DEFINITION_VERSION}}},"checkpointRecord":{"index":{"action":"accepted the requirement","result":"ready for execution"}},"capsule":{"summary":"intake result","goal":"user goal","process":["intake steps"],"findings":[],"nextStep":"implicit brain executes"}}. Replace CURRENT_INPUT_REVISION with the actual integer inputRevision.`,
   'Submitting the new-task form is already the user confirmation. For proposal.intent=create, do not write a second-confirmation blocker into objective, deliveryConditions, or blockingGaps.',
   'Do not choose a task execution owner, worker, provider, or runtime in the intake decision.',
-  'Use answer for a question you can answer from current input, provided context or host-authorized task.read_result results, with no new execution, exploration, external retrieval, or deliverable. Reading this system published results is not new business work. Respect publication state: pending/unknown with confirmed commits is partial evidence, never complete success; ambiguous execution requires clarification. Put the reply in answer; do not carry matchedTaskId, proposal, or intent. A request to perform new work, explore, retrieve externally, or deliver a result is a requirement, never an answer.',
+  'Use answer for a question you can answer from current input, provided context or advertised internal reads such as task.read_result or project.snapshot, with no new execution, exploration, external retrieval, or deliverable. Respect publication state: pending/unknown with confirmed commits is partial evidence, never complete success; ambiguous execution requires clarification. Put the reply in answer; do not carry matchedTaskId, proposal, or intent. A request to perform new work, explore, retrieve externally, or deliver a result is a requirement, never an answer.',
   'For status-query use matchedTaskId when one task is selected. For answer, put the reply in answer and omit matchedTaskId, proposal, and intent.',
   'For clarification, ask one concrete question, include options (an array of 2 to 4 concrete selectable option strings) when candidate choices exist, and do not invent a task match.',
   'Use answered clarifications in the committed user input as facts for this request. Ask only for information that is still missing.',
@@ -307,6 +314,7 @@ export interface ExplicitBrainInterpretationInput {
   readonly taskCandidates: readonly ExplicitBrainTaskCandidate[];
   /** Host-bound service read authority. Never serialized into business input. */
   readonly readTaskResult?: (taskId: string) => Promise<unknown>;
+  readonly readProjectSnapshot?: (members?: readonly string[]) => Promise<unknown>;
   /**
    * Conversation project target carried by the input. When present the explicit
    * brain treats this absolute project directory as the project context of the
@@ -1348,6 +1356,9 @@ export function createProviderExplicitBrainInterpreter(input: {
       const priorCheckpoints = continuation?.fact.priorCheckpoints
         ?? await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
       const owned = await input.prepareAgentProvider?.({ roleId: 'interaction' });
+      const configuredAgent = input.agentRoster?.find(agent => agent.agentId === owned?.configuredAgentId);
+      const readProjectSnapshot = configuredAgent !== undefined && managementRoleForAgent(configuredAgent) === 'project-lead'
+        ? request.readProjectSnapshot : undefined;
       // One selected binding for the whole turn: the raw owner freezes it, and
       // the driver uses the same value. A borrowed provider keeps its existing
       // non-closing ownership; only the original owner records a close fact.
@@ -1509,7 +1520,8 @@ export function createProviderExplicitBrainInterpreter(input: {
             }
           },
           ...(continuation?.acceptedEnd !== undefined || continuation?.partialDrain !== undefined ? {} : { tools: [SKILL_SELECTION_TOOL, ...(useEndProtocol ? [EXPLICIT_END_TOOL] : []),
-            ...(request.readTaskResult === undefined ? [] : [TASK_RESULT_READ_TOOL])] }),
+            ...(request.readTaskResult === undefined ? [] : [TASK_RESULT_READ_TOOL]),
+            ...(readProjectSnapshot === undefined ? [] : [PROJECT_SNAPSHOT_TOOL])] }),
           ...(!useEndProtocol ? {} : { completeRequest: async ({ requestId, tools }: {
             readonly requestId: string;
             readonly tools: readonly { readonly call: import('../../contracts/src/index.js').ProviderToolCall; readonly result: ProviderToolExecutionResult }[];
@@ -1530,6 +1542,35 @@ export function createProviderExplicitBrainInterpreter(input: {
           executeTool: {
             async execute({ call, requestId }): Promise<ProviderToolExecutionResult> {
               const key = JSON.stringify([requestId, call.callId]);
+              if (call.toolId === PROJECT_SNAPSHOT_TOOL.toolId && readProjectSnapshot !== undefined) {
+                const nextAction = { kind: 'continue', ref: PROJECT_SNAPSHOT_TOOL.toolId } as const;
+                const rejected = (code: string, message: string): ProviderToolExecutionResult => ({
+                  output: JSON.stringify({ status: 'failed', code, callId: call.callId, toolId: call.toolId,
+                    message, recoverable: true, nextAction }),
+                  outputRefs: [], evidenceRefs: [], status: 'failed',
+                  error: { errorId: `${code}:${call.callId}`, code, message, category: 'validation',
+                    phase: 'tool', ownerId: 'humanagent.app', retryable: 'retryable', attention: 'foreground',
+                    evidenceRefs: [], nextAction },
+                });
+                const args = call.arguments;
+                const invalid = () => rejected('project.snapshot.invalid-arguments',
+                  'Pass an empty object for all members or only a non-empty list of unique member references');
+                if (args === null || typeof args !== 'object' || Array.isArray(args)
+                  || Object.keys(args).some(key => key !== 'members')) return invalid();
+                const members = 'members' in args ? args.members : undefined;
+                if (members !== undefined && (!Array.isArray(members) || members.length === 0
+                  || !members.every((ref): ref is string => typeof ref === 'string' && ref.trim().length > 0)
+                  || new Set(members).size !== members.length)) return invalid();
+                try {
+                  return { output: JSON.stringify(await readProjectSnapshot(members)),
+                    outputRefs: [], evidenceRefs: [], status: 'succeeded' };
+                } catch (error) {
+                  if (error instanceof UiRuntimeApiError && error.code === 'project.snapshot.member-unavailable') {
+                    return rejected(error.code, error.message);
+                  }
+                  throw error;
+                }
+              }
               if (call.toolId === TASK_RESULT_READ_TOOL.toolId && request.readTaskResult !== undefined) {
                 const args = call.arguments;
                 const rejected = (code: string, message: string): ProviderToolExecutionResult => ({

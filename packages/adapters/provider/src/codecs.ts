@@ -314,6 +314,7 @@ function businessText(
 
 const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
   ['task.read_result', 'task_read_result'],
+  ['project.snapshot', 'project_snapshot'],
   ['file.read', 'file_read'],
   ['file.list', 'file_list'],
   ['file.search', 'file_search'],
@@ -333,6 +334,7 @@ const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
 ]);
 const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
   ['task_read_result', 'task.read_result'],
+  ['project_snapshot', 'project.snapshot'],
   ['file_read', 'file.read'],
   ['file_list', 'file.list'],
   ['file_search', 'file.search'],

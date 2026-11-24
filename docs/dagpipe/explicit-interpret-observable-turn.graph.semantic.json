@@ -24,6 +24,7 @@
     "turn_result": "packages/app"
   },
   "contracts": {
+    "managerSkill": "已注册的 project-management Skill 维护 Manager 事件触发与工具流程。Manager 角色提示词只维护长期职责与边界。真实项目级快照工具依赖宿主授权，聚合原 board、当前运行绑定和可公开会话；缺失来源显式标记。",
     "inputs": "一次用户提交携带原始输入、sourceRef 与 inputRevision，进入既有 explicit intake。",
     "progress": "提交进度步骤只来自真实 explicit.step 事件（seq、summary、occurredAt）。interpret 是长请求，页面必须能在等待期间看到真实推进；无真实 step 时只显示提交中与初始本步计时，不猜步骤、不伪造序号或总步数。",
     "time": "服务端 201 回执携带的真实 occurredAt 是服务端业务时间真源；页面提交观察计时只基于本地单调时钟：总耗时从 banner mount 起算，本步耗时从当前真实 step 到达时刻起算，不补算页面挂载前时间，不得用服务端 occurredAt 反算挂载前耗时。",

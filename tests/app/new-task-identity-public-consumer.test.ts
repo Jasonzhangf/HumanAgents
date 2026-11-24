@@ -357,6 +357,7 @@ function taskControlPathFor(root: string, mode: 'fake' | 'rcc' = 'fake'): string
 async function startRuntime(root: string, port: ExecutionRuntimePort, extra: {
   readonly projectKey: string;
   readonly mode?: 'fake' | 'rcc';
+  readonly agentRoster?: UiRuntimeLaunchOptions['agentRoster'];
   readonly providerSource?: 'rcc' | 'http';
   readonly binding?: ProviderBinding;
   readonly explicitBrainInterpreter?: ExplicitBrainInputInterpreter;
@@ -381,6 +382,7 @@ async function startRuntime(root: string, port: ExecutionRuntimePort, extra: {
     workspaceRoot: root,
     memory: memoryFor(extra.projectKey),
     accessControl: auth.accessControl,
+    ...(extra.agentRoster === undefined ? {} : { agentRoster: extra.agentRoster }),
     explicitBrainInterpreter: extra.explicitBrainInterpreter ?? createInterpreter,
     ...(extra.providerSource === undefined ? {} : { providerSource: extra.providerSource }),
     ...(extra.runtimeComposition === undefined ? {} : { runtimeComposition: extra.runtimeComposition }),
@@ -708,6 +710,55 @@ async function currentTaskPlanReceipt(
   if (receipt === null) throw new Error(`fixture lost the physical receipt for ${revisionId}`);
   return receipt;
 }
+
+test('manager snapshot reads per-member boards from the serve scope and rejects an undeclared member', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'manager-project-snapshot-'));
+  type Snapshot = { projectKey: string; members: readonly {
+    memberRef: string; status: string; board: { current: readonly { title: string }[] };
+  }[] };
+  const observed: { read?: (members?: readonly string[]) => Promise<unknown> } = {};
+  const runtime = await startRuntime(root, new CountingStartPort({ binding, stepDelayMs: 1 }), {
+    projectKey: 'project-snapshot',
+    agentRoster: [
+      { agentId: 'configured-manager', roleId: 'interaction', managementRole: 'project-lead' },
+      { agentId: 'control-domain-ceo', roleId: 'interaction', managementRole: 'ceo' },
+      { agentId: 'worker', roleId: 'execution' },
+    ],
+    explicitBrainInterpreter: { async interpret(input) {
+      observed.read = input.readProjectSnapshot;
+      return { kind: 'answer', answer: 'snapshot fixture', normalizedInput: input.rawInput, knownFacts: [], decisionRefs: [] };
+    } },
+  });
+  try {
+    runtime.service.createTask({
+      title: 'Project worker task', directive: 'Project-only directive',
+      boardOwner: { scope: 'project', projectId: 'project-snapshot', actorId: 'worker' },
+    });
+    runtime.service.createTask({
+      title: 'Other project task', directive: 'Other project directive',
+      boardOwner: { scope: 'project', projectId: 'other-project', actorId: 'worker' },
+    });
+    const interactionId = await runtime.service.receiveExplicitInput({
+      sourceRef: 'ui:manager-snapshot', channel: 'business', rawInput: 'Show project members.',
+    });
+    await runtime.service.interpretExplicitInput({ interactionId });
+    const read = observed.read;
+    if (read === undefined) throw new Error('the Manager interpretation must receive a live snapshot reader');
+    const all = await read() as Snapshot;
+    assert.equal(all.projectKey, 'project-snapshot');
+    assert.deepEqual(all.members.map(member => member.memberRef), ['Jenny', 'worker']);
+    assert.equal(JSON.stringify(all).includes('Other project'), false);
+    const batch = await read(['worker']) as Snapshot;
+    assert.equal(batch.members.length, 1);
+    assert.deepEqual(batch.members[0]?.board.current.map(task => task.title), ['Project worker task']);
+    assert.equal(batch.members[0]?.status, 'unknown');
+    await assert.rejects(() => read(['unknown']), /absent or ambiguous in the authorized project roster/);
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('public new-task submit binds the real typed source and cold-reads before and after execution', async () => {
   await mkdir(ROOT, { recursive: true });
