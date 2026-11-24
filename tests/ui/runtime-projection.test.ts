@@ -354,6 +354,33 @@ test('main topic shows one linked task and relays its child ask to the user-faci
   assert.deepEqual(projection.openInputRequest?.options, request.options);
 });
 
+test('an explicit turn keeps its real request and tool steps after the task is linked', () => {
+  const taskId = id('task', 'main-topic-tool-steps');
+  const projection = projectMainTopic({
+    projectKey: 'main-topic-project', projectName: '工具项目', workspaceCwd: '/tmp/main-topic-project', mode: 'rcc',
+    interactions: [{
+      interactionId: 'main-topic-tool-interaction', rawInput: '读取预算并报告。', occurredAt: '2026-11-22T10:00:00.000Z',
+      state: 'confirmed', draftProposal: '读取预算并报告', taskId,
+      steps: [
+        { seq: 1, kind: 'request.dispatching', summary: '正在请求模型整理任务', occurredAt: '2026-11-22T10:00:01.000Z', requestId: 'request-1', turnId: 'turn-1' },
+        { seq: 2, kind: 'tool.started', summary: '内置工具已调用', occurredAt: '2026-11-22T10:00:02.000Z', requestId: 'request-1', turnId: 'turn-1', tool: { kind: 'select-skills', callId: 'call-1' } },
+        { seq: 3, kind: 'tool.finished', summary: '内置工具已返回', occurredAt: '2026-11-22T10:00:03.000Z', requestId: 'request-1', turnId: 'turn-1', tool: { kind: 'select-skills', callId: 'call-1', status: 'succeeded', detail: { kind: 'skills', skills: ['task-intake'] } } },
+      ],
+    }],
+    tasks: [{
+      taskId, title: '读取预算', state: 'running', stateLabel: '执行中', currentNode: 'provider.tool', nextStep: '等待读取结果',
+      output: '', updatedAt: '2026-11-22T10:00:04.000Z', sourceInteractionId: 'main-topic-tool-interaction',
+    }],
+  });
+
+  const draft = projection.turns.find((turn) => turn.turnId === 'draft:main-topic-tool-interaction');
+  assert.equal(draft?.statusFacts?.steps?.length, 3);
+  assert.deepEqual(draft?.statusFacts?.steps?.filter((step) => step.kind.startsWith('tool.')).map((step) => [step.requestId, step.turnId, step.tool?.callId]), [
+    ['request-1', 'turn-1', 'call-1'],
+    ['request-1', 'turn-1', 'call-1'],
+  ]);
+});
+
 test('main topic retains each consumed request and exact answer once in user turn order', () => {
   const taskId = id('task', 'main-topic-answered-task');
   const projection = projectMainTopic({

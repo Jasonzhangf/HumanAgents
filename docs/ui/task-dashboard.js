@@ -1640,9 +1640,24 @@ heading.append(refreshButton)
 
 function refreshPage() {
   if (pageDisposed) return
+  const readVersionBefore = dashboardFreshReadVersion
+  taskResumeRefreshPending = true
+  renderActiveReadingMode()
   // A manual refresh is the one path that re-reads the shared semantic panel.
   // Plain re-renders re-attach its retained host without a new request.
-  void refresh().then(() => semanticObservationPanel?.reload()).catch(setRefreshError)
+  void refresh()
+    .then(async () => {
+      if (pageDisposed || dashboardFreshReadVersion === readVersionBefore) return
+      taskResumeUnconfirmedKey = ''
+      taskResumeNotice = ''
+      taskResumeError = undefined
+      await semanticObservationPanel?.reload()
+    })
+    .catch(setRefreshError)
+    .finally(() => {
+      taskResumeRefreshPending = false
+      if (!pageDisposed) renderActiveReadingMode()
+    })
 }
 
 let dashboard
@@ -3092,7 +3107,151 @@ function markSync() {
 const STOP_ACTION_LABEL = '停止本次执行'
 const RETRY_STOP_ACTION_LABEL = '重试停止'
 const START_ACTION_LABEL = '处理任务'
+const RESUME_ACTION_LABEL = '继续原任务'
 const GRANT_CONTROL_FAILURE_COPY = '执行授权处理未完成；请打开技术详情查看原因。'
+let taskResumeBusy = false
+let taskResumeNotice = ''
+let taskResumeError
+let taskResumeUnconfirmedKey = ''
+let taskResumeRefreshPending = false
+let dashboardFreshReadVersion = 0
+
+function currentTaskResumeTarget() {
+  if (!explicitScope || dashboard?.resumeTarget === undefined || dashboard.resumeTarget === null) return null
+  const target = dashboard.resumeTarget
+  if (typeof target !== 'object'
+    || typeof target.taskId !== 'string' || target.taskId.trim() === ''
+    || typeof target.operationId !== 'string' || target.operationId.trim() === '') {
+    return { invalid: true }
+  }
+  return { taskId: target.taskId, operationId: target.operationId }
+}
+
+function taskResumeTargetKey(target) {
+  return target && !target.invalid ? `${target.taskId}\n${target.operationId}` : ''
+}
+
+function taskResumeHeld(dashboardValue = dashboard) {
+  return dashboardValue?.checkpoint?.recoveryOutcome === 'recovery-hold-effect-unknown'
+}
+
+function taskResumeStatusCopy() {
+  const target = currentTaskResumeTarget()
+  if (target?.invalid) return '项目没有提供完整的原执行信息，未发送请求。'
+  if (taskResumeRefreshPending) return '正在重新读取任务状态…'
+  if (taskResumeUnconfirmedKey && taskResumeUnconfirmedKey === taskResumeTargetKey(target)) {
+    return '继续结果尚未确认。请刷新页面重新读取任务状态。'
+  }
+  if (taskResumeBusy) return '正在继续原任务…'
+  return taskResumeNotice || '确认原执行仍可继续后，继续原来的任务。'
+}
+
+function renderTaskResumeSection() {
+  if (!explicitScope) return null
+  const target = currentTaskResumeTarget()
+  const held = taskResumeHeld()
+  if (!target && !held && !taskResumeNotice && !taskResumeError) return null
+
+  const section = element('section', undefined, 'section task-resume-section')
+  section.dataset.taskResume = held ? 'held' : target?.invalid ? 'invalid' : target ? 'ready' : 'receipt'
+  section.append(element('h2', held ? '恢复受阻' : RESUME_ACTION_LABEL))
+  const panel = element('div', undefined, 'panel')
+
+  if (held) {
+    const hold = element('div', undefined, 'status-banner task-resume-hold')
+    hold.dataset.tone = 'warning'
+    hold.setAttribute('role', 'alert')
+    hold.append(
+      element('strong', '上一次变更的结果尚未确认。任务暂不能继续。'),
+      element('p', dashboard.nextStep || '核实该操作的实际结果并由恢复入口记录后，才能重新检查恢复条件。'),
+    )
+    panel.append(hold)
+  }
+
+  if (target && !target.invalid && !held) {
+    const actions = element('div', undefined, 'actions')
+    const resumeButton = element('button', RESUME_ACTION_LABEL, 'button button--primary')
+    resumeButton.type = 'button'
+    resumeButton.dataset.taskResumeAction = 'resume'
+    resumeButton.disabled = taskResumeBusy || taskResumeRefreshPending
+      || taskResumeTargetKey(target) === taskResumeUnconfirmedKey
+    resumeButton.addEventListener('click', () => void resumeExistingTask())
+    actions.append(resumeButton)
+    panel.append(actions)
+  } else if (target?.invalid) {
+    const invalid = element('p', '项目没有提供完整的原执行信息，未发送请求。', 'muted')
+    invalid.setAttribute('role', 'alert')
+    panel.append(invalid)
+  }
+
+  if (!held) {
+    const status = element('p', taskResumeStatusCopy(), 'muted')
+    status.dataset.taskResumeStatus = 'true'
+    status.setAttribute('role', 'status')
+    status.setAttribute('aria-live', 'polite')
+    panel.append(status)
+  }
+
+  if (taskResumeError?.status) {
+    const failure = element('div', undefined, 'status-banner task-resume-error')
+    failure.dataset.tone = 'danger'
+    failure.setAttribute('role', 'alert')
+    failure.append(
+      element('strong', `${taskResumeError.code} · ${taskResumeError.message}`),
+      element('p', taskResumeError.nextAction),
+    )
+    panel.append(failure)
+  }
+  section.append(panel)
+  return section
+}
+
+async function resumeExistingTask() {
+  const target = currentTaskResumeTarget()
+  if (!explicitScope || !target || target.invalid || taskResumeBusy || taskResumeRefreshPending || taskResumeHeld()) return
+  const targetKey = taskResumeTargetKey(target)
+  if (targetKey === taskResumeUnconfirmedKey) return
+  taskResumeBusy = true
+  taskResumeNotice = '正在继续原任务…'
+  taskResumeError = undefined
+  renderActiveReadingMode()
+  try {
+    const receipt = await api.resumeTask(target, {
+      projectKey: explicitScope.projectKey,
+      mode: explicitScope.mode,
+    })
+    if (receipt?.state !== 'released'
+      || receipt.taskId !== target.taskId
+      || receipt.operationId !== target.operationId) {
+      taskResumeUnconfirmedKey = targetKey
+      taskResumeError = {
+        status: receipt?.state === undefined ? undefined : 409,
+        code: 'task.resume.receipt-invalid',
+        ownerId: 'humanagent.app',
+        message: '响应没有确认原执行已继续。',
+        nextAction: '刷新任务页并重新读取任务状态。',
+      }
+      taskResumeNotice = '未能确认原任务已继续。'
+    } else {
+      taskResumeNotice = '已继续原任务。'
+      taskResumeError = undefined
+    }
+    renderActiveReadingMode()
+    await refresh().catch(setRefreshError)
+  } catch (error) {
+    if (pageDisposed) return
+    taskResumeNotice = error?.status
+      ? '未能继续原任务。'
+      : '继续结果尚未确认。请刷新页面重新读取任务状态。'
+    taskResumeError = error
+    if (!error?.status) taskResumeUnconfirmedKey = targetKey
+    renderActiveReadingMode()
+    await refresh().catch(setRefreshError)
+  } finally {
+    taskResumeBusy = false
+    if (!pageDisposed) renderActiveReadingMode()
+  }
+}
 
 function actionCopy() {
   if (dashboard.state === 'succeeded') {
@@ -3687,15 +3846,19 @@ function renderDashboard() {
     : ''
 
   const blocker = taskBlocker(dashboard)
-  if (blocker) {
+  const resumeBlocker = dashboard.resumeIssue ? taskBlocker({ error: dashboard.resumeIssue }) : null
+  for (const issue of [blocker, resumeBlocker].filter(Boolean)) {
     const errorNotice = element('div', undefined, 'status-banner task-blocker')
     errorNotice.dataset.tone = 'danger'
     errorNotice.setAttribute('role', 'alert')
-    errorNotice.append(element('strong', blocker.reason))
-    if (blocker.code) errorNotice.append(element('code', blocker.code))
-    if (blocker.next) errorNotice.append(element('p', blocker.next))
+    errorNotice.append(element('strong', issue.reason))
+    if (issue.code) errorNotice.append(element('code', issue.code))
+    if (issue.next) errorNotice.append(element('p', issue.next))
     primary.append(errorNotice)
   }
+
+  const resumeSection = renderTaskResumeSection()
+  if (resumeSection) primary.append(resumeSection)
 
   const productFocus = ensureProductFocus()
   if (productFocus) primary.append(productFocus.centerHost)
@@ -4058,6 +4221,7 @@ async function refresh() {
         status.dataset.tone = 'warning'
         status.append(element('span', ` · 显示上次确认内容（stale）· ${readScopeLabel(explicitScope)}`))
       } else {
+        dashboardFreshReadVersion += 1
         status.dataset.tone = 'success'
         status.textContent = '任务投影已同步'
       }
@@ -4088,6 +4252,7 @@ async function refresh() {
     agentReadFailure = undefined
     dashboardStale = false
     dashboardFailure = undefined
+    dashboardFreshReadVersion += 1
     planHistoryState = applyPlanHistoryRead(dashboard)
     taskControlError = undefined
     if (!taskGrantIntent) {

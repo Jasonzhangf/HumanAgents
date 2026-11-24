@@ -85,12 +85,17 @@ function advertisesTurnEnd(body) {
   )
 }
 
+const selectedFile = 'production.txt'
+const selectedFileCallId = 'relay-read-file'
+
 function captureTerminalUpstream(deliveryText) {
   const requests = []
   const inputRequestArguments = []
   const completedArguments = []
   const original = globalThis.fetch
   let inputRequestCount = 0
+  let dispatchedRead = false
+  let pairedRead = false
   const capture = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     if (new URL(url).origin !== upstreamOrigin) return original(input, init)
@@ -158,6 +163,21 @@ function captureTerminalUpstream(deliveryText) {
           { type: 'response.completed', response: { id: 'relay-input-request' } },
         ])
       }
+      if (!dispatchedRead) {
+        assert.ok(responsesWire(body).tools.some(tool => tool.name === 'file_read'))
+        dispatchedRead = true
+        return sseResponse([
+          { type: 'response.created', response: { id: selectedFileCallId } },
+          { type: 'response.output_item.done', output_index: 0, item: {
+            type: 'function_call', call_id: selectedFileCallId, name: 'file_read', arguments: JSON.stringify({ path: selectedFile }),
+          } },
+          { type: 'response.completed', response: { id: selectedFileCallId } },
+        ])
+      }
+      const output = responsesWire(body).input.find(item => item.type === 'function_call_output' && item.call_id === selectedFileCallId)
+      assert.ok(output, 'the selected file result must be paired before the model can finish')
+      assert.ok(output.output.includes(deliveryText), 'the paired result must contain the actual file contents')
+      pairedRead = true
       const args = {
         outcome: 'completed',
         summary: {
@@ -185,6 +205,7 @@ function captureTerminalUpstream(deliveryText) {
     requests,
     inputRequestArguments,
     completedArguments,
+    hasPairedRead: () => pairedRead,
     restore: () => { globalThis.fetch = original },
   }
 }
@@ -245,6 +266,10 @@ async function main() {
   const lease = await acquireDaemonLease(paths, { ownerId: 'execution-input-relay-browser' })
   projectKey = paths.projectKey
   const deliveryText = 'Relay complete: the production environment was confirmed and applied.'
+  await writeFile(join(workspace, selectedFile), `${deliveryText}\n`)
+  const originalCloseStarted = Promise.withResolvers()
+  const originalCloseAllowed = Promise.withResolvers()
+  let preparedTaskProviders = 0
   const upstream = captureTerminalUpstream(deliveryText)
   const accessControl = await AccessControlService.open({
     credentialPath: join(root, 'security', 'web-access.json'),
@@ -311,7 +336,17 @@ async function main() {
           ...(selection.configuredAgentId === undefined ? {} : { configuredAgentId: selection.configuredAgentId }),
           agentProviderBindings: entries,
           legacyProvider: httpProvider,
-          createPort: (selected) => createAgentProviderPort(selected, runEvidenceRoot),
+          createPort: (selected) => {
+            const port = createAgentProviderPort(selected, runEvidenceRoot)
+            if (++preparedTaskProviders !== 1) return port
+            const close = port.close.bind(port)
+            port.close = async (...args) => {
+              originalCloseStarted.resolve()
+              await originalCloseAllowed.promise
+              return close(...args)
+            }
+            return port
+          },
         }, owner, lease),
         createTaskAssembly: ({ executionAgent, maxAttempts }) => {
           const runtimePool = new AgentRuntimePoolManager({
@@ -413,7 +448,25 @@ async function main() {
       (response) => response.url().includes('/input-requests/') && response.request().method() === 'POST',
       { timeout: 45_000 },
     )
+    await Promise.race([
+      originalCloseStarted.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('the original Provider did not reach close')), 20_000).unref()),
+    ])
+    const answerRequestSent = desktop.waitForRequest(
+      (request) => request.url().includes('/input-requests/') && request.method() === 'POST',
+    )
     await prompt.getByRole('button', { name: '生产环境', exact: true }).click()
+    await answerRequestSent
+    try {
+      const acknowledgedBeforeClose = await Promise.race([
+        answerResponsePromise.then(() => true),
+        new Promise(resolve => setTimeout(() => resolve(false), 500)),
+      ])
+      assert.equal(acknowledgedBeforeClose, false, 'the old execution must close before releasing the answer continuation')
+      assert.equal(preparedTaskProviders, 1, 'the answer must not start a second provider before the old close')
+    } finally {
+      originalCloseAllowed.resolve()
+    }
     const answerResponse = await answerResponsePromise
     const answerText = await answerResponse.text()
     const answerBody = JSON.parse(answerText)
@@ -462,6 +515,14 @@ async function main() {
     assert.deepEqual(apiErrors.filter(error => !rosterReads.includes(error)), [])
     assert.equal(upstream.inputRequestArguments.length, 1)
     assert.equal(upstream.completedArguments.length, 1)
+    assert.equal(upstream.hasPairedRead(), true)
+    relationQuery.set('taskId', answerBody.taskId.value)
+    const executionSession = await (await fetch(`${runtime.server.url}/api/product/session?${relationQuery}`, { headers: { cookie } })).json()
+    const matchedCall = executionSession.toolEvents.find(event => event.kind === 'provider.tool' && event.callId === selectedFileCallId)
+    assert.equal(matchedCall?.toolId, 'file.read')
+    assert.equal(matchedCall.arguments.path, selectedFile)
+    assert.ok(executionSession.toolEvents.some(event => event.kind === 'provider.tool-result'
+      && event.callId === selectedFileCallId && event.requestId === matchedCall.requestId && event.status === 'succeeded'))
     assert.equal((await fetch(`${runtime.server.url}/api/tasks`, { headers: { cookie } })).status, 200)
     const finalTasks = await (await fetch(`${runtime.server.url}/api/tasks`, { headers: { cookie } })).json()
     assert.equal([
@@ -479,6 +540,9 @@ async function main() {
       browserClosed: !browserInstance.isConnected(),
       inputRequestArgument: upstream.inputRequestArguments[0],
       completedArgument: upstream.completedArguments[0],
+      selectedFile,
+      pairedToolResult: true,
+      waitedForOriginalClose: true,
       pageErrors,
       rosterReads,
     }, null, 2))
@@ -490,6 +554,7 @@ async function main() {
     await writeFile(join(evidenceRoot, 'execution-failure.txt'), String(error?.stack ?? error))
     throw error
   } finally {
+    originalCloseAllowed.resolve()
     await browserInstance?.close()
     upstream.restore()
     await runtime?.close()

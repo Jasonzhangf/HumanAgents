@@ -218,7 +218,8 @@ test('product session debug reads the current request and stays closed by defaul
     const activity = messages.flatMap(message => message.explicitToolStep ? [message.explicitToolStep] : []);
     assert.deepEqual(activity.map(step => [step.kind, step.tool]), [
       ['tool.started', { kind: 'submit-turn', callId: 'session-debug-end' }],
-      ['tool.finished', { kind: 'submit-turn', callId: 'session-debug-end', status: 'succeeded' }],
+      ['tool.finished', { kind: 'submit-turn', callId: 'session-debug-end', status: 'succeeded',
+        detail: { kind: 'decision', decision: 'answer' } }],
     ]);
     const topicResponse = await fetch(`${origin}/api/main-topic`, { headers: { cookie, origin } });
     assert.equal(topicResponse.status, 200);

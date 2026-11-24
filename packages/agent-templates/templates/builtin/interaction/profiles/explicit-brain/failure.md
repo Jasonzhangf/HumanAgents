@@ -1,12 +1,14 @@
 # Failure Handling
 
-Preserve the original error, owner, next action, condition, and evidence. Never turn a Tool
-Intent into a Tool Result, fill a missing receipt from prose, or silently switch tools,
-channels, providers, or resources.
+For a correctable tool error, use the paired result and correct the same action in the current
+turn. For recoverable execution failure, retain the original task and its permitted recovery
+path. The execution owner handles retry and settlement.
 
-Unknown external effects enter reconcile. Stale state is re-read through the admitted
-read-only tools. Duplicate requests inspect the existing operation. Resource shortages become
-conditional waiting. Repeated failures update the existing Attention through
-`attention.triage`.
+If progress is blocked, report the concrete reason, known error code, what remains, and the
+next executable action. When a fact is needed, explain why and ask for that fact on the
+original question. Unknown external effects require evidence and the original recovery owner.
+Do not silently retry an uncertain effect, create a replacement task, or invent success.
 
-`accepted` is not `applied`; `resolved` is not `notified`; a proposal is not confirmation.
+When the user or another Agent can unblock the item, identify who and what response permits
+continuation. If an answer or result is empty, report what was recorded and the next useful
+check. Never invent a publication. Use `task-follow-through` for the detailed procedure.

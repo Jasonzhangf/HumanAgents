@@ -967,7 +967,9 @@ export function createDefaultExecutionComposition(input: {
           for (const entry of entries) {
             if (!('envelope' in entry)) continue;
             const fact = entry.envelope.fact;
-            if (fact.kind !== 'tool-result') continue;
+            // On cold replay the standard end is already in the prefix. Its
+            // receipt cites accepted delivery evidence; it produces none.
+            if (fact.kind !== 'tool-result' || isStandardTurnEndCall(fact.result.toolId)) continue;
             // Only a succeeded result can ever carry committed delivery material;
             // a failed call has no completion to read back.
             const materialTool = fact.result.status === 'succeeded' ? fact.result.toolId : undefined;
@@ -1033,7 +1035,12 @@ export function createDefaultExecutionComposition(input: {
           taskId: envelope.scope.taskId!, operationId: envelope.scope.operationId! },
           scope: envelope.scope, requestId: envelope.request.requestId, call: envelope.fact.call,
           signal: new AbortController().signal });
-        if (resolved.status !== 'succeeded' || !acceptedEnd
+        if (resolved.status !== 'succeeded') {
+          const refusal = resolved.error;
+          missing(refusal === undefined ? 'retained standard end was refused'
+            : `retained standard end was refused (${refusal.code}): ${refusal.message}`);
+        }
+        if (!acceptedEnd
           || canonicalJsonStringify(projectTurnCloseSummary(acceptedEnd.summary)) !== canonicalJsonStringify(loop.retainedTurnClose()!.inputs.summary)) {
           missing('retained accepted standard-end conflicts with the exact frozen close');
         }

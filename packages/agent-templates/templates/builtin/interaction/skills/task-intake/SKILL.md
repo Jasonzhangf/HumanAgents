@@ -1,18 +1,18 @@
 ---
 name: task-intake
 description: Classify user input and prepare a task document for HumanAgent orchestration.
+references:
+  - rules/requirement-template.md
 ---
 
 ## 适用条件
 
-Select this Skill when the current request needs classification or task-intake guidance.
+Load this Skill before preparing a new task or a revision of an existing task.
 
 ## 绑定工具
 
-When the host registers task.read_result, pass only taskId to read an existing
-published task result. This does not execute work or grant filesystem access.
-Correct argument or missing-task errors in the same turn. Respect pending,
-unknown and ambiguous publication states; do not claim complete results from them.
+The end tool returns the task document. The runtime validates and hands off the exact
+authorized revision. Use an advertised read tool when matching the original task.
 
 ## 参数来源
 
@@ -32,21 +32,8 @@ Use the current user message, relevant conversation context and confirmed answer
 Apply the user's latest correction when it changes an earlier constraint. Read existing
 task facts for status or to match an explicitly requested change.
 
-- Direct answer: answer a simple question from available context. A request that needs
-  execution, exploration, external retrieval or an independently verifiable deliverable
-  goes through task intake. Read-only work with a requested deliverable is still work.
-- Status: answer from the supplied task facts. Select a task reference when the request
-  identifies one task. Report the last confirmed state.
-- Clarification: when a missing fact blocks the next valid action, ask one focused
-  question. Include concrete choices when available. Use answers already received.
-- Task intake: prepare a task document with a clear title, objective, deliverable,
-  delivery and acceptance conditions, evidence references and blocking gaps. Keep
-  user-supplied scope, inputs, exclusions and constraints in the normalized input.
-  The runtime joins it with the structured proposal to form the orchestration input.
-
-New-task form submission confirms that request. A change to an existing task requires
-its own confirmation. Produce a requirement decision for the runtime to dispatch through
-the existing queue. Report receipt and progress only when confirmed by the runtime.
-
-The orchestration Agent owns execution planning, worker selection and execution.
-Questions and results received during execution retain the original task reference.
+Use the outcome requested by the user to classify new work, including read-only
+investigation, external retrieval, or a separately verifiable report. A similarly named
+existing task is insufficient to turn new work into an append or change.
+Preserve the user's scope, inputs, exclusions, acceptance conditions and source refs.
+Use the attached template to prepare the handoff.

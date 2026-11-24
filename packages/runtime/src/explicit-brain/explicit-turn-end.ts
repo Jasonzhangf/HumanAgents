@@ -130,6 +130,7 @@ export async function submitExplicitTurnEnd(input: {
   readonly requestId: string;
   readonly callId: string;
   readonly arguments: unknown;
+  readonly requiresClarification?: boolean;
 }): Promise<ExplicitEndSubmission> {
   const { attempt } = input;
   const tx = await input.journal.transactTurn<ExplicitEndSubmission>(attempt.turn, snapshot => {
@@ -161,6 +162,9 @@ export async function submitExplicitTurnEnd(input: {
     try {
       validateExplicitTurnEndInput(input.arguments as ExplicitTurnEndInput);
       const valid = input.arguments as ExplicitTurnEndInput;
+      if (input.requiresClarification && valid.decision.kind !== 'clarification') {
+        throw new ContractError('decision.kind must be clarification when recovery needs user confirmation');
+      }
       result = { kind: 'accepted', interactionId: attempt.turn.interactionId, inputRevision: attempt.turn.inputRevision,
         turnId: attempt.turn.turnId, decision: valid.decision, checkpointRecord: valid.checkpointRecord,
         ...(valid.capsule === undefined ? {} : { capsule: valid.capsule }),

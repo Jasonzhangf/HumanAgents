@@ -64,7 +64,11 @@ import {
 import { createReviewAssignments } from '../../../runtime/src/review/index.js';
 import type { CommittedCheckpointRecord } from '../../../runtime/src/checkpoints/ports.js';
 import type { RefinedDeliveryStore } from '../../../runtime/src/ui-runtime/coordinator.js';
-import type { ActiveTurnContext, ActiveTurnSegmentContext } from '../../../runtime/src/context/active-turn-context.js';
+import {
+  RuntimeActiveTurnError,
+  type ActiveTurnContext,
+  type ActiveTurnSegmentContext,
+} from '../../../runtime/src/context/active-turn-context.js';
 import type {
   InspectionBoundaryPort,
   InspectionSelectionReader,
@@ -2330,7 +2334,42 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
     const invocationId = readInvocationSelector(request.call.arguments);
     return parent.runProducer(async (): Promise<ProviderToolExecutionResult> => {
       parent.assertProductionOpen();
-      await parent.recordChildNonSelection(invocationId);
+      try {
+        await parent.recordChildNonSelection(invocationId);
+      } catch (error) {
+        if (!(error instanceof RuntimeActiveTurnError)
+          || error.code !== 'active-turn.non-selection.unreturned') {
+          throw error;
+        }
+        const evidenceRefs = [scopedEvidence(request.scope, 'child-not-select-unreturned')];
+        return {
+          output: JSON.stringify({
+            status: 'failed',
+            code: error.code,
+            executed: false,
+            toolId: request.call.toolId,
+            callId: request.call.callId,
+            invocationId,
+            message: error.message,
+            recoverable: true,
+          }),
+          outputRefs: [],
+          evidenceRefs,
+          status: 'failed',
+          error: {
+            errorId: `provider-tool-${error.code}-${request.call.callId}`,
+            code: error.code,
+            category: 'validation',
+            phase: 'tool',
+            message: error.message,
+            ownerId: OWNER,
+            retryable: 'retryable',
+            attention: 'foreground',
+            evidenceRefs,
+            nextAction: { kind: 'continue', ref: APP_CHILD_NOT_SELECT_TOOL.toolId },
+          },
+        };
+      }
       return {
         output: JSON.stringify({ state: 'not-selected', invocationId }),
         outputRefs: [],

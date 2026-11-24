@@ -51,7 +51,7 @@ export type ResponsesWireEvent =
   | { readonly protocol: 'responses'; readonly type: 'response.completed'; readonly response: { readonly id: string } }
   | { readonly protocol: 'responses'; readonly type: 'response.incomplete'; readonly response: { readonly id: string; readonly incomplete_details?: { readonly reason: string } } }
   | { readonly protocol: 'responses'; readonly type: 'response.failed'; readonly response: { readonly id: string; readonly error: ResponsesWireError } }
-  | { readonly protocol: 'responses'; readonly type: 'error'; readonly error: ResponsesWireError };
+  | { readonly protocol: 'responses'; readonly type: 'error'; readonly error: Omit<ResponsesWireError, 'code'> & { readonly code?: string | null } };
 
 export type ResponsesWireContentPart =
   | { readonly type: 'output_text'; readonly text: string; readonly annotations?: readonly unknown[] }

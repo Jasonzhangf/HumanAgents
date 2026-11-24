@@ -16,8 +16,12 @@ import { JournalIntegrityError, JsonlOrganJournal } from '../../packages/adapter
 import { createJsonlActiveTurnJournal } from '../../packages/adapters/jsonl/src/active-turn.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { createActiveTurnSegmentJournal, createNativeRecoveryAssets } from '../../packages/app/src/native-recovery-assets.js';
+import {
+  APP_CHILD_NOT_SELECT_TOOL,
+  createAppChildProducer,
+} from '../../packages/app/src/ui-runtime/child-producer.js';
 import { produceAdmittedTurn } from '../../packages/runtime/src/admission/admitted-turn.js';
-import { ActiveTurnContext } from '../../packages/runtime/src/context/active-turn-context.js';
+import { ActiveTurnContext, RuntimeActiveTurnError } from '../../packages/runtime/src/context/active-turn-context.js';
 import { activeTurnCommitId, type ActiveTurnJournalRecord } from '../../packages/runtime/src/context/active-turn-journal.js';
 import { resumeActiveTurnSegment } from '../../packages/runtime/src/context/active-turn-segments.js';
 
@@ -401,6 +405,170 @@ test('JSONL codec commits the exact not-selected transition and rejects a missin
       committed.records.length,
       'every rejected transition appends zero bytes',
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Failure basis: a model can decline a child before that child has returned.
+// The Runtime correctly rejects the durable transition, but the tool boundary
+// currently lets that rejection escape, which ends the whole Provider request.
+// Impact: the model loses its one chance to correct the call in the same turn.
+// Probability: observed in a production-shaped child turn. Cost: one local
+// producer call with a real Active Turn Journal; no Provider or external model.
+test('child.not_select without a returned delivery is a model-correctable failure and preserves the turn', async () => {
+  await mkdir(ROOT, { recursive: true });
+  const root = await mkdtemp(join(ROOT, 'unreturned-not-select-'));
+  try {
+    const journalPath = join(root, 'organ.jsonl');
+    const assetRoot = join(root, 'assets');
+    const turnId = 'unreturned-not-select-turn';
+    const taskId = id('task', 'unreturned-not-select-task');
+    const scope: ScopeRef = {
+      organId: id('organ', 'unreturned-not-select-organ'), taskId,
+      cycleId: id('cycle', 'unreturned-not-select-cycle'),
+      operationId: id('operation', 'unreturned-not-select-operation'),
+    };
+    const evidence = (label: string): EvidenceRef => ({
+      evidenceId: id('evidence', label), kind: 'operation', source: 'child-nonselection-consumer',
+      locator: `test://child-nonselection/${label}`, scope,
+    });
+    const assignment: WorkAssignment = {
+      assignmentId: 'unreturned-not-select-assignment', taskId, pipelineNodeId: 'unreturned-not-select-node',
+      attempt: 1, executionEpoch: 1, inputRevision: 1, objective: 'preserve unreturned child state',
+      targetRefs: ['subject:unreturned'], expectedOutputRefs: ['output:unreturned'],
+      successCriteria: ['the child is not declined'], failureCriteria: ['the child is falsely declined'],
+      incompleteCriteria: ['the child remains unreturned'], requiredCapabilities: ['provider.execution'],
+      mergeGate: 'not-required',
+    };
+    const runtime = {
+      runtimeId: 'unreturned-not-select-runtime', executionEpoch: 1,
+      ownerRef: 'unreturned-not-select-owner', permissionRevision: 'unreturned-not-select-permission',
+    };
+    const admittedTurn = produceAdmittedTurn({
+      runtime, taskId, scope, assignment, directiveRevision: 1, turnId,
+      currentTurnRef: `active-turn://${turnId}`, admissionEvidence: [evidence('admission')],
+      recoveryStateRef: evidence('recovery'),
+    });
+    const activeBinding: ActiveTurnBinding = {
+      admittedTurn, assignment, execution: { runtimeId: runtime.runtimeId, executionEpoch: 1 }, scope,
+    };
+    const journal = createJsonlActiveTurnJournal({ filePath: journalPath, turnId });
+    const context = await ActiveTurnContext.open({ journal, binding: activeBinding, currentTurnRef: admittedTurn.currentTurnRef });
+    await context.openChildInvocation({
+      invocationId: 'unreturned-child', childTurnId: 'unreturned-child-turn',
+      checkpointReceiptRef: 'unreturned-child-checkpoint', binding: { kind: 'execution', assignment },
+    });
+
+    // The Runtime truth boundary must keep rejecting this transition. The tool
+    // boundary below only reports that rejection back to the model.
+    await assert.rejects(
+      () => context.recordChildNonSelection('unreturned-child'),
+      (error: unknown) => error instanceof RuntimeActiveTurnError
+        && error.code === 'active-turn.non-selection.unreturned',
+    );
+    const beforeRecords = await journal.replay();
+
+    const producer = createAppChildProducer({
+      manager: {} as never,
+      parent: context,
+      parentAssignment: assignment,
+      checkpoints: {} as never,
+      refinedDeliveryStore: {} as never,
+      bodyAssets: {} as never,
+      bindChildRun: async () => { throw new Error('non-selection must not dispatch a child'); },
+      prepareAgentProvider: async () => { throw new Error('non-selection must not prepare a child Provider'); },
+      roster: [],
+      admitChildOperation: async () => { throw new Error('non-selection must not admit a child operation'); },
+    });
+    const result = await producer.execute({
+      execution: {
+        runtimeId: runtime.runtimeId, taskId, operationId: scope.operationId!, executionEpoch: 1,
+      },
+      scope,
+      requestId: 'unreturned-not-select-request',
+      call: {
+        callId: 'unreturned-not-select-call', toolId: APP_CHILD_NOT_SELECT_TOOL.toolId,
+        continuationRef: 'responses-unreturned-not-select',
+        arguments: { invocationId: 'unreturned-child' },
+      },
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error?.code, 'active-turn.non-selection.unreturned');
+    assert.equal(result.error?.category, 'validation');
+    assert.equal(result.error?.retryable, 'retryable');
+    assert.deepEqual(result.error?.nextAction, { kind: 'continue', ref: APP_CHILD_NOT_SELECT_TOOL.toolId });
+    assert.equal(result.error?.message, 'cannot decline a child delivery that has not been durably returned');
+    assert.deepEqual(result.evidenceRefs.map((ref) => ref.locator), ['child/child-not-select-unreturned']);
+    const output = JSON.parse(result.output) as Record<string, unknown>;
+    assert.equal(output.status, 'failed');
+    assert.equal(output.code, 'active-turn.non-selection.unreturned');
+    assert.equal(output.executed, false);
+    assert.equal(output.toolId, APP_CHILD_NOT_SELECT_TOOL.toolId);
+    assert.equal(output.callId, 'unreturned-not-select-call');
+    assert.equal(output.invocationId, 'unreturned-child');
+    assert.equal(output.recoverable, true);
+    assert.equal(result.error?.errorId, 'provider-tool-active-turn.non-selection.unreturned-unreturned-not-select-call');
+
+    // The rejected call appends no false adoption or non-selection fact.
+    assert.deepEqual(await journal.replay(), beforeRecords);
+    const unreturned = context.childInvocations().find((record) => record.invocationId === 'unreturned-child');
+    assert.equal(unreturned?.notSelectedResultSeq, undefined);
+    assert.equal(unreturned?.adoptedResultSeq, undefined);
+    // The next request materializes its context from the live prefix. A
+    // rejected precondition must leave that same turn readable.
+    await context.readLivePrefix('next-provider-request');
+
+    // A returned child remains legal to decline, so the boundary fix does not
+    // alter the valid Runtime transition.
+    const review: ReviewAssignment = {
+      assignmentId: 'returned-review-assignment', taskId: taskId.value, workerAgentId: 'returned-worker',
+      reviewKind: 'quality', attempt: 1, executionEpoch: 1, inputRevision: 1,
+      subjectRefs: ['subject:returned'], workerCapabilities: ['provider.execution'],
+      requiredCapabilities: ['review.quality'], mergeGate: 'not-required',
+    };
+    const reviewResult: ReviewResult = {
+      resultId: 'returned-review-result', assignmentId: review.assignmentId, taskId: review.taskId,
+      workerAgentId: review.workerAgentId, reviewKind: review.reviewKind, attempt: review.attempt,
+      executionEpoch: review.executionEpoch, inputRevision: review.inputRevision,
+      subjectRefs: review.subjectRefs, status: 'passed', findings: [], evidenceRefs: [evidence('returned-review')],
+    };
+    const store = new ImmutableAssetStore(assetRoot);
+    const refinedDelivery: RawAsset = {
+      ref: evidenceReference(
+        await store.write('returned-review-delivery', new TextEncoder().encode('{}')),
+        scope,
+        'operation',
+        'returned-review-delivery',
+      ),
+      view: { kind: 'utf8-text' },
+    };
+    await context.openChildInvocation({
+      invocationId: 'returned-review-child', childTurnId: 'returned-review-child-turn',
+      checkpointReceiptRef: 'returned-review-checkpoint', binding: { kind: 'review', assignment: review },
+    });
+    const delivery = await context.recordChildReturn({
+      kind: 'review', invocationId: 'returned-review-child', assignment: review,
+      result: reviewResult, refinedDelivery,
+    });
+    const returnedResult = await producer.execute({
+      execution: {
+        runtimeId: runtime.runtimeId, taskId, operationId: scope.operationId!, executionEpoch: 1,
+      },
+      scope,
+      requestId: 'returned-not-select-request',
+      call: {
+        callId: 'returned-not-select-call', toolId: APP_CHILD_NOT_SELECT_TOOL.toolId,
+        continuationRef: 'responses-returned-not-select',
+        arguments: { invocationId: 'returned-review-child' },
+      },
+      signal: new AbortController().signal,
+    });
+    assert.equal(returnedResult.status, 'succeeded');
+    assert.equal(JSON.parse(returnedResult.output).state, 'not-selected');
+    const returned = context.childInvocations().find((record) => record.invocationId === 'returned-review-child');
+    assert.equal(returned?.notSelectedResultSeq, delivery.seq);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

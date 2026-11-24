@@ -2620,19 +2620,24 @@ test('RCC v3 completes single-round message requests after round-one message don
         content: [{ type: 'output_text', text: unrequestedRoundTwoDecision }],
       },
     }),
-    frame('response.completed', { response: { id: 'resp-rcc-buffered-round2' } }),
+    frame('response.completed', { response: { id: 'resp-rcc-buffered-round2', model: 'reported-model', usage: {
+      input_tokens: 1397, output_tokens: 304, input_tokens_details: { cached_tokens: 1024 },
+    } } }),
+    frame('response.completed', { response: { id: 'unrequested-response', usage: { input_tokens: 17, output_tokens: 4 } } }),
   ])), binding, new ResponsesProviderCodec(), 'rcc');
   await bufferedSecondMessageBuilt.adapter.start({
     ...startInput(),
     tools: [{ toolId: 'dispatch_helper', description: 'dispatch helper', inputSchema: { type: 'object' } }],
   });
   const bufferedFacts: Array<{ readonly kind: string; readonly contentUnitId?: string }> = [];
+  const bufferedUsage: Array<[number | undefined, number | undefined, number | undefined]> = [];
   const bufferedObserved = [];
   for await (const event of bufferedSecondMessageBuilt.adapter.observe({
     ...execution,
     onRawFacts: async (facts) => {
       for (const fact of facts) {
         bufferedFacts.push({ kind: fact.kind, ...(fact.kind === 'content' ? { contentUnitId: fact.contentUnitId } : {}) });
+        if (fact.kind === 'usage') bufferedUsage.push([fact.inputTokens, fact.outputTokens, fact.cacheReadInputTokens]);
       }
     },
   })) {
@@ -2642,8 +2647,31 @@ test('RCC v3 completes single-round message requests after round-one message don
     bufferedFacts.filter((fact) => fact.kind === 'content').map((fact) => fact.contentUnitId),
     ['responses:assistant-text:rcc-output-0'],
   );
+  assert.deepEqual(bufferedUsage, [[1397, 304, 1024]]);
+  assert.equal(bufferedFacts.filter((fact) => fact.kind === 'request-complete').length, 1);
   assert.equal(bufferedObserved.at(-1)?.terminalState, 'succeeded');
   assert.equal((await bufferedSecondMessageBuilt.adapter.settle(execution)).state, 'succeeded');
+
+  // RCC can omit the first response.created and emit it only when starting an
+  // unrequested round. A tool from that round must not reopen a text-only drain.
+  const lateCreatedBuilt = adapter(async () => response(chunks([
+    frame('response.output_item.done', {
+      item: { type: 'message', id: 'round-one', role: 'assistant', status: 'completed',
+        content: [{ type: 'output_text', text: roundOneDecision }] },
+      output_index: 0,
+    }),
+    frame('response.created', { response: { id: 'late-round' } }),
+    frame('response.output_item.done', { output_index: 1, item: {
+      type: 'function_call', id: 'late-tool', call_id: 'late-tool-call',
+      name: 'dispatch_helper', arguments: '{}',
+    } }),
+    frame('response.completed', { response: { id: 'late-round' } }),
+  ])), binding, new ResponsesProviderCodec(), 'rcc');
+  await lateCreatedBuilt.adapter.start(startInput());
+  const lateCreatedEvents = [];
+  for await (const event of lateCreatedBuilt.adapter.observe(execution)) lateCreatedEvents.push(event);
+  assert.equal(lateCreatedEvents.some((event) => event.kind === 'tool'), false);
+  assert.equal((await lateCreatedBuilt.adapter.settle(execution)).state, 'succeeded');
 
   // Negative 1: A pending tool call in Round 1 must NOT be truncated by the
   // single-round post-message grace even if `humanagent_turn_end` is absent.

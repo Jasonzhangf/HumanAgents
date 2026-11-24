@@ -31,9 +31,9 @@ test('the recorded user message occurs once in its history drawer', () => {
 
 // Known callback mismatch loses the entire round. Impact: unreadable history.
 // Small deterministic test; browser covers DOM, lazy output and focus behavior.
-test('history entry binds both render paths to the distinct round detail callback', async () => {
+test('the conversation entry binds the round detail callback', async () => {
   const entry = readFileSync(new URL('../../docs/ui/entry.js', import.meta.url), 'utf8')
-  assert.equal((entry.match(/onOpenHistoryDetail: openMainTopicHistoryDetail/g) || []).length, 2)
+  assert.match(entry, /onOpenHistoryDetail: openMainTopicHistoryDetail/)
   const history = await import('../../docs/ui/main-topic-history-detail.js')
   assert.equal(typeof history.renderMainTopicHistoryDetail, 'function')
 })

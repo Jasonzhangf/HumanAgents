@@ -402,13 +402,20 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
   for (const interaction of interactions) {
     const explicitTurns = interactionTurns(interaction)
     const task = tasksByInteraction.get(interaction.interactionId)
-    if (task === undefined) {
+    const steps = interaction.steps ?? []
+    // A linked task owns execution progress, while a real explicit-intake step
+    // remains attached to the Jenny turn that produced it. Do not lose those
+    // request/tool facts merely because the confirmed draft now has a Task.
+    if (task === undefined || steps.length > 0) {
       const response = [...explicitTurns].reverse().find((turn) => turn.role === 'jenny')
-      const statusFacts = { state: interaction.state, steps: interaction.steps ?? [], waitingForUser: interaction.state === 'awaiting-clarification' }
+      const statusFacts = { state: interaction.state, steps, waitingForUser: interaction.state === 'awaiting-clarification' }
       if (response) {
         const index = explicitTurns.indexOf(response)
         explicitTurns[index] = { ...response, statusFacts }
-      } else explicitTurns.push({ turnId: `explicit-status:${interaction.interactionId}`, role: 'jenny', kind: 'status', text: '正在处理你的请求', interactionId: interaction.interactionId, statusFacts })
+      } else explicitTurns.push({
+        turnId: `explicit-status:${interaction.interactionId}`, role: 'jenny', kind: 'status', text: '',
+        interactionId: interaction.interactionId, statusFacts,
+      })
     }
     turns.push(...explicitTurns)
     if (task !== undefined) turns.push(...taskTurns(task, interaction.rawInput))

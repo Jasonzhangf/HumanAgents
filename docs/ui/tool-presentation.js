@@ -15,7 +15,8 @@ export function toolSemantics(toolId, args, report) {
 // Public execution identity only. A missing call identity never joins two facts.
 function callKey(event) {
   if (!event.taskId?.value || !event.operationId || !Number.isSafeInteger(event.executionEpoch) || !event.callId) return undefined
-  return JSON.stringify([event.taskId.scope, event.taskId.value, event.operationId, event.executionEpoch, event.callId])
+  return JSON.stringify([event.taskId.scope, event.taskId.value, event.operationId, event.executionEpoch,
+    event.turnId, event.requestId, event.callId])
 }
 
 export function toolPresentations(events = []) {
@@ -98,7 +99,9 @@ function toolCard(row, readOutput, previous) {
   present(undefined)
   if (row.result?.error) {
     const error = row.result.error
-    card.append(element('p', `${error.code || ''} ${error.message || ''}${error.ownerId ? ` · 错误负责人：${error.ownerId}` : ''}`.trim(), 'tool-error'))
+    const message = error.code === 'active-turn.non-selection.unreturned'
+      ? '执行方尚未返回结果，暂时不能记录取舍。' : error.message
+    card.append(element('p', [error.code, message].filter(Boolean).join(' · '), 'tool-error'))
   }
   if (Object.hasOwn(ACTOR, execution?.role)) card.append(element('span', ACTOR[execution.role], 'tool-actor muted'))
   card.append(semantic)
@@ -123,6 +126,7 @@ function toolCard(row, readOutput, previous) {
       executionEpoch: (row.call ?? row.result).executionEpoch,
       callId: (row.call ?? row.result).callId, calledAt: row.call?.occurredAt,
       returnedAt: row.result?.occurredAt, outputRef: row.result?.outputRef,
+      error: row.result?.error,
       execution,
       evidenceRefs: row.result?.evidenceRefs,
     }, null, 2)))

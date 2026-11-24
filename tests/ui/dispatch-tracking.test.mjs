@@ -24,7 +24,7 @@ test('task and turn ownership uses exact task or source interaction, never match
   assert.equal(taskForTurn({ taskId: { value: 'parent-a' }, interactionId: 'interaction-b' }, [task, other]), task)
   assert.equal(taskForTurn({ text: '检查项目 Jenny parent-a' }, [task, other]), undefined)
   const p = { tasks: [task, other], turns: [
-    { turnId: 'draft-a', taskId: task.taskId, role: 'jenny', kind: 'draft', text: '完整草案', quote: '完整输入' },
+    { turnId: 'draft-a', taskId: task.taskId, interactionId: task.sourceInteractionId, role: 'jenny', kind: 'draft', text: '完整草案', quote: '完整输入' },
     { turnId: 'error-b', taskId: other.taskId, role: 'jenny', kind: 'error', text: 'raw english failure', quote: '完整输入' },
     { turnId: 'reply-c', interactionId: 'interaction-c', role: 'jenny', kind: 'message', text: '2' },
   ] }
@@ -35,6 +35,29 @@ test('task and turn ownership uses exact task or source interaction, never match
   assert.equal(turns[1].role, 'task')
   assert.doesNotMatch(turns[1].text, /raw english/)
   assert.equal(turns[2], p.turns[2])
+})
+test('only exact-source drafts form cards and unowned task errors remain visible', () => {
+  const blocked = { ...task, state: 'blocked', nextStep: '检查原执行错误后重试', error: { code: 'unknown.event', message: 'unexpected provider event' } }
+  const sourceDraft = { ...other, state: 'running' }
+  const projection = { tasks: [blocked, sourceDraft], turns: [
+    { turnId: 'missing-source-draft', taskId: blocked.taskId, role: 'jenny', kind: 'draft', text: '旧轮草案' },
+    { turnId: 'wrong-source-draft', taskId: blocked.taskId, interactionId: 'other-interaction', role: 'jenny', kind: 'draft', text: '另一轮草案' },
+    { turnId: 'source-draft', taskId: sourceDraft.taskId, interactionId: sourceDraft.sourceInteractionId, role: 'jenny', kind: 'draft', text: '原交办草案' },
+    { turnId: 'blocked-error', taskId: blocked.taskId, role: 'jenny', kind: 'error', text: 'raw english failure' },
+    { turnId: 'card-status', taskId: sourceDraft.taskId, role: 'jenny', kind: 'status', text: '任务执行中' },
+    { turnId: 'card-error', taskId: sourceDraft.taskId, role: 'jenny', kind: 'error', text: 'raw english failure' },
+  ] }
+  const turns = ownedMainTopicTurns(projection)
+  assert.equal(turns[0], projection.turns[0])
+  assert.equal(turns[1], projection.turns[1])
+  assert.equal(turns[2].kind, 'dispatch')
+  assert.equal(turns[2].dispatchTask, sourceDraft)
+  assert.equal(turns[3].role, 'task')
+  assert.match(turns[3].text, /检查项目/)
+  assert.match(turns[3].text, /模型服务返回了无法识别的响应事件/)
+  assert.match(turns[3].text, /unknown\.event/)
+  assert.match(turns[3].text, /检查原执行错误后重试/)
+  assert.equal(turns.length, 4, 'only status and error under the actual card are deduplicated')
 })
 test('child action follows only scoped formal relation; dispatch does not prove takeover', () => {
   const scope = { projectKey: 'p', mode: 'fake', taskId: 'parent-a' }

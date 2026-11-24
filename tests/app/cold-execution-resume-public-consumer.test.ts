@@ -18,6 +18,7 @@ import {
   type FileWriteCompletionFact,
   type FileWriteEffect,
   type FileWriteEffectIntent,
+  type InteractionParentProviderExecutionIdentityRef,
   type OperationId,
   type PreparedRecoveryCapture,
   type PublishedTaskPlanRevision,
@@ -34,7 +35,11 @@ import type {
 } from '../../packages/contracts/src/active-turn-segments.js';
 import type { JournalCommitRef } from '../../packages/contracts/src/i2-history.js';
 import type { TaskRuntimeIncarnation } from '../../packages/contracts/src/framework.js';
-import { JsonlOrganJournal, type JournalRecord } from '../../packages/adapters/jsonl/src/index.js';
+import {
+  createJsonlToolEffectLedgerJournal,
+  JsonlOrganJournal,
+  type JournalRecord,
+} from '../../packages/adapters/jsonl/src/index.js';
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import {
   createJsonlActiveTurnJournal,
@@ -42,6 +47,10 @@ import {
 } from '../../packages/adapters/jsonl/src/active-turn.js';
 import type { ActiveTurnJournalRecord } from '../../packages/runtime/src/context/active-turn-journal.js';
 import { JsonlOperationCompletionJournal } from '../../packages/adapters/jsonl/src/operation-completion.js';
+import { JsonlInteractionParentTurnJournal } from '../../packages/adapters/jsonl/src/interaction-parent-turn-journal.js';
+import { JsonlInteractionHelperJournal } from '../../packages/adapters/jsonl/src/interaction-helper-journal.js';
+import { ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
+import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { ImmutableAssetStore, evidenceReference } from '../../packages/adapters/filesystem/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
@@ -51,6 +60,10 @@ import { ActiveTurnSegmentContext } from '../../packages/runtime/src/context/act
 import { resumeActiveTurnSegment } from '../../packages/runtime/src/context/active-turn-segments.js';
 import { durableContextDigest, produceContextHistory } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import { prepareCheckpointClosure } from '../../packages/runtime/src/checkpoints/closure.js';
+import {
+  computeToolArgsDigest,
+  computeToolIdempotencyKey,
+} from '../../packages/runtime/src/checkpoints/effect-ledger-recovery.js';
 import { submitCheckpoint } from '../../packages/runtime/src/checkpoints/submission.js';
 import {
   projectDurableTaskInventory,
@@ -101,7 +114,7 @@ import {
   type NativeSaveProgress,
 } from '../../packages/runtime/src/checkpoints/native-save-contract.js';
 import { prepareAgentProvider, prepareExecutionAgentProvider, createAgentProviderPort, type AgentProviderComposition } from '../../packages/app/src/agent-driver-composition.js';
-import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
+import { createProviderExplicitBrainInterpreter, type ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import type { ProviderConfig, EffectiveAgentProviderBinding } from '../../packages/config/src/index.js';
 import {
@@ -136,11 +149,13 @@ const organId = id('organ', 'cold-resume-organ');
 const c3aWrongRef = 'wrong-business-ref';
 const c3aAcceptedRef = 'accepted-prefix';
 const c3aOmittedRef = 'older-view';
+const c3aNextResult = 'Next execution completed from the corrected forward context.';
 const c3aContextSeed = {
   activeRefs: [c3aAcceptedRef, c3aWrongRef],
   omittedRefs: [c3aOmittedRef],
 } as const;
 const processMode = process.argv.find((arg) => arg.startsWith('--cold-process='))?.split('=', 2)[1];
+const browserFixture = processMode === 'browser-fixture';
 const processKind = process.argv.find((arg) => arg.startsWith('--fixture-kind='))?.split('=', 2)[1] ?? 'captured';
 const processRoot = process.argv.find((arg) => arg === '--fixture-root') === undefined
   ? undefined
@@ -644,7 +659,6 @@ async function upstream(
   const errors: Upstream['errors'] = [];
   let nextDelivery = false;
   let endCallCount = 0;
-  const section = (text: string) => ({ text, evidenceRefs: nextDelivery ? [] : [deliveryRef] });
   const turnEndFrames = () => {
     const callId = `cold-resume-end-${++endCallCount}`;
     return [
@@ -653,14 +667,26 @@ async function upstream(
         item: { type: 'function_call', call_id: callId, name: 'humanagent_turn_end', arguments: '' } },
       { type: 'response.output_item.done', output_index: 0,
         item: { type: 'function_call', call_id: callId, name: 'humanagent_turn_end',
-          arguments: JSON.stringify({ summary: {
-            goal: section(summaryText?.[nextDelivery ? 'next' : 'original'].goal ?? (nextDelivery ? 'complete the next execution' : 'resume the original business turn')),
-            actions: section(summaryText?.[nextDelivery ? 'next' : 'original'].actions ?? (nextDelivery ? 'used the corrected forward context' : 'retained the confirmed effect')),
-            result: section(summaryText?.[nextDelivery ? 'next' : 'original'].result ?? (nextDelivery ? 'delivered the next execution result' : 'C3A prior-v2 resumed semantic marker')),
-            expectedNextStep: section(summaryText?.[nextDelivery ? 'next' : 'original'].expectedNextStep ?? 'planner aligns the exact current plan') },
+          arguments: JSON.stringify({
+            outcome: 'completed',
+            summary: {
+              goal: summaryText?.[nextDelivery ? 'next' : 'original'].goal
+                ?? (nextDelivery ? 'complete the next execution' : 'resume the original business turn'),
+              actions: [summaryText?.[nextDelivery ? 'next' : 'original'].actions
+                ?? (nextDelivery ? 'used the corrected forward context' : 'retained the confirmed effect')],
+              result: {
+                status: 'completed',
+                text: nextDelivery
+                  ? c3aNextResult
+                  : deliveryText
+                    ?? summaryText?.original.result
+                    ?? 'C3A prior-v2 resumed semantic marker',
+              },
+              nextStep: summaryText?.[nextDelivery ? 'next' : 'original'].expectedNextStep
+                ?? 'planner aligns the exact current plan',
+            },
             deliveryRefs: nextDelivery ? [] : [deliveryRef],
-            ...(nextDelivery ? { deliveryText: 'Next execution completed from the corrected forward context.' }
-              : deliveryText === undefined ? {} : { deliveryText }) }) } },
+          }) } },
       { type: 'response.completed', response: { id: `response-${model}` } },
     ];
   };
@@ -775,6 +801,7 @@ interface ColdFixture {
   readonly initialOpenAnchor?: ActiveTurnInitialOpenAnchor;
   readonly fixtureKind?: 'captured' | 'interrupted' | 'initial-open';
   readonly pendingRequestId?: string;
+  readonly unknownEffectPath?: string;
 }
 
 interface InterruptedColdFixture extends ColdFixture {
@@ -790,7 +817,7 @@ interface InterruptedColdFixture extends ColdFixture {
  * but ZERO checkpoints, ZERO checkpoint closures, ZERO recovery-assets.phase
  * commits, and ZERO segment-opened records.
  */
-async function buildInitialOpenColdFixture(name: string): Promise<ColdFixture> {
+async function buildInitialOpenColdFixture(name: string, interruptFileEffect = false): Promise<ColdFixture> {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, `${name}-`));
   const preparedPath = join(root, 'prepared.jsonl');
@@ -1079,6 +1106,35 @@ async function buildInitialOpenColdFixture(name: string): Promise<ColdFixture> {
   const pendingRequestId = 'pending-initial-request';
   await active.registerRequest({ request: { turnId: businessTurnId, requestId: pendingRequestId }, scope, phase: 'dispatching' });
   await active.registerRequest({ request: { turnId: businessTurnId, requestId: pendingRequestId }, scope, phase: 'dispatched' });
+  let unknownEffectPath: string | undefined;
+  if (interruptFileEffect) {
+    const operation = id('operation', 'interrupted-file-write');
+    const callId = 'interrupted-file-call';
+    const continuationRef = 'interrupted-file-continuation';
+    const toolBinding = { execution, scope: { ...scope, operationId: operation },
+      toolOperationId: operation, requestId: pendingRequestId, callId, continuationRef };
+    const arguments_ = { path: 'interrupted-output.txt', content: 'one interrupted write\n' };
+    const argsDigest = computeToolArgsDigest(arguments_);
+    const toolEffect: FileWriteEffect = { kind: 'file.write', effectId: await fileWriteEffectId(toolBinding),
+      workspaceRef: root, relativePath: arguments_.path, inputDigest: digest(arguments_.content),
+      expectedContentDigest: digest(arguments_.content) };
+    const raw = await new ImmutableAssetStore(artifactsRoot).write('interrupted-call-arguments',
+      new TextEncoder().encode(JSON.stringify(arguments_)));
+    await active.acceptRawFact({ execution: binding.execution, scope,
+      request: { turnId: businessTurnId, requestId: pendingRequestId }, producerSeq: 1,
+      fact: { kind: 'tool-call', contentUnitId: callId,
+        call: { callId, toolId: 'file.write', arguments: arguments_, continuationRef },
+        rawArguments: { ref: evidenceReference(raw, scope, 'operation'), view: { kind: 'utf8-text' } },
+        complete: true } });
+    await completion.commitIntent({ kind: 'operation-effect-intent', version: 1, binding: toolBinding, effect: toolEffect });
+    const ledger = createJsonlToolEffectLedgerJournal({ filePath: `${journalPath}.effect-ledger.jsonl` });
+    await ledger.appendToolEffectLedgerEntry({ scope, turnId: businessTurnId, callId, toolCallId: callId,
+      toolName: 'file.write', effectPolicy: 'mutating', argsDigest,
+      idempotencyKey: computeToolIdempotencyKey({ turnId: businessTurnId, toolCallId: callId, toolId: 'file.write', argsDigest }),
+      state: 'dispatched-effect-unknown', outputArtifactRef: null });
+    unknownEffectPath = join(root, arguments_.path);
+    await writeFile(unknownEffectPath, arguments_.content, 'utf8');
+  }
   await active.registerRequest({ request: { turnId: businessTurnId, requestId: pendingRequestId }, scope, phase: 'waiting' });
 
   // Commit RuntimeTaskCurrentState in entryPhase: 'open', nextAction: { kind: 'continue' }
@@ -1141,6 +1197,7 @@ async function buildInitialOpenColdFixture(name: string): Promise<ColdFixture> {
     initialOpenAnchor: anchor,
     fixtureKind: 'initial-open',
     pendingRequestId,
+    ...(unknownEffectPath ? { unknownEffectPath } : {}),
   };
 }
 
@@ -1350,6 +1407,60 @@ async function buildColdFixture(name: string,
     result: { operationId: toolOperationId, status: 'succeeded', outputRef: 'artifact://accepted-output',
       outputDigest: digest(output), evidenceRefs: [evidence(scope, 'accepted-output')],
       verifier: { name: 'file-readback', version: '1', decision: 'accepted' }, completedAt: at } });
+  // Production Memory reads the exact control-journal sibling effect ledger.
+  // Record the pre-dispatch and confirmed transition from the same actual call,
+  // execution scope, tool arguments and read-back proof used by the Organ facts
+  // above. This keeps recovery on the real producer shape instead of treating
+  // the completion records in the Organ journal as a substitute ledger.
+  const effectLedgerPath = `${journalPath}.effect-ledger.jsonl`;
+  const effectLedger = createJsonlToolEffectLedgerJournal({
+    filePath: effectLedgerPath,
+    journal: new JsonlOrganJournal(effectLedgerPath),
+  });
+  const argsDigest = computeToolArgsDigest(callArguments);
+  const idempotencyKey = computeToolIdempotencyKey({
+    turnId: businessTurnId,
+    toolCallId: effectBinding.callId,
+    toolId: 'file.write',
+    argsDigest,
+  });
+  const effectLedgerIdentity = {
+    scope,
+    turnId: businessTurnId,
+    callId: effectBinding.callId,
+    toolCallId: effectBinding.callId,
+    boundPlanStepId: 'step-1',
+    toolName: 'file.write',
+    effectPolicy: 'mutating' as const,
+    argsDigest,
+    idempotencyKey,
+  };
+  await effectLedger.appendToolEffectLedgerEntry({
+    ...effectLedgerIdentity,
+    state: 'dispatched-effect-unknown',
+    outputArtifactRef: null,
+  });
+  await effectLedger.appendToolEffectLedgerEntry({
+    ...effectLedgerIdentity,
+    state: 'effect-committed',
+    outputArtifactRef: 'artifact://accepted-output',
+    cachedOutput: {
+      output,
+      outputRefs: ['artifact://accepted-output'],
+      evidenceRefs: [evidence(scope, 'accepted-output')],
+      status: 'succeeded',
+    },
+  });
+  const persistedEffect = await effectLedger.readToolEffectLedgerEntries({
+    scope,
+    turnId: businessTurnId,
+  });
+  assert.equal(persistedEffect.length, 1);
+  assert.equal(persistedEffect[0]?.entry.callId, effectBinding.callId);
+  assert.equal(persistedEffect[0]?.entry.toolCallId, effectBinding.callId);
+  assert.equal(persistedEffect[0]?.entry.turnId, businessTurnId);
+  assert.equal(persistedEffect[0]?.entry.state, 'effect-committed');
+  assert.deepEqual(persistedEffect[0]?.history, ['dispatched-effect-unknown', 'effect-committed']);
   const rawOutput = { ref: evidenceReference(await new ImmutableAssetStore(artifactsRoot).write('accepted-output-raw',
     new TextEncoder().encode(output)), scope, 'operation'), view: { kind: 'utf8-text' as const } };
   const accepted: AcceptedRawFact = await active.acceptRawFact({ execution: binding.execution, scope,
@@ -1741,6 +1852,72 @@ function controlledColdResumeSelector(fixture: ColdFixture): ColdResumeSelector 
  * Actual in-process HTTP listener plus the actual UiRuntimeService route. The
  * only controlled edge is the canonical selector callback above.
  */
+function blockedTaskReadFixture(fixture: ColdFixture) {
+  const baseUrl = 'http://blocked-task-read.test';
+  const binding: ProviderBinding = { ...serviceBinding, bindingId: 'blocked-task-read',
+    protocol: 'responses', modelRef: 'controlled-status-read', endpointRef: baseUrl };
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(fixture.root, 'explicit-assets')));
+  const journal = new JsonlOrganJournal(join(fixture.root, 'explicit-parent.jsonl'));
+  const helper = new JsonlInteractionHelperJournal(journal);
+  let completeReply!: () => void;
+  const allowReply = new Promise<void>(resolve => { completeReply = resolve; });
+  const callId = 'original-task-read';
+  let calls = 0;
+  const transport = new V3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
+    binding, baseUrl, source: 'http', evidence,
+    async fetch(_url, init) {
+      if (init.method === 'GET') {
+        return { status: 200, body: null, text: async () => JSON.stringify({ data: [{ id: binding.modelRef }] }) };
+      }
+      const wire = JSON.parse(init.body ?? '{}') as {
+        tools?: readonly { name: string }[];
+        input?: readonly { type: string; call_id?: string; output?: string }[];
+      };
+      assert.equal(wire.tools?.some(tool => tool.name === 'task_resume') ?? false, false);
+      const round = ++calls;
+      assert.ok(round <= 3, 'the controlled read has one request, its continuation, and the drain');
+      const responseId = `blocked-read-response-${round}`;
+      const paired = round === 2 ? wire.input?.find(item => item.type === 'function_call_output'
+        && item.call_id === callId) : undefined;
+      if (round === 2) {
+        const result = JSON.parse(paired?.output ?? '{}') as { status?: string; blocker?: unknown };
+        assert.equal(result.status, 'blocked');
+        assert.ok(result.blocker);
+        await allowReply;
+      }
+      const decision = { kind: 'simple', decision: { kind: 'status-query', normalizedInput: '读取原任务',
+        knownFacts: [], decisionRefs: [], answer: '已读取原任务。' },
+        checkpointRecord: { index: { action: '读取原任务', result: '已读取' } } };
+      const tool = round === 1
+        ? { name: 'task_read_result', call_id: callId, arguments: JSON.stringify({ taskId: fixture.taskId.value }) }
+        : { name: 'humanagent_turn_end', call_id: 'blocked-read-end', arguments: JSON.stringify(decision) };
+      const frames = [{ type: 'response.created', response: { id: responseId } },
+        ...(round === 3 ? [] : [{ type: 'response.output_item.done', output_index: 0,
+          item: { type: 'function_call', id: `blocked-read-item-${round}`, ...tool } }]),
+        { type: 'response.completed', response: { id: responseId } }];
+      const body = frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('');
+      return { status: 200, headers: new Headers({ 'content-type': 'text/event-stream' }),
+        body: (async function* () { yield new TextEncoder().encode(body); })(), text: async () => body };
+    },
+  });
+  const port = new ProviderAdapter<InteractionParentProviderExecutionIdentityRef>({
+    binding, transport, evidence, routeRef: 'blocked-task-read', codec: new ResponsesProviderCodec(),
+  });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    organId, interactionScopeId: 'browser-blocked-task-read', binding, port,
+    parentJournal: new JsonlInteractionParentTurnJournal(journal),
+    checkpointJournal: helper, helperJournal: helper, turnHelperJournal: helper,
+    rawEvidence: evidence, rawContent: providerRawContentReader(evidence),
+    helperFactory: async () => { throw new Error('the chat may only read the existing task'); },
+    clock: { now: () => new Date().toISOString() },
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    prepareAgentProvider: async () => ({ roleId: 'interaction', source: 'http', binding, port,
+      provider: { source: 'http', provider: 'http', binding: binding.bindingId, protocol: 'responses',
+        model: binding.modelRef, route: 'blocked-task-read', baseUrl } }),
+  });
+  return { interpreter, completeReply, close: () => port.close(binding) };
+}
+
 async function buildResumeService(
   fixture: ColdFixture,
   upstreamBaseUrl: string,
@@ -1754,10 +1931,13 @@ async function buildResumeService(
 ) {
   const assemblies: ResumeAssembly[] = [];
   let selectorCalls = 0;
-  const paths = productionMemory ? await resolveRuntimePaths({ controlRoot: join(fixture.root, 'control'), workspace: fixture.root }) : undefined;
+  const paths = productionMemory || browserFixture
+    ? await resolveRuntimePaths({ controlRoot: join(fixture.root, 'control'), workspace: fixture.root })
+    : undefined;
   if (paths) await ensureControlLayout(paths);
+  const uiRoot = browserFixture ? join(process.cwd(), 'docs', 'ui') : join(fixture.root, 'ui');
   if (paths && realMemory) await writeFile(join(paths.controlRoot, 'config.toml'), realMemory.configToml, 'utf8');
-  const configuration = paths ? await loadConfiguration(paths) : undefined;
+  const configuration = productionMemory && paths ? await loadConfiguration(paths) : undefined;
   const factory = paths && realMemory ? memoryDriverFactory({
     paths, configuration: configuration!, workspace: paths.workspaceCwd,
     prepareAgentProvider: (selection) => prepareAgentProvider({ ...selection,
@@ -1784,7 +1964,7 @@ async function buildResumeService(
       settle: async (input) => { const result = await driver.settle(input); calls.push({ kind: 'settle', input, result }); return result; },
     }, release: async () => { await prepared.release(); calls.push({ kind: 'release', request }); } };
   } : undefined;
-  const memoryRuntime = paths ? await composeMemoryRuntime({
+  const memoryRuntime = configuration && paths ? await composeMemoryRuntime({
     paths, configuration: configuration!, workspaceCwd: paths.workspaceCwd,
     ...(driverFor === undefined ? {} : { driverFor }),
     sessionsRoot: paths.sessionsRoot, runNotesRoot: paths.runNotesRoot,
@@ -1819,6 +1999,7 @@ async function buildResumeService(
     };
   }
   const attentionPath = join(paths?.journalRoot ?? fixture.root, 'memory-attention.jsonl');
+  const blockedRead = fixture.unknownEffectPath ? blockedTaskReadFixture(fixture) : undefined;
   const memoryHooks = memoryRuntime && paths ? composeUiMemoryHooks({ memory: memoryRuntime,
     checkpointJournalPath: fixture.journalPath, attentionPort: createJsonlAttentionPort({ paths, filePath: attentionPath }),
     readAttentions: async () => {
@@ -1831,12 +2012,27 @@ async function buildResumeService(
     binding: serviceBinding,
     port: new FakeReplayExecutionRuntimePort({ binding: serviceBinding, stepDelayMs: 1 }),
     checkpointStoreFor: () => new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at)),
+    ...(fixture.unknownEffectPath ? {
+      effectLedgerFor: () => createJsonlToolEffectLedgerJournal({ filePath: `${fixture.journalPath}.effect-ledger.jsonl` }),
+    } : {}),
     attentionPort: attentionPort(),
     providerState: 'ready',
     journal: fixture.preparedJournal,
     closurePort: fixture.preparedJournal,
-    memory: memoryRuntime ? { ...memoryRuntime.composition, projectKey: paths!.projectKey, ...memoryHooks } : testMemory('project-cold-resume-http'),
-    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    memory: memoryRuntime ? { ...memoryRuntime.composition, projectKey: paths!.projectKey, ...memoryHooks } : testMemory(paths?.projectKey ?? 'project-cold-resume-http'),
+    ...(browserFixture && paths !== undefined ? {
+      runtimePaths: paths,
+      projectKey: paths.projectKey,
+      workspaceRoot: paths.workspaceCwd,
+      taskIdentity: new TaskIdentityConsumer(new JsonlTaskIdentityJournal(fixture.journal)),
+      projectCatalog: async () => ({ projects: [{
+        projectKey: paths.projectKey,
+        projectRoot: paths.projectRoot,
+        workspaceCwd: paths.workspaceCwd,
+        checkpointsRoot: paths.checkpointsRoot,
+      }], failures: [] }),
+    } : {}),
+    explicitBrainInterpreter: blockedRead?.interpreter ?? unusedExplicitBrainInterpreter,
     runtimeComposition: {
       createTaskAssembly: resumeTaskAssembly(fixture, assemblies, runtimeOptions),
       createExecutionPorts: (callbacks) => {
@@ -1901,7 +2097,7 @@ async function buildResumeService(
     service,
     accessControl,
     productRoot: fixture.root,
-    uiRoot: join(fixture.root, 'ui'),
+    uiRoot,
     isClosing: () => false,
   });
   const server = createServer(dispatcher.listener);
@@ -1916,16 +2112,20 @@ async function buildResumeService(
     accessControl,
     server,
     url: `http://127.0.0.1:${address.port}`,
+    projectKey: paths?.projectKey,
     cookie,
     assemblies,
     memoryRuntime,
     memoryAnalyses,
     memoryHooks,
     attentionPath,
+    blockedRead,
     selectorCallCount: () => selectorCalls,
     close: async () => {
+      blockedRead?.completeReply();
       server.closeIdleConnections?.();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await blockedRead?.close();
       await accessControl.closeCredentialWatch().catch(() => undefined);
       await launched?.close();
       for (const assembly of assemblies) await assembly.runtimePool.dispose();
@@ -2288,6 +2488,32 @@ async function runC3aControlChain(
   const checkpoints = createJsonlCheckpointJournal({ filePath: fixture.journalPath, journal: fixture.journal });
   const originalPosition = await checkpoints.readExecutionPosition(taskScope);
   if (originalPosition === null) throw new Error('the fixture has no original execution position');
+  // Hydration legitimately holds the original operation until the provider
+  // settles. Supply the fixture's confirmed receipt afterwards so this test
+  // exercises explicit resume rather than racing startup's own recovery.
+  const scope = fixture.allocation.scope;
+  const filePath = `${fixture.journalPath}.effect-ledger.jsonl`;
+  const ledger = createJsonlToolEffectLedgerJournal({ filePath, journal: new JsonlOrganJournal(filePath) });
+  const held = await ledger.readLatestTurnSegmentRecoveryFact({ scope, turnId: fixture.businessTurnId });
+  if (held === null) throw new Error('the production fixture did not record its initial recovery hold');
+  assert.equal(held.recoveryOutcome, 'recovery-hold-effect-unknown');
+  assert.equal(held.providerSettleReceipt.state, 'unknown');
+  assert.equal(held.toolEffects[0]?.state, 'effect-committed');
+  await ledger.appendTurnSegmentRecoveryFact({ scope, fact: {
+    taskId: held.taskId,
+    operationId: held.operationId,
+    turnId: held.turnId,
+    executionEpoch: held.executionEpoch,
+    segmentSeq: held.segmentSeq,
+    predecessorCheckpointId: held.predecessorCheckpointId,
+    planRevisionId: held.planRevisionId,
+    recoveryResponsibilityOwner: held.recoveryResponsibilityOwner,
+    providerSettleReceipt: {
+      providerRequestId: 'accepted-tool-request', state: 'settled', verifiedBy: 'response-stream-eof', verifiedAt: at,
+    },
+    toolEffects: held.toolEffects,
+    recoveryOutcome: 'recovery-auto-resumed',
+  } });
   const release = await service.resumeExecution(fixture.taskId, { operationId: fixture.allocation.operationId });
   assert.equal(release.state, 'released');
   const resumedPosition = await checkpoints.readExecutionPosition(taskScope);
@@ -2450,7 +2676,7 @@ async function runC3aProcess(): Promise<void> {
       assert.ok(current.context.contextView.omittedRefs.includes(c3aOmittedRef));
       assert.equal(http.wires.length, 0, 'hydrate must not send a Provider request');
       const next = await runNextExecutionAssertions(app.service, fixture, http, position!.executionEpoch, current.context,
-        'delivered the next execution result');
+        c3aNextResult);
       archiveRoot = await archiveC3aReceipts(fixture, http, { mode: processMode, pid: process.pid,
         controlFloor: position!.executionEpoch, currentTask: current.task, retainedDuties: current.retainedDuties,
         activeRefs: current.context.contextView.activeRefs, omittedRefs: current.context.contextView.omittedRefs, next,
@@ -2670,7 +2896,7 @@ async function runNextExecutionAssertions(
     .every((semantic) => executionText.some((text) => text.includes(semantic))),
   'the actual next wire must retain the accepted context semantics and duty');
   assert.ok(executionText.some((text) => text.includes(expectedCheckpointSemantic)),
-    'the actual next wire must consume the resumed v2 checkpoint semantics');
+    `the next request must include ${JSON.stringify(expectedCheckpointSemantic)} from the resumed v2 checkpoint; got ${JSON.stringify(executionText)}`);
   assert.ok(!executionText.some((text) => text.includes(contextRefs.wrong)),
     'the corrected wrong ref must not return as active reasoning');
 
@@ -2729,7 +2955,7 @@ async function runNextExecutionAssertions(
   assert.equal(publication.state, 'committed');
   assert.equal(publication.commits.length, 1);
   const publicationText = publication.commits[0]!.text;
-  assert.equal(publicationText, 'Next execution completed from the corrected forward context.');
+  assert.equal(publicationText, c3aNextResult);
   assert.equal(await readFile(fixture.effectPath, 'utf8'), effectBefore);
   assert.equal(effectRecordCount(records, fixture.effect.effectId), effectsBefore,
     'starting the next execution must not replay the confirmed effect');
@@ -4143,7 +4369,7 @@ function registerPublicConsumers(): void {
       memoryFault.diagnostics = true;
       const current = knownCurrent((await fixture.journal.verify()).records, { organId, taskId: fixture.taskId });
       const unaffected = await runNextExecutionAssertions(app.service, fixture, http, chain.next.executionEpoch, current.context,
-        'delivered the next execution result');
+        c3aNextResult);
       const faultSummary = await c3aHttpMemorySummary(app);
       assert.equal(faultSummary.data.state, 'degraded');
       assert.match(faultSummary.data.detail!, /memory-test-consume-failed/);
@@ -4237,6 +4463,14 @@ if (processMode === 'p2b-audit') {
   await runC3aProcess();
 } else if (processMode === 'seed' || processMode === 'resume') {
   await (processMode === 'seed' ? runSeedProcess() : runResumeProcess());
-} else {
+} else if (!browserFixture) {
   registerPublicConsumers();
 }
+
+function readBrowserFixtureEffectLedger(fixture: ColdFixture) {
+  return createJsonlToolEffectLedgerJournal({ filePath: `${fixture.journalPath}.effect-ledger.jsonl` })
+    .readToolEffectLedgerEntries({ scope: fixture.allocation.scope, turnId: fixture.businessTurnId });
+}
+
+export { buildColdFixture, buildInitialOpenColdFixture, buildResumeService, effectRecordCount,
+  readBrowserFixtureEffectLedger, upstream };

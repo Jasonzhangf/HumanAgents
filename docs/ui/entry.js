@@ -22,7 +22,7 @@ import { mountInteractionWorkCard } from './interaction-work-card.js'
 import { renderMainTopic, disposeMainTopic, updateMainTopicUsage, mainTopicTurnGroups } from './main-topic.js'
 import { renderMainTopicHistoryDetail } from './main-topic-history-detail.js'
 import { createSessionUsageReader } from './runtime-api.js'
-import { conversationStatus, elapsedSeconds } from './conversation-status.js'
+import { renderTurnProgressDetail } from './turn-progress-detail.js'
 import {
   projectInteractionCardFromEntries,
   projectInteractionCardFromSnapshot,
@@ -1362,32 +1362,15 @@ function openMainTopicHistoryDetail(trigger, round, turns, host = mainTopicHost)
 }
 
 function openMainTopicProgressDetail(trigger, turn, scope) {
-  const content = element('div', undefined, 'stack progress-detail-body')
-  const identity = element('dl', undefined, 'draft-receipt')
-  for (const [label, value] of [['消息', turn.turnId], ['会话', turn.interactionId], ['任务', turn.taskId?.value]]) {
-    if (!value) continue
-    const row = element('div')
-    row.append(element('dt', label), element('dd', value))
-    identity.append(row)
-  }
-  content.append(identity)
-  const list = element('ol', undefined, 'progress-step-list')
-  for (const row of conversationStatus(turn.statusFacts)) {
-    const item = element('li', undefined, 'progress-step')
-    item.append(element('span', row.label))
-    const seconds = elapsedSeconds(row)
-    if (seconds !== undefined) item.append(element('span', `${seconds} 秒`))
-    if (row.error) item.append(element('span', sanitizeUserVisibleText([row.error.code, row.error.message].filter(Boolean).join('：'))))
-    if (row.startedAt) item.append(element('time', formatTime(row.startedAt)))
-    list.append(item)
-  }
-  content.append(list)
+  const detail = renderTurnProgressDetail(turn, { readOutput: api.readToolOutput })
+  const { content } = detail
   if (turn.taskId) {
     const link = element('a', '打开完整任务看板', 'button button--sm')
     link.href = taskDashboardHref(turn.taskId.value, { kind: 'task', projectKey: scope.projectKey, mode: scope.mode })
     content.append(link)
   }
   openTechnicalDetail({ title: '执行进度详情', content, trigger, onClose: () => {
+    detail.dispose()
     // A normal poll may replace the clicked button while this layer is open.
     if (!trigger.isConnected) {
       mainTopicHost.querySelector(`[data-turn-id="${CSS.escape(turn.turnId)}"] .conversation-status-detail`)?.focus()

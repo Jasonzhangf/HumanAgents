@@ -953,12 +953,14 @@ export type ProviderToolStatus = 'succeeded' | 'failed' | 'blocked' | 'cancelled
 
 export interface ExplicitInteractionToolActivity {
   readonly callId: string;
-  readonly kind: 'select-skills' | 'read-task-result' | 'submit-turn';
+  readonly kind: 'select-skills' | 'read-task-result' | 'resume-task' | 'submit-turn';
   readonly status?: ProviderToolStatus;
   readonly errorCode?: string;
   readonly detail?:
     | { readonly kind: 'skills'; readonly skills: readonly string[] }
-    | { readonly kind: 'task-result'; readonly title?: string; readonly taskState?: string; readonly publicationState?: string }
+    | { readonly kind: 'task-result'; readonly title?: string; readonly taskState?: string; readonly publicationState?: string;
+        readonly resultAvailable?: boolean; readonly continuation?: 'released' | 'in-progress' | 'complete' | 'blocked';
+        readonly blocker?: { readonly code: string; readonly reason: string; readonly nextStep: string } }
     | { readonly kind: 'decision'; readonly decision: 'answer' | 'status-query' | 'clarification' | 'create' | 'append' | 'change' | 'partial'; readonly title?: string };
 }
 export type ProviderSubmitStatus = 'accepted' | 'completed' | 'blocked' | 'failed' | 'unknown';

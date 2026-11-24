@@ -10,7 +10,9 @@ const at = '2026-11-22T10:00:00.000Z'
 const steps = [
   { seq: 1, kind: 'request.dispatched', occurredAt: at, requestId: 'request-simple', turnId: 'simple' },
   { seq: 2, kind: 'response.streaming', occurredAt: '2026-11-22T10:00:02.000Z', requestId: 'request-simple', turnId: 'simple' },
-  { seq: 3, kind: 'request.settled', occurredAt: '2026-11-22T10:00:03.000Z', requestId: 'request-simple', turnId: 'simple' },
+  { seq: 3, kind: 'tool.started', occurredAt: '2026-11-22T10:00:03.000Z', requestId: 'request-simple', turnId: 'simple', tool: { kind: 'select-skills', callId: 'call-simple' } },
+  { seq: 4, kind: 'tool.finished', occurredAt: '2026-11-22T10:00:04.000Z', requestId: 'request-simple', turnId: 'simple', tool: { kind: 'select-skills', callId: 'call-simple', status: 'succeeded', detail: { kind: 'skills', skills: ['task-intake'] } } },
+  { seq: 5, kind: 'request.settled', occurredAt: '2026-11-22T10:00:05.000Z', requestId: 'request-simple', turnId: 'simple' },
 ]
 const task = (value) => ({ scope: 'task', value })
 const projection = {
@@ -69,6 +71,12 @@ try {
         await writeFile(join(evidence, `${entry}-${reload}-${id}.txt`), text)
         const expected = { simple: '本次请求总耗时', history: '任务已完成', other: '受控失败' }[id]
         assert.ok(text.includes(expected), `${entry} ${id}: expected ${expected}, got ${text}`)
+        if (id === 'simple') {
+          assert.ok(text.includes('加载本轮技能'))
+          assert.ok(text.includes('任务接单'))
+          assert.ok(text.includes('已完成'))
+          assert.equal(/request-simple|call-simple|simple-interaction/.test(text), false)
+        }
         assert.ok(!text.includes('任务尚未进入执行进度'))
         const href = await dialog.locator('a').count() ? await dialog.locator('a').getAttribute('href') : null
         if (id === 'simple') assert.equal(href, null)

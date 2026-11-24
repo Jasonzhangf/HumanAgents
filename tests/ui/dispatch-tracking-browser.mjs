@@ -9,7 +9,8 @@ const evidence = process.env.DISPATCH_EVIDENCE_DIR || resolve(import.meta.dirnam
 await mkdir(evidence, { recursive: true })
 const writes = [], checks = [], errors = []
 const originalEndpoint = process.env.DISPATCH_ORIGINAL_READ_URL
-const project = { projectKey: 'dispatch-proof', projectName: '交办验收', agentName: 'Jenny', mode: 'fake', workspaceCwd: '/isolated/dispatch-proof' }
+const project = { projectKey: 'dispatch-proof', projectName: '交办验收', agentName: 'Jenny', mode: 'fake',
+  workspaceCwd: '/isolated/manual-webui-20261123-135730/workspace-2026' }
 const tasks = [], turns = [], interactions = new Map(), controlWrites = []
 let waitingDecision
 let phase = 'fixture'
@@ -98,7 +99,9 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/')) {
       if (phase === 'live') {
         assert.equal(req.method, 'GET', 'original sample is read-only')
-        const response = await fetch(new URL(`${url.pathname}${url.search}`, originalEndpoint))
+        const controller = new AbortController()
+        res.once('close', () => controller.abort())
+        const response = await fetch(new URL(`${url.pathname}${url.search}`, originalEndpoint), { signal: controller.signal })
         res.writeHead(response.status, { 'content-type': 'application/json' }); res.end(await response.text()); return
       }
       const data = await fixture(req, url)
@@ -107,7 +110,10 @@ const server = createServer(async (req, res) => {
     const path = resolve(root, '.' + (url.pathname === '/' ? '/index.html' : url.pathname))
     assert.ok(path.startsWith(root + '/'))
     res.writeHead(200, { 'content-type': { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' }[extname(path)] || 'text/plain' }); res.end(await readFile(path))
-  } catch (error) { errors.push(error.message); res.writeHead(500); res.end(JSON.stringify({ error: { code: 'proof.failed', message: error.message } })) }
+  } catch (error) {
+    if (res.destroyed) return
+    errors.push(error.message); res.writeHead(500); res.end(JSON.stringify({ error: { code: 'proof.failed', message: error.message } }))
+  }
 })
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
 const base = `http://127.0.0.1:${server.address().port}`
@@ -117,6 +123,17 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' })
   page.on('pageerror', error => errors.push(error.message))
   await page.goto(`${base}/?projectKey=${project.projectKey}&mode=fake`)
+  await page.locator('.entry-jenny').waitFor()
+  const workspaceLabel = page.locator('.entry-workspace-folder > summary')
+  check('navigation shows the workspace name including its meaningful digits',
+    await workspaceLabel.innerText() === 'workspace-2026')
+  check('navigation and conversation header omit the generated directory timestamp',
+    !(await page.locator('.entry-rail, .entry-toolbar').allTextContents()).join().includes('20261123-135730')
+    && await workspaceLabel.getAttribute('title') === null)
+  await page.getByRole('button', { name: '项目设置', exact: true }).click()
+  await page.getByText(project.workspaceCwd, { exact: true }).waitFor()
+  check('project settings still identify the workspace by full path', true)
+  await page.keyboard.press('Escape')
   const input = page.locator('textarea[name=rawInput]')
   await input.fill('检查隔离项目')
   await page.getByRole('button', { name: '发送给 Jenny', exact: true }).click()

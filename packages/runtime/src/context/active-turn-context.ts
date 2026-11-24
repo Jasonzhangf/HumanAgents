@@ -392,24 +392,31 @@ async function recordChildAdoptionRecord(
 async function recordChildNonSelectionRecord(
   state: ActiveTurnRecordState,
   invocationId: string,
-): Promise<void> {
+): Promise<'recorded' | 'unreturned'> {
   const invocation = projectChildInvocations(state.records).find((record) => record.invocationId === invocationId);
   if (!invocation) fail('active-turn.invocation.unknown', `non-selection references unknown invocation ${invocationId}`);
   const delivery = projectEntries(state.records).find((entry): entry is AcceptedChildDelivery => (
     !('envelope' in entry) && entry.invocationId === invocationId
   ));
-  if (!delivery) {
-    fail('active-turn.non-selection.unreturned', 'cannot decline a child delivery that has not been durably returned');
-  }
+  if (!delivery) return 'unreturned';
   if (delivery.kind !== invocation.binding.kind) {
     fail('active-turn.non-selection.kind-mismatch', 'declined delivery kind does not match its invocation binding');
   }
   if (invocation.adoptedResultSeq !== undefined) {
     fail('active-turn.non-selection.adopted', 'cannot decline a child delivery the parent already adopted');
   }
-  if (invocation.notSelectedResultSeq === delivery.seq) return;
+  if (invocation.notSelectedResultSeq === delivery.seq) return 'recorded';
   const record: ChildInvocationRecord = { ...invocation, notSelectedResultSeq: delivery.seq };
   await state.append(state.commitId(`not-selected:${invocationId}`), { kind: 'child-invocation', record });
+  return 'recorded';
+}
+
+function rejectUnreturnedChild(result: 'recorded' | 'unreturned'): void {
+  // An unanswered precondition appends nothing. Report it outside the mutation
+  // queue so only failed required mutations invalidate the live context.
+  if (result === 'unreturned') {
+    fail('active-turn.non-selection.unreturned', 'cannot decline a child delivery that has not been durably returned');
+  }
 }
 
 async function recordReviewCheckpointRecord(
@@ -669,11 +676,7 @@ export class ActiveTurnContext {
    * adoption rejects, and a repeated identical decision is idempotent.
    */
   async recordChildNonSelection(invocationId: string): Promise<void> {
-    return this.mutate(() => this.recordChildNonSelectionRecord(invocationId));
-  }
-
-  private async recordChildNonSelectionRecord(invocationId: string): Promise<void> {
-    return recordChildNonSelectionRecord(this.state(), invocationId);
+    rejectUnreturnedChild(await this.mutate(() => recordChildNonSelectionRecord(this.state(), invocationId)));
   }
 
   /**
@@ -995,7 +998,7 @@ export class ActiveTurnSegmentContext {
   }
 
   async recordChildNonSelection(invocationId: string): Promise<void> {
-    return this.mutate(() => recordChildNonSelectionRecord(this.state(), invocationId));
+    rejectUnreturnedChild(await this.mutate(() => recordChildNonSelectionRecord(this.state(), invocationId)));
   }
 
   async recordReviewCheckpoint(invocationId: string, checkpointReceiptRef: string): Promise<void> {

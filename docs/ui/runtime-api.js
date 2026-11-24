@@ -399,6 +399,19 @@ export function createRuntimeApi(options = {}) {
         body: JSON.stringify(body),
       },
     ),
+    // Resume is an exact control action. The task and operation both come from
+    // the current Dashboard projection; project/mode stay in the existing task
+    // control scope and never enter the business request body.
+    resumeTask: ({ taskId, operationId } = {}, taskScope) => {
+      if (typeof taskId !== 'string' || taskId.trim() === ''
+        || typeof operationId !== 'string' || operationId.trim() === '') {
+        throw new TypeError('task resume requires non-empty taskId and operationId')
+      }
+      return request(`/api/tasks/${encodeURIComponent(taskId)}/resume${exactTaskControlScopeQuery(taskScope)}`, {
+        method: 'POST',
+        body: JSON.stringify({ operationId }),
+      })
+    },
     receiveExplicitInput: (input) => request('/api/explicit/inputs', {
       method: 'POST',
       body: JSON.stringify({ ...input, channel: 'business' }),

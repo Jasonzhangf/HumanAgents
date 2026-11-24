@@ -28,6 +28,7 @@
     "composition": "五板块与 session 组合由 App 纯组合既有 owner 已读事实；Runtime 保留事实选择，UI 保留投影。新增公开读取入口时才补本图入口契约，不把内部 actual execution graph 当产品关系链。",
     "boardIndex": "板块条目集合来自任务身份/状态与 session 事实；Live 分类来自权威状态，不从页面本地 transport 或 role 名判断；未知保持显式。",
     "relationBoundary": "关系边只来自 typed lineage（requirementId、subscriptionId、occurrenceId、child execution、checkpoint、review、planner、tool-pair）与 exact refs，不用标题、时间或角色顺序补边。",
-    "childToolActivity": "同一 task 内的委派活动按已提交的 invocation、acquired incarnation 和 child turn 绑定读取；调用与结果使用其自己的 operation、epoch 和调用身份。公开结果读取沿同一精确 scope 解析持久事实，并使用该执行绑定所属的报告存储。浏览器复用工具语义视图，不从委派参数、结果摘要或文件名推断实际文件工具调用。"
+    "childToolActivity": "同一 task 内的委派活动按已提交的 invocation、acquired incarnation 和 child turn 绑定读取；调用与结果使用其自己的 operation、epoch 和调用身份。公开结果读取沿同一精确 scope 解析持久事实，并使用该执行绑定所属的报告存储。浏览器复用工具语义视图，不从委派参数、结果摘要或文件名推断实际文件工具调用。",
+    "providerCallUsage": "Provider adapter 按实际 HTTP 请求终帧记录输入、输出及服务上报的缓存计数。同一 Responses 响应出现应忽略的额外消息项时，使用已有收拢时间窗读取实际终帧，不向当前逻辑轮发布额外消息或工具。公开会话按原请求读取持久统计；实报零保持零，没有读数时不计算命中率。"
   }
 }

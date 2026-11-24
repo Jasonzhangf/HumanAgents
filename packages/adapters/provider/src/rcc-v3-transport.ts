@@ -1084,8 +1084,8 @@ export class RccV3ProviderTransport<
     let activeReasoningItemId: string | undefined;
     let reasoningSummaryStarted = false;
     let activeResponseId = `rcc-response-${String(active.identity.executionEpoch)}`;
-    let responsesRoundCount = 0;
     let roundOneMessageCompleted = false;
+    let bufferedMessageDrainDeadline: number | undefined;
     // Open content-unit delta streams of this observation. A unit leaves the
     // map when its own done event arrives, and every unit is dropped once the
     // stream reports a terminal event.
@@ -1107,7 +1107,12 @@ export class RccV3ProviderTransport<
         active.body,
         this.maxEventBytes,
         this.maxBufferBytes,
-        () => (awaitingPostMessageCompletion() ? this.postMessageCompletionGraceMs : this.noProgressBudgetMs),
+        () => {
+          if (!awaitingPostMessageCompletion()) return this.noProgressBudgetMs;
+          return bufferedMessageDrainDeadline === undefined
+            ? this.postMessageCompletionGraceMs
+            : Math.max(0, bufferedMessageDrainDeadline - performance.now());
+        },
         () => {
           if (awaitingPostMessageCompletion() && !active.controller.signal.aborted) {
             active.controller.abort(
@@ -1142,6 +1147,13 @@ export class RccV3ProviderTransport<
               ? 'error'
               : frame.event;
         if (!type) throw new ProviderAdapterError({ code: 'protocol.missing-event-type', category: 'protocol', phase: 'observe', message: 'RCC v3 SSE event has no type', scope: input });
+        if (bufferedMessageDrainDeadline !== undefined && !isTerminalEvent(active.protocol, type)) {
+          if (type === 'response.created' || performance.now() >= bufferedMessageDrainDeadline) {
+            active.controller.abort(new DOMException('RCC v3 buffered message terminal drain ended', 'AbortError'));
+            break;
+          }
+          continue;
+        }
         // Live Responses streams also carry account, header and timing
         // diagnostics. They have no content or completion authority. Keep
         // these exact transport frames out of the domain codec; unknown
@@ -1156,17 +1168,12 @@ export class RccV3ProviderTransport<
         const normalized = active.protocol === 'responses' && type === 'response.output_item.done'
           ? (this.source === 'http' ? record : normalizeServertoolCall(record))
           : record;
-        if (active.protocol === 'responses' && (type === 'response.created' || type === 'response.in_progress')) {
-          const responseRecord = optionalRecord(record.response);
-          if (responseRecord && typeof responseRecord.id === 'string' && responseRecord.id.trim() !== '') {
-            activeResponseId = responseRecord.id;
-          }
-        }
         if (active.protocol === 'responses' && type === 'response.created') {
-          responsesRoundCount += 1;
           activeReasoningItemId = undefined;
           reasoningSummaryStarted = false;
-          if (responsesRoundCount > 1 && awaitingPostMessageCompletion()) {
+          // A new response after a completed message starts another round
+          // even when RCC omitted response.created for the first round.
+          if (awaitingPostMessageCompletion()) {
             observedTerminal = true;
             openUnits.clear();
             active.terminalState = terminalStateFor(active.protocol, 'response.completed', undefined, active.stopRequested);
@@ -1183,30 +1190,23 @@ export class RccV3ProviderTransport<
             break;
           }
         }
+        if (active.protocol === 'responses' && (type === 'response.created' || type === 'response.in_progress')) {
+          const responseRecord = optionalRecord(record.response);
+          if (responseRecord && typeof responseRecord.id === 'string' && responseRecord.id.trim() !== '') {
+            activeResponseId = responseRecord.id;
+          }
+        }
         if (active.protocol === 'responses' && (type === 'response.output_item.added' || type === 'response.output_item.done')) {
           const item = readRecord(normalized.item);
           if (item.type === 'function_call') {
             active.responsesToolCallsPending = true;
             roundOneMessageCompleted = false;
           } else if (item.type === 'message' && awaitingPostMessageCompletion()) {
-            // RCC buffered a second assistant message item (`rcc-output-1`)
-            // from its unrequested `continue_execution` round without emitting
-            // a second `response.created`. Settle Round 1 before that item can
-            // enter the codec's content facts.
-            observedTerminal = true;
-            openUnits.clear();
-            active.terminalState = terminalStateFor(active.protocol, 'response.completed', undefined, active.stopRequested);
-            if (!active.controller.signal.aborted) {
-              active.controller.abort(
-                new DOMException('RCC v3 single-round message completed before buffered second message item', 'AbortError'),
-              );
-            }
-            yield {
-              protocol: 'responses',
-              type: 'response.completed',
-              response: { id: activeResponseId },
-            } as unknown as ProviderWireEvent;
-            break;
+            // RCC can append a second message inside the same response. Keep it
+            // out of the logical round but read the actual request terminal
+            // within the existing post-message grace to retain reported usage.
+            bufferedMessageDrainDeadline = performance.now() + this.postMessageCompletionGraceMs;
+            continue;
           }
         }
         if (active.protocol === 'responses' && type === 'response.output_item.added') {
@@ -1389,6 +1389,7 @@ export class RccV3ProviderTransport<
         }
         yield raw;
         if (active.stopRequested) throw active.stopCause;
+        if (bufferedMessageDrainDeadline !== undefined && observedTerminal) break;
       }
       if (!active.terminalState && awaitingPostMessageCompletion()) {
         observedTerminal = true;

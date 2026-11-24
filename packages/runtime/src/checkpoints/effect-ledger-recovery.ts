@@ -663,23 +663,9 @@ export async function reconcileHeldTurnEffectsForRecover(
   input: ReconcileHeldTurnEffectsInput,
 ): Promise<EvaluatedTurnRecoveryDecision> {
   const ownerId = input.ownerId ?? DEFAULT_EFFECT_RECOVERY_OWNER;
-  const existingRecords = await input.ledger.readToolEffectLedgerEntries({
-    scope: input.scope,
-    turnId: input.turnId,
-  });
-  const heldUnknownMutating = existingRecords.filter(
-    (item) => item.entry.effectPolicy === 'mutating' && item.entry.state === 'dispatched-effect-unknown',
-  );
-
-  for (const held of heldUnknownMutating) {
-    await input.ledger.appendToolEffectLedgerEntry({
-      ...held.entry,
-      scope: input.scope,
-      state: 'reconciled',
-      operatorNote: input.operatorNote ?? 'operator confirmed external side effect via recover action',
-    });
-  }
-
+  // A recover request only re-evaluates persisted facts. Unknown mutating effects
+  // remain held unless the ledger already contains a trusted reconciled fact;
+  // operator notes and provider settlements do not assert the external outcome.
   return evaluateAndPersistTurnRecovery({
     ledger: input.ledger,
     checkpointStore: input.checkpointStore,

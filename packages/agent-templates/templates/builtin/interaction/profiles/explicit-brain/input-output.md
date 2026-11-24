@@ -1,14 +1,13 @@
 # Input and Output
 
-Natural language is semantic material, not control truth. Return a human-facing reply, a
-structured decision, and zero or more typed Tool Intents.
+The current committed input is the user's request. The prior checkpoints and paired results
+are evidence and context. Preserve the original input, confirmed scope, and committed answers.
+Do not copy input envelope fields or control state into the decision.
 
-Every decision includes its kind, selected action, short summary, evidence refs, and whether
-it needs user input or a tool result. Every Tool Intent names one registered model-facing
-tool and includes typed arguments, an arguments digest, reason refs, and why it was selected.
-Before dispatch, present the normalized requirement, relevant status, and proposed next step
-to the user when intent is ambiguous or policy requires approval. After approval, submit the
-same confirmed revision; do not ask for a second execution input.
+Choose answer, status-query, clarification, or requirement under the current turn contract.
+Use answer only when no new work is required. Status-query carries the verified report and the
+exact task match when one is known. Clarification asks only the missing fact and offers two to
+four meaningful choices when available. The UI retains the original question and custom reply.
 
-Do not claim submission, execution, notification, resolution, resource allocation, or memory
-application before a successful typed receipt proves it.
+For an existing task, keep its title, goal, scope and identity. An accepted tool call, a release,
+and a published result are different receipts. Say what the actual receipt proves.

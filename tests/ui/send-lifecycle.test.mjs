@@ -67,3 +67,20 @@ test('a finish read or permission error stops stale official explicit clocks', (
     assert.ok(p.turns.find(t => t.turnId === status.turnId).localStatus.every(row => !row.running))
   }
 })
+
+test('an interrupted model request retains the dispatch but labels its response unresolved', () => {
+  const status = { turnId: 'status:interaction-2', interactionId: 'interaction-2', role: 'jenny', kind: 'status',
+    statusFacts: { state: 'matching', steps: [
+      { kind: 'request.dispatching', requestId: 'r', turnId: 't', occurredAt: '2026-11-23T15:00:00Z' },
+      { kind: 'request.dispatched', requestId: 'r', turnId: 't', occurredAt: '2026-11-23T15:00:03Z' },
+    ] } }
+  const error = { code: 'transport.failure' }
+  const turns = submissionView({ turns: [user, status] }, { ...attempt, error, processError: error }).turns
+  const rows = turns.find((turn) => turn.turnId === status.turnId).localStatus
+  assert.equal(rows.find((row) => row.phase === 'sending').label, '请求已发出')
+  const model = rows.find((row) => row.phase === 'model-wait')
+  assert.equal(model.label, '模型响应中断，结果待核实')
+  assert.equal(model.running, false)
+  assert.equal(model.endedAt, undefined)
+  assert.equal(turns.at(-1).localStatus[0].error.code, error.code)
+})

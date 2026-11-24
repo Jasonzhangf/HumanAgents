@@ -1866,6 +1866,18 @@ test('responses codec accepts the live provider function_call item shape without
   });
 });
 
+test('responses stream errors keep the upstream message when there is no provider code', async () => {
+  const context = codecContext();
+  const codec = new ResponsesProviderCodec();
+  for (const error of [{ message: 'upstream temporarily unavailable' }, { code: null, message: 'upstream temporarily unavailable' }]) {
+    const decoded = await codec.decodeEvent({ protocol: 'responses', type: 'error', error }, context);
+    assert.equal(decoded.events[0]?.kind, 'error');
+    assert.equal(decoded.events[0]?.error?.code, 'provider.failed');
+    assert.equal(decoded.events[0]?.error?.message, error.message);
+    assert.ok(decoded.rawFacts.some(fact => fact.kind === 'request-complete' && fact.terminal === 'failed'));
+  }
+});
+
 test('responses codec keeps structurally invalid tool arguments fatal', async () => {
   const codec = new ResponsesProviderCodec();
   const context = codecContext();

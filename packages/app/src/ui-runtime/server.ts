@@ -2049,6 +2049,11 @@ async function handleRequest(
     // verified the session; Runtime retains the task-scoped grant decision.
     const taskResume = /^\/api\/tasks\/([^/]+)\/resume$/.exec(path);
     if (taskResume && method === 'POST') {
+      const taskId = id('task', decodeURIComponent(taskResume[1]!));
+      const scope = optionalTaskControlScope(url);
+      if (scope !== undefined) {
+        await service.verifyControllableTaskTarget(taskId, scope.projectKey, scope.mode);
+      }
       const body = await readBody(request);
       const keys = Object.keys(body);
       if (keys.length !== 1 || keys[0] !== 'operationId') {
@@ -2061,10 +2066,7 @@ async function handleRequest(
         );
       }
       const operationId = id('operation', requireString(body, 'operationId'));
-      const resumed = await service.resumeExecution(
-        id('task', decodeURIComponent(taskResume[1]!)),
-        { operationId },
-      );
+      const resumed = await service.resumeExecution(taskId, { operationId });
       writeJson(response, 202, resumed);
       return;
     }

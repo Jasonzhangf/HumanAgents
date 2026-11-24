@@ -23,6 +23,8 @@ import {
   validateInteractionTraceEntry,
   type Attention,
   type Checkpoint,
+  type CycleId,
+  type OperationId,
   type EvidenceRef,
   type ExecutionRuntimePort,
   type InteractionParentProviderExecutionIdentityRef,
@@ -4575,11 +4577,13 @@ test('explicit result port keeps pending and unknown publications honest in inte
     await service.interpretExplicitInput({ interactionId });
     const before = await readResult!(task.taskId.value) as any;
     assert.ok(before.commits.length > 0);
+    assert.equal(before.resultAvailable, true);
     const readPublication = store.readPublicOutputs.bind(store);
     store.readPublicOutputs = async () => ({ state: 'pending', commits: [] });
     const pending = await readResult!(task.taskId.value) as any;
     assert.equal(pending.status, 'succeeded');
     assert.equal(pending.publicationState, 'pending');
+    assert.equal(pending.resultAvailable, false);
     assert.deepEqual(pending.commits, [], 'internal task.output must not replace unpublished body');
     store.readPublicOutputs = async () => { throw new Error('controlled publication outage'); };
     const unknown = await readResult!(task.taskId.value) as any;
@@ -4593,6 +4597,166 @@ test('explicit result port keeps pending and unknown publications honest in inte
     assert.equal(service.listTasks().completed.length, 1, 'read and regeneration must not start another task');
   } finally {
     await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('ordinary explicit interpretation never receives an operation resume writer', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-read-only-'));
+  const workspaceDir = join(root, 'workspace-project');
+  await mkdir(workspaceDir, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: workspaceDir });
+  await ensureControlLayout(paths);
+  const journal = new UiRuntimeJournal(join(root, 'runtime.jsonl'));
+  let interpreterInput: Record<string, unknown> | undefined;
+  let resumeSelectors = 0;
+  const service = new UiRuntimeService({
+    mode: 'fake', organId, binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(
+      join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`),
+    ),
+    attentionPort: attentionPort(), providerState: 'ready', journal, closurePort: journal,
+    memory: testMemory(paths.projectKey), runtimeComposition: {
+      admitExecution: async () => {},
+      createExecutionPorts: () => ({
+        resolveColdExecutionResumeRequest: async () => {
+          resumeSelectors += 1;
+          throw new Error('a normal interpretation must not reach the resume selector');
+        },
+      } as never),
+    },
+    explicitBrainInterpreter: { async interpret(input) {
+      interpreterInput = input as unknown as Record<string, unknown>;
+      return { kind: 'answer', normalizedInput: input.rawInput, answer: 'read only',
+        knownFacts: [], decisionRefs: [] };
+    } },
+    projectKey: paths.projectKey, workspaceRoot: paths.workspaceCwd, runtimePaths: paths,
+  });
+  try {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: 'test:read-only', rawInput: '只检查状态', channel: 'business',
+    });
+    await service.interpretExplicitInput({ interactionId });
+    if (interpreterInput === undefined) throw new Error('the explicit interpreter was not called');
+    const captured = interpreterInput;
+    assert.equal(typeof captured.readTaskResult, 'function');
+    assert.equal(captured.resumeTask, undefined,
+      'ordinary explanation must receive read authority only');
+    assert.equal(resumeSelectors, 0);
+  } finally {
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('parent dashboard reports multiple child executions without choosing a resume target', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-parent-resume-ambiguity-'));
+  const workspaceDir = join(root, 'workspace-project');
+  await mkdir(workspaceDir, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace: workspaceDir });
+  await ensureControlLayout(paths);
+  const checkpointRoot = join(root, 'checkpoints');
+  const controlJournal = new JsonlOrganJournal(uiRuntimeControlJournalPath(join(checkpointRoot, 'fake')));
+  const identities = new TaskIdentityConsumer(new JsonlTaskIdentityJournal(controlJournal));
+  const subscriptionPath = join(checkpointRoot, 'fake', 'subscriptions.jsonl');
+  const subscriptions = new SubscriptionControlPort(
+    new JsonlOrganJournal(subscriptionPath), { organId }, subscriptionPath,
+  );
+  const prepared = new UiRuntimeJournal(join(root, 'runtime.jsonl'));
+  const readySource = preparedStopAllocation();
+  const checkpoints = (taskId: TaskId, cycleId: CycleId) => new FileCheckpointStore(
+    join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`),
+  );
+  const seed = new RuntimeTaskCoordinator({
+    organId, journal: prepared, checkpointStoreFor: checkpoints, attentionPort: attentionPort(),
+    createDriver: () => { throw new Error('this regression only reads retained executions'); },
+  });
+  try {
+    const parent = seed.createTask({ title: 'same project parent', directive: 'continue the project' });
+    const children = [
+      seed.createTask({ title: 'first project execution', directive: 'continue the project' }),
+      seed.createTask({ title: 'second project execution', directive: 'continue the project' }),
+    ];
+    const requirementId = 'requirement-parent-resume-ambiguity';
+    for (const task of [parent, ...children]) {
+      await identities.establish({
+        scope: { organId, taskId: task.taskId },
+        source: { requirementId, inputRevision: 1, draftId: 'draft-parent-resume-ambiguity',
+          draftRevisionVersion: 1, draftRevisionHash: 'hash-parent-resume-ambiguity',
+          confirmationRef: 'confirm-parent-resume-ambiguity' },
+        title: task.title,
+      });
+    }
+    const dueAt = '2026-10-24T18:00:00.000Z';
+    const operationIds: OperationId[] = [];
+    for (const [index, child] of children.entries()) {
+      const subscriptionId = `subscription:${requirementId}:${index}`;
+      const schedule = await subscriptions.create({ subscriptionId, goalId: requirementId,
+        scheduleRevision: 1, state: 'active', busyPolicy: 'skip', currentOccurrenceOrdinal: 0 }, {
+        policyId: `policy-parent-resume-ambiguity:${index}`, policyRevision: 1, timezone: 'UTC',
+        canonicalInstant: dueAt, dstMode: 'wall', dstMissedPolicy: 'shift-forward',
+        dstAmbiguousPolicy: 'earlier-offset', latePolicy: 'run-once', busyPolicy: 'skip',
+        executionMode: 'once', dueAt,
+      }, subscriptionId);
+      await subscriptions.schedule({ occurrence: { subscriptionId,
+        scheduleRevision: schedule.subscription.scheduleRevision, occurrenceOrdinal: 1, state: 'due', dueAt }, nowAt: dueAt });
+      const operationId = id('operation', `parent-resume-ambiguity-${index}`);
+      operationIds.push(operationId);
+      await subscriptions.claim({ subscriptionId, scheduleRevision: schedule.subscription.scheduleRevision,
+        occurrenceOrdinal: 1, dueAt, taskId: child.taskId,
+        operationId,
+        inputArtifactDigest: `sha256:parent-resume-ambiguity-${index}`,
+        schedulerInstanceId: 'parent-resume-ambiguity-fixture', leaseId: `parent-resume-ambiguity-${index}`,
+        generation: 1, executionEpoch: 1, nowAt: dueAt, leaseUntil: '2026-10-24T19:00:00.000Z' });
+      const cycleId = id('cycle', `parent-resume-ambiguity-${index}`);
+      prepared.append({ kind: 'operation.prepared',
+        allocation: { ...readySource, taskId: child.taskId, operationId,
+          scope: { organId, taskId: child.taskId, operationId, cycleId } },
+        input: 'continue the project', operationCounter: index + 1, cycleCounter: index + 1 });
+    }
+
+    const resumeSelections: { taskId: string; operationId: string }[] = [];
+    const service = new UiRuntimeService({
+      mode: 'fake', organId, binding,
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+      checkpointStoreFor: checkpoints, attentionPort: attentionPort(), providerState: 'ready',
+      journal: prepared, closurePort: prepared, explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+      memory: testMemory(paths.projectKey), projectKey: paths.projectKey, workspaceRoot: paths.workspaceCwd,
+      runtimePaths: paths, taskIdentity: identities, subscriptionControl: subscriptions,
+      runtimeComposition: {
+        createExecutionPorts: () => ({
+          createDriver: () => { throw new Error('dashboard reads must not create an execution driver'); },
+          resolveColdExecutionResumeRequest: async ({ taskId, operationId }) => {
+            resumeSelections.push({ taskId: taskId.value, operationId: operationId.value });
+            return { businessTurnId: `turn-${taskId.value}`,
+              predecessor: { segmentId: `turn-${taskId.value}`, recoveryAssetsReceiptRef: 'retained' } };
+          },
+        }),
+      },
+    });
+    await service.hydrate();
+    const before = prepared.replay();
+    const readDashboard = async (taskId: TaskId) => {
+      const result = await service.scopedTaskDashboard(taskId, paths.projectKey, 'fake');
+      if (!result.ok) throw new Error(result.failure.message);
+      return result.value;
+    };
+    const siblingTargets = children.map((child, index) => ({
+      taskId: child.taskId.value, operationId: operationIds[index]!.value,
+    }));
+    for (const [index, child] of children.entries()) {
+      const view = await readDashboard(child.taskId);
+      assert.deepEqual(view.resumeTarget, siblingTargets[index]);
+    }
+    const parentView = await readDashboard(parent.taskId);
+    assert.equal(parentView.resumeTarget, undefined,
+      'parent projection must not turn its display-selected child into a write target');
+    assert.equal(parentView.resumeIssue?.code, 'task.execution.ambiguous');
+    assert.match(parentView.resumeIssue?.nextAction ?? '', /选择要继续的执行/);
+    assert.deepEqual(resumeSelections, siblingTargets, 'only the exact child pages may resolve write targets');
+    assert.deepEqual(prepared.replay(), before, 'reading any dashboard must not write');
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -9741,6 +9905,7 @@ test('a terminal scheduled child projects through its parent detail, dashboard a
     const unrelated = service.createTask({ title: 'unrelated task' });
     const empty = await readResult!(unrelated.taskId.value) as any;
     assert.equal(empty.publicationState, 'unavailable');
+    assert.equal(empty.resultAvailable, false);
     assert.deepEqual(empty.commits, []);
     assert.equal((await service.listTasksWithIdentitySource()).completed.filter(task => task.taskId.value === parent.taskId.value).length, 1);
     await identities.establish({ scope: { organId, taskId: unrelated.taskId },

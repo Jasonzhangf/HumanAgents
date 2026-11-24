@@ -86,7 +86,7 @@ test('missing, empty, pending and error are explicit; known zero differs from un
 
 test('a pending call keeps the last recorded token and cache counts visible', () => {
   const pending = call({ callId: 'awaiting-usage', inputTokens: null, outputTokens: null,
-    cacheReadTokens: null, cacheWriteTokens: null, context: { used: null, limit: null, percent: null },
+    cacheReadTokens: null, cacheWriteTokens: null, context: { used: null, limit: 190000, percent: null },
     currentCallCacheHitRate: null, outputSpeed: { tokensPerSecond: null, basis: 'response-elapsed' } })
   const footer = usageUI.renderCallUsageFooter(usage([call({ inputTokens: 15891, outputTokens: 324, cacheReadTokens: 0 }), pending]))
   const summary = text(footer.querySelector('.call-usage-summary'))
@@ -94,6 +94,27 @@ test('a pending call keeps the last recorded token and cache counts visible', ()
   assert.match(summary, /缓存读取 0/)
   assert.match(summary, /本次调用尚无统计/)
   assert.equal(footer.querySelectorAll('.call-usage-call').length, 2)
+})
+
+test('a completed call with token totals explains missing cache counters without hiding a reported zero', () => {
+  const footer = usageUI.renderCallUsageFooter(usage([call(), call({
+    callId: 'call-no-cache-report', inputTokens: 7329, outputTokens: 207,
+    cacheReadTokens: null, cacheWriteTokens: null, currentCallCacheHitRate: null,
+  })]))
+  const summary = footer.querySelector('.call-usage-summary')
+  assert.match(text(summary), /输入 7329 · 输出 207/)
+  assert.match(text(summary), /缓存读取未上报/)
+  assert.match(text(summary), /缓存写入未上报/)
+  assert.match(text(summary), /缓存命中率无法计算/)
+  assert.doesNotMatch(text(summary), /命中 0%|命中 50%|尚无统计/)
+  assert.equal(facts(footer.querySelectorAll('.call-usage-call')[0])['本次调用缓存命中率'], '50%')
+  usageUI.updateCallUsageFooter(footer, usage([call({
+    inputTokens: 7329, outputTokens: 207, cacheReadTokens: 0,
+    cacheWriteTokens: null, currentCallCacheHitRate: 0,
+  })]))
+  assert.match(text(summary), /缓存读取 0/)
+  assert.match(text(summary), /缓存写入未上报/)
+  assert.match(text(summary), /缓存命中 0%/)
 })
 
 test('refresh reuses footer/disclosure, replaces same call, retains expansion and clears stale scope', () => {

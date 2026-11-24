@@ -293,6 +293,16 @@ export function validateExplicitTurnEndInput(input: ExplicitTurnEndInput): void 
   if ((input.kind === 'complex') !== (input.decision.kind === 'requirement')) {
     throw new ContractError('explicit-turn-end.input-kind-decision');
   }
+  const decision = input.decision as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(decision, 'matchedTaskId')) {
+    if (input.decision.kind !== 'status-query' && input.decision.kind !== 'requirement') {
+      throw new ContractError('explicit-turn-end.decision.matched-task-id-not-applicable');
+    }
+    requireNonEmptyString(decision.matchedTaskId, 'explicit-turn-end.decision.matched-task-id');
+    if (input.decision.kind === 'requirement' && input.decision.proposal.intent === 'create') {
+      throw new ContractError('explicit-turn-end.decision.matched-task-id-create');
+    }
+  }
   validateEndCheckpointIndex(input.checkpointRecord);
   validateEndCapsule(input.kind, input.capsule);
 }

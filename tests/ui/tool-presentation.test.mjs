@@ -23,6 +23,24 @@ test('same-name calls pair only by task, operation, epoch and callId', () => {
   assert.equal(b.outputTarget.taskId.value, 'finance')
   assert.equal(rows.filter((row) => !row.call).length, 3)
 })
+// Failure mode: providers may reuse a call id in another turn or request.
+// Impact: a result can close the wrong card while the present call looks pending.
+// Cost: one pure fixture; no DOM, runtime or provider.
+test('a reused call id stays inside its exact turn and request', () => {
+  const rows = toolPresentations([
+    event('provider.tool', 'same', 1, { requestId: 'r1', turnId: 'turn-1', arguments: { path: '甲.txt' } }),
+    event('provider.tool-result', 'same', 2, { requestId: 'r1', turnId: 'turn-1', status: 'succeeded', outputRef: 'output:甲', outputDigest: 'recorded' }),
+    event('provider.tool', 'same', 3, { requestId: 'r2', turnId: 'turn-1', arguments: { path: '乙.txt' } }),
+    event('provider.tool-result', 'same', 4, { requestId: 'r2', turnId: 'turn-1', status: 'failed', error: { code: 'file.denied', message: '乙拒绝读取' } }),
+  ])
+  assert.equal(rows.length, 2)
+  assert.deepEqual(rows.map((row) => [row.call.requestId, row.result.requestId, row.result.seq]), [
+    ['r1', 'r1', 2],
+    ['r2', 'r2', 4],
+  ])
+  assert.equal(rows[0].outputTarget.seq, 2)
+  assert.equal(rows.filter((row) => row.outputTarget).length, 1)
+})
 test('unknown, failed, result-only and missing identity keep facts without guessing', () => {
   const error = { code: 'file.denied', message: '不允许读取' }
   const rows = toolPresentations([

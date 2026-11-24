@@ -10,7 +10,7 @@
   },
   "owners": {
     "assemble": "packages/runtime",
-    "route": "packages/runtime",
+    "route": "packages/app/src/explicit-brain-runtime.ts",
     "outcome": "packages/runtime",
     "history": "packages/runtime",
     "return": "packages/app"
@@ -23,6 +23,7 @@
     "identityBoundary": "父轮次使用中立 interaction-parent execution identity（runtimeId、organId、operationId、executionEpoch、interactionTurn）；不伪造 taskId 或 cycleId，也不把身份镜像到业务 payload 或 metadata。",
     "dispatchReturnBoundary": "显式产品解释器不广告也不执行 dispatch_helper/accept_helper，不启动新 helper。旧 helper 的 dispatch-accepted、returned 与 owner-accepted 事实继续由既有 Journal 精确读取和恢复，返回结论不自动采纳。",
     "iterationBoundary": "initial、tool-call、tool-result、continuation 由外部 ProviderAgentDriver 按真实请求循环驱动；本 DAG 保持无环，不在图内表达工具请求环。",
+    "explicitEndOrder": "同一模型响应内的结束工具按调用顺序处理。坏参数的实际配对结果写入后，先由 C07 消费这次失败，再处理同响应后续调用。首个合法结束或第三次失败唯一收口；后续调用不能覆盖其结果或消耗另一份预算。",
     "resultReadBoundary": "assemble 固定候选，不预载结果或序列化权限函数。route 仅在宿主绑定时提供 task.read_result，唯一参数 taskId：复用当前项目 service 读取权、Task identity/subscription lineage 和精确执行 binding 的 canonical publication reader；多 occurrence 返回歧义，不择最新。pending/unknown 保留状态，不回退 task.output。参数错误或无此任务按原 callId 返回可纠正工具错误，同轮继续；权限、publication 与持久化错误仍沿既有错误/partial 返回终点。history 通过既有 driver 写入当前 requestId/callId 配对事实，冷读复用已提交正文及来源，不重写旧 checkpoint、不新增执行。",
     "helperBoundary": "显式产品解释器不再派发任何 helper；helper 执行与 owner 接受只属于隐式大脑及旧 helper 的既有恢复路径。",
     "historyBoundary": "历史语义只取前序已提交 InteractionSemanticCheckpoint；当前轮次完整上下文由当前原文 RawAsset 与本轮 accepted raw facts 单独物化，二者不混用，也不形成隐藏的前次响应链。",
@@ -35,6 +36,8 @@
     ,"explicitEndBoundary": "新协议轮使用 explicit-turn-end 结束工具：outer kind 只有 simple/complex，inner decision 保持既有 intake kinds；requirement 必须 complex 且带 capsule，simple 禁止 capsule。普通尾部文本无结束工具时只续推，不发布成功结果。"
     ,"partialHistoryBoundary": "typed partial 是独立 outcome，不进入 answer/requirement normal 分支，也不写 semantic checkpoint。history 只保存失败尝试与恢复责任；继续通过 resumePartialRef 读取最近有效 checkpoint 和三次错误，保持原 interaction/inputRevision，不重复 FIFO 或 Task。"
     ,"turnEndGates": "有效结束 call 是 checkpoint 资格；真实 drain/settle/close 是成功发布资格；partial/无效结束/失败探索禁止主路径 checkpoint。"
+    ,"existingTaskContinuation": "显式解释轮只读原任务的准确执行、已发布结果和恢复条件。要求继续时帮助用户定位任务，由任务页的独立用户动作选择确切原任务和 operation。App 核对项目、运行模式和原执行绑定，Runtime 沿原恢复入口判定并执行。页面只在实际 release 后报告继续。歧义或副作用未知时保留原因、错误码和具体恢复条件。普通澄清答复不产生恢复写入。"
+    ,"promptOwnership": "系统控制边界在前；配置绑定的身份与角色职责、权限、输入输出与故障规则常驻；App 按当前绑定提供实际工具与 C07 协议；Skill 目录只含元数据，正文和引用规则按选用展开；当前作用域、已提交 checkpoint、当前原文与 live steps 保持独立来源。状态、触发与动作语义见 humanagent-explicit-agent-action-routing。"
   },
   "implementationStatus": "UNVERIFIED"
 }

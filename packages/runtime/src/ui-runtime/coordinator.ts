@@ -1119,6 +1119,7 @@ export interface OperationRecord {
    * instead of minting a second scope, runtime id or Harness epoch.
    */
   allocation?: RuntimeExecutionAllocation;
+  executionCompletion?: Promise<void>;
   readonly events: RuntimeTaskEvent[];
   seq: number;
 }
@@ -3140,7 +3141,7 @@ export class RuntimeTaskCoordinator {
       record.rejectRelease = reject;
     });
     record.releasePending = pending;
-    void this.runExecution(record, operation, operation.allocation.scope, operation.input, operation.allocation);
+    operation.executionCompletion = this.runExecution(record, operation, operation.allocation.scope, operation.input, operation.allocation);
     return pending;
   }
 
@@ -3180,9 +3181,11 @@ export class RuntimeTaskCoordinator {
 
   /**
    * Explicit operator recovery from a `recovery-hold-effect-unknown` hold.
-   * Reconciles held mutating tool effects (`dispatched-effect-unknown` ->
-   * `reconciled`), commits a `recovery-auto-resumed` checkpoint, and resumes
-   * the same business Turn without replaying the held mutating tool call.
+   * Re-evaluates persisted recovery facts. An unknown mutating tool effect stays
+   * held unless the ledger already contains a trusted reconciled fact; operator
+   * notes and Provider settlement are not external tool-effect confirmation.
+   * A safe recovery commits `recovery-auto-resumed` and resumes the same business
+   * Turn without replaying the held mutating tool call.
    * Duplicate or concurrent calls for the same held Turn are idempotent.
    */
   async recoverTask(
@@ -4050,6 +4053,13 @@ export class RuntimeTaskCoordinator {
     readonly executionEpoch: number;
   }> {
     const record = this.requireTask(input.taskId);
+    const pendingRequest = record.inputRequest;
+    if (pendingRequest?.requestId === input.requestId && pendingRequest.expectedRevision === input.expectedRevision) {
+      // The question can be visible while its operation is still closing.
+      // A continuation must not replace this task's execution state during that close.
+      const closing = this.operations.get(pendingRequest.operationId.value)?.executionCompletion;
+      if (closing !== undefined) await closing;
+    }
     const request = record.inputRequest;
     if (request === undefined || request.requestId !== input.requestId) {
       throw new RuntimeTaskControlError(
@@ -4073,6 +4083,14 @@ export class RuntimeTaskCoordinator {
         RUNTIME_OWNER,
         `expected answer revision ${request.expectedRevision}, got ${input.expectedRevision}`,
         `resubmit the answer with expectedRevision ${request.expectedRevision}`,
+      );
+    }
+    if (record.state !== 'waiting') {
+      throw new RuntimeTaskControlError(
+        'task-input-request.execution-not-settled',
+        RUNTIME_OWNER,
+        'the operation that asked for input did not finish closing',
+        record.nextStep,
       );
     }
     const answer = input.answer.trim();
@@ -6943,6 +6961,7 @@ export class RuntimeTaskCoordinator {
       }
       completeExecutionReady(false);
       this.activeExecutions.delete(operation.operationId.value);
+      delete operation.executionCompletion;
     }
   }
 

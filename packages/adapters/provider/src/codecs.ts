@@ -314,6 +314,7 @@ function businessText(
 
 const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
   ['task.read_result', 'task_read_result'],
+  ['task.resume', 'task_resume'],
   ['file.read', 'file_read'],
   ['file.list', 'file_list'],
   ['file.search', 'file_search'],
@@ -333,6 +334,7 @@ const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
 ]);
 const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
   ['task_read_result', 'task.read_result'],
+  ['task_resume', 'task.resume'],
   ['file_read', 'file.read'],
   ['file_list', 'file.list'],
   ['file_search', 'file.search'],
@@ -2035,10 +2037,14 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'error': {
         this.clearToolArguments(context);
         const errorRecord = requireObject(record, 'error', context.execution, raw.type);
-        const code = requireString(errorRecord, 'code', context.execution, raw.type);
+        const code = errorRecord.code == null ? 'provider.failed' : requireString(errorRecord, 'code', context.execution, raw.type);
         const message = requireString(errorRecord, 'message', context.execution, raw.type);
         const param = typeof errorRecord.param === 'string' ? errorRecord.param : undefined;
-        const errorEvidence = await captureEvidence(context, raw.type, `error/${code}`, { code, message, ...(param === undefined ? {} : { param }) });
+        const errorEvidence = await captureEvidence(context, raw.type, `error/${code}`, {
+          ...(errorRecord.code === undefined ? {} : { code: errorRecord.code }),
+          message,
+          ...(param === undefined ? {} : { param }),
+        });
         const error = providerError(context.execution, context.scope, code, message, 'protocol', [errorEvidence]);
         return {
           events: [ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${code}`), `error-${code}`, { kind: 'recover', ref: OWNER }, { error })],

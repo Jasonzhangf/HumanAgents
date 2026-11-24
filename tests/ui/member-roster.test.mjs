@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createProjectRosterReader, memberRole, memberSessionLabel, mountMemberRoster, memberRosterDetail } from '../../docs/ui/member-roster.js'
 import { createRuntimeApi } from '../../docs/ui/runtime-api.js'
-import { entryWorkspaceHint } from '../../docs/ui/entry-workspace.js'
 
 // Wrong keys mix same-name members; repeated entry polls must not reread config.
 test('formal API encodes the exact project key and exposes real HTTP failures', async () => {
@@ -49,10 +48,6 @@ class Node {
   setAttribute(name, value) { this[name] = value }
 }
 const text = (node) => [node.textContent, ...node.children.map(text)].join(' ')
-test('workspace hints use declared path and never reverse a project key', () => {
-  assert.equal(entryWorkspaceHint('/real/alpha/同名项目/'), 'alpha/同名项目')
-  assert.equal(entryWorkspaceHint(undefined), '')
-})
 test('DOM keeps real names and roles, no binding is explicit, and 404 is not an empty roster', async () => {
   const previous = globalThis.document
   globalThis.document = { createElement: (tag) => new Node(tag) }

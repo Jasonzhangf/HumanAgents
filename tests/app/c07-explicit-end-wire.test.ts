@@ -5,7 +5,8 @@ import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { id, type InteractionParentProviderExecutionIdentityRef, type ProviderBinding } from '../../packages/contracts/src/index.js';
-import { createProviderExplicitBrainInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
+import { createProviderExplicitBrainInterpreter,
+  type ExplicitBrainInterpretationInput } from '../../packages/app/src/explicit-brain-runtime.js';
 import { ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../packages/adapters/provider/src/evidence.js';
 import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
@@ -33,9 +34,12 @@ const requirement = { kind: 'complex', decision: {
 }, checkpointRecord: { index: { action: '整理用户需求', result: '已准备好执行' } }, capsule: { summary: '已整理报告需求', goal: '交付报告', process: ['识别用户需求'], findings: [], nextStep: '交给隐式大脑执行' } };
 
 async function runWire(attempts: readonly unknown[], options: {
-  textFirst?: boolean; skills?: boolean; malformed?: readonly number[];
+  textFirst?: boolean; skills?: boolean | readonly string[]; malformed?: readonly number[];
+  correctedEndAt?: number;
   coldAccepted?: boolean; coldPartial?: boolean; resume?: boolean;
   readTaskResult?: (taskId: string) => Promise<unknown>;
+  readReply?: unknown;
+  resumeWriter?: (taskId: string) => Promise<unknown>;
   readArguments?: unknown;
   correctRead?: boolean;
   failedDrain?: boolean;
@@ -75,10 +79,11 @@ async function runWire(attempts: readonly unknown[], options: {
     const index = modelRequestCount++;
     const readRound = options.readTaskResult !== undefined && (index === 0 || (options.correctRead === true && index === 1));
     const skillRound = options.skills && index === 0;
-    let argument = attempts[index - (options.skills || options.readTaskResult ? 1 : 0)];
+    const prefixLength = options.skills || options.readTaskResult ? 1 : 0;
+    let argument = attempts[index - prefixLength];
     if (options.readTaskResult && !readRound) {
       const result = wire.input.find((entry: any) => entry.type === 'function_call_output' && entry.call_id === (options.correctRead ? 'call-1' : 'call-0'));
-      argument = { ...answer, decision: { ...answer.decision, answer: result?.output ?? 'missing result' } };
+      argument = options.readReply ?? { ...answer, decision: { ...answer.decision, answer: result?.output ?? 'missing result' } };
     }
     // A runaway request is an explicit test failure, never an endless fixture.
     if (!readRound && !skillRound && argument === undefined) {
@@ -91,7 +96,10 @@ async function runWire(attempts: readonly unknown[], options: {
       ...(options.textFirst && index === 0 ? [{ type: 'response.output_text.done', item_id: `text-${index}`, text: JSON.stringify(argument) }]
         : [{ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: `item-${index}`,
           call_id: `call-${index}`, name: readRound ? 'task_read_result' : skillRound ? 'interaction_select_skills' : 'humanagent_turn_end',
-          arguments: options.malformed?.includes(index) ? '{' : JSON.stringify(readRound ? (index === 0 ? options.readArguments : undefined) ?? { taskId: 'published-parent' } : skillRound ? { skillIds: ['task-intake'] } : argument) } }]),
+          arguments: options.malformed?.includes(index) ? '{' : JSON.stringify(readRound ? (index === 0 ? options.readArguments : undefined) ?? { taskId: 'published-parent' } : skillRound ? { skillIds: options.skills === true ? ['task-intake'] : options.skills } : argument) } }]),
+      ...(options.correctedEndAt === index ? [{ type: 'response.output_item.done', output_index: 1,
+        item: { type: 'function_call', id: 'item-corrected', call_id: 'call-corrected', name: 'humanagent_turn_end',
+          arguments: JSON.stringify(answer) } }] : []),
       { type: 'response.completed', response: { id: `c07-${index}` } },
     ];
     response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -155,10 +163,12 @@ async function runWire(attempts: readonly unknown[], options: {
     ...overrides,
   });
   const steps: ExplicitInteractionStepInput[] = [];
-  const request = { interactionId: 'c07-interaction', inputRevision: 1,
+  const request: ExplicitBrainInterpretationInput & { readonly resumeTask?: (taskId: string) => Promise<unknown> } = {
+    interactionId: 'c07-interaction', inputRevision: 1,
     sourceRef: 'test:c07', rawInput: '你好', clarifications: [], taskCandidates: [],
     onStep: (step: ExplicitInteractionStepInput) => { steps.push(step); },
-    ...(options.readTaskResult === undefined ? {} : { readTaskResult: options.readTaskResult }) };
+    ...(options.readTaskResult === undefined ? {} : { readTaskResult: options.readTaskResult }),
+    ...(options.resumeWriter === undefined ? {} : { resumeTask: options.resumeWriter }) };
   const interpreter = createInterpreter();
   const append = helpers.appendSemanticCheckpoint.bind(helpers);
   if (options.coldAccepted) helpers.appendSemanticCheckpoint = async () => { throw new Error('controlled checkpoint write interruption'); };
@@ -345,6 +355,60 @@ test('published task result enters the real next wire and survives cold accepted
   assert.ok(checkpoint);
 });
 
+test('blocked task read keeps its original blocker in the paired public tool step', async () => {
+  const blocker = {
+    code: 'unknown.event',
+    reason: 'unknown responses wire event type',
+    nextStep: '确认外部变更结果后执行恢复或停止任务',
+  };
+  const publication = {
+    taskId: 'published-parent',
+    executionTaskId: 'published-child',
+    title: '受阻原任务',
+    status: 'blocked',
+    publicationState: 'committed',
+    resultAvailable: false,
+    blocker,
+  };
+  const { result, wires, steps } = await runWire([answer], {
+    readTaskResult: async taskId => {
+      assert.equal(taskId, 'published-parent');
+      return publication;
+    },
+    readReply: answer,
+  });
+  assert.equal(result.kind, 'answer');
+  if (result.kind !== 'answer') throw new Error('expected answer');
+  assert.equal(result.answer, answer.decision.answer, 'the model answer omits the task blocker');
+  assert.deepEqual(JSON.parse(wires[1].input.find((entry: any) =>
+    entry.type === 'function_call_output' && entry.call_id === 'call-0').output), publication);
+  const step = steps.find(candidate => candidate.kind === 'tool.finished'
+    && candidate.tool?.kind === 'read-task-result'
+    && candidate.tool.callId === 'call-0');
+  if (step?.turnId === undefined || step.requestId === undefined || step.tool?.detail?.kind !== 'task-result') {
+    throw new Error('the exact task read did not reach its model request and public tool step');
+  }
+  assert.ok(step.turnId.length > 0);
+  assert.ok(step.requestId.length > 0);
+  assert.deepEqual(step.tool.detail.blocker, blocker);
+});
+
+test('ordinary explicit wire neither advertises nor invokes a resume writer', async () => {
+  let resumes = 0;
+  const { result, wires } = await runWire([answer], {
+    resumeWriter: async () => {
+      resumes += 1;
+      return { continuation: 'released' };
+    },
+  });
+  assert.equal(result.kind, 'answer');
+  assert.equal(resumes, 0);
+  assert.equal(wires.filter((wire: any) => wire.tools !== undefined).length, 1);
+  assert.equal(wires.filter((wire: any) => wire.tools === undefined).length, 1);
+  assert.equal(wires[0].tools.some((tool: any) => tool.name === 'task_resume'), false);
+  assert.equal(/task\.resume|needsRecoveryConfirmation=true/.test(wires[0].instructions), false);
+});
+
 test('explicit result read pairs correctable argument and missing-task errors then continues the same turn', async () => {
   for (const readArguments of [{ path: '/etc/passwd' }, { taskId: 'published-parent', projectKey: 'foreign' }, { taskId: '' }, { taskId: 'missing' }]) {
     let reads = 0;
@@ -395,6 +459,56 @@ test('C07 actual wire corrects twice and accepts the third end with paired error
   assert.ok(checkpoint);
 });
 
+test('C07 counts malformed arguments before a corrected end in the same response', async () => {
+  const { result, wires, snapshot, checkpoint } = await runWire([{}], { malformed: [0], correctedEndAt: 0 });
+  assert.equal(result.kind, 'answer');
+  assert.equal(wires.length, 2);
+  const outcomes = snapshot.endControls?.map(entry => entry.fact).filter(fact => fact.kind === 'submission');
+  assert.deepEqual(outcomes?.map(fact => [fact.callId, fact.result.kind]), [['call-0', 'rejected'], ['call-corrected', 'accepted']]);
+  const outputs = wires[1].input.filter((entry: any) => entry.type === 'function_call_output');
+  assert.deepEqual(outputs.map((entry: any) => entry.call_id), ['call-0', 'call-corrected']);
+  assert.equal(JSON.parse(outputs[0].output.split('\n', 1)[0]).code, 'tool.arguments.invalid-json');
+  assert.equal(JSON.parse(outputs[1].output).kind, 'accepted');
+  assert.ok(checkpoint);
+});
+
+test('C07 keeps partial when a valid end follows the third malformed call in the same response', async () => {
+  const { result, wires, snapshot, checkpoint } = await runWire([{}, {}, {}], { malformed: [0, 1, 2], correctedEndAt: 2 });
+  assert.equal(result.kind, 'partial');
+  const outcomes = snapshot.endControls?.map(entry => entry.fact).filter(fact => fact.kind === 'submission');
+  assert.deepEqual(outcomes?.map(fact => fact.result.kind), ['rejected', 'rejected', 'partial']);
+  const outputs = wires.at(-1).input.filter((entry: any) => entry.type === 'function_call_output');
+  assert.equal(outputs.at(-1).call_id, 'call-corrected');
+  assert.equal(JSON.parse(outputs.at(-1).output).code, 'explicit.end.already-concluded');
+  assert.equal(checkpoint, null);
+});
+
+test('C07 actual wire rejects invalid matchedTaskId values before acceptance and corrects in the same turn', async () => {
+  const invalid = [
+    { ...requirement, decision: { ...requirement.decision, matchedTaskId: '' } },
+    { ...requirement, decision: { ...requirement.decision, matchedTaskId: 'ui-task-existing' } },
+  ];
+  for (const invalidRequirement of invalid) {
+    const { result, wires, snapshot, checkpoint } = await runWire([invalidRequirement, requirement]);
+    assert.equal(result.kind, 'requirement');
+    assert.equal(wires.length, 3, 'the corrected end continues in the original turn before transport drain');
+    const rejected = JSON.parse(wires[1].input.find((entry: any) =>
+      entry.type === 'function_call_output' && entry.call_id === 'call-0').output);
+    assert.equal(rejected.kind, 'rejected');
+    assert.equal(rejected.failedAttempt, 1);
+    assert.match(rejected.errors[0].path, /matched-task-id/);
+    const submissions = snapshot.endControls?.map(entry => entry.fact)
+      .filter(entry => entry.kind === 'submission');
+    assert.deepEqual(submissions?.map(entry => entry.result.kind), ['rejected', 'accepted']);
+    const accepted = submissions?.at(-1);
+    const acceptedDecision = accepted?.kind === 'submission' && accepted.result.kind === 'accepted'
+      ? accepted.result.decision : undefined;
+    if (acceptedDecision?.kind !== 'requirement') throw new Error('unexpected accepted decision');
+    assert.equal(acceptedDecision.matchedTaskId, undefined);
+    assert.ok(checkpoint);
+  }
+});
+
 test('C07 actual wire returns durable typed partial on the third bad end without checkpoint', async () => {
   const { result, wires, snapshot, checkpoint } = await runWire([{}, {}, {}]);
   if (result.kind !== 'partial') throw new Error('expected typed partial');
@@ -409,7 +523,20 @@ test('C07 actual wire Skill selection precedes the complex end and executes no b
   const { result, wires, checkpoint, steps } = await runWire([requirement], { skills: true });
   assert.equal(result.kind, 'requirement');
   assert.equal(wires.length, 3);
+  const stableSections = ['# Explicit Brain', '# Mission', '# Boundaries', '# Input and Output',
+    '# Failure Handling', '# Registered tools', '# Explicit end-tool protocol', '# Registered Skills'];
+  for (const { instructions } of wires.slice(0, 2)) {
+    const positions = stableSections.map(section => instructions.indexOf(section));
+    assert.ok(positions.every(at => at >= 0));
+    assert.deepEqual(positions, [...positions].sort((left, right) => left - right));
+    assert.equal(instructions.split('# Failure Handling').length - 1, 1);
+  }
+  assert.equal(/# Selected Skill|# Task handoff/.test(wires[0].instructions), false);
   assert.match(wires[1].instructions, /Selected Skill: task-intake/);
+  assert.match(wires[1].instructions, /# Skill rule reference: rules\/requirement-template\.md\s+# Task handoff/);
+  assert.equal(/# Follow through on an existing task/.test(wires[1].instructions), false);
+  assert.equal(wires[2].tools, undefined);
+  assert.equal(/# Mission|# Registered Skills|# Task handoff/.test(wires[2].instructions ?? ''), false);
   assert.ok(checkpoint);
   const tools = steps.filter(step => step.kind.startsWith('tool.'));
   assert.equal(tools.length, 4);
@@ -423,6 +550,16 @@ test('C07 actual wire Skill selection precedes the complex end and executes no b
     { callId: 'call-1', kind: 'submit-turn', status: 'succeeded', detail: { kind: 'decision', decision: 'create', title: '报告' } },
   ]);
   assert.equal(/整理报告|Selected Skill|blockingGaps|skillIds/.test(JSON.stringify(tools)), false);
+});
+
+test('C07 loads follow-through guidance independently of the intake template', async () => {
+  const { wires, steps } = await runWire([answer], { skills: ['task-follow-through'] });
+  assert.equal(wires[0].instructions.includes('# Follow through on an existing task'), false);
+  assert.match(wires[1].instructions, /# Selected Skill: task-follow-through/);
+  assert.match(wires[1].instructions, /# Follow through on an existing task/);
+  assert.equal(wires[1].instructions.includes('# Task handoff'), false);
+  assert.deepEqual(steps.find(step => step.kind === 'tool.finished' && step.tool?.kind === 'select-skills')?.tool?.detail,
+    { kind: 'skills', skills: ['task-follow-through'] });
 });
 
 test('C07 actual wire text-only decision needs a real end and does not consume a format attempt', async () => {

@@ -4,6 +4,24 @@ const explicitFinished = new Set(['answered', 'status-only', 'confirmed', 'dispa
 const validTime = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value))
 const executionKey = (e) => JSON.stringify([e.taskId?.scope, e.taskId?.value, e.operationId, e.executionEpoch])
 const requestKey = (e) => e.requestId ? `${executionKey(e)}:${JSON.stringify([e.turnId, e.requestId])}` : executionKey(e)
+const toolKey = (e) => `${requestKey(e)}:${JSON.stringify(e.callId)}`
+const toolLabels = Object.freeze({
+  'file.read': '读取文件',
+  'file.write': '写入文件',
+  'file.edit': '修改文件',
+  'file.search': '搜索文件',
+  'file.list': '列出文件',
+  'web.search': '搜索网页',
+  bash: '执行命令',
+})
+const toolResultLabels = Object.freeze({
+  succeeded: '已完成',
+  failed: '失败',
+  blocked: '受阻',
+  cancelled: '已取消',
+  unknown: '状态未知',
+})
+const toolLabel = (event) => Object.hasOwn(toolLabels, event.toolId) ? toolLabels[event.toolId] : '工具操作'
 
 export function elapsedSeconds(row, now = Date.now()) {
   if (!validTime(row.startedAt)) return undefined
@@ -38,11 +56,19 @@ export function conversationStatus(facts = {}) {
     return group
   }
   const respond = (group, at, output = true) => {
-    if (!group || group.settled) return
+    if (!group || group.settled || group.returnedTool) return
     close(group.wait, at)
     if (group.wait) group.wait.label = '等待模型响应（已收到）'
     if (!group.response) group.response = add(`response:${rows.length}`, 'streaming', '模型正在处理', at, 'active')
     if (output) group.response.label = '正在接收模型响应'
+  }
+  const respondWithTool = (group, at) => {
+    if (!group || group.settled || group.returnedTool) return
+    respond(group, at, false)
+    group.returnedTool = true
+    close(group.response, at)
+    group.response.label = '模型已返回工具调用'
+    group.response.tone = 'success'
   }
   const dispatch = (key, at) => {
     const group = models.get(key)
@@ -54,7 +80,7 @@ export function conversationStatus(facts = {}) {
   const settle = (group, at) => {
     if (group) group.settled = true
     close(group?.response, at)
-    if (group?.response) { group.response.label = '模型响应已结束'; group.response.tone = 'success' }
+    if (group?.response && !group.returnedTool) { group.response.label = '模型响应已结束'; group.response.tone = 'success' }
     // A settled request with no first-response fact cannot supply wait duration.
     if (group?.wait) group.wait.running = false
   }
@@ -79,16 +105,15 @@ export function conversationStatus(facts = {}) {
     }
     if (e.kind === 'provider.output') respond(group, e.occurredAt)
     if (e.kind === 'provider.tool' && e.callId) {
-      close(group?.wait, e.occurredAt)
-      if (group?.wait) group.wait.label = '等待模型响应（已收到）'
-      const toolKey = `${executionKey(e)}:${e.callId}`
-      if (!tools.has(toolKey)) tools.set(toolKey, add(toolKey, 'tool', '执行工具等待结果', e.occurredAt, 'active'))
+      respondWithTool(group, e.occurredAt)
+      const key = toolKey(e)
+      if (!tools.has(key)) tools.set(key, add(key, 'tool', toolLabel(e), e.occurredAt, 'active'))
     }
     if (e.kind === 'provider.tool-result' && e.callId) {
-      const row = tools.get(`${executionKey(e)}:${e.callId}`)
+      const row = tools.get(toolKey(e))
       if (row) {
         close(row, e.occurredAt)
-        row.label = e.status === 'succeeded' ? '工具执行完成' : e.status === 'failed' ? '工具执行失败' : '工具已返回'
+        row.statusLabel = toolResultLabels[e.status] || '已返回'
         row.tone = e.status === 'failed' ? 'danger' : e.status === 'succeeded' ? 'success' : 'warning'
         row.error = e.error
       }
@@ -120,21 +145,19 @@ export function conversationStatus(facts = {}) {
     if (step.kind === 'response.reasoning' || step.kind === 'response.streaming') {
       respond(group, step.occurredAt, step.kind === 'response.streaming')
     }
-    if (step.kind === 'tool.started' && group?.wait) {
-      close(group.wait, step.occurredAt)
-      group.wait.label = '等待模型响应（已收到）'
-    }
+    if (step.kind === 'tool.started' && step.tool) respondWithTool(group, step.occurredAt)
     if (step.kind === 'request.settled') {
       settle(group, step.occurredAt)
       if (key) close(executions.get(key), step.occurredAt)
     }
   }
-  // Keep the latest model request visible with its independent wait/response rows.
+  // Keep the latest model request visible with its independent wait/response
+  // rows. Tool facts stay visible after the next request starts: each call has
+  // its own task/operation/epoch/call identity and duration.
   const latest = [...models.values()].at(-1)
   const modelRows = new Set(latest ? [latest.sending, latest.wait, latest.response] : [])
   const toolRows = [...tools.values()]
-  const activeTools = toolRows.filter((row) => row.running && row.endedAt === undefined)
-  const visibleTools = new Set([...activeTools, ...toolRows.slice(-1)])
+  const visibleTools = new Set(toolRows)
   const latestTotal = [...executions.values()].at(-1)
   const latestRetry = [...retries.values()].at(-1)
   const latestError = [...rows].reverse().find((row) => row.phase === 'error')

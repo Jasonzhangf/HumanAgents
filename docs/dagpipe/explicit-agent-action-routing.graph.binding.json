@@ -1,0 +1,30 @@
+{
+  "graph": "humanagent-explicit-agent-action-routing",
+  "operator": {
+    "operator": "humanagent-explicit-agent-action-routing",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-UNVERIFIED",
+  "nodes": {
+    "bind_event": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "designNote": "复用显式交互身份与输入绑定。可信 peer、框架通知、任务回执和待答恢复由各自入口提供来源、项目范围及当前代次。统一事件信封仍需接线验证。"
+    },
+    "choose_next_action": {
+      "ownerPath": "packages/app/src/explicit-brain-runtime.ts",
+      "ownerRel": "packages/app/src/explicit-brain-runtime.ts",
+      "designNote": "沿既有显式语义轮次推理。App 注入授权的项目快照、当前任务和历史读取能力，验证作用域与本次用户动作授权。运行时控制授权来自可信入口。"
+    },
+    "apply_selected_action": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "designNote": "复用需求投递、原任务读取、输入转交与控制入口。Runtime owner 负责恢复检查、真实释放和默认决定的持久提交。Jenny 选择和汇报处置，隐式编排 Agent 接手任务执行。"
+    },
+    "close_event": {
+      "ownerPath": "packages/runtime/src/explicit-brain/explicit-turn-end.ts",
+      "ownerRel": "packages/runtime/src/explicit-brain/explicit-turn-end.ts",
+      "designNote": "对话沿 C07 收口。公开会话和待办从同一任务决定或执行回执投影用户可见的原因、效果和下一步。"
+    }
+  }
+}

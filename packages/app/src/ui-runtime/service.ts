@@ -421,6 +421,11 @@ export interface RuntimeTaskPlanProjection {
   readonly canCancelFuture: boolean;
 }
 
+type RuntimeTaskResumeTarget = {
+  readonly taskId: string;
+  readonly operationId: string;
+};
+
 type RuntimeTaskDashboardView = RuntimeTaskDashboardProjection & {
   readonly history: {
     readonly events: readonly RuntimeTaskEventProjection[];
@@ -439,6 +444,9 @@ type RuntimeTaskDashboardView = RuntimeTaskDashboardProjection & {
   readonly orchestrated?: boolean;
   readonly planRevision?: PlanRevisionRecord;
   readonly planRevisions?: readonly PlanRevisionRecord[];
+  /** App-owned exact live continuation candidate; absent for durable-only reads or unsafe states. */
+  readonly resumeTarget?: RuntimeTaskResumeTarget;
+  readonly resumeIssue?: Pick<UiRuntimeApiErrorBody, 'code' | 'message' | 'nextAction'>;
 };
 
 const LIFECYCLE_STATES = new Set([
@@ -5067,11 +5075,15 @@ export class UiRuntimeService {
     }
   }
 
-  private async taskSnapshotWithParentExecution(taskId: TaskId): Promise<RuntimeTaskSnapshot> {
+  private async taskSnapshotWithParentExecutionTarget(
+    taskId: TaskId,
+  ): Promise<{ readonly task: RuntimeTaskSnapshot; readonly executionTaskId?: TaskId }> {
     const parent = this.coordinatorOrQueuedTaskSnapshot(taskId);
-    if (hasOwnExecutionOrFailure(parent)) return parent;
+    if (hasOwnExecutionOrFailure(parent)) return { task: parent, executionTaskId: parent.taskId };
     const taskIdentity = this.options.taskIdentity;
-    if (taskIdentity === undefined || this.subscriptionControl === undefined) return parent;
+    if (taskIdentity === undefined || this.subscriptionControl === undefined) {
+      return { task: parent, executionTaskId: parent.taskId };
+    }
     const snapshots = this.coordinator.taskSnapshots();
     const identities = new Map<string, TaskIdentityRecord>();
     await Promise.all(snapshots.map(async (snapshot) => {
@@ -5083,9 +5095,17 @@ export class UiRuntimeService {
       identities,
       await this.subscriptionControl.list(),
     );
-    const child = currentChildExecution(snapshots.filter((snapshot) =>
-      lineage.get(snapshot.taskId.value)?.parentTaskId.value === taskId.value));
-    return child === undefined ? parent : projectParentRuntimeSnapshot(parent, child);
+    const children = snapshots.filter((snapshot) =>
+      lineage.get(snapshot.taskId.value)?.parentTaskId.value === taskId.value);
+    const child = currentChildExecution(children);
+    return child === undefined
+      ? { task: parent, executionTaskId: parent.taskId }
+      : { task: projectParentRuntimeSnapshot(parent, child),
+        ...(children.length === 1 ? { executionTaskId: child.taskId } : {}) };
+  }
+
+  private async taskSnapshotWithParentExecution(taskId: TaskId): Promise<RuntimeTaskSnapshot> {
+    return (await this.taskSnapshotWithParentExecutionTarget(taskId)).task;
   }
 
   listTasks(): RuntimeTaskListProjection {
@@ -5412,13 +5432,14 @@ export class UiRuntimeService {
       const messages = [inputMessage];
       for (const { seq, kind, occurredAt, requestId, turnId, tool } of interaction.steps) {
         if ((kind !== 'tool.started' && kind !== 'tool.finished') || !requestId || !turnId || !tool) continue;
-        const { callId, kind: toolKind, status, errorCode } = tool;
+        const { callId, kind: toolKind, status, errorCode, detail } = tool;
         messages.push({
           ...publicMessage(`step:${seq}`, kind === 'tool.started' ? '内置工具已调用' : '内置工具已返回', occurredAt),
           explicitToolStep: {
             kind, requestId, turnId,
             tool: { callId, kind: toolKind, ...(status === undefined ? {} : { status }),
-              ...(errorCode === undefined ? {} : { errorCode }) },
+              ...(errorCode === undefined ? {} : { errorCode }),
+              ...(detail === undefined ? {} : { detail }) },
           },
         });
       }
@@ -5995,35 +6016,53 @@ export class UiRuntimeService {
     return selectProductOutput(await this.authoritativePublicOutputForTask(taskId));
   }
 
-  /** Narrow interpretation port; the model never supplies project or execution authority. */
+  /** Resolve the original task and at most one execution in the serve-bound project. */
+  private async explicitTaskTarget(interaction: ExplicitInteractionSnapshot, rawTaskId: string) {
+    if (interaction.workspace !== undefined && this.options.projectKey !== undefined
+      && interaction.workspace.projectKey !== this.options.projectKey) {
+      throw new UiRuntimeApiError('explicit-brain.workspace-outside-serve-scope', APP_OWNER,
+        'task is outside the serve-bound project', 'use the project owning this conversation', 403);
+    }
+    const taskId = id('task', rawTaskId);
+    const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+    let execution = task;
+    if (!hasOwnExecutionOrFailure(task) && this.options.taskIdentity !== undefined && this.subscriptionControl !== undefined) {
+      const snapshots = this.coordinator.taskSnapshots();
+      const identities = new Map<string, TaskIdentityRecord>();
+      await Promise.all(snapshots.map(async (snapshot) => {
+        const identity = await this.options.taskIdentity!.read({ organId: this.options.organId, taskId: snapshot.taskId });
+        if (identity !== undefined) identities.set(snapshot.taskId.value, identity);
+      }));
+      const lineage = executionLineageByChildId(snapshots.map(toRuntimeTaskSnapshotInput), identities,
+        await this.subscriptionControl.list());
+      const children = snapshots.filter(snapshot => lineage.get(snapshot.taskId.value)?.parentTaskId.value === taskId.value);
+      if (children.length > 1) return { task, ambiguous: children.map(child => child.taskId.value) };
+      if (children[0] !== undefined) execution = children[0];
+    }
+    return { task, execution };
+  }
+
+  private explicitTaskBlocker(task: RuntimeTaskSnapshot) {
+    if (task.checkpoint?.recoveryOutcome === 'recovery-hold-effect-unknown') {
+      return {
+        code: task.error?.code ?? 'task.recovery.effect-unknown',
+        reason: task.error?.message ?? task.currentState,
+        nextStep: task.nextStep,
+      };
+    }
+    if (task.error !== undefined) return { code: task.error.code, reason: task.error.message, nextStep: task.nextStep };
+    return undefined;
+  }
+
   private explicitTaskResultReader(interaction: ExplicitInteractionSnapshot): (taskId: string) => Promise<unknown> {
     return async (rawTaskId) => {
-      if (interaction.workspace !== undefined && this.options.projectKey !== undefined
-        && interaction.workspace.projectKey !== this.options.projectKey) {
-        throw new UiRuntimeApiError('explicit-brain.workspace-outside-serve-scope', APP_OWNER,
-          'task result is outside the serve-bound project', 'use the project owning this conversation', 403);
-      }
-      const taskId = id('task', rawTaskId);
-      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
-      let execution = task;
-      if (!hasOwnExecutionOrFailure(task) && this.options.taskIdentity !== undefined && this.subscriptionControl !== undefined) {
-        const snapshots = this.coordinator.taskSnapshots();
-        const identities = new Map<string, TaskIdentityRecord>();
-        await Promise.all(snapshots.map(async (snapshot) => {
-          const identity = await this.options.taskIdentity!.read({ organId: this.options.organId, taskId: snapshot.taskId });
-          if (identity !== undefined) identities.set(snapshot.taskId.value, identity);
-        }));
-        const lineage = executionLineageByChildId(snapshots.map(toRuntimeTaskSnapshotInput), identities,
-          await this.subscriptionControl.list());
-        const children = snapshots.filter(snapshot => lineage.get(snapshot.taskId.value)?.parentTaskId.value === taskId.value);
-        if (children.length > 1) return { taskId: rawTaskId, title: task.title, status: task.state,
-          publicationState: 'ambiguous', executionTaskIds: children.map(child => child.taskId.value), commits: [] };
-        if (children[0] !== undefined) execution = children[0];
-      }
+      const { task, execution, ambiguous } = await this.explicitTaskTarget(interaction, rawTaskId);
+      if (execution === undefined) return { taskId: rawTaskId, title: task.title, status: task.state,
+        publicationState: 'ambiguous', executionTaskIds: ambiguous, commits: [], resultAvailable: false };
       const binding = publicOutputBindingFor(execution, this.options.organId);
       const result = selectProductOutput(await this.authoritativePublicOutputForTask(execution.taskId), binding);
       return { taskId: rawTaskId, title: task.title, executionTaskId: execution.taskId.value, status: execution.state,
-        publicationState: result.publication?.state ?? 'unavailable', ...result };
+        publicationState: result.publication?.state ?? 'unavailable', ...result, blocker: this.explicitTaskBlocker(execution) };
     };
   }
 
@@ -6037,20 +6076,51 @@ export class UiRuntimeService {
   }
 
   /**
+   * Publish the exact retained-operation action only after the same source
+   * selector used by the public resume boundary proves that this task/operation
+   * pair has a unique committed predecessor. Reading a dashboard never resumes.
+   */
+  private async taskDashboardResumeAction(
+    task: RuntimeTaskSnapshot,
+    executionTaskId: TaskId | undefined,
+  ): Promise<Pick<RuntimeTaskDashboardView, 'resumeTarget' | 'resumeIssue'>> {
+    const source = this.boundProjectSource();
+    const resolveRequest = this.resolveColdExecutionResumeRequest;
+    if (source === undefined || resolveRequest === undefined || task.operationId === undefined) return {};
+    if ((task.state !== 'waiting' && task.state !== 'blocked') || task.inputRequest !== undefined
+      || task.executionRelease === 'released'
+      || task.checkpoint?.recoveryOutcome === 'recovery-hold-effect-unknown') return {};
+    if (executionTaskId === undefined) return { resumeIssue: {
+      code: 'task.execution.ambiguous',
+      message: '同一项目的这项任务有多条执行记录，无法确定要继续哪一条。',
+      nextAction: '在任务列表中展开这项任务，选择要继续的执行。',
+    } };
+    try {
+      await this.verifyControllableTaskTarget(executionTaskId, source.projectKey, this.mode);
+      await resolveRequest({ taskId: executionTaskId, operationId: id('operation', task.operationId) });
+      return { resumeTarget: { taskId: executionTaskId.value, operationId: task.operationId } };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
    * The task dashboard plus the persisted plan this task belongs to, when it has
    * one. The plan is a durable read, so the HTTP read model is composed here and
    * the synchronous `taskDashboard` stays free of journal I/O for the internal
    * callers that only need task state.
    */
   async taskDashboardWithPlan(taskId: TaskId, agentSelection?: DecodedTaskAgentActivitySelectionQuery): Promise<RuntimeTaskDashboardView> {
-    const task = await this.taskSnapshotWithParentExecution(taskId);
+    const { task, executionTaskId } = await this.taskSnapshotWithParentExecutionTarget(taskId);
     const withPublication = await this.taskDashboardWithPublication(taskId, task);
     const plan = await this.executionPlanForTask(taskId);
     const identity = await this.options.taskIdentity?.read({ organId: this.options.organId, taskId });
+    const resumeAction = await this.taskDashboardResumeAction(task, executionTaskId);
     return {
       ...withPublication,
       ...(identity?.title === undefined ? {} : { semanticTitle: identity.title }),
       ...(plan === undefined ? {} : { plan }),
+      ...resumeAction,
       taskPlanHistory: await this.boundTaskPlanHistory(taskId),
       agentActivity: await this.taskAgentActivityFor(this.boundProjectSource(), this.mode, taskId, agentSelection),
     };

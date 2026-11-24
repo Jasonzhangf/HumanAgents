@@ -120,6 +120,8 @@ export interface ProviderAgentDriverCommonOptions<TIdentity extends AnyProviderE
     readonly requestId: string;
     readonly tools: readonly { readonly call: ProviderToolCall; readonly result: ProviderToolExecutionResult }[];
   }) => Promise<'continue' | 'complete' | 'drain'>;
+  /** Called after the exact malformed call result is durable, before the next tool batch. */
+  readonly onMalformedToolCallResult?: (input: { readonly requestId: string; readonly call: ProviderToolCall }) => Promise<void>;
   readonly onRequestLifecycle?: (event: ProviderRequestLifecycleEvent<TIdentity>) => void;
   /**
    * Native raw path. `rawEvidence` saves the exact executor output and
@@ -1063,6 +1065,9 @@ export class ProviderAgentDriver<
           toolResults.set(outcome.call.callId, { status, result });
           try {
             await this.persistToolResult(request, outcome.call, outcome.result, result);
+            if (invalidResults.has(outcome.call.callId)) {
+              await this.options.onMalformedToolCallResult?.({ requestId: request.requestId, call: outcome.call });
+            }
           } catch (cause) {
             this.recordProducerFailure(cause);
             persistenceFailure ??= cause;

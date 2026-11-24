@@ -3,20 +3,30 @@ import { conversationStatus, createConversationStatusClock } from './conversatio
 import * as callUsageFooter from './call-usage-footer.js'
 import { renderToolBody, disposeToolBody } from './tool-presentation.js'
 import { taskForTurn, taskValue, renderDispatchCard } from './dispatch-tracking.js'
-import { renderExplicitToolActivity } from './explicit-tool-activity.js'
+import { explicitToolActivityFinished, renderExplicitToolActivity } from './explicit-tool-activity.js'
+import { taskBlocker } from './task-blocker.js'
 
 export function ownedMainTopicTurns(projection) {
   const turns = projection.turns || []
-  const cardTasks = new Set(turns.filter(turn => turn.kind === 'draft' && taskForTurn(turn, projection.tasks)).map(turn => taskValue(taskForTurn(turn, projection.tasks).taskId)))
+  const dispatchTask = turn => {
+    const task = turn.kind === 'draft' && taskForTurn(turn, projection.tasks)
+    return task?.sourceInteractionId && turn.interactionId === task.sourceInteractionId ? task : undefined
+  }
+  const cardTasks = new Set(turns.map(dispatchTask).filter(Boolean).map(task => taskValue(task.taskId)))
   return turns.filter(turn => turn.detailReadError || !(['status', 'error'].includes(turn.kind) && cardTasks.has(taskValue(turn.taskId)))).map(turn => {
     const task = taskForTurn(turn, projection.tasks)
     if (!task || turn.role === 'user' || !['draft', 'status', 'error', 'result'].includes(turn.kind)) return turn
-    if (turn.kind === 'draft' && task.sourceInteractionId && turn.interactionId !== task.sourceInteractionId) return turn
+    if (turn.kind === 'draft' && !dispatchTask(turn)) return turn
     if (turn.kind === 'draft') return { ...turn, kind: 'dispatch', quote: undefined,
       dispatchTask: taskValue(projection.openInputRequest?.taskId) === taskValue(task.taskId) ? { ...task, inputRequest: projection.openInputRequest } : task,
       documentText: turn.text, text: '任务已交办' }
+    if (turn.kind === 'error') {
+      const blocker = taskBlocker(task) || taskBlocker({ ...task, state: 'blocked' })
+      return { ...turn, role: 'task', quote: undefined,
+        text: [task.title, blocker.reason, blocker.code, blocker.next].filter(Boolean).join(' · ') }
+    }
     return { ...turn, role: 'task', quote: undefined,
-      text: turn.kind === 'error' ? `任务执行链受阻${task.error?.code ? `（${task.error.code}）` : ''} · 恢复状态：未读到恢复完成回执` : turn.text }
+      text: turn.text }
   })
 }
 
@@ -176,45 +186,62 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
   else article.append(header)
   const previousStatus = article.querySelector('.conversation-status')
   if (turn.statusFacts || turn.localStatus) {
-    const status = element('div', undefined, `conversation-status${turn.turnId.startsWith('local-status:') ? ' mt-send-status' : ''}`)
-    status.setAttribute('aria-label', '执行阶段与计时')
-    for (const row of turn.localStatus || conversationStatus(turn.statusFacts)) {
-      const line = element('div', undefined, 'conversation-status-row')
-      line.dataset.phase = row.phase
-      line.dataset.tone = row.tone
-      line.dataset.running = String(row.running)
-      const mark = element('span', row.tone === 'danger' ? '!' : row.tone === 'success' ? '✓' : '●', 'conversation-status-mark')
-      mark.setAttribute('aria-hidden', 'true')
-      line.append(mark, element('span', row.label))
-      const time = element('span', '', 'conversation-status-time')
-      line.append(time)
-      bindings.push({ row, node: time })
-      if (row.error) {
-        line.append(element('span', `${row.error.code || ''} ${row.error.message || ''}`.trim(), 'conversation-status-error'))
-        appendPairingEntry(line, row.error)
+    // Provider tool facts have a dedicated semantic card below. Keeping their
+    // generic phase row here duplicates the action and hides its result details.
+    const rows = (turn.localStatus || conversationStatus(turn.statusFacts)).filter((row) => row.phase !== 'tool')
+    const signature = JSON.stringify(rows)
+    if (previousStatus?.dataset.signature === signature) {
+      const lines = [...previousStatus.querySelectorAll('.conversation-status-row')]
+      for (const [index, row] of rows.entries()) {
+        const time = lines[index]?.querySelector('.conversation-status-time')
+        if (time) bindings.push({ row, node: time })
       }
-      status.append(line)
+      const detail = previousStatus.querySelector('[data-open-turn-detail]')
+      if (detail) detail.onclick = () => topicState.onOpenDetail(detail, turn)
+    } else {
+      const status = element('div', undefined, `conversation-status${turn.turnId.startsWith('local-status:') ? ' mt-send-status' : ''}`)
+      status.setAttribute('aria-label', '执行阶段与计时')
+      status.dataset.signature = signature
+      for (const row of rows) {
+        const line = element('div', undefined, 'conversation-status-row')
+        line.dataset.phase = row.phase
+        line.dataset.tone = row.tone
+        line.dataset.running = String(row.running)
+        const mark = element('span', row.tone === 'danger' ? '!' : row.tone === 'success' ? '✓' : '●', 'conversation-status-mark')
+        mark.setAttribute('aria-hidden', 'true')
+        line.append(mark, element('span', row.label))
+        if (row.statusLabel) line.append(element('span', row.statusLabel, 'muted'))
+        const time = element('span', '', 'conversation-status-time')
+        line.append(time)
+        bindings.push({ row, node: time })
+        if (row.error) {
+          line.append(element('span', `${row.error.code || ''} ${row.error.message || ''}`.trim(), 'conversation-status-error'))
+          appendPairingEntry(line, row.error)
+        }
+        status.append(line)
+      }
+      if (turn.onRecover && turn.localStatus?.some(row => row.error)) {
+        const recover = element('button', '重新读取本轮状态', 'conversation-status-detail')
+        recover.type = 'button'
+        recover.onclick = () => void turn.onRecover()
+        status.append(recover)
+      }
+      if (turn.onContinue) {
+        const resume = element('button', '继续本轮处理', 'conversation-status-detail')
+        resume.type = 'button'
+        resume.onclick = () => void turn.onContinue()
+        status.append(resume)
+      }
+      if (typeof topicState.onOpenDetail === 'function') {
+        const detail = element('button', '详情', 'conversation-status-detail')
+        detail.type = 'button'
+        detail.dataset.openTurnDetail = ''
+        detail.onclick = () => topicState.onOpenDetail(detail, turn)
+        status.append(detail)
+      }
+      if (previousStatus) previousStatus.replaceWith(status)
+      else header.after(status)
     }
-    if (turn.onRecover && turn.localStatus?.some(row => row.error)) {
-      const recover = element('button', '重新读取本轮状态', 'conversation-status-detail')
-      recover.type = 'button'
-      recover.onclick = () => void turn.onRecover()
-      status.append(recover)
-    }
-    if (turn.onContinue) {
-      const resume = element('button', '继续本轮处理', 'conversation-status-detail')
-      resume.type = 'button'
-      resume.onclick = () => void turn.onContinue()
-      status.append(resume)
-    }
-    if (typeof topicState.onOpenDetail === 'function') {
-      const detail = element('button', '详情', 'conversation-status-detail')
-      detail.type = 'button'
-      detail.addEventListener('click', () => topicState.onOpenDetail(detail, turn))
-      status.append(detail)
-    }
-    if (previousStatus) previousStatus.replaceWith(status)
-    else header.after(status)
   } else previousStatus?.remove()
   let bubble = article.querySelector('.mt-bubble')
   if (!bubble) {
@@ -269,7 +296,7 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     }
     detailReadError.textContent = turn.detailReadError.message
   } else detailReadError?.remove()
-  const events = turn.taskId || turn.dispatchTask ? undefined : turn.toolEvents
+  const events = turn.toolEvents
   let tools = bubble.querySelector('.tool-body')
   if (events?.length) {
     if (!tools) {
@@ -281,10 +308,8 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     disposeToolBody(tools)
     tools.remove()
   }
-  const explicitState = turn.statusFacts?.state
   renderExplicitToolActivity(bubble, turn.explicitSteps ?? turn.statusFacts?.steps,
-    Boolean(turn.statusFacts?.steps && !['received', 'matching'].includes(explicitState)) ||
-    Boolean(turn.localStatus?.some(row => row.error)))
+    explicitToolActivityFinished(turn), bindings)
   let control = answerControls.get(article)
   const key = requestKey(turn)
   if (turn.kind === 'input-request' && turn.requestId && turn.taskId

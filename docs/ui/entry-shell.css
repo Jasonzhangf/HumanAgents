@@ -20,8 +20,7 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 .entry-person[aria-current="page"] { background: #dae7d9; color: #203b2c; }
 .entry-jenny { border-left: 3px solid #385e45; }
 .entry-ceo { margin-top: 10px; font-weight: 650; background: white; border: 1px solid #bac8bb; }
-.entry-rail-foot { margin-top: auto; border-top: 1px solid #cdd6cb; padding-top: 14px; }
-.entry-rail-foot p, .entry-read-state { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #59655c; font-size: 11px; }
+.entry-read-state { margin: 0; color: #59655c; font-size: 11px; }
 .entry-menu-toggle, .entry-menu-close { display: none; }
 #page-root > .page[data-page-layout="work"] { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; width: 100%; max-width: none; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; gap: 0; overflow: hidden; }
 #page-root .page-heading, #page-root .page-support:empty, #page-root > .shell-controls { display: none; }
@@ -83,7 +82,6 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 }
 
 /* Member tree: one serve-bound member, with independent detail access. */
-.entry-project-workspace { display: block; margin: 3px 0 0 12px; color: #59655c; font-size: 11px; font-weight: 400; overflow-wrap: anywhere; }
 .member-roster-main-row { display: flex; align-items: center; gap: 3px; }
 .member-roster-main { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; padding: 9px 5px; }
 .member-roster-detail-trigger { flex: 0 0 auto; padding: 7px 3px; border: 0; border-radius: 5px; background: transparent; color: #59655c; font-size: 11px; cursor: pointer; }
@@ -96,4 +94,5 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 .member-roster-project-settings { align-content: start; overflow-wrap: anywhere; }
 .entry-workspace-folder{margin-block-end:8px}
 .entry-workspace-projects{margin-inline-start:8px;padding-inline-start:8px;border-inline-start:1px solid var(--line)}
+.entry-workspace-path{overflow-wrap:anywhere}
 .entry-toolbar [hidden]{display:none}

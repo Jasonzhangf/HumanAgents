@@ -47,7 +47,13 @@ export function submissionView(projection, attempt) {
     for (let i = 0; i < turns.length; i++) {
       const turn = turns[i]
       if (belongs(turn) && turn.statusFacts && (attempt.error || turn.statusFacts.steps !== undefined)) {
-        turns[i] = { ...turn, localStatus: conversationStatus(turn.statusFacts).map(row => ({ ...row, running: false })) }
+        const localStatus = conversationStatus(turn.statusFacts).map(row => ({
+          ...row,
+          running: false,
+          ...(attempt.error && attempt.processError && row.running && ['model-wait', 'streaming'].includes(row.phase)
+            ? { label: '模型响应中断，结果待核实' } : {}),
+        }))
+        turns[i] = { ...turn, localStatus }
       }
     }
   }
