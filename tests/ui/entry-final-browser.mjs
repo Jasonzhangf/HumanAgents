@@ -1,7 +1,8 @@
 // Isolated public-page acceptance. No service, provider or production writes.
-// Failure basis: previous homepage had a permanent mobile rail, flat member
-// placeholder, and two-row composer. Impact: unusable narrow conversation and
-// missing task/schedule actions. Cost: one short-lived Chromium, no runtime.
+// Failure basis: the shell's outer grid row could grow with 153 workspace
+// groups or a long chat, pushing the composer below the viewport and losing
+// independent scrolling. Impact: the user cannot send while browsing history.
+// Cost: one short-lived Chromium and synthetic API fixtures, no runtime writes.
 import assert from 'node:assert/strict'
 import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
@@ -16,6 +17,9 @@ const check = (name, condition) => { assert.ok(condition, name); checks.push(nam
 let reads = 0
 let usageReads = 0
 const writes = []
+let longLayoutMetrics
+let narrowLayoutMetrics
+let drawerMetrics
 const project = { projectKey: 'entry-acceptance', projectName: 'HumanAgent', agentName: 'Jenny',
   workspaceCwd: '/isolated/entry-acceptance', topicName: '主会话', mode: 'fake' }
 const task = { taskId: { value: 'acceptance-task' }, title: '隔离验收任务', semanticTitle: '隔离验收任务', state: 'running',
@@ -23,8 +27,20 @@ const task = { taskId: { value: 'acceptance-task' }, title: '隔离验收任务'
 let reply = false
 let addedProject = false
 let catalogState = 'populated'
+let longLayout = false
+const longProjects = Array.from({ length: 153 }, (_, index) => ({
+  scope: { projectKey: index === 0 ? project.projectKey : `entry-long-project-${index}` },
+  label: index === 0 ? project.projectName : `项目 ${index + 1}`,
+  workspaceCwd: `/isolated/entry-long-workspace-${index}`,
+}))
 const projection = () => ({ ...project, surface: 'main-topic', tasks: [task], activeTask: task,
-  turns: [{ turnId: 'user-one', role: 'user', kind: 'message', text: '含税价和未税价有什么区别？' },
+  turns: longLayout ? Array.from({ length: 160 }, (_, index) => ({
+    turnId: `long-turn-${index}`,
+    role: index % 2 === 0 ? 'user' : 'jenny',
+    kind: 'message',
+    text: index % 2 === 0 ? `第 ${index / 2 + 1} 轮长聊天问题：请比较含税价和未税价，并说明报价口径。`
+      : `第 ${(index + 1) / 2} 轮长聊天回答：统一税价口径后再比较报价，避免把税额重复计入。`,
+  })) : [{ turnId: 'user-one', role: 'user', kind: 'message', text: '含税价和未税价有什么区别？' },
     { turnId: 'reply-one', role: 'jenny', kind: 'message', text: '比较报价时需要统一税价口径。', taskId: task.taskId },
     ...(reply ? [{ turnId: 'user-two', role: 'user', kind: 'message', text: '正常消息验收' },
       { turnId: 'reply-two', role: 'jenny', kind: 'message', text: '隔离服务已直接回答。' }] : [])] })
@@ -42,7 +58,7 @@ try {
         if (catalogState === 'failed') {
           status = 503
           data = { error: { code: 'catalog.unavailable', message: '项目列表读取失败' } }
-        } else data = { projects: catalogState === 'empty' ? [] : [
+        } else data = { projects: catalogState === 'empty' ? [] : longLayout ? longProjects : [
           { scope: { projectKey: project.projectKey }, label: project.projectName },
           ...(addedProject ? [{ scope: { projectKey: 'new-project' }, label: '新增工作区' }] : []),
         ] }
@@ -161,10 +177,88 @@ try {
     await page.getByText(message, { exact: true }).waitFor()
     check(`the ${state} catalog replaces its loading state`, await page.getByText('正在读取项目…', { exact: true }).count() === 0)
   }
+  catalogState = 'populated'
+  longLayout = true
+  await page.setViewportSize({ width: 1905, height: 1080 })
+  await page.goto('http://entry-acceptance.test/')
+  await page.locator('.entry-jenny').waitFor()
+  await page.waitForFunction(() => document.querySelectorAll('.entry-project').length === 153)
+  await page.locator('.entry-project').evaluateAll((nodes) => { for (const node of nodes) node.open = true })
+  const layout = await page.evaluate(() => {
+    const box = (selector) => {
+      const rect = document.querySelector(selector)?.getBoundingClientRect()
+      return rect ? { top: rect.top, bottom: rect.bottom, height: rect.height, width: rect.width } : null
+    }
+    const rail = document.querySelector('.entry-rail')
+    const primary = document.querySelector('.page-primary')
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      root: box('#page-root'),
+      page: box('#page-root > .page'),
+      rail: box('.entry-rail'),
+      composer: box('.page-composer'),
+      railScroll: rail ? { clientHeight: rail.clientHeight, scrollHeight: rail.scrollHeight } : null,
+      chatScroll: primary ? { clientHeight: primary.clientHeight, scrollHeight: primary.scrollHeight } : null,
+    }
+  })
+  longLayoutMetrics = layout
+  check('long catalog and chat keep the page inside the viewport',
+    layout.page.height <= layout.viewport.height + 1)
+  check('long catalog and chat keep the composer inside the viewport',
+    layout.composer.top >= 0 && layout.composer.bottom <= layout.viewport.height + 1)
+  check('long catalog scrolls inside the bounded rail',
+    layout.rail.height <= layout.viewport.height + 1 && layout.railScroll.scrollHeight > layout.railScroll.clientHeight)
+  check('long chat scrolls inside the bounded main column',
+    layout.chatScroll.scrollHeight > layout.chatScroll.clientHeight)
+  const railScrolled = await page.locator('.entry-rail').evaluate((node) => {
+    node.scrollTop = node.scrollHeight
+    return node.scrollTop > 0
+  })
+  const chatScrolled = await page.locator('.page-primary').evaluate((node) => {
+    node.scrollTop = node.scrollHeight
+    return node.scrollTop > 0
+  })
+  check('long catalog rail remains independently scrollable', railScrolled)
+  check('long chat remains independently scrollable', chatScrolled)
+  const composerAfterScroll = await page.locator('.page-composer').boundingBox()
+  check('composer stays inside the viewport after chat and rail scroll',
+    composerAfterScroll.y >= 0 && composerAfterScroll.y + composerAfterScroll.height <= 1081)
+  await page.screenshot({ path: resolve(evidence, 'long-layout-1905.png') })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: '打开项目菜单' }).waitFor()
+  const narrow = await page.evaluate(() => {
+    const composer = document.querySelector('.page-composer')?.getBoundingClientRect()
+    const primary = document.querySelector('.page-primary')
+    return {
+      composer: composer ? { top: composer.top, bottom: composer.bottom } : null,
+      chatScroll: primary ? { clientHeight: primary.clientHeight, scrollHeight: primary.scrollHeight } : null,
+    }
+  })
+  narrowLayoutMetrics = narrow
+  check('narrow viewport keeps the long-chat composer inside the viewport',
+    narrow.composer.top >= 0 && narrow.composer.bottom <= 845)
+  check('narrow viewport keeps the long chat scrollable',
+    narrow.chatScroll.scrollHeight > narrow.chatScroll.clientHeight)
+  check('narrow viewport keeps the project drawer closed', !await page.locator('.entry-rail').isVisible())
+  await page.getByRole('button', { name: '打开项目菜单' }).click()
+  await page.getByRole('button', { name: '关闭菜单' }).waitFor()
+  const drawer = await page.evaluate(() => {
+    const dialog = document.querySelector('.entry-rail-dialog')?.getBoundingClientRect()
+    const rail = document.querySelector('.entry-rail')
+    return {
+      dialog: dialog ? { top: dialog.top, bottom: dialog.bottom } : null,
+      railScroll: rail ? { clientHeight: rail.clientHeight, scrollHeight: rail.scrollHeight } : null,
+    }
+  })
+  drawerMetrics = drawer
+  check('narrow drawer stays inside the viewport and scrolls its long catalog',
+    drawer.dialog.top >= 0 && drawer.dialog.bottom <= 845 && drawer.railScroll.scrollHeight > drawer.railScroll.clientHeight)
+  await page.screenshot({ path: resolve(evidence, 'long-layout-390-drawer.png') })
+  await page.getByRole('button', { name: '关闭菜单' }).click()
   check('no page errors', errors.length === 0)
   await context.close()
 } finally {
   await browser.close()
-  await writeFile(resolve(evidence, 'receipt.json'), JSON.stringify({ checks, reads, writes, cleanup: { browserClosed: !browser.isConnected(), noListeningServer: true, productionWrites: false } }, null, 2))
+  await writeFile(resolve(evidence, 'receipt.json'), JSON.stringify({ checks, reads, writes, longLayoutMetrics, narrowLayoutMetrics, drawerMetrics, cleanup: { browserClosed: !browser.isConnected(), noListeningServer: true, productionWrites: false } }, null, 2))
 }
 console.log(JSON.stringify({ result: 'PASS', checks, evidence }, null, 2))

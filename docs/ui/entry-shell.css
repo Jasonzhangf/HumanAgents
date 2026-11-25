@@ -1,7 +1,7 @@
 /* Homepage shell: 222px project tree and an unchanged-width conversation. */
 body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
-#page-root.entry-workspace { display: grid; grid-template-columns: 222px minmax(0, 1fr); height: 100dvh; overflow: hidden; --surface: #f8faf6; --line: #dce2d9; --accent: #205b45; --main-gutter: max(24px, calc((100% - 980px) / 2)); }
-.entry-rail-dialog { display: block; position: static; width: 222px; height: 100%; max-width: none; max-height: none; padding: 0; margin: 0; border: 0; background: #eef1eb; color: inherit; }
+#page-root.entry-workspace { display: grid; grid-template-columns: 222px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 100dvh; overflow: hidden; --surface: #f8faf6; --line: #dce2d9; --accent: #205b45; --main-gutter: max(24px, calc((100% - 980px) / 2)); }
+.entry-rail-dialog { display: block; position: static; width: 222px; height: 100%; min-height: 0; max-width: none; max-height: none; padding: 0; margin: 0; border: 0; overflow: hidden; background: #eef1eb; color: inherit; }
 .entry-rail { height: 100%; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding: 28px 16px 16px; border-right: 1px solid #dce2d9; }
 .entry-brand { display: flex; align-items: center; gap: 9px; font-size: 20px; font-weight: 700; letter-spacing: -.8px; }
 .entry-mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: #293f32; color: white; font-family: Georgia, serif; }
@@ -22,7 +22,7 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 .entry-ceo { margin-top: 10px; font-weight: 650; background: white; border: 1px solid #bac8bb; }
 .entry-read-state { margin: 0; color: #59655c; font-size: 11px; }
 .entry-menu-toggle, .entry-menu-close { display: none; }
-#page-root > .page[data-page-layout="work"] { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; width: 100%; max-width: none; height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; gap: 0; overflow: hidden; }
+#page-root > .page[data-page-layout="work"] { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; width: 100%; max-width: none; height: 100%; max-height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; gap: 0; overflow: hidden; }
 #page-root .page-heading, #page-root .page-support:empty, #page-root > .shell-controls { display: none; }
 .entry-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 12px 5%; border-bottom: 1px solid var(--line); }
 .entry-scope-title { min-width: 0; max-width: 38%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; color: #59655c; }
