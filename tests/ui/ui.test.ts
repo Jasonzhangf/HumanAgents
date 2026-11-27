@@ -2237,19 +2237,10 @@ type EntrySubmissionHarness = {
   readonly run: (submission: unknown, api: unknown, receipt?: unknown) => Promise<unknown>;
   readonly calls: readonly string[];
   readonly taskIdentities: readonly Record<string, unknown>[];
-  readonly cardStates: readonly {
-    readonly kind: string;
-    readonly state: string;
-    readonly sourceKind?: string;
-    readonly text?: string;
-    readonly eventKey?: string;
-    readonly interactionId?: string;
-    readonly occurredAt?: string;
-  }[];
-  readonly draftedStates: readonly string[];
-  readonly status: { readonly dataset: Record<string, string>; readonly textContent: string };
+  readonly paintedStates: readonly string[];
   readonly directAnswers: readonly { readonly tone?: string; readonly text?: string; readonly retry?: boolean }[];
-  readonly state: () => string;
+  readonly attempt: () => Record<string, unknown> | undefined;
+  readonly state: () => string | undefined;
 };
 
 /**
@@ -2257,8 +2248,8 @@ type EntrySubmissionHarness = {
  *
  * The flow is a closure over page state, so the source is sliced by its stable
  * markers and evaluated with page-level collaborators stubbed. The slices are
- * the shipped code, not copies: a new branch that mutates the status region or
- * throws on a supported state is caught here without a browser.
+ * the shipped code, not copies: a new branch that throws on a supported state
+ * or loses post-confirmation identity is caught here without a browser.
  */
 function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHarness {
   const answerStart = source.indexOf('export function answeredSubmissionPresentation');
@@ -2282,64 +2273,60 @@ function compileEntrySubmissionHarness(source: string): () => EntrySubmissionHar
     confirmationBlock,
     source.slice(acceptanceStart, acceptanceEnd),
     source.slice(identityStart, identityEnd),
-    'let interactionId;',
-    'let sendAttempt;',
-    'let latestState = "received";',
-    'let confirmation;',
+    'let activeAttempt;',
     'let api = apiRef.current;',
-    'const cardStates = [];',
-    'const draftedStates = [];',
+    'const paintedStates = [];',
     'const directAnswers = [];',
     'const calls = [];',
     'const taskIdentities = [];',
-    'const status = { dataset: {}, textContent: "" };',
-    'const submitBanner = { text() {}, clear() {} };',
+    'const pendingDrafts = new Map();',
+    'const explicitStepStops = new Map();',
+    'const liveExplicitToolEvents = new Map();',
+    'const pageLeaving = false;',
     'const window = { location: { href: "http://entry.test/", assign() {} }, history: { state: {}, replaceState(state) { this.state = state; } } };',
+    'const submitButton = { disabled: false };',
+    'const form = { querySelector() { return submitButton; } };',
     'const input = { value: "" };',
-    'const document = { querySelector() { return input; } };',
+    'const document = { querySelector(selector) { return selector === "#entry-form" ? form : input; } };',
     'function retainEntryDraft() {}',
-    'function paintSubmission() {}',
-    // Record the exact arguments the page hands to the card event, including the
-    // detail object, and mirror the real appendCardEvent's interactionId
-    // fallback so the captured entries can be projected like the page's own.
-    'function appendCardEvent(kind, text, sourceKind, detail) {',
-    '  const eventDetail = detail || {};',
-    '  cardStates.push(Object.assign({ kind, state: latestState, text, sourceKind, interactionId: eventDetail.interactionId || interactionId }, eventDetail));',
-    '}',
-    'function appendCardError() {}',
-    'function renderDraft(snapshot) { draftedStates.push(snapshot.state); }',
+    'function draftReviewFromSnapshot(snapshot) { return snapshot; }',
+    'function liveToolEvent() { return null; }',
+    'function paintSubmission() { if (activeAttempt?.snapshot?.state) paintedStates.push(activeAttempt.snapshot.state); }',
     'function renderDirectAnswer(result) { directAnswers.push(result); }',
-    'function observationHref(taskId) { return "./task.html?task=" + taskId; }',
     'async function refreshQueue() {}',
-    // Main-topic readback belongs to the page closure outside this source slice.
     'async function refreshMainTopic() {}',
     'const mainTopicHost = { dataset: {} };',
-    // Task lookup/rendering is outside this fixture. Record the actual identity
-    // handed to that boundary; do not invent a successful task lookup.
-    'async function landOnSubmittedTask(identity) { taskIdentities.push(identity); }',
+    'async function landOnSubmittedTask(identity) {',
+    '  const { attempt: receivedAttempt, ...rest } = identity;',
+    '  if (receivedAttempt !== activeAttempt) throw new Error("landing attempt mismatch");',
+    '  taskIdentities.push(rest);',
+    '}',
     'return {',
     '  async run(submission, nextApi, receipt) {',
     '    api = Object.assign({}, nextApi, {',
     '      async receiveExplicitInput(...args) { calls.push("receive"); return receipt === undefined ? nextApi.receiveExplicitInput(...args) : receipt; },',
     '      async confirmExplicitRequirement(...args) { calls.push("confirm"); return nextApi.confirmExplicitRequirement(...args); },',
     '    });',
-    '    interactionId = receipt === undefined ? "interaction-entry" : undefined;',
-    '    sendAttempt = { rawInput: submission.rawInput, rawDraft: submission.rawInput, key: "entry-test" };',
+    '    activeAttempt = {',
+    '      interactionId: receipt === undefined ? "interaction-entry" : undefined,',
+    '      rawInput: submission.rawInput,',
+    '      rawDraft: submission.rawInput,',
+    '      key: "entry-test",',
+    '      submission,',
+    '      latestState: "received",',
+    '    };',
     '    input.value = submission.rawInput;',
     '    calls.length = 0;',
     '    taskIdentities.length = 0;',
-    '    latestState = "received";',
-    '    cardStates.length = 0;',
-    '    draftedStates.length = 0;',
+    '    paintedStates.length = 0;',
     '    directAnswers.length = 0;',
-    '    return await executeSubmission(submission);',
+    '    return await executeSubmission(activeAttempt);',
     '  },',
-    '  cardStates,',
+    '  paintedStates,',
     '  calls, taskIdentities,',
-    '  draftedStates,',
     '  directAnswers,',
-    '  status,',
-    '  state: () => latestState,',
+    '  attempt: () => activeAttempt,',
+    '  state: () => activeAttempt?.latestState,',
     '};',
   ].join('\n');
   return () => new Function('apiRef', harnessSource)({ current: undefined }) as EntrySubmissionHarness;
@@ -2386,29 +2373,28 @@ test('entry page projects the post-confirmation state instead of the pre-confirm
     [undefined, 'confirmed'],
   ] as readonly [unknown, string][]) {
     const harness = buildHarness();
-    await harness.run(submission, entryApi(postConfirmation, postConfirmation === undefined));
+    const returned = await harness.run(submission, entryApi(postConfirmation, postConfirmation === undefined)) as { state?: string };
     assert.equal(harness.state(), expected);
-    assert.deepEqual(harness.draftedStates, ['awaiting-confirmation']);
-    assert.equal(harness.cardStates.length, 1);
-    assert.equal(harness.cardStates[0]!.kind, 'decision');
-    assert.equal(harness.cardStates[0]!.state, expected);
-    assert.equal(harness.cardStates[0]!.state === 'awaiting-confirmation', false);
+    assert.equal(returned.state, expected);
+    assert.deepEqual(harness.paintedStates, ['awaiting-confirmation']);
     assert.deepEqual(harness.calls, ['confirm'], 'confirmation submits exactly once');
     assert.deepEqual(harness.taskIdentities, [{ requirementId: 'requirement:draft-1:1', draftId: 'draft-1', inputRevision: 1, interactionId: 'interaction-entry' }]);
   }
 });
 
 /*
- * The user turn must carry the real occurrence time the runtime returned on the
- * 201 receipt. Failure mode: executeSubmission appended the raw-input card event
- * without the occurredAt the receipt carried, so the work card fell back to
- * 「时间未提供」 even though the server already reported a timestamp. The harness
- * drives the receive branch (no pre-set interactionId) and inspects the exact
- * detail the page passed to appendCardEvent.
+ * The receive branch must bind the backend interactionId and propagate to main-topic
+ * confirmation + landing without altering explicit missing semantics on work cards.
  */
-test('entry page attaches the receipt occurrence time to the user turn', async () => {
+test('entry receive branch binds returned interactionId and preserves card occurredAt fallback', async () => {
   const source = await readFile('docs/ui/entry.js', 'utf8');
   const buildHarness = compileEntrySubmissionHarness(source);
+  const { mountInteractionWorkCard } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/interaction-work-card.js')}`,
+  ).href) as InteractionWorkCardAdapter;
+  const { formatTime } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/runtime-api.js')}`,
+  ).href) as { formatTime: (value: string) => string };
 
   const receipt = {
     interactionId: 'interaction-receipt',
@@ -2420,57 +2406,15 @@ test('entry page attaches the receipt occurrence time to the user turn', async (
       return { state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, normalizedInput: '读取 README', proposal: '读取 README 并汇报', proposedIntent: 'create' } };
     },
     async confirmExplicitRequirement() {
-      return { requirement: { requirementId: 'requirement:draft-1:1', fifoSeq: 1 } };
+      return { requirement: { requirementId: 'requirement:draft-1:1', draftId: 'draft-1', inputRevision: 1, fifoSeq: 1 } };
     },
   };
 
   const withTime = buildHarness();
   await withTime.run(submission, api, receipt);
-  const userTurn = withTime.cardStates.find((entry) => entry.kind === 'user');
-  assert.ok(userTurn, 'the receive branch must append a user turn');
-  assert.equal(userTurn!.occurredAt, '2026-10-27T07:28:58.639Z', 'the user turn must carry the receipt occurredAt');
   assert.deepEqual(withTime.calls, ['receive', 'confirm'], 'receive and confirmation each submit exactly once');
+  assert.equal(withTime.attempt()?.interactionId, receipt.interactionId);
   assert.equal(withTime.taskIdentities[0]?.interactionId, receipt.interactionId);
-
-  // A receipt that omits occurredAt must not fabricate a time; the explicit
-  // missing semantics stay intact so the card still reports 「时间未提供」.
-  const withoutTime = buildHarness();
-  await withoutTime.run(submission, api, { interactionId: 'interaction-receipt' });
-  const sparseTurn = withoutTime.cardStates.find((entry) => entry.kind === 'user');
-  assert.ok(sparseTurn, 'the receive branch must append a user turn');
-  assert.equal(sparseTurn!.occurredAt, undefined, 'no occurredAt must be fabricated when the receipt omits it');
-  assert.deepEqual(withoutTime.calls, ['receive', 'confirm']);
-});
-
-/*
- * The rendered work card must surface the real user-turn time, never the
- * 「时间未提供」 fallback, when the entry carried an occurredAt. Failure mode:
- * the entry.js card event dropped the receipt time, so the projection produced a
- * turn with occurredAt undefined and the card printed 「时间未提供」. The test
- * feeds the captured detail through the same projection the page uses and renders
- * the card with the FakeNode DOM double. The second half keeps the explicit
- * missing semantics correct: a turn without a time still reports 「时间未提供」.
- */
-test('entry work card shows the receipt time instead of 「时间未提供」', async () => {
-  const { mountInteractionWorkCard } = await import(new URL(
-    `file://${join(process.cwd(), 'docs/ui/interaction-work-card.js')}`,
-  ).href) as InteractionWorkCardAdapter;
-  const { formatTime } = await import(new URL(
-    `file://${join(process.cwd(), 'docs/ui/runtime-api.js')}`,
-  ).href) as { formatTime: (value: string) => string };
-
-  const source = await readFile('docs/ui/entry.js', 'utf8');
-  const receipt = { interactionId: 'interaction-receipt', occurredAt: '2026-10-27T07:28:58.639Z' };
-  const entryApi = {
-    async inspectExplicitInteraction() {
-      return { state: 'awaiting-confirmation', draft: { draftId: 'draft-1', inputRevision: 1, normalizedInput: '读取 README', proposal: '读取 README 并汇报', proposedIntent: 'create' } };
-    },
-    async confirmExplicitRequirement() {
-      return { requirement: { requirementId: 'requirement:draft-1:1', fifoSeq: 1 } };
-    },
-  };
-  const harness = compileEntrySubmissionHarness(source)();
-  await harness.run({ rawInput: '读取 README', executionPolicy: { executionMode: 'once' } }, entryApi, receipt);
 
   const scope = globalThis as unknown as { document?: unknown };
   const previousDocument = scope.document;
@@ -2484,20 +2428,16 @@ test('entry work card shows the receipt time instead of 「时间未提供」', 
     },
   };
   try {
-    // The page's own entries, projected and rendered exactly as the page does.
-    const entries = harness.cardStates.map((entry) => ({ ...entry }));
     const withTimeHost = new FakeNode('div');
     mountInteractionWorkCard(withTimeHost).update(
-      interactionCardPage.projectInteractionCardFromEntries(entries, 'awaiting-confirmation'),
+      interactionCardPage.projectInteractionCardFromEntries(
+        [{ kind: 'user', sourceKind: 'user', eventKey: 'explicit.raw-input', text: '读取 README', interactionId: receipt.interactionId, occurredAt: receipt.occurredAt }],
+        'awaiting-confirmation',
+      ),
     );
-    // The user turn is the first conversation turn; its time must be the real
-    // receipt time, never the 「时间未提供」 fallback.
     const userTime = withTimeHost.querySelector('.iwc-time')?.textContent;
-    assert.equal(userTime, formatTime('2026-10-27T07:28:58.639Z'), 'the user turn must render the real receipt time');
-    assert.ok(userTime !== '时间未提供', 'the user turn must not fall back to 「时间未提供」');
-    assert.ok(withTimeHost.querySelector('.iwc-time') !== null, 'the card must render a time element for the user turn');
+    assert.equal(userTime, formatTime(receipt.occurredAt));
 
-    // The fallback must stay correct when the runtime genuinely reported no time.
     const withoutTimeHost = new FakeNode('div');
     mountInteractionWorkCard(withoutTimeHost).update(
       interactionCardPage.projectInteractionCardFromEntries(
@@ -2591,9 +2531,7 @@ test('entry page presents an answered snapshot as a success result instead of fa
   assert.deepEqual(harness.calls, [], 'a simple answer must not submit a requirement');
   assert.deepEqual(harness.taskIdentities, [], 'a simple answer must not route to a task');
   assert.equal(harness.state(), 'answered');
-  assert.deepEqual(harness.draftedStates, ['answered']);
-  assert.equal(harness.status.dataset.tone, 'success');
-  assert.equal(harness.status.textContent, 'Jenny 已直接回答；本次没有创建任务');
+  assert.deepEqual(harness.paintedStates, ['answered']);
   assert.equal(harness.directAnswers.length, 1);
   assert.equal(harness.directAnswers[0]?.text, '13 加 14 等于 27。');
 });

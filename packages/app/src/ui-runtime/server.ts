@@ -1057,12 +1057,16 @@ async function handleRequest(
     // Bare task control retains the existing bound project service.
     const scopedTaskRecovery = /^\/api\/tasks\/[^/]+\/(resume|recover)$/.test(path)
       && (url.searchParams.has('scope') || url.searchParams.has('projectKey'));
+    const hasScopeParams = url.searchParams.has('scope') || url.searchParams.has('projectKey');
     const conversationScopedRoute = path === '/api/main-topic'
-      || path === '/api/tasks'
-      || scopedTaskRecovery
-      || path.startsWith('/api/explicit/')
-      || /^\/api\/executions\/[^/]+\/events$/.test(path)
-      || /^\/api\/tasks\/[^/]+\/operations\/[^/]+\/executions\/\d+\/events\/\d+\/tool-output$/.test(path);
+      || (hasScopeParams && (
+        path === '/api/tasks'
+        || scopedTaskRecovery
+        || path.startsWith('/api/explicit/')
+        || /^\/api\/executions\/[^/]+\/events$/.test(path)
+        || /^\/api\/tasks\/[^/]+\/events$/.test(path)
+        || /^\/api\/tasks\/[^/]+\/operations\/[^/]+\/executions\/\d+\/events\/\d+\/tool-output$/.test(path)
+      ));
     const scopedKind = conversationScopedRoute ? url.searchParams.get('scope') : null;
     const scopedProjectKey = conversationScopedRoute ? url.searchParams.get('projectKey')?.trim() : undefined;
     // `system` is the existing navigation spelling for the no-project CEO
@@ -1072,9 +1076,10 @@ async function handleRequest(
     if (!conversationScopedRoute) {
       requestedScope = undefined;
     } else if (scopedKind === null && scopedProjectKey === undefined) {
-      // The bare conversation entry is the no-project CEO. A project must be
-      // named explicitly so it can never inherit the default CEO history.
-      requestedScope = { kind: 'alex' };
+      // Without an explicit scope backend (e.g. standalone project test servers),
+      // bare routes keep their direct project service binding; with one, bare
+      // conversation routes select the no-project CEO.
+      requestedScope = scopedConversationBackend === undefined ? undefined : { kind: 'alex' };
     } else if (conversationScopedRoute && scopedKind === null && scopedProjectKey !== undefined) {
       try {
         requestedScope = conversationScopeFromQuery({ scope: 'project', projectKey: scopedProjectKey });
@@ -1104,6 +1109,7 @@ async function handleRequest(
       || (path === '/api/tasks' && method === 'GET')
       || (scopedTaskRecovery && method === 'POST')
       || (/^\/api\/executions\/[^/]+\/events$/.test(path) && method === 'GET')
+      || (/^\/api\/tasks\/[^/]+\/events$/.test(path) && method === 'GET')
       || (/^\/api\/tasks\/[^/]+\/operations\/[^/]+\/executions\/\d+\/events\/\d+\/tool-output$/.test(path) && method === 'GET')
       || (path === '/api/explicit/inputs' && method === 'POST')
       || (/^\/api\/explicit\/interactions\/[^/]+$/.test(path) && method === 'GET')
@@ -2256,9 +2262,11 @@ async function handleRequest(
     const taskResume = /^\/api\/tasks\/([^/]+)\/resume$/.exec(path);
     if (taskResume && method === 'POST') {
       const taskId = id('task', decodeURIComponent(taskResume[1]!));
-      const scope = optionalTaskControlScope(url);
-      if (scope !== undefined) {
-        await service.verifyControllableTaskTarget(taskId, scope.projectKey, scope.mode);
+      if (requestedScope === undefined) {
+        const scope = optionalTaskControlScope(url);
+        if (scope !== undefined) {
+          await service.verifyControllableTaskTarget(taskId, scope.projectKey, scope.mode);
+        }
       }
       const body = await readBody(request);
       const keys = Object.keys(body);
@@ -2367,16 +2375,14 @@ async function handleRequest(
     const taskEvents = /^\/api\/tasks\/([^/]+)\/events$/.exec(path);
     if (taskEvents && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskEvents[1]!));
-      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
-        await scopedConversationBackend.requireTaskOwnership(requestedScope, taskId);
-      } else {
-        service.taskDetail(taskId);
-      }
+      const eventSource = requestedScope !== undefined && scopedConversationBackend !== undefined
+        ? await scopedConversationBackend.taskEventSource(requestedScope, taskId)
+        : (service.taskDetail(taskId), service);
       const { session } = await resolveSession(accessControl, request, response);
       if (isClosing()) {
         throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
       }
-      streamTaskEvents(request, response, service, taskId, session, accessControl, sseRegistry);
+      streamTaskEvents(request, response, eventSource, taskId, session, accessControl, sseRegistry);
       return;
     }
     const executionMemoryContext = /^\/api\/executions\/([^/]+)\/memory-context$/.exec(path);
@@ -2576,7 +2582,9 @@ function streamEvents(
 function streamTaskEvents(
   request: IncomingMessage,
   response: ServerResponse,
-  service: UiRuntimeService,
+  service: Pick<UiRuntimeService, 'subscribeTaskEvents'> & {
+    taskDashboard(taskId: TaskId): { readonly state: string };
+  },
   taskId: TaskId,
   session: AccessSession,
   accessControl: AccessControlService,

@@ -300,7 +300,13 @@ export function createRuntimeApi(options = {}) {
   }
 
   async function request(path, init = {}) {
-    if (path.split('?')[0] === '/api/main-topic' || path.startsWith('/api/explicit/')) path = conversationPath(path)
+    const pathname = path.split('?')[0]
+    if (pathname === '/api/main-topic'
+      || pathname === '/api/tasks'
+      || pathname.startsWith('/api/explicit/')
+      || /^\/api\/tasks\/[^/]+\/operations\/[^/]+\/executions\/\d+\/events\/\d+\/tool-output$/.test(pathname)) {
+      path = conversationPath(path)
+    }
     const headers = new Headers(init.headers || {})
     if (init.body !== undefined) headers.set('content-type', 'application/json')
     const response = await fetchImpl(`${baseUrl}${path}`, { ...init, headers })

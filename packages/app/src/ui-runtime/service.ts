@@ -6336,10 +6336,10 @@ export class UiRuntimeService {
   // Main Topic needs published output and state, not plan/activity reads. Both
   // consumers project the same scoped execution snapshot with public output.
   private async taskDashboardWithPublication(taskId: TaskId, task: RuntimeTaskSnapshot): Promise<RuntimeTaskDashboardView> {
-    const withCheckpoint = await this.withExactTaskCycleCheckpointRead(toRuntimeTaskSnapshotInput(task));
+    const withCheckpoint = await this.withExactTaskCycleCheckpointRead(task);
     const publicOutput = await this.authoritativePublicOutputForTask(taskId);
-    return runtimeTaskDashboard(withCheckpoint as RuntimeTaskSnapshot, this.mode,
-      runtimeLivenessInput(withCheckpoint as RuntimeTaskSnapshot, this.now().toISOString()), publicOutput);
+    return runtimeTaskDashboard(withCheckpoint, this.mode,
+      runtimeLivenessInput(withCheckpoint, this.now().toISOString()), publicOutput);
   }
 
   private async taskAgentActivityFor(
@@ -6912,7 +6912,9 @@ export class UiRuntimeService {
    * same task/cycle and operation epoch back without treating occurrence success
    * as public publication or crossing into another execution identity.
    */
-  private async withExactTaskCycleCheckpointRead<T extends RuntimeTaskSnapshotInput>(
+  private async withExactTaskCycleCheckpointRead<
+    T extends Pick<RuntimeTaskSnapshotInput, 'taskId' | 'state' | 'currentState' | 'nextStep' | 'operationId' | 'executionEpoch' | 'checkpoint' | 'error' | 'allowedActions'>,
+  >(
     task: T,
     checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => PublicOutputCheckpointStore = this.options.checkpointStoreFor,
   ): Promise<T> {

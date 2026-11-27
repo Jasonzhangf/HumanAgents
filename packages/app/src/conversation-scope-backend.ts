@@ -52,6 +52,12 @@ export interface ScopedConversationSession {
     lastEventId: string | undefined,
     listener: (event: import('../../runtime/src/ui-runtime/coordinator.js').RuntimeTaskEvent) => void,
   ) => ReturnType<UiRuntimeService['subscribeReplay']>;
+  readonly subscribeTaskEvents?: (
+    taskId: import('../../contracts/src/index.js').TaskId,
+    lastEventId: string | undefined,
+    listener: (event: import('../../ui/contracts/runtime.js').RuntimeSseEvent) => void,
+  ) => ReturnType<UiRuntimeService['subscribeTaskEvents']>;
+  readonly taskDashboardState?: (taskId: import('../../contracts/src/index.js').TaskId) => { readonly state: string };
   readonly toolOutput?: (
     taskId: import('../../contracts/src/index.js').TaskId,
     operationId: import('../../contracts/src/index.js').OperationId,
@@ -247,6 +253,24 @@ export class ScopedConversationBackend {
     if (session.subscribeExecution === undefined) throw new ScopedConversationBackendError('scope.operation-unavailable', 'execution events are not available for this scope');
     await this.requireOperationOwnership(scope, operationId);
     return session.subscribeExecution(operationId, lastEventId, listener);
+  }
+
+  async taskEventSource(
+    scope: ConversationScope,
+    taskId: import('../../contracts/src/index.js').TaskId,
+  ): Promise<{
+    readonly subscribeTaskEvents: NonNullable<ScopedConversationSession['subscribeTaskEvents']>;
+    readonly taskDashboard: NonNullable<ScopedConversationSession['taskDashboardState']>;
+  }> {
+    const { session } = await this.session(scope);
+    await this.requireTaskOwnership(scope, taskId);
+    if (session.subscribeTaskEvents === undefined || session.taskDashboardState === undefined) {
+      throw new ScopedConversationBackendError('scope.operation-unavailable', 'task events are not available for this scope');
+    }
+    return {
+      subscribeTaskEvents: session.subscribeTaskEvents,
+      taskDashboard: session.taskDashboardState,
+    };
   }
 
   async toolOutput(
@@ -561,6 +585,8 @@ export function scopedSessionFromUiRuntime(service: UiRuntimeService): ScopedCon
     recoverTask: (taskId, options) => service.recoverTask(taskId, options),
     operationTask: (operationId) => service.operationTask(operationId),
     subscribeExecution: (operationId, lastEventId, listener) => service.subscribeReplay(operationId, lastEventId, listener),
+    subscribeTaskEvents: (taskId, lastEventId, listener) => service.subscribeTaskEvents(taskId, lastEventId, listener),
+    taskDashboardState: (taskId) => service.taskDashboard(taskId),
     toolOutput: (taskId, operationId, executionEpoch, seq) => service.toolOutput(taskId, operationId, executionEpoch, seq),
   };
 }

@@ -230,11 +230,11 @@ const REGISTERED_TOOL_SURFACE = [
 ].join('\n');
 
 const INTAKE_OUTPUT_PROTOCOL = [
-  '# Explicit intake decision output',
+  '# Explicit end-tool protocol',
   'This is one intake decision, not one turn of task execution. Produce exactly one decision object for the current input and claim no task execution.',
   'For a simple question you can answer from the supplied context, call humanagent_turn_end with kind=simple and your structured decision.',
   'For a request that needs registered Skill guidance, call interaction.select_skills once with every relevant registered Skill ID. The tool only loads prompt guidance; it does not perform project, agent, or communication operations.',
-  'After any Skill result, call humanagent_turn_end. Do not dispatch helpers or execute business work. Text alone cannot finish this turn.',
+  'After any Skill result, call humanagent_turn_end with one decision. Do not dispatch helpers or execute business work. Text alone cannot finish this turn.',
   'The end arguments contain kind=simple or complex, a decision object, and checkpointRecord.index with one-sentence action and result. decision.kind must be requirement, status-query, clarification, or answer. A requirement uses complex and must include capsule with summary, goal, process (string array), findings (string array), nextStep and optional detailRefs. All other decisions use simple with no capsule; the answer is its detail.',
   'Inside decision, always include kind, normalizedInput, knownFacts (string array), and decisionRefs (string array). Add proposal, optional taskFlow and matchedTaskId for requirement; answer for status-query and answer; or question and optional options (string array) for clarification. Proposal fields belong only inside proposal.',
   'For a requirement, proposal.title is a short business title of at most 50 characters. Do not include paths, internal identifiers, or the whole request text; the full request remains in normalizedInput and objective.',
@@ -251,7 +251,7 @@ const INTAKE_OUTPUT_PROTOCOL = [
   'If rawInput is addressed to an execution runtime but still states a concrete deliverable, preserve that deliverable as a requirement. Do not ask the user to decide whether the interaction entry should execute the runtime mechanics; it does not.',
   'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
   'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
-  `For requirement, put taskFlow inside decision with definitionVersion as the JSON integer ${TASK_FLOW_DEFINITION_VERSION} (never a quoted string), and kind chosen from semantic task shape only: one-shot for one bounded deliverable; inspection for recurring check-and-report work; long-running for an open-ended goal. Omit taskFlow only when genuinely ambiguous, and clarify when that blocks a decision.`,
+  `If supplied, decision.taskFlow.definitionVersion is the JSON integer ${TASK_FLOW_DEFINITION_VERSION} (never a quoted string). Choose taskFlow.kind from semantic task shape only: one-shot for one bounded deliverable; inspection for recurring check-and-report work; long-running for an open-ended goal. Omit taskFlow only when genuinely ambiguous, and clarify when that blocks a decision.`,
   'Simple end example: {"kind":"simple","decision":{"kind":"answer","normalizedInput":"hello","knownFacts":[],"decisionRefs":[],"answer":"Hello."},"checkpointRecord":{"index":{"action":"answered the question","result":"answered"}}}',
 ].join('\n\n');
 
@@ -786,7 +786,9 @@ function parseRequestRelation(value: unknown): { readonly requestRelation?: Expl
     if (relation.kind === 'new' && Object.keys(relation).length === 1) {
       return { requestRelation: { kind: 'new' } };
     }
-    if (relation.kind === 'continue' && (Object.keys(relation).length === 2 || Object.keys(relation).length === 3)
+    const keys = Object.keys(relation);
+    if (relation.kind === 'continue'
+      && keys.every((key) => key === 'kind' || key === 'candidateId' || key === 'action')
       && typeof relation.candidateId === 'string' && relation.candidateId.trim()
       && (relation.action === undefined || relation.action === 'resume-dispatch')) {
       return { requestRelation: { kind: 'continue', candidateId: relation.candidateId,
@@ -1073,14 +1075,13 @@ export function createProviderExplicitBrainInterpreter(input: {
         readonly partialDrain?: ExplicitTurnPartialResult;
       } | undefined;
       const scopeKey = { organId: input.organId, interactionScopeId: input.interactionScopeId };
-      const pathOpened = (turn: InteractionTurnIdentity) => turn.interactionId === request.interactionId;
       const readPendingTurn = async () => {
         const opened = await input.parentJournal.readScopeOpenedTurns(scopeKey);
         const closed = await input.checkpointJournal.readScopeSemanticCheckpoints(scopeKey);
         const abandoned = await input.parentJournal.readScopeAbandonedTurns(scopeKey);
         const unusable = await input.parentJournal.readScopeParseFailures(scopeKey);
         const failedEpochs = await input.parentJournal.readScopeExecutionFailures(scopeKey);
-        return opened.find(({ fact }) => pathOpened(fact.turn) && !closed.some(({ checkpoint }) =>
+        return opened.find(({ fact }) => !closed.some(({ checkpoint }) =>
           checkpoint.organId.scope === fact.turn.organId.scope
           && checkpoint.organId.value === fact.turn.organId.value
           && checkpoint.interactionScopeId === fact.turn.interactionScopeId
@@ -1238,9 +1239,6 @@ export function createProviderExplicitBrainInterpreter(input: {
       let effectiveRequest = request;
       let pending = await readPendingTurn();
       while (pending !== undefined) {
-        if (pending.fact.turn.inputRevision !== effectiveRequest.inputRevision) {
-          throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} requires its exact prior input revision`);
-        }
         const original = await input.rawContent.read({ scope: pending.fact.scope, content: pending.fact.initialInput });
         const committedText = new TextDecoder('utf-8', { fatal: true }).decode(original);
         if (committedText === JSON.stringify({ ...effectiveRequest, resumePartialRef: undefined })) break;
