@@ -2820,7 +2820,7 @@ test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled whi
     binding,
     baseUrl: 'http://rcc-stream-retry.test',
     source: 'rcc',
-    transientStreamRetries: 2,
+    transientStreamRetries: 3,
     transientStreamRetryDelaysMs: [1],
     evidence: {
       async write(input) {
@@ -2856,6 +2856,16 @@ test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled whi
           text: async () => '',
         };
       }
+      if (calls === 3) {
+        return {
+          status: 200,
+          body: (async function* () {
+            yield encoder.encode(':\n\n');
+            throw new TypeError('terminated');
+          })(),
+          text: async () => '',
+        };
+      }
       return {
         status: 200,
         body: (async function* () {
@@ -2871,7 +2881,7 @@ test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled whi
   await ad.start(startInput());
   const observed = [];
   for await (const event of ad.observe(execution)) observed.push(event);
-  assert.equal(calls, 3);
+  assert.equal(calls, 4);
   assert.equal(observed.some((event) => event.kind === 'error'), false, 'retried pre-output error must stay below event boundary');
   assert.equal(observed.at(-1)?.kind, 'terminal');
   const settled = await ad.settle(execution);

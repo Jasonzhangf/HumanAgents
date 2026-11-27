@@ -1145,24 +1145,25 @@ export class RccV3ProviderTransport<
     try {
       while (true) {
         let retryStream = false;
-        for await (const frame of parseSse(
-          active.body,
-          this.maxEventBytes,
-          this.maxBufferBytes,
-          () => {
-            if (!awaitingPostMessageCompletion()) return this.noProgressBudgetMs;
-            return bufferedMessageDrainDeadline === undefined
-              ? this.postMessageCompletionGraceMs
-              : Math.max(0, bufferedMessageDrainDeadline - performance.now());
-          },
-          () => {
-            if (awaitingPostMessageCompletion() && !active.controller.signal.aborted) {
-              active.controller.abort(
-                new DOMException('RCC v3 single-round message completed after post-message grace', 'AbortError'),
-              );
-            }
-          },
-        )) {
+        try {
+          for await (const frame of parseSse(
+            active.body,
+            this.maxEventBytes,
+            this.maxBufferBytes,
+            () => {
+              if (!awaitingPostMessageCompletion()) return this.noProgressBudgetMs;
+              return bufferedMessageDrainDeadline === undefined
+                ? this.postMessageCompletionGraceMs
+                : Math.max(0, bufferedMessageDrainDeadline - performance.now());
+            },
+            () => {
+              if (awaitingPostMessageCompletion() && !active.controller.signal.aborted) {
+                active.controller.abort(
+                  new DOMException('RCC v3 single-round message completed after post-message grace', 'AbortError'),
+                );
+              }
+            },
+          )) {
         if (active.stopRequested) throw active.stopCause;
         if (!frame.data) continue;
         if (frame.data === '[DONE]') {
@@ -1455,7 +1456,21 @@ export class RccV3ProviderTransport<
         yield raw;
         if (active.stopRequested) throw active.stopCause;
         if (bufferedMessageDrainDeadline !== undefined && observedTerminal) break;
-      }
+          }
+        } catch (streamError) {
+          if (!active.stopRequested
+            && !isExpectedStopAbort(streamError, active)
+            && !(streamError instanceof StreamSilenceError)
+            && !(streamError instanceof ProviderAdapterError)
+            && !yieldedWireEvent
+            && this.source === 'rcc'
+            && active.lastRequest !== undefined
+            && streamAttempt < this.transientStreamRetries) {
+            retryStream = true;
+          } else {
+            throw streamError;
+          }
+        }
       if (!retryStream
         && !active.terminalState
         && !yieldedWireEvent
