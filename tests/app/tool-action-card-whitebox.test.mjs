@@ -177,7 +177,7 @@ test('real tools → scoped reader → action mapper, including same callId acro
           assert.ok(card.lines?.some(l => l.kind === 'add' && l.text.includes(s.c.callId === 'edit' ? 'edited' : s.c.callId === 'overwrite' ? 'after' : 'before')));
           if (s.c.callId !== 'create') assert.ok(card.lines.some(l => l.kind === 'remove' && l.text.includes(s.c.callId === 'edit' ? 'after' : 'before')));
         }
-        if (s.c.callId === 'read') assert.ok(text(card).includes('<script>literal & safe</script>'));
+        if (s.c.callId === 'read') assert.ok(text(card).includes('已读取文件内容'));
         if (s.c.callId === 'hit') {
           assert.ok(text(card).includes(`${s.label} edited`));
           assert.ok(text(card).includes(`${s.label}/空 格.txt`), 'actual matched path must be visible');
@@ -266,18 +266,18 @@ test('real tools → scoped reader → action mapper, including same callId acro
           await find(card, 'tool-read-output').listeners.click();
           const semantic = find(card, 'tool-semantic');
           assert.ok(domText(semantic).includes(s.report.path));
-          assert.ok(domText(semantic).includes(s.report.content.trimEnd()));
+          assert.ok(domText(semantic).includes('已读取文件内容'));
           assert.ok(!domText(semantic).includes(`${s.label === 'alpha' ? 'beta' : 'alpha'} edited`));
           assert.equal(find(card, 'tool-report-original'), undefined, 'read does not construct folded JSON');
           const raw = disclosure(card, 'tool-raw-report');
           assert.equal(raw.dialog.open, false);
           openDisclosure(raw);
           assert.equal(find(raw.content, 'tool-report-original').textContent, JSON.stringify(s.report, null, 2));
+          assert.ok(find(raw.content, 'tool-report-original').textContent.includes('<script>literal & safe</script>'));
           closeDisclosure(raw);
           openDisclosure(raw);
           assert.equal(raw.content.children.length, 1, 'repeated open does not duplicate original report');
           s.dom = domText(card);
-          assert.ok(domText(card).includes('<script>literal & safe</script>'));
         }
         assert.equal(reads, 2);
         const shell = receipt.samples.find(s => s.c.callId === 'shell');
@@ -293,8 +293,9 @@ test('real tools → scoped reader → action mapper, including same callId acro
         assert.deepEqual(JSON.parse(find(facts.content, 'tool-arguments').textContent), shell.c.args);
         closeDisclosure(facts);
         await find(host, 'tool-read-output').listeners.click();
-        assert.ok(domText(find(host, 'tool-semantic')).includes(shell.report.stdout.text));
-        assert.ok(domText(find(host, 'tool-semantic')).includes(shell.report.stderr.text));
+        assert.ok(domText(find(host, 'tool-semantic')).includes('退出码：0'));
+        assert.ok(domText(find(host, 'tool-output')).includes(shell.report.stdout.text));
+        assert.ok(domText(find(host, 'tool-output')).includes(shell.report.stderr.text));
         assert.doesNotMatch(domText(host), /等待结果正文|尚无结果正文|执行工具等待结果/);
         shell.dom = domText(host);
         const failed = { ...shell.result, status: 'failed', error: { code: 'shell.denied', message: '命令被拒绝', ownerId: 'executor' } };
