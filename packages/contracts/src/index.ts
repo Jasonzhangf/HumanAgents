@@ -2021,3 +2021,15 @@ export const PIPELINE_ROWS: Readonly<Record<PipelineNodeId, PipelineNodeRow>> = 
   'task.output': 8,
   'memory.agent': 9,
 };
+
+/**
+ * Detects non-transient account-exhaustion 429 responses returned by RCC
+ * routing when all candidate upstream accounts are rate-limited or disabled.
+ */
+export function isRccAccountsExhaustedError(message: string): boolean {
+  const decoded = message.includes('\\u')
+    ? message.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+    : message;
+  return /所有候选账号.*(?:均已限额|均已禁用|已限额|已禁用|不可用|耗尽)|(?:all candidate accounts|all upstream accounts|no available (?:candidate )?accounts?).*(?:exhausted|rate.?limited|disabled|quota|unavailable)|insufficient_quota|account_deactivated|quota_exceeded/i
+    .test(decoded);
+}

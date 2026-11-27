@@ -1,6 +1,7 @@
 import {
   canonicalJsonStringify,
   id,
+  isRccAccountsExhaustedError,
   type AnyProviderExecutionIdentityRef,
   type EvidenceRef,
   type InteractionParentProviderExecutionIdentityRef,
@@ -1141,10 +1142,12 @@ export class RccV3ProviderTransport<
     // trips the no-progress budget.
     let lastProgressAtMs = this.now().getTime();
     let yieldedWireEvent = false;
+    let bufferedHandshakeEvents: ProviderWireEvent[] = [];
     let streamAttempt = 0;
     try {
       while (true) {
         let retryStream = false;
+        bufferedHandshakeEvents = [];
         try {
           for await (const frame of parseSse(
             active.body,
@@ -1432,6 +1435,19 @@ export class RccV3ProviderTransport<
           const delta = readRecord(record.delta);
           if (typeof delta.stop_reason === 'string') this.stopReasons.set(active.identity, delta.stop_reason);
         }
+        if (this.source === 'rcc'
+          && !yieldedWireEvent
+          && !active.stopRequested
+          && streamAttempt < this.transientStreamRetries
+          && isPreOutputHandshakeEvent(active.protocol, type)) {
+          bufferedHandshakeEvents.push(raw);
+          continue;
+        }
+        for (const buffered of bufferedHandshakeEvents) {
+          yieldedWireEvent = true;
+          yield buffered;
+        }
+        bufferedHandshakeEvents = [];
         yieldedWireEvent = true;
         yield raw;
         if (active.stopRequested) throw active.stopCause;
@@ -1635,6 +1651,9 @@ export class RccV3ProviderTransport<
         active.terminalState = 'failed';
       }
       failed = true;
+      if (streamAttempt > 0 && streamAttempt >= this.transientStreamRetries && thrown instanceof ProviderAdapterError) {
+        (thrown as { transportRetriesExhausted?: boolean }).transportRetriesExhausted = true;
+      }
       throw thrown;
     } finally {
       resolveStreamCompletion();
@@ -2098,7 +2117,11 @@ function extractStreamErrorFields(
 ): { readonly code: string; readonly message: string } {
   const rawError = type.endsWith('.failed') ? (readRecord(record.response).error ?? {}) : (record.error ?? {});
   const errObj = typeof rawError === 'object' && rawError !== null ? (rawError as Record<string, unknown>) : undefined;
-  const rawCode = errObj && typeof errObj.code === 'string' && errObj.code.trim().length > 0 ? errObj.code.trim() : undefined;
+  const rawCode = errObj && typeof errObj.code === 'string' && errObj.code.trim().length > 0
+    ? errObj.code.trim()
+    : errObj && typeof errObj.code === 'number' && Number.isFinite(errObj.code)
+      ? String(errObj.code)
+      : undefined;
   const rawType = errObj && typeof errObj.type === 'string' && errObj.type.trim().length > 0 ? errObj.type.trim() : undefined;
   const code = rawCode !== undefined && /^\d+$/.test(rawCode) && rawType !== undefined && TRANSIENT_WIRE_ERROR_TYPES.has(rawType)
     ? rawType
@@ -2109,12 +2132,14 @@ function extractStreamErrorFields(
   return { code, message };
 }
 
-function isExhausted429Message(message: string): boolean {
-  return /所有候选账号对模型.*均已限额或禁用/.test(message);
+function isPreOutputHandshakeEvent(protocol: 'responses' | 'anthropic' | 'openai', type: string): boolean {
+  if (protocol === 'responses') return type === 'response.created' || type === 'response.in_progress';
+  if (protocol === 'anthropic') return type === 'message_start';
+  return false;
 }
 
 function isTransientRccStreamError(code: string, message: string): boolean {
-  if (isExhausted429Message(message)) return false;
+  if (isRccAccountsExhaustedError(message)) return false;
   if (/^http\.5\d\d$/.test(code) || code === 'http.429') return true;
   if (code === 'unknown_parameter' || code === 'server_error' || code === 'rate_limit_exceeded'
     || code === 'upstream_error' || code === 'provider.failed') {
@@ -2127,7 +2152,7 @@ function isTransientRccStreamError(code: string, message: string): boolean {
 function isTransientRccSendError(cause: unknown): boolean {
   if (cause === null || typeof cause !== 'object' || !('providerError' in cause)) return false;
   const err = (cause as { readonly providerError?: ProviderError }).providerError;
-  if (!err || isExhausted429Message(err.message)) return false;
+  if (!err || isRccAccountsExhaustedError(err.message)) return false;
   if (err.category === 'timeout' || err.code === 'transport.empty.body') return true;
   if (err.category === 'transport') return err.retryable === 'retryable';
   return /^http\.5\d\d$/.test(err.code) || err.code === 'http.429';

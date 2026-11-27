@@ -1541,6 +1541,20 @@ async function handleRequest(
         400,
       );
     }
+    if (path === '/api/projects/roster' && method === 'GET') {
+      const projectKey = url.searchParams.get('projectKey')?.trim();
+      if (!projectKey) {
+        throw new UiRuntimeApiError(
+          'read.scope.invalid',
+          APP_OWNER,
+          'project roster requires a non-empty projectKey',
+          'send projectKey=<declared projectKey>',
+          400,
+        );
+      }
+      writeReadResult(response, await service.projectRoster(projectKey));
+      return;
+    }
     if (path === '/api/product/board' && method === 'GET') {
       const scope = requireBoundProductBoardScope(url, service);
       writeJson(response, 200, await readProduct(() => service.productBoardIndex(scope)));

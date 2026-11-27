@@ -13272,3 +13272,70 @@ test('UiRuntimeJournal closure commit/read tail-scans without materializing the 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('GET /api/projects/roster returns configured members and explicit 400/404 for invalid or unknown projectKey', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-project-roster-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const auth = await testAccessControl(root);
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    runtimePaths: paths,
+    projectKey: paths.projectKey,
+    projectCatalog: async () => ({ projects: [], failures: [] }),
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    memory: testMemory(paths.projectKey),
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    agentRoster: [
+      { agentId: 'Alex', roleId: 'interaction', managementRole: 'ceo' },
+      { agentId: 'interaction-default', roleId: 'interaction', managementRole: 'project-lead' },
+      { agentId: 'orchestration-default', roleId: 'orchestration' },
+    ],
+  });
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl: auth.accessControl,
+    productRoot: root,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  testSessionByOrigin.set(new URL(server.url).origin, auth.cookie);
+  try {
+    const missingRes = await fetch(`${server.url}/api/projects/roster`);
+    assert.equal(missingRes.status, 400);
+
+    const unknownRes = await fetch(`${server.url}/api/projects/roster?projectKey=proj-missing`);
+    assert.equal(unknownRes.status, 404);
+
+    const okRes = await fetch(`${server.url}/api/projects/roster?projectKey=${encodeURIComponent(paths.projectKey)}`);
+    assert.equal(okRes.status, 200);
+    const body = await okRes.json() as {
+      readonly projectKey: string;
+      readonly rosterState: string;
+      readonly members: readonly { readonly memberName: string; readonly agentId: string; readonly roleId: string }[];
+    };
+    assert.equal(body.projectKey, paths.projectKey);
+    assert.equal(body.rosterState, 'configured');
+    assert.deepEqual(
+      body.members.map((m) => ({ memberName: m.memberName, agentId: m.agentId, roleId: m.roleId })),
+      [
+        { memberName: 'Jenny', agentId: 'interaction-default', roleId: 'manager' },
+        { memberName: 'orchestration-default', agentId: 'orchestration-default', roleId: 'orchestration' },
+      ],
+    );
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

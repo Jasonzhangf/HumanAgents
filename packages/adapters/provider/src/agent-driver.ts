@@ -2,6 +2,7 @@ import {
   assertProviderExecutionIdentity,
   assertProviderExecutionIdentityMatch,
   id,
+  isRccAccountsExhaustedError,
   isStandardTurnEndToolId,
   validateProviderToolResult,
   validateProviderRequestLifecycleEvent,
@@ -148,6 +149,8 @@ export interface ProviderAgentDriverCommonOptions<TIdentity extends AnyProviderE
   readonly requestContext?: ProviderRequestContextHook<TIdentity>;
   /** Backoff delays for transient continuation/drain `port.submit` retries (10 retries by default). */
   readonly submitRetryDelaysMs?: readonly number[];
+  /** Maximum transient retries for `start`/`submit` in this driver (defaults to 10; explicit runtime passes 0 when owning the outer retry loop). */
+  readonly maxSubmitRetries?: number;
   readonly now?: () => Date;
 }
 
@@ -1647,7 +1650,7 @@ export class ProviderAgentDriver<
     fn: () => Promise<R>,
   ): Promise<R> {
     const delays = this.options.submitRetryDelaysMs ?? DEFAULT_SUBMIT_RETRY_DELAYS_MS;
-    const maxAttempts = DEFAULT_SUBMIT_MAX_RETRIES + 1;
+    const maxAttempts = Math.max(0, this.options.maxSubmitRetries ?? DEFAULT_SUBMIT_MAX_RETRIES) + 1;
     let attempt = 1;
     while (true) {
       try {
@@ -1693,10 +1696,6 @@ export class ProviderAgentDriver<
 const DEFAULT_SUBMIT_MAX_RETRIES = 10;
 const DEFAULT_SUBMIT_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
 
-function isAllAccountsExhausted429(message: string): boolean {
-  return /所有候选账号对模型.*均已限额或禁用/.test(message);
-}
-
 function isTransientProviderSubmitFailure(cause: unknown): boolean {
   if (cause === null || typeof cause !== 'object' || !('providerError' in cause)) return false;
   const error = (cause as { readonly providerError?: ProviderError }).providerError;
@@ -1704,7 +1703,7 @@ function isTransientProviderSubmitFailure(cause: unknown): boolean {
   if (error.category === 'timeout' || error.code === 'transport.empty.body') return true;
   if (error.category === 'transport') return error.retryable === 'retryable';
   if (/^http\.5\d\d$/.test(error.code)) return true;
-  return error.code === 'http.429' && !isAllAccountsExhausted429(error.message);
+  return error.code === 'http.429' && !isRccAccountsExhaustedError(error.message);
 }
 
 async function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {

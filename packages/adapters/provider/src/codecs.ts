@@ -767,7 +767,9 @@ function responsesWireErrorCode(
     }
     return rawType ?? 'provider.failed';
   }
-  const rawCode = requireString(errorRecord, 'code', execution, eventType);
+  const rawCode = typeof errorRecord.code === 'number' && Number.isFinite(errorRecord.code)
+    ? String(errorRecord.code)
+    : requireString(errorRecord, 'code', execution, eventType);
   if (/^\d+$/.test(rawCode) && rawType !== undefined && TRANSIENT_WIRE_ERROR_TYPES.has(rawType)) {
     return rawType;
   }

@@ -2937,3 +2937,103 @@ test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled whi
   assert.equal(badReqCalls, 1);
   assert.equal(badReqObserved.find((e) => e.kind === 'error')?.error?.code, '400');
 });
+
+test('RCC v3 retries pre-output drops after response.created handshake and fails fast on English/escaped exhausted 429', async () => {
+  const encoder = new TextEncoder();
+  let calls = 0;
+  const hsExecution = { ...execution, operationId: id('operation', 'op-handshake-retry') };
+  const hsStart = { ...startInput(), operationId: hsExecution.operationId };
+  const transport = createV3ProviderHttpTransport({
+    binding,
+    baseUrl: 'http://rcc-handshake-retry.test',
+    source: 'rcc',
+    transientStreamRetries: 3,
+    transientStreamRetryDelaysMs: [1],
+    evidence: {
+      async write(input) {
+        return {
+          evidenceId: id('evidence', `rcc-handshake-${calls}`),
+          kind: input.kind,
+          source: 'rcc-v3-transport-test',
+          locator: input.locator,
+          scope: input.scope,
+        };
+      },
+      async read() { return new Uint8Array(); },
+    },
+    fetch: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          status: 200,
+          body: (async function* () {
+            yield encoder.encode('data: {"type":"response.created","response":{"id":"resp-drop-1"}}\n\n');
+            yield encoder.encode('data: {"type":"response.in_progress","response":{"id":"resp-drop-1"}}\n\n');
+            throw new TypeError('terminated');
+          })(),
+          text: async () => '',
+        };
+      }
+      return {
+        status: 200,
+        body: (async function* () {
+          yield encoder.encode('data: {"type":"response.created","response":{"id":"resp-ok-2"}}\n\n');
+          yield encoder.encode('data: {"type":"response.output_text.done","item_id":"item-1","text":"after handshake retry"}\n\n');
+          yield encoder.encode('data: {"type":"response.completed","response":{"id":"resp-ok-2"}}\n\n');
+        })(),
+        text: async () => '',
+      };
+    },
+  });
+  const ad = new ProviderAdapter({ binding, routeRef: 'rcc-handshake-retry', codec: new ResponsesProviderCodec(), transport, evidence: sink() });
+  await ad.start(hsStart);
+  const observed = [];
+  for await (const event of ad.observe(hsExecution)) observed.push(event);
+  assert.equal(calls, 2);
+  assert.equal(observed.some((e) => e.kind === 'error'), false);
+  const modelStartCount = observed.filter((e) => e.kind === 'model').length;
+  assert.equal(modelStartCount, 1, 'buffered pre-output handshake must not duplicate response.created across retries');
+  assert.equal((await ad.settle(hsExecution)).state, 'succeeded');
+
+  for (const exhaustedBody of [
+    JSON.stringify({ error: { code: 429, message: 'All candidate accounts exhausted for model default (insufficient_quota)' } }),
+    JSON.stringify({ error: { code: 429, message: '\\u6240\\u6709\\u5019\\u9009\\u8d26\\u53f7\\u5bf9\\u6a21\\u578b default \\u5747\\u5df2\\u9650\\u989d\\u6216\\u7981\\u7528' } }),
+  ]) {
+    let exhaustedCalls = 0;
+    const exExecution = { ...execution, operationId: id('operation', `op-exhausted-${exhaustedBody.length}`) };
+    const exTransport = createV3ProviderHttpTransport({
+      binding,
+      baseUrl: 'http://rcc-exhausted-variants.test',
+      source: 'rcc',
+      transientStreamRetries: 3,
+      transientStreamRetryDelaysMs: [1],
+      evidence: {
+        async write(input) {
+          return {
+            evidenceId: id('evidence', `rcc-ex-${exhaustedCalls}`),
+            kind: input.kind,
+            source: 'rcc-v3-transport-test',
+            locator: input.locator,
+            scope: input.scope,
+          };
+        },
+        async read() { return new Uint8Array(); },
+      },
+      fetch: async () => {
+        exhaustedCalls += 1;
+        return {
+          status: 200,
+          body: (async function* () {
+            yield encoder.encode(`event: error\ndata: ${exhaustedBody}\n\n`);
+          })(),
+          text: async () => '',
+        };
+      },
+    });
+    const exAd = new ProviderAdapter({ binding, routeRef: 'rcc-ex-variant', codec: new ResponsesProviderCodec(), transport: exTransport, evidence: sink() });
+    await exAd.start({ ...startInput(), operationId: exExecution.operationId });
+    const exObserved = [];
+    for await (const event of exAd.observe(exExecution)) exObserved.push(event);
+    assert.equal(exhaustedCalls, 1, `exhausted 429 variant must not retry: ${exhaustedBody}`);
+  }
+});

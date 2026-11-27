@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   assertPlanStepDispatchBinding,
   id,
+  isRccAccountsExhaustedError,
   standardTurnEndPublicText,
   validatePlanRevisionRecord,
   type AgentDriver,
@@ -2123,10 +2124,6 @@ function errorFromUnknown(error: unknown): RuntimeTaskError {
   };
 }
 
-function isAllAccountsExhausted429(message: string): boolean {
-  return /所有候选账号对模型.*均已限额或禁用/.test(message);
-}
-
 function retryableNativeStartFailure(error: unknown): {
   readonly failure: RuntimeTaskError;
   readonly retryable: boolean;
@@ -2136,7 +2133,7 @@ function retryableNativeStartFailure(error: unknown): {
     return { failure, retryable: false };
   }
   const providerError = (error as { readonly providerError?: ProviderError }).providerError;
-  const transient429 = providerError?.code === 'http.429' && !isAllAccountsExhausted429(providerError.message);
+  const transient429 = providerError?.code === 'http.429' && !isRccAccountsExhaustedError(providerError.message);
   return {
     failure,
     retryable: providerError?.phase === 'start' && (/^http\.5\d\d$/.test(providerError.code) || transient429),

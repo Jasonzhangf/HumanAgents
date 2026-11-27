@@ -1,6 +1,7 @@
 import {
   canonicalJsonStringify,
   id,
+  isRccAccountsExhaustedError,
   validateTaskIdentityRecord,
   validateTurnClosureReference,
   type AgentEvent,
@@ -99,10 +100,6 @@ export interface IndependentTurnPlannerDeps {
 const DEFAULT_PLANNER_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
 const DEFAULT_PLANNER_MAX_TRANSIENT_RETRIES = 10;
 
-function isAllAccountsExhausted429(message: string): boolean {
-  return /所有候选账号对模型.*均已限额或禁用/.test(message);
-}
-
 function extractProviderError(cause: unknown): ProviderError | undefined {
   if (cause === null || typeof cause !== 'object') return undefined;
   if ('providerError' in cause) {
@@ -121,7 +118,7 @@ function isRetryablePlannerProviderError(
   source: AgentProviderComposition['source'],
 ): boolean {
   if (!error) return false;
-  if (isAllAccountsExhausted429(error.message)) return false;
+  if (isRccAccountsExhaustedError(error.message)) return false;
   if (error.category === 'transport' || error.category === 'timeout') return true;
   if (/^http\.5\d\d$/.test(error.code)) return true;
   if (error.code === 'http.429') return true;

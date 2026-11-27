@@ -7078,6 +7078,40 @@ export class UiRuntimeService {
     return { ok: true, value: this.projectProjection(source, rows, failures) };
   }
 
+  async projectRoster(projectKey: string): Promise<RuntimeReadResult<{
+    readonly projectKey: string;
+    readonly rosterState: 'configured' | 'not-initialized';
+    readonly members: readonly {
+      readonly memberName: string;
+      readonly agentId: string;
+      readonly roleId: string;
+      readonly sessions: readonly { readonly sessionId: string; readonly state: string }[];
+    }[];
+  }>> {
+    const source = await this.findProjectSource(projectKey);
+    if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
+    const roster = this.options.agentRoster;
+    if (!roster || roster.length === 0) {
+      return { ok: true, value: { projectKey: source.projectKey, rosterState: 'not-initialized', members: [] } };
+    }
+    const members = roster
+      .filter((agent) => managementRoleForAgent(agent) !== 'ceo')
+      .map((agent) => ({
+        memberName: managementRoleForAgent(agent) === 'project-lead' ? 'Jenny' : agent.agentId,
+        agentId: agent.agentId,
+        roleId: managementRoleForAgent(agent) === 'project-lead' ? 'manager' : agent.roleId,
+        sessions: [],
+      }));
+    return {
+      ok: true,
+      value: {
+        projectKey: source.projectKey,
+        rosterState: 'configured',
+        members,
+      },
+    };
+  }
+
   /**
    * Public system read: every visible configured project in the current control
    * root. `taskCount` is the sum of the returned project rows, never the current

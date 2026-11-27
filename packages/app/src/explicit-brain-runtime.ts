@@ -4,6 +4,7 @@ import {
   EXPLICIT_BRAIN_MODEL_TOOLS,
   EXPLICIT_BRAIN_TEMPLATE_REF,
   id,
+  isRccAccountsExhaustedError,
   type ExecutionRuntimePort,
   type EvidenceRef,
   type InteractionParentProviderExecutionIdentityRef,
@@ -1564,6 +1565,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           scope,
           inputRefs: [`humanagent://interaction/${effectiveRequest.interactionId}/revision/${effectiveRequest.inputRevision}`],
           ownerId: 'humanagent.runtime.explicit-brain',
+          maxSubmitRetries: 0,
           rawEvidence: input.rawEvidence,
           registerRequest: (registration) => createdOwner.registerRequest(registration),
           acceptRawFact: (envelope) => createdOwner.acceptRawFact(envelope),
@@ -2082,20 +2084,18 @@ export function createProviderExplicitBrainInterpreter(input: {
 const DEFAULT_EXPLICIT_MAX_TRANSIENT_RETRIES = 10;
 const DEFAULT_EXPLICIT_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
 
-function isExplicitAllAccountsExhausted429(message: string): boolean {
-  return /所有候选账号对模型.*均已限额或禁用/.test(message);
-}
-
 function extractExplicitFailure(cause: unknown): {
   readonly code: string;
   readonly message: string;
   readonly category?: string;
   readonly retryable?: string;
+  readonly transportRetriesExhausted?: boolean;
 } | undefined {
   if (cause === null || typeof cause !== 'object') return undefined;
   if (cause instanceof AggregateError && cause.errors.length > 0) {
     return extractExplicitFailure(cause.errors[0]);
   }
+  const transportRetriesExhausted = (cause as { readonly transportRetriesExhausted?: unknown }).transportRetriesExhausted === true;
   if ('providerError' in cause) {
     const err = (cause as { readonly providerError?: { readonly code?: unknown; readonly message?: unknown; readonly category?: unknown; readonly retryable?: unknown } }).providerError;
     if (err && typeof err.code === 'string' && typeof err.message === 'string') {
@@ -2104,11 +2104,12 @@ function extractExplicitFailure(cause: unknown): {
         message: err.message,
         ...(typeof err.category === 'string' ? { category: err.category } : {}),
         ...(typeof err.retryable === 'string' ? { retryable: err.retryable } : {}),
+        ...(transportRetriesExhausted ? { transportRetriesExhausted: true } : {}),
       };
     }
   }
   if (cause instanceof AppLifecycleError) {
-    return { code: cause.code, message: cause.message };
+    return { code: cause.code, message: cause.message, ...(transportRetriesExhausted ? { transportRetriesExhausted: true } : {}) };
   }
   return undefined;
 }
@@ -2116,7 +2117,8 @@ function extractExplicitFailure(cause: unknown): {
 function isRetryableExplicitRccFailure(cause: unknown): boolean {
   const detail = extractExplicitFailure(cause);
   if (!detail) return false;
-  if (isExplicitAllAccountsExhausted429(detail.message)) return false;
+  if (detail.transportRetriesExhausted) return false;
+  if (isRccAccountsExhaustedError(detail.message)) return false;
   if (/interaction request budget exhausted|explicit-brain\.|unsupported-tool|runtime\.|provider\.production\.closed/.test(`${detail.code} ${detail.message}`)) {
     return false;
   }

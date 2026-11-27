@@ -8664,6 +8664,63 @@ test('provider explicit brain retries transient RCC SSE errors across drain reco
       (error: unknown) => error instanceof Error && /所有候选账号对模型/.test(error.message),
     );
     assert.equal(exhaustedRequests, 1, 'exhausted 429 must fail fast without retrying');
+
+    // Persistent HTTP 503 must honor one bounded total retry budget (<= maxTransientRetries + 1),
+    // not multiply inner driver retries (10) x outer retries (maxTransientRetries).
+    let persistent503Requests = 0;
+    const boundedInterpreter = createProviderExplicitBrainInterpreter({
+      organId: id('organ', 'ui-explicit-rcc-bounded'),
+      interactionScopeId: 'scope:rcc-bounded',
+      parentJournal,
+      checkpointJournal: helperJournal,
+      helperJournal,
+      turnHelperJournal: helperJournal,
+      rawEvidence: evidence,
+      rawContent,
+      clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding,
+      templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease,
+      maxTransientRetries: 2,
+      transientRetryDelaysMs: [1],
+      prepareAgentProvider: async () => ({
+        roleId: 'interaction' as const,
+        provider: { source: 'rcc', provider: 'rcc', binding: 'rcc-entry', protocol: 'responses', model: binding.modelRef, route: 'rcc-bounded-503', baseUrl: 'http://rcc-bounded-503.test' } as const,
+        source: 'rcc' as const,
+        binding,
+        port: new ProviderAdapter({
+          binding,
+          routeRef: 'rcc-bounded-503',
+          codec: new ResponsesProviderCodec(),
+          evidence,
+          transport: new V3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
+            binding,
+            baseUrl: 'http://rcc-bounded-503.test',
+            source: 'rcc',
+            evidence,
+            fetch: async () => {
+              persistent503Requests += 1;
+              return {
+                status: 503,
+                headers: new Headers({ 'content-type': 'application/json' }),
+                body: null,
+                text: async () => JSON.stringify({ error: { message: 'upstream 503' } }),
+              };
+            },
+          }),
+        }),
+      }),
+    });
+    await assert.rejects(() => boundedInterpreter.interpret({
+      interactionId: 'interaction-rcc-bounded-503',
+      inputRevision: 1,
+      sourceRef: 'ui:rcc-bounded-503',
+      rawInput: '1+1?',
+      clarifications: [],
+      taskCandidates: [],
+    }));
+    assert.equal(persistent503Requests, 3, 'persistent 503 must stay bounded to maxTransientRetries + 1 total start attempts');
   } finally {
     await lease.release();
     await rm(root, { recursive: true, force: true });
