@@ -7,6 +7,8 @@ import {
   formatPairingCommand,
   listConfiguredProjects,
   loadConfiguration,
+  resolveConfiguredConversationScopes,
+  resolveOptionalAlexReadonlyInventoryRoot,
   resolveProductPaths,
   resolveRuntimePaths,
   resolveWebSearchBackendConfig,
@@ -46,7 +48,13 @@ import {
   settleSessionOutcome,
 } from './index.js';
 import { SessionStore } from './session-store.js';
-import { startUiRuntime } from './ui-runtime/index.js';
+import {
+  ScopedConversationBackend,
+  scopedSessionFromUiRuntime,
+  startUiRuntime,
+} from './ui-runtime/index.js';
+import { MemoryCoordinator } from '../../runtime/src/memory/index.js';
+import { DeterministicMemoryBackend } from '../../adapters/memory/src/index.js';
 import { assembleProviderExecutionPort } from './provider-assembly.js';
 import { closeAgentProvider, createAgentProviderPort, prepareAgentProvider, prepareExecutionAgentProvider,
   providerBindingFromConfig, type AgentProviderComposition } from './agent-driver-composition.js';
@@ -74,6 +82,7 @@ import {
   runSupervisorServeStartup,
   SERVE_OWNER,
   stopDaemonOwner,
+  SUPERVISOR_RECOVER_DISPOSED_LEASE_OPTION,
   SUPERVISOR_RESTART_REQUEST_OPTION,
   waitForDaemonLeaseHandoff,
   type SupervisorStartup,
@@ -87,7 +96,7 @@ import {
   type SupervisorStartupDeclaration,
 } from './supervisor/restart-client.js';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { homedir, networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -132,6 +141,7 @@ import {
 // appearing in such a value position is payload (for example
 // `run --plan default --prompt -h`), not a help request.
 const VALUE_OPTIONS: ReadonlySet<string> = new Set([
+  '--alex-inventory-root',
   '--binding',
   '--capability-digest',
   '--config-digest',
@@ -151,6 +161,7 @@ const VALUE_OPTIONS: ReadonlySet<string> = new Set([
   '--protocol',
   '--provider',
   '--rcc-base-url',
+  '--recover-disposed-lease',
   '--restart-request',
   '--route',
   '--session',
@@ -160,6 +171,7 @@ const VALUE_OPTIONS: ReadonlySet<string> = new Set([
 ]);
 
 const SERVE_STARTUP_OPTIONS: ReadonlySet<string> = new Set([
+  '--alex-inventory-root',
   '--binding',
   '--capability-digest',
   '--config-digest',
@@ -272,6 +284,7 @@ async function currentStartupDeclaration(
   resolvedPaths: {
     readonly controlRoot?: string;
     readonly workspace?: string;
+    readonly alexInventoryRoot?: string;
   } = {},
 ): Promise<SupervisorStartupDeclaration> {
   const entryPath = fileURLToPath(import.meta.url);
@@ -288,6 +301,7 @@ async function currentStartupDeclaration(
   // this invocation's cwd. Retain the resolved absolute values last so a later
   // restart from another cwd cannot reinterpret them.
   const resolvedPathArgs = [
+    ...(resolvedPaths.alexInventoryRoot === undefined ? [] : ['--alex-inventory-root', resolvedPaths.alexInventoryRoot]),
     ...(resolvedPaths.controlRoot === undefined ? [] : ['--control-root', resolvedPaths.controlRoot]),
     ...(resolvedPaths.workspace === undefined ? [] : ['--workspace', resolvedPaths.workspace]),
   ];
@@ -853,6 +867,8 @@ function helpText(): string {
     '  --control-root <path>    本次调用使用的产品 control root（默认采用已声明的默认产品）',
     '  --provider <name>        provider（默认读取 ~/.humanagent/config.toml）',
     '  --port <number>          WebUI 端口（默认 10086）',
+    '  --alex-inventory-root <absolute-dir>  显式授权本实例的 Alex 只读盘点目录（默认不启用）',
+    '  --recover-disposed-lease <lease-id>  一次性恢复当前 root 中已处置、清理失败且原 PID 已退出的 serve lease',
     '  --protocol <name>        responses、openai 或 anthropic',
     '  humanagent pair          使用当前产品的凭据直接签发一次性配对码',
     '  humanagent restart       使用原 serve owner 的启动声明完成一次代码交接',
@@ -1676,17 +1692,38 @@ export async function main(args: readonly string[]): Promise<void> {
     return;
   }
   if (command === 'serve') {
+    const alexInventoryRootArg = option(args, '--alex-inventory-root');
+    if (args.includes('--alex-inventory-root') && (alexInventoryRootArg === undefined || alexInventoryRootArg.startsWith('--'))) {
+      throw new Error('missing --alex-inventory-root directory');
+    }
+    const alexReadonlyInventoryRoot = await resolveOptionalAlexReadonlyInventoryRoot(alexInventoryRootArg);
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     // A formal replacement carries a one-shot recorded request id. It is a
     // control argument for this child invocation only. It stays out of the
     // retained startup declaration and out of SERVE_STARTUP_OPTIONS.
     const restartRequest = option(args, SUPERVISOR_RESTART_REQUEST_OPTION);
+    const recoverDisposedLeaseId = option(args, SUPERVISOR_RECOVER_DISPOSED_LEASE_OPTION);
+    if (
+      args.includes(SUPERVISOR_RECOVER_DISPOSED_LEASE_OPTION)
+      && (recoverDisposedLeaseId === undefined || recoverDisposedLeaseId.startsWith('--'))
+    ) {
+      throw new Error('missing --recover-disposed-lease lease id');
+    }
+    if (recoverDisposedLeaseId !== undefined && restartRequest !== undefined) {
+      throw new AppLifecycleError(
+        'daemon-recovery.option-conflict',
+        'disposed lease recovery and formal restart cannot run in the same invocation',
+        'run the exact disposed lease recovery first, then use the normal restart path for later replacement',
+        'humanagent.app.cli',
+      );
+    }
     // Retain the already-resolved product and workspace as explicit startup
     // arguments so a later formal restart cannot reselect a product from cwd
     // or from a changed default-product declaration.
     const startup = await currentStartupDeclaration(args, [], {
       controlRoot: paths.controlRoot,
       workspace: paths.workspaceCwd,
+      ...(alexReadonlyInventoryRoot === undefined ? {} : { alexInventoryRoot: alexReadonlyInventoryRoot }),
     });
     let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
     let serveRuntime: ServeRuntimeComposition | undefined;
@@ -1774,7 +1811,7 @@ export async function main(args: readonly string[]): Promise<void> {
         baseUrl,
       };
       const effectiveAgentProviderBindings = resolveCliAgentProviderBindings(configuration, effectiveLegacyProvider);
-      const prepareSelectedAgentProvider = <
+      const selectedAgentProviderPreparerFor = (agentEvidenceRoot: string) => <
         TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
       >(input: {
         readonly roleId: import('../../config/src/index.js').AgentRole;
@@ -1789,8 +1826,9 @@ export async function main(args: readonly string[]): Promise<void> {
           capabilityDigest: binding.capabilityDigest,
         },
         maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
-        evidenceRoot,
+        evidenceRoot: agentEvidenceRoot,
       });
+      const prepareSelectedAgentProvider = selectedAgentProviderPreparerFor(evidenceRoot);
       const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10086;
       const host = serveHost(option(args, '--host') ?? '127.0.0.1');
       const accessControl = await AccessControlService.open({
@@ -1810,6 +1848,123 @@ export async function main(args: readonly string[]): Promise<void> {
             option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined,
             fakeScenario(args),
           );
+      const taskAgentProviderPreparerFor = (agentEvidenceRoot: string) => (
+        selection: { readonly roleId: import('../../config/src/index.js').AgentRole; readonly configuredAgentId?: string },
+        owner: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStop,
+        lease: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStopPreparationLease,
+      ) => prepareExecutionAgentProvider({
+        roleId: selection.roleId,
+        ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
+        agentProviderBindings: effectiveAgentProviderBindings,
+        legacyProvider: effectiveLegacyProvider,
+        legacyBindingOverrides: {
+          endpointRef: binding.endpointRef,
+          configDigest: binding.configDigest,
+          capabilityDigest: binding.capabilityDigest,
+        },
+        createPort: (selected) => createAgentProviderPort(
+          selected,
+          agentEvidenceRoot,
+          option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
+        ),
+      }, owner, lease);
+      const prepareTaskAgentProvider = taskAgentProviderPreparerFor(evidenceRoot);
+      const explicitBrainHelperProviderPreparerFor = (agentEvidenceRoot: string) => (selection: {
+        readonly roleId: import('../../config/src/index.js').AgentRole;
+        readonly configuredAgentId?: string;
+      }) => selectedAgentProviderPreparerFor(agentEvidenceRoot)<TasklessProviderExecutionIdentityRef>(selection);
+      const prepareExplicitBrainHelper = explicitBrainHelperProviderPreparerFor(evidenceRoot);
+      const explicitBrainTemplateRoot = process.env.HUMANAGENT_TEMPLATE_ROOT;
+      const conversationProjects = (await listConfiguredProjects(paths)).projects
+        .filter((project) => project.projectKey === paths.projectKey);
+      const conversationDescriptors = resolveConfiguredConversationScopes({
+        config: { internal: configuration.internal, user: configuration.effective },
+        projects: conversationProjects,
+      });
+      let projectRuntimeForConversation: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+      const scopedConversationBackend = new ScopedConversationBackend({
+        descriptors: conversationDescriptors,
+        stateRoot: join(paths.mainRoot, 'conversation-scopes'),
+        createSession: async (descriptor) => {
+          if (descriptor.scope.kind === 'project') {
+            if (projectRuntimeForConversation === undefined || descriptor.projectKey !== paths.projectKey) {
+              throw new AppLifecycleError(
+                'conversation.project-runtime-unavailable',
+                `the project conversation runtime is not available for ${descriptor.projectKey}`,
+                'retry after serve has started the configured project runtime',
+                'humanagent.app.serve',
+              );
+            }
+            return scopedSessionFromUiRuntime(projectRuntimeForConversation.service);
+          }
+          const alexRoot = join(paths.mainRoot, 'alex');
+          const alexEvidenceRoot = join(alexRoot, 'evidence');
+          const alexTaskWorkspaceRoot = join(alexRoot, 'task-workspace');
+          await mkdir(alexTaskWorkspaceRoot, { recursive: true });
+          const alexRuntime = await startUiRuntime({
+            listen: false,
+            mode,
+            maxConcurrentTasks: configuration.effective.execution?.maxConcurrentTasks,
+            accessControl,
+            organId: id('organ', 'humanagent-alex-conversation'),
+            binding,
+            providerSource: resolvedSource,
+            port: cordisHost.getExecutionRuntimePort(),
+            checkpointRoot: join(alexRoot, 'checkpoints'),
+            interactionRoot: alexRoot,
+            evidenceRoot: alexEvidenceRoot,
+            uiRoot,
+            productRoot: paths.controlRoot,
+            // Alex has no Runtime project identity. Its tool adapter receives a
+            // private storage key and fixed root, so neither enters the session,
+            // task intake or public scope projection as a project.
+            providerToolStorageKey: 'alex-native-tools',
+            providerToolWorkspaceRoot: alexTaskWorkspaceRoot,
+            ...(alexReadonlyInventoryRoot === undefined ? {} : {
+              providerToolReadonlyInventoryRoot: alexReadonlyInventoryRoot,
+            }),
+            agentRoster: configuration.agentRoster,
+            // Cold recovery reads the retry-cycle owner even when this scoped
+            // Alex launch has no provider avoidance configured.
+            providerRetryJournalRoot: join(alexRoot, 'retry'),
+            ...(providerRetryConfigFromEffective(configuration) === undefined ? {} : {
+              providerRetryConfig: {
+                config: providerRetryConfigFromEffective(configuration)!,
+                journalRoot: join(alexRoot, 'retry'),
+              },
+            }),
+            ...(explicitBrainTemplateRoot === undefined ? {} : { explicitBrainTemplateRoot }),
+            explicitBrainHelperProviderPreparer: explicitBrainHelperProviderPreparerFor(alexEvidenceRoot),
+            memory: {
+              coordinator: new MemoryCoordinator(),
+              backend: new DeterministicMemoryBackend(),
+              projectKey: 'alex-session',
+              roleId: 'interaction',
+            },
+            runtimeComposition: {
+              prepareAgentProvider: (selection) => selectedAgentProviderPreparerFor(alexEvidenceRoot)({
+                ...selection,
+                // Alex is the interaction entry identity. Other duties, such as
+                // the closed-turn Planner, must resolve from their configured role.
+                configuredAgentId: selection.configuredAgentId
+                  ?? (selection.roleId === 'interaction' ? descriptor.agentId : undefined),
+              }),
+              prepareTaskAgentProvider: taskAgentProviderPreparerFor(alexEvidenceRoot),
+              // Alex has its own headless UI-runtime and journals. The task
+              // assembly comes from the already-started serve composition so
+              // confirmation can enter the real orchestration path; the Alex
+              // runtime still supplies the task, checkpoint journal, executor,
+              // and tool authorization at the call boundary.
+              createTaskAssembly: serveRuntime!.createTaskAssembly,
+            },
+            lease: () => supervisor?.lease,
+          });
+          return {
+            ...scopedSessionFromUiRuntime(alexRuntime.service),
+            close: () => alexRuntime.close(),
+          };
+        },
+      });
       const memoryDriverFor = memoryDriverFactory({
         paths,
         configuration,
@@ -1967,42 +2122,14 @@ export async function main(args: readonly string[]): Promise<void> {
               runtimeComposition: {
                 ...(mode === 'fake' ? {} : {
                   prepareAgentProvider: prepareSelectedAgentProvider,
-                  // The Task-scoped preparer hands the selected execution
-                  // composition's custody to the prepared-stop owner before the
-                  // fallible acquisition append. It reuses the same compiled
-                  // bindings, effective legacy provider and port factory as the
-                  // neutral preparer; it never re-parses config or substitutes
-                  // the default Provider.
-                  prepareTaskAgentProvider: (
-                    selection: { readonly roleId: import('../../config/src/index.js').AgentRole; readonly configuredAgentId?: string },
-                    owner: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStop,
-                    lease: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStopPreparationLease,
-                  ) => prepareExecutionAgentProvider({
-                    roleId: selection.roleId,
-                    ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
-                    agentProviderBindings: effectiveAgentProviderBindings,
-                    legacyProvider: effectiveLegacyProvider,
-                    legacyBindingOverrides: {
-                      endpointRef: binding.endpointRef,
-                      configDigest: binding.configDigest,
-                      capabilityDigest: binding.capabilityDigest,
-                    },
-                    createPort: (selected) => createAgentProviderPort(
-                      selected,
-                      evidenceRoot,
-                      option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
-                    ),
-                  }, owner, lease),
+                  prepareTaskAgentProvider,
                 }),
                 ...(orchestrationPorts === undefined ? {} : {
                   createTaskAssembly: serveRuntime!.createTaskAssembly,
                 }),
               },
               ...(mode === 'fake' ? {} : {
-                explicitBrainHelperProviderPreparer: (selection: {
-                  readonly roleId: import('../../config/src/index.js').AgentRole;
-                  readonly configuredAgentId?: string;
-                }) => prepareSelectedAgentProvider<TasklessProviderExecutionIdentityRef>(selection),
+                explicitBrainHelperProviderPreparer: prepareExplicitBrainHelper,
               }),
               host,
               portNumber,
@@ -2039,7 +2166,9 @@ export async function main(args: readonly string[]): Promise<void> {
                   processStartToken: activeLease.processStartToken,
                 };
               },
+              scopedConversationBackend,
             });
+            projectRuntimeForConversation = runtime;
             runtime.service.bindReadResources({ runtimePaths: paths, projectCatalog: () => listConfiguredProjects(paths) });
           },
           dispose: async () => {
@@ -2051,6 +2180,7 @@ export async function main(args: readonly string[]): Promise<void> {
     }, {
       startup,
       ...(restartRequest === undefined ? {} : { restartRequest }),
+      ...(recoverDisposedLeaseId === undefined ? {} : { recoverDisposedLeaseId }),
     });
     if (launch.status === 'already-running') {
       const endpoint = launch.lease.controlEndpoint;

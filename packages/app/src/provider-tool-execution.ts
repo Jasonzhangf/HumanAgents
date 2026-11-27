@@ -36,6 +36,7 @@ import {
   type FileReadRequest,
   type WebSearchProviderBackendConfig,
 } from '../../adapters/operations/src/index.js';
+import { inventoryGitWorkspaceReadonly } from '../../adapters/operations/src/git-inventory-readonly.js';
 import { CodeSearchHarnessError, CodeSearchService, WebSearchService, type WebSearchProvider } from '../../runtime/src/hand/index.js';
 import type { ProviderToolExecutionPort } from '../../adapters/provider/src/index.js';
 import type {
@@ -249,6 +250,12 @@ export const RESPONSES_WEB_SEARCH_TOOL: ProviderToolDefinition = {
     required: ['query'],
     additionalProperties: false,
   },
+};
+
+export const RESPONSES_WORKSPACE_INVENTORY_TOOL: ProviderToolDefinition = {
+  toolId: 'workspace.inventory',
+  description: 'Inspect the pre-authorized local workspace inventory: directory sizes and Git repository/worktree metadata. This tool is read-only and has no path or command arguments.',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
 };
 
 export interface ResponsesFileToolExecutor extends ProviderToolExecutionPort {}
@@ -611,6 +618,7 @@ interface ProviderToolIo {
   readonly webSearchService: WebSearchService | null;
   readonly toolOutputs: ToolOutputAssets;
   readonly readAssets: FileReadAssets;
+  readonly readonlyInventoryRoot?: string;
 }
 /** Tool ids this executor owns; surfaced to the provider when it calls a tool
  *  this Harness does not own (for example a backend harness tool such as
@@ -628,6 +636,7 @@ const ADVERTISED_TOOL_IDS: readonly string[] = [
   RESPONSES_UPDATE_GOAL_TOOL.toolId,
   RESPONSES_PRESENT_TOOL.toolId,
   RESPONSES_WEB_SEARCH_TOOL.toolId,
+  RESPONSES_WORKSPACE_INVENTORY_TOOL.toolId,
 ];
 
 /** Gateway registrations for the advertised provider tools. Registration is a
@@ -664,8 +673,8 @@ export function canCiteDeliveryMaterial(toolId: string | undefined): boolean {
   return toolId !== undefined && carriesDeliveryMaterial(toolId);
 }
 
-function providerToolRegistrations(): ToolRegistration[] {
-  return ADVERTISED_TOOL_IDS.map((toolId) => ({
+function providerToolRegistrations(toolIds: readonly string[]): ToolRegistration[] {
+  return toolIds.map((toolId) => ({
     toolName: toolId,
     contractVersion: '1.0.0',
     supportedKinds: [mutates(toolId) ? 'apply' as const : 'inspect' as const],
@@ -729,6 +738,8 @@ export function createResponsesFileToolExecutor(input: {
   readonly workspaceRoot: string;
   readonly projectKey: string;
   readonly artifactRoot: string;
+  /** Trusted host binding. Never populated from Provider arguments. */
+  readonly readonlyInventoryRoot?: string;
   readonly webSearchProviderConfig?: WebSearchProviderBackendConfig;
   readonly admission?: ProviderToolAdmissionInput;
 }): {
@@ -759,6 +770,7 @@ export function createResponsesFileToolExecutor(input: {
     webSearchService,
     toolOutputs,
     readAssets,
+    ...(input.readonlyInventoryRoot === undefined ? {} : { readonlyInventoryRoot: input.readonlyInventoryRoot }),
   };
   const pending = new Map<string, {
     readonly request: ToolExecRequest;
@@ -770,7 +782,22 @@ export function createResponsesFileToolExecutor(input: {
   const completion = admission === undefined
     ? undefined
     : new OperationCompletionOwner(new JsonlOperationCompletionJournal({ journal: admission.organJournal }));
-  const registrations = providerToolRegistrations();
+  const advertisedToolIds = [
+    RESPONSES_FILE_READ_TOOL.toolId,
+    RESPONSES_FILE_LIST_TOOL.toolId,
+    RESPONSES_FILE_SEARCH_TOOL.toolId,
+    RESPONSES_FILE_WRITE_TOOL.toolId,
+    RESPONSES_FILE_EDIT_TOOL.toolId,
+    RESPONSES_BASH_TOOL.toolId,
+    RESPONSES_TODO_WRITE_TOOL.toolId,
+    RESPONSES_GET_GOAL_TOOL.toolId,
+    RESPONSES_CREATE_GOAL_TOOL.toolId,
+    RESPONSES_UPDATE_GOAL_TOOL.toolId,
+    RESPONSES_PRESENT_TOOL.toolId,
+    ...(input.webSearchProviderConfig === undefined ? [] : [RESPONSES_WEB_SEARCH_TOOL.toolId]),
+    ...(input.readonlyInventoryRoot === undefined ? [] : [RESPONSES_WORKSPACE_INVENTORY_TOOL.toolId]),
+  ];
+  const registrations = providerToolRegistrations(advertisedToolIds);
   const registrationByTool = new Map(registrations.map((registration) => [registration.toolName, registration]));
   const gateway = admission ? createProviderToolGateway({
     registrations,
@@ -866,9 +893,9 @@ export function createResponsesFileToolExecutor(input: {
     executor: {
       async execute(request): Promise<ToolExecResult> {
         if (request.signal.aborted) throw Object.assign(new Error('provider tool was stopped before admission'), { name: 'AbortError' });
-        if (!ADVERTISED_TOOL_IDS.includes(request.call.toolId)) {
+        if (!advertisedToolIds.includes(request.call.toolId)) {
           throw new Error(
-            `provider tool is not registered: ${request.call.toolId}; tools this Harness owns: ${ADVERTISED_TOOL_IDS.join(', ')}`,
+            `provider tool is not registered: ${request.call.toolId}; tools this Harness owns: ${advertisedToolIds.join(', ')}`,
           );
         }
         if (!admission || !gateway) throw new Error('provider tool control source is missing: same Journal, current task grant, principal, resource boundary, admission binding and clock are required');
@@ -1051,6 +1078,21 @@ async function executeRawTool(
     case 'update_goal': return executeUpdateGoal(request, io);
     case 'present': return executePresent(request, io);
     case 'web.search': return executeWebSearch(request, { service: io.webSearchService, assets: io.toolOutputs });
+    case 'workspace.inventory': {
+      if (io.readonlyInventoryRoot === undefined) throw new Error('workspace inventory is not authorized for this runtime');
+      if (Object.keys(request.call.arguments).length !== 0) throw new Error('workspace.inventory accepts no arguments');
+      const report = await inventoryGitWorkspaceReadonly(io.readonlyInventoryRoot, request.signal);
+      const outputId = safeId(`provider-tool-inventory-${request.execution.taskId.value}-${request.call.callId}`);
+      const descriptor = await io.toolOutputs.writeReport({ outputId, report });
+      return {
+        status: 'succeeded',
+        output: JSON.stringify(report),
+        outputRefs: [descriptor.outputRef],
+        ...descriptor,
+        executorRoute: 'app.workspace-inventory.local',
+        evidenceRefs: [taskEvidence(request, 'workspace-inventory')],
+      };
+    }
     default: throw new Error(`provider tool is not registered: ${request.call.toolId}`);
   }
 }

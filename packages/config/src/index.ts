@@ -16,6 +16,7 @@ declare module 'node:fs/promises' {
 
 export * from './ui-preferences.js';
 export * from './workspace-management.js';
+export * from './conversation-scope.js';
 export { resetUiDisplayPreference, saveUiDisplayPreference } from './ui-preference-store.js';
 
 export const CONFIG_SCHEMA_VERSION = 1;

@@ -19,6 +19,7 @@ declare module 'node:fs/promises' {
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
   export function rm(path: string, options?: { recursive?: boolean }): Promise<void>;
   export function realpath(path: string): Promise<string>;
+  export function rm(path: string, options: { recursive?: boolean; force?: boolean }): Promise<void>;
   export function stat(path: string): Promise<{ isDirectory(): boolean; mode: number }>;
   export function writeFile(path: string, data: string, encoding?: string): Promise<void>;
 }

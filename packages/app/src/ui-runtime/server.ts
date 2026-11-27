@@ -14,6 +14,12 @@ import {
   type TaskId,
 } from '../../../contracts/src/index.js';
 import type { RequirementIntent } from '../../../contracts/src/index.js';
+import { conversationScopeFromQuery, type ConversationScope } from '../../../contracts/src/conversation-scope.js';
+import {
+  ScopedConversationBackendError,
+  type ScopedConversationBackend,
+  type ScopedConversationResponse,
+} from '../conversation-scope-backend.js';
 import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
 import type { ProductSessionReadScope, UiRuntimeService } from './service.js';
 import type { ProductBoardScope } from './product-session-read.js';
@@ -52,6 +58,8 @@ const APP_OWNER = 'humanagent.app';
 
 export interface UiRuntimeServerOptions {
   readonly service: UiRuntimeService;
+  /** Optional server-owned registry for Alex and other logical conversation scopes. */
+  readonly scopedConversationBackend?: ScopedConversationBackend;
   readonly accessControl: AccessControlService;
   /**
    * Config-owned product root. It is the only source for the public pairing
@@ -395,6 +403,26 @@ function adoptedChildSelector(invocationId: string, childTurnId: string, deliver
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
+  if (error instanceof ScopedConversationBackendError) {
+    const httpStatus = error.code === 'scope.unknown' ? 404
+      : error.code === 'scope.interaction-not-found' || error.code === 'scope.operation-not-found' || error.code === 'scope.task-not-found' ? 404
+        : error.code === 'scope.ambiguous' || error.code === 'scope.session-shared' ? 409
+        : error.code === 'scope.engine-unavailable' ? 503
+          : 501;
+    writeJson(response, httpStatus, {
+      error: {
+        code: error.code,
+        ownerId: APP_OWNER,
+        message: error.message,
+        nextAction: error.code === 'scope.unknown' || error.code === 'scope.interaction-not-found'
+          ? 'select the conversation scope that recorded this interaction'
+          : error.code === 'scope.engine-unavailable'
+            ? 'configure the conversation engine for this scope and retry'
+            : 'use an operation supported by the selected conversation scope',
+      },
+    });
+    return;
+  }
   if (isAccessControlError(error)) {
     writeJson(response, error.httpStatus, {
       error: {
@@ -433,6 +461,26 @@ function writeError(response: ServerResponse, error: unknown): void {
       ...(cause === undefined ? {} : { cause }),
     },
   });
+}
+
+function scopedResponseMetadata(scoped: ScopedConversationResponse<unknown>): Record<string, unknown> {
+  return {
+    scope: scoped.scope,
+    canonicalAddress: scoped.canonicalAddress,
+    agentId: scoped.agentId,
+    role: scoped.role,
+    ...(scoped.projectKey === undefined ? {} : { projectKey: scoped.projectKey }),
+    ...(scoped.workspaceCwd === undefined ? {} : { workspaceCwd: scoped.workspaceCwd }),
+    ...(scoped.legacySessionRef === undefined ? {} : { legacySessionRef: scoped.legacySessionRef }),
+    ...(scoped.legacyBindingEvidenceRef === undefined ? {} : { legacyBindingEvidenceRef: scoped.legacyBindingEvidenceRef }),
+    preservedInteractionRefs: scoped.preservedInteractionRefs,
+    preservedTaskRefs: scoped.preservedTaskRefs,
+  };
+}
+
+function writeScopedValue(response: ServerResponse, status: number, scoped: ScopedConversationResponse<unknown>): void {
+  const value = typeof scoped.value === 'object' && scoped.value !== null ? scoped.value : { value: scoped.value };
+  writeJson(response, status, { ...value, ...scopedResponseMetadata(scoped) });
 }
 
 function isConfirmedControlConflict(error: unknown): boolean {
@@ -839,6 +887,7 @@ export interface UiRuntimeRequestDispatcher {
  */
 export function createUiRuntimeRequestDispatcher(options: {
   readonly service: UiRuntimeService;
+  readonly scopedConversationBackend?: ScopedConversationBackend;
   readonly accessControl: AccessControlService;
   readonly productRoot: string;
   readonly uiRoot: string;
@@ -856,6 +905,7 @@ export function createUiRuntimeRequestDispatcher(options: {
       request,
       response,
       options.service,
+      options.scopedConversationBackend,
       options.accessControl,
       options.productRoot,
       sseRegistry,
@@ -868,6 +918,13 @@ export function createUiRuntimeRequestDispatcher(options: {
       options.displayPreference,
       options.workspaceManagement,
     ).catch((error) => {
+      // A streamed response owns its close semantics after headers have been
+      // sent. A second JSON error cannot change its status and would become an
+      // unhandled write-after-end failure.
+      if (response.headersSent) {
+        if (!response.writableEnded) response.destroy(error instanceof Error ? error : undefined);
+        return;
+      }
       writeError(response, error);
     });
   };
@@ -884,6 +941,7 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   let closing = false;
   const { listener, sseRegistry } = createUiRuntimeRequestDispatcher({
     service,
+    ...(options.scopedConversationBackend === undefined ? {} : { scopedConversationBackend: options.scopedConversationBackend }),
     accessControl,
     productRoot: options.productRoot,
     uiRoot: options.uiRoot,
@@ -966,6 +1024,7 @@ async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
   service: UiRuntimeService,
+  scopedConversationBackend: ScopedConversationBackend | undefined,
   accessControl: AccessControlService,
   productRoot: string,
   sseRegistry: ReturnType<typeof createSseRegistry>,
@@ -994,6 +1053,75 @@ async function handleRequest(
       return;
     }
     const path = url.pathname;
+    // Recovery opts into conversation routing only with an explicit selector.
+    // Bare task control retains the existing bound project service.
+    const scopedTaskRecovery = /^\/api\/tasks\/[^/]+\/(resume|recover)$/.test(path)
+      && (url.searchParams.has('scope') || url.searchParams.has('projectKey'));
+    const conversationScopedRoute = path === '/api/main-topic'
+      || path === '/api/tasks'
+      || scopedTaskRecovery
+      || path.startsWith('/api/explicit/')
+      || /^\/api\/executions\/[^/]+\/events$/.test(path)
+      || /^\/api\/tasks\/[^/]+\/operations\/[^/]+\/executions\/\d+\/events\/\d+\/tool-output$/.test(path);
+    const scopedKind = conversationScopedRoute ? url.searchParams.get('scope') : null;
+    const scopedProjectKey = conversationScopedRoute ? url.searchParams.get('projectKey')?.trim() : undefined;
+    // `system` is the existing navigation spelling for the no-project CEO
+    // entry. It is resolved to the typed Alex scope at the server boundary;
+    // it never becomes a persisted identity or a project key.
+    let requestedScope: ConversationScope | undefined;
+    if (!conversationScopedRoute) {
+      requestedScope = undefined;
+    } else if (scopedKind === null && scopedProjectKey === undefined) {
+      // The bare conversation entry is the no-project CEO. A project must be
+      // named explicitly so it can never inherit the default CEO history.
+      requestedScope = { kind: 'alex' };
+    } else if (conversationScopedRoute && scopedKind === null && scopedProjectKey !== undefined) {
+      try {
+        requestedScope = conversationScopeFromQuery({ scope: 'project', projectKey: scopedProjectKey });
+      } catch {
+        throw new UiRuntimeApiError('conversation.scope.invalid', APP_OWNER, 'projectKey must be non-empty', 'send a declared projectKey or scope=alex', 400);
+      }
+    } else if (scopedKind !== null) {
+      try {
+        requestedScope = conversationScopeFromQuery({
+          scope: scopedKind as 'alex' | 'system' | 'project',
+          ...(scopedProjectKey === undefined ? {} : { projectKey: scopedProjectKey }),
+        });
+      } catch {
+        throw new UiRuntimeApiError('conversation.scope.invalid', APP_OWNER, 'scope must be alex/system or project with one projectKey', 'send scope=alex or scope=project&projectKey=<declared key>', 400);
+      }
+    }
+    if (requestedScope !== undefined && scopedConversationBackend === undefined) {
+      throw new UiRuntimeApiError('conversation.scope.unavailable', APP_OWNER, 'this server has no scoped conversation backend', 'start the server with the config-owned scope registry', 503);
+    }
+    if (requestedScope !== undefined && scopedConversationBackend !== undefined && path === '/api/main-topic' && method === 'GET') {
+      const scoped = await scopedConversationBackend.readMainTopic(requestedScope);
+      writeScopedValue(response, 200, scoped);
+      return;
+    }
+    const scopedMethodSupported = requestedScope === undefined || (
+      (path === '/api/main-topic' && method === 'GET')
+      || (path === '/api/tasks' && method === 'GET')
+      || (scopedTaskRecovery && method === 'POST')
+      || (/^\/api\/executions\/[^/]+\/events$/.test(path) && method === 'GET')
+      || (/^\/api\/tasks\/[^/]+\/operations\/[^/]+\/executions\/\d+\/events\/\d+\/tool-output$/.test(path) && method === 'GET')
+      || (path === '/api/explicit/inputs' && method === 'POST')
+      || (/^\/api\/explicit\/interactions\/[^/]+$/.test(path) && method === 'GET')
+      || (/^\/api\/explicit\/interactions\/[^/]+\/interpret$/.test(path) && method === 'POST')
+      || (/^\/api\/explicit\/interactions\/[^/]+\/continue$/.test(path) && method === 'POST')
+      || (/^\/api\/explicit\/interactions\/[^/]+\/clarification$/.test(path) && method === 'POST')
+      || (/^\/api\/explicit\/interactions\/[^/]+\/confirmation$/.test(path) && method === 'POST')
+      || (/^\/api\/explicit\/interactions\/[^/]+\/events$/.test(path) && method === 'GET')
+    );
+    if (!scopedMethodSupported) {
+      throw new UiRuntimeApiError(
+        'conversation.scope.unsupported',
+        APP_OWNER,
+        `scope is not supported for ${method} ${path}`,
+        'use main-topic, input, interaction detail, interpret, or continue with the typed scope',
+        501,
+      );
+    }
     if (path === '/api/liveness' && method === 'GET') {
       writeJson(response, 200, { status: 'alive', service: 'humanagent.ui-runtime' });
       return;
@@ -1450,7 +1578,9 @@ async function handleRequest(
       return;
     }
     if (path === '/api/tasks' && method === 'GET') {
-      writeJson(response, 200, await service.listTasksWithIdentitySource());
+      writeJson(response, 200, requestedScope !== undefined && scopedConversationBackend !== undefined
+        ? await scopedConversationBackend.listTasks(requestedScope)
+        : await service.listTasksWithIdentitySource());
       return;
     }
     if (path === '/api/main-topic' && method === 'GET') {
@@ -1504,8 +1634,13 @@ async function handleRequest(
     }
     if (path === '/api/explicit/inputs' && method === 'POST') {
       const body = await readBody(request);
-      const channel = requireString(body, 'channel');
-      if (channel === 'control') {
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        if (body.workspace !== undefined || body.agentId !== undefined) {
+          throw new UiRuntimeApiError('conversation.scope.conflict', APP_OWNER, 'scoped input cannot provide workspace or agentId identity overrides', 'send only the typed conversation scope', 400);
+        }
+      }
+      const channelValue = requireString(body, 'channel');
+      if (channelValue === 'control') {
         throw new UiRuntimeApiError(
           'explicit-brain.control.unsupported',
           APP_OWNER,
@@ -1514,31 +1649,40 @@ async function handleRequest(
           501,
         );
       }
-      if (channel !== 'business') {
+      if (channelValue !== 'business') {
         throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field channel must be business', 'provide business');
       }
+      const channel: 'business' = channelValue;
       const inputRevision = body.inputRevision === undefined ? 1 : requirePositiveInteger(body, 'inputRevision');
       const requestKind = optionalInteractionRequestKind(body);
       const occurredAt = optionalString(body, 'occurredAt') ?? new Date().toISOString();
       const idempotencyKey = optionalString(body, 'idempotencyKey');
       const topicRef = optionalString(body, 'topicRef');
-      const interactionId = await service.receiveExplicitInput({
+      const scopedInput = {
         sourceRef: requireString(body, 'sourceRef'),
         rawInput: requireString(body, 'rawInput'),
         channel,
         actor: {
-          kind: 'human',
-          sourceKind: 'product-principal',
+          kind: 'human' as const,
+          sourceKind: 'product-principal' as const,
           sourceRef: accessControl.readProductPrincipalOwner(),
         },
         occurredAt,
         ...(requestKind === undefined ? {} : { requestKind }),
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         ...(topicRef === undefined ? {} : { topicRef }),
-        ...(body.workspace === undefined ? {} : { workspaceRequest: requireString(body, 'workspace') }),
-      }, inputRevision);
-      const accepted = await service.inspectExplicitInteraction(interactionId);
-      writeJson(response, 201, { interactionId, occurredAt: accepted.occurredAt ?? occurredAt });
+      };
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        const scoped = await scopedConversationBackend.receiveInput(requestedScope, { ...scopedInput, inputRevision });
+        writeScopedValue(response, 201, { ...scoped, value: { ...scoped.value, occurredAt } });
+      } else {
+        const interactionId = await service.receiveExplicitInput({
+          ...scopedInput,
+          ...(body.workspace === undefined ? {} : { workspaceRequest: requireString(body, 'workspace') }),
+        }, inputRevision);
+        const accepted = await service.inspectExplicitInteraction(interactionId);
+        writeJson(response, 201, { interactionId, occurredAt: accepted.occurredAt ?? occurredAt });
+      }
       return;
     }
     if (path === '/api/explicit/decision' && method === 'POST') {
@@ -1559,18 +1703,21 @@ async function handleRequest(
     }
     const explicitInterpretation = /^\/api\/explicit\/interactions\/([^/]+)\/interpret$/.exec(path);
     if (explicitInterpretation && method === 'POST') {
-      writeJson(response, 200, await service.interpretExplicitInput({
-        interactionId: decodeURIComponent(explicitInterpretation[1]!),
-      }));
+      const interactionId = decodeURIComponent(explicitInterpretation[1]!);
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        const scoped = await scopedConversationBackend.interpretInteraction(requestedScope, interactionId);
+        writeScopedValue(response, 200, scoped);
+      } else writeJson(response, 200, await service.interpretExplicitInput({ interactionId }));
       return;
     }
     const explicitContinue = /^\/api\/explicit\/interactions\/([^/]+)\/continue$/.exec(path);
     if (explicitContinue && method === 'POST') {
       const body = await readBody(request);
-      writeJson(response, 200, await service.continueExplicitPartial({
-        interactionId: decodeURIComponent(explicitContinue[1]!),
-        partialRef: requireString(body, 'partialRef'),
-      }));
+      const interactionId = decodeURIComponent(explicitContinue[1]!);
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        const scoped = await scopedConversationBackend.continueInteraction(requestedScope, interactionId, requireString(body, 'partialRef'));
+        writeScopedValue(response, 200, scoped);
+      } else writeJson(response, 200, await service.continueExplicitPartial({ interactionId, partialRef: requireString(body, 'partialRef') }));
       return;
     }
     const explicitRefinement = /^\/api\/explicit\/interactions\/([^/]+)\/refine$/.exec(path);
@@ -1601,10 +1748,16 @@ async function handleRequest(
     const explicitClarification = /^\/api\/explicit\/interactions\/([^/]+)\/clarification$/.exec(path);
     if (explicitClarification && method === 'POST') {
       const body = await readBody(request);
-      writeJson(response, 200, await service.answerExplicitClarification({
-        interactionId: decodeURIComponent(explicitClarification[1]!),
-        answer: requireString(body, 'answer'),
-      }));
+      const interactionId = decodeURIComponent(explicitClarification[1]!);
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        const scoped = await scopedConversationBackend.answerClarification(requestedScope, interactionId, requireString(body, 'answer'));
+        writeScopedValue(response, 200, scoped);
+      } else {
+        writeJson(response, 200, await service.answerExplicitClarification({
+          interactionId,
+          answer: requireString(body, 'answer'),
+        }));
+      }
       return;
     }
     const explicitProviderSettlement =
@@ -1625,7 +1778,11 @@ async function handleRequest(
     }
     const explicitInteraction = /^\/api\/explicit\/interactions\/([^/]+)$/.exec(path);
     if (explicitInteraction && method === 'GET') {
-      writeJson(response, 200, await service.inspectExplicitInteraction(decodeURIComponent(explicitInteraction[1]!)));
+      const interactionId = decodeURIComponent(explicitInteraction[1]!);
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        const scoped = await scopedConversationBackend.inspectInteraction(requestedScope, interactionId);
+        writeScopedValue(response, 200, scoped);
+      } else writeJson(response, 200, await service.inspectExplicitInteraction(interactionId));
       return;
     }
     const explicitInteractionEvents = /^\/api\/explicit\/interactions\/([^/]+)\/events$/.exec(path);
@@ -1635,7 +1792,20 @@ async function handleRequest(
       if (isClosing()) {
         throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
       }
-      await streamExplicitSteps(request, response, service, interactionId, session, accessControl, sseRegistry);
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        await scopedConversationBackend.requireInteractionOwnership(requestedScope, interactionId);
+      }
+      await streamExplicitSteps(
+        request,
+        response,
+        interactionId,
+        (scopedId, onStep) => requestedScope !== undefined && scopedConversationBackend !== undefined
+          ? scopedConversationBackend.subscribeInteractionSteps(requestedScope, scopedId, onStep)
+          : service.subscribeExplicitSteps(scopedId, onStep),
+        session,
+        accessControl,
+        sseRegistry,
+      );
       return;
     }
     const explicitRejection = /^\/api\/explicit\/interactions\/([^/]+)\/reject$/.exec(path);
@@ -1729,8 +1899,9 @@ async function handleRequest(
         throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field requestKind must be new-task-create or existing-task-change', 'provide a final-submit request kind');
       }
       const taskRef = optionalTaskRef(body);
-      const receipt = await service.confirmExplicitRequirement({
-        interactionId: decodeURIComponent(explicitConfirmation[1]!),
+      const interactionId = decodeURIComponent(explicitConfirmation[1]!);
+      const confirmation = {
+        interactionId,
         draftId: requireString(body, 'draftId'),
         inputRevision: requirePositiveInteger(body, 'inputRevision'),
         confirmationRef: requireString(body, 'confirmationRef'),
@@ -1747,8 +1918,12 @@ async function handleRequest(
         ...(draftRevisionHash === undefined ? {} : { draftRevisionHash }),
         ...(body.deliverables === undefined ? {} : { deliverables: requireStringArray(body, 'deliverables') }),
         ...(body.constraints === undefined ? {} : { constraints: requireStringArray(body, 'constraints') }),
-      });
-      writeJson(response, 200, receipt);
+      };
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        writeScopedValue(response, 200, await scopedConversationBackend.confirmRequirement(requestedScope, interactionId, confirmation));
+      } else {
+        writeJson(response, 200, await service.confirmExplicitRequirement(confirmation));
+      }
       return;
     }
     if (path === '/api/explicit/dispatch-next' && method === 'POST') {
@@ -2097,7 +2272,9 @@ async function handleRequest(
         );
       }
       const operationId = id('operation', requireString(body, 'operationId'));
-      const resumed = await service.resumeExecution(taskId, { operationId });
+      const resumed = requestedScope === undefined
+        ? await service.resumeExecution(taskId, { operationId })
+        : await scopedConversationBackend!.resumeExecution(requestedScope, taskId, { operationId });
       writeJson(response, 202, resumed);
       return;
     }
@@ -2107,10 +2284,11 @@ async function handleRequest(
       const operatorNote = typeof body.operatorNote === 'string' && body.operatorNote.trim().length > 0
         ? body.operatorNote.trim()
         : undefined;
-      const task = await service.recoverTask(
-        id('task', decodeURIComponent(taskRecover[1]!)),
-        operatorNote === undefined ? {} : { operatorNote },
-      );
+      const taskId = id('task', decodeURIComponent(taskRecover[1]!));
+      const options = operatorNote === undefined ? {} : { operatorNote };
+      const task = requestedScope === undefined
+        ? await service.recoverTask(taskId, options)
+        : await scopedConversationBackend!.recoverTask(requestedScope, taskId, options);
       writeJson(response, 200, {
         state: task.state,
         taskId: task.taskId.value,
@@ -2163,24 +2341,37 @@ async function handleRequest(
       return;
     }
     if (taskDetail && method === 'GET') {
-      writeJson(response, 200, await service.taskDetailWithIdentitySource(id('task', decodeURIComponent(taskDetail[1]!))));
+      const taskId = id('task', decodeURIComponent(taskDetail[1]!));
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        await scopedConversationBackend.requireTaskOwnership(requestedScope, taskId);
+      }
+      writeJson(response, 200, await service.taskDetailWithIdentitySource(taskId));
       return;
     }
     const executionEvents = /^\/api\/executions\/([^/]+)\/events$/.exec(path);
     if (executionEvents && method === 'GET') {
       const operationId = id('operation', decodeURIComponent(executionEvents[1]!));
-      service.operationTask(operationId);
+      if (requestedScope === undefined || scopedConversationBackend === undefined) service.operationTask(operationId);
       const { session } = await resolveSession(accessControl, request, response);
       if (isClosing()) {
         throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
       }
-      streamEvents(request, response, service, operationId, session, accessControl, sseRegistry);
+      streamEvents(
+        request, response, session, accessControl, sseRegistry,
+        requestedScope !== undefined && scopedConversationBackend !== undefined
+          ? async (lastEventId, listener) => scopedConversationBackend.subscribeExecution(requestedScope, operationId, lastEventId, listener)
+          : async (lastEventId, listener) => service.subscribeReplay(operationId, lastEventId, listener),
+      );
       return;
     }
     const taskEvents = /^\/api\/tasks\/([^/]+)\/events$/.exec(path);
     if (taskEvents && method === 'GET') {
       const taskId = id('task', decodeURIComponent(taskEvents[1]!));
-      service.taskDetail(taskId);
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        await scopedConversationBackend.requireTaskOwnership(requestedScope, taskId);
+      } else {
+        service.taskDetail(taskId);
+      }
       const { session } = await resolveSession(accessControl, request, response);
       if (isClosing()) {
         throw new UiRuntimeApiError('ui-server.closing', APP_OWNER, 'runtime listener is shutting down', 'reconnect after the service is ready', 503);
@@ -2191,33 +2382,39 @@ async function handleRequest(
     const executionMemoryContext = /^\/api\/executions\/([^/]+)\/memory-context$/.exec(path);
     if (executionMemoryContext && method === 'GET') {
       const operationId = id('operation', decodeURIComponent(executionMemoryContext[1]!));
-      service.operationTask(operationId);
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        await scopedConversationBackend.requireOperationOwnership(requestedScope, operationId);
+      } else {
+        service.operationTask(operationId);
+      }
       const receipt = service.memoryContextStatus(operationId);
       writeJson(response, receipt.httpStatus, receipt.body);
       return;
     }
     const taskToolOutput = /^\/api\/tasks\/([^/]+)\/operations\/([^/]+)\/executions\/(\d+)\/events\/(\d+)\/tool-output$/.exec(path);
     if (taskToolOutput && method === 'GET') {
-      const allowed = new Set(['projectKey', 'mode', 'roleId', 'configuredAgentId']);
+      const allowed = new Set(['scope', 'projectKey', 'mode', 'roleId', 'configuredAgentId']);
       for (const key of url.searchParams.keys()) {
         if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
           throw new UiRuntimeApiError('tool-output.query-invalid', APP_OWNER,
             `unsupported or repeated tool output query key: ${key}`, 'send each scope field once; do not send paths or tokens', 400);
         }
       }
-      const scope = url.searchParams.size === 0 ? undefined : requireReadScope(url);
+      const scope = requestedScope !== undefined ? undefined : url.searchParams.size === 0 ? undefined : requireReadScope(url);
       const roleId = optionalProductReadId(url, 'roleId');
       const configuredAgentId = optionalProductReadId(url, 'configuredAgentId');
-      const report = await service.toolOutput(
-        id('task', decodeURIComponent(taskToolOutput[1]!)),
-        id('operation', decodeURIComponent(taskToolOutput[2]!)),
-        Number(taskToolOutput[3]!),
-        Number(taskToolOutput[4]!),
-        scope === undefined ? undefined : { ...scope,
-          ...(roleId === undefined ? {} : { roleId }),
-          ...(configuredAgentId === undefined ? {} : { configuredAgentId }),
-        },
-      );
+      const taskId = id('task', decodeURIComponent(taskToolOutput[1]!));
+      const operationId = id('operation', decodeURIComponent(taskToolOutput[2]!));
+      const executionEpoch = Number(taskToolOutput[3]!);
+      const seq = Number(taskToolOutput[4]!);
+      const report = requestedScope !== undefined && scopedConversationBackend !== undefined
+        ? await scopedConversationBackend.toolOutput(requestedScope, taskId, operationId, executionEpoch, seq)
+        : await service.toolOutput(taskId, operationId, executionEpoch, seq,
+            scope === undefined ? undefined : { ...scope,
+              ...(roleId === undefined ? {} : { roleId }),
+              ...(configuredAgentId === undefined ? {} : { configuredAgentId }),
+            },
+          );
       writeJson(response, 200, report);
       return;
     }
@@ -2272,11 +2469,13 @@ async function handleRequest(
 function streamEvents(
   request: IncomingMessage,
   response: ServerResponse,
-  service: UiRuntimeService,
-  operationId: { readonly scope: 'operation'; readonly value: string },
   session: AccessSession,
   accessControl: AccessControlService,
   registry: ReturnType<typeof createSseRegistry>,
+  subscribe: (
+    lastEventId: string | undefined,
+    listener: (event: RuntimeSseEvent) => void,
+  ) => Promise<{ readonly replay: readonly RuntimeSseEvent[]; readonly unsubscribe: () => void }>,
 ): void {
   const lastEventId = request.headers['last-event-id'];
   let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -2332,8 +2531,9 @@ function streamEvents(
     }
   };
   registry.scheduleAuthRevalidation(accessControl);
-  try {
-    const subscription = service.subscribeReplay(operationId as never, typeof lastEventId === 'string' ? lastEventId : undefined, (event) => {
+  void (async () => {
+    try {
+      const subscription = await subscribe(typeof lastEventId === 'string' ? lastEventId : undefined, (event) => {
       if (closed) return;
       eventWrites = eventWrites.then(async () => {
         if (closed) return;
@@ -2346,28 +2546,28 @@ function streamEvents(
           await closeStream('write-failure');
         }
       });
-    });
-    unsubscribe = subscription.unsubscribe;
-    for (const event of subscription.replay) writeSse(response, event);
-    if (subscription.replay.at(-1)?.terminalPhase === 'final') {
-      void closeStream('terminal');
-      return;
+      });
+      unsubscribe = subscription.unsubscribe;
+      for (const event of subscription.replay) writeSse(response, event);
+      if (subscription.replay.at(-1)?.terminalPhase === 'final') {
+        void closeStream('terminal');
+        return;
+      }
+      heartbeat = setInterval(() => {
+        void (async () => {
+          await validateStreamSession();
+          if (closed) return;
+          try {
+            response.write(': keep-alive\n\n');
+          } catch {
+            await closeStream('write-failure');
+          }
+        })();
+      }, 15000);
+    } catch {
+      void closeStream('write-failure');
     }
-    heartbeat = setInterval(() => {
-      void (async () => {
-        await validateStreamSession();
-        if (closed) return;
-        try {
-          response.write(': keep-alive\n\n');
-        } catch {
-          await closeStream('write-failure');
-        }
-      })();
-    }, 15000);
-  } catch (error) {
-    void closeStream('write-failure');
-    throw error;
-  }
+  })();
   response.once('close', () => {
     void closeStream('client');
   });
@@ -2565,8 +2765,11 @@ function streamSemanticObservation(
 async function streamExplicitSteps(
   request: IncomingMessage,
   response: ServerResponse,
-  service: UiRuntimeService,
   interactionId: string,
+  subscribe: (
+    interactionId: string,
+    onStep: Parameters<UiRuntimeService['subscribeExplicitSteps']>[1],
+  ) => ReturnType<UiRuntimeService['subscribeExplicitSteps']>,
   session: AccessSession,
   accessControl: AccessControlService,
   registry: ReturnType<typeof createSseRegistry>,
@@ -2617,7 +2820,7 @@ async function streamExplicitSteps(
   };
   registry.scheduleAuthRevalidation(accessControl);
   try {
-    const subscription = await service.subscribeExplicitSteps(interactionId, (step) => {
+    const subscription = await subscribe(interactionId, (step) => {
       if (closed) return;
       eventWrites = eventWrites.then(async () => {
         if (closed) return;

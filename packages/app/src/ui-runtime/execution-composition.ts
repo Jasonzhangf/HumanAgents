@@ -355,6 +355,7 @@ export function createDefaultExecutionComposition(input: {
     readonly projectKey: string;
     readonly artifactRoot: string;
     readonly tools: readonly ProviderToolDefinition[];
+    readonly readonlyInventoryRoot?: string;
     readonly webSearchProviderConfig?: WebSearchBackendConfig;
   };
   readonly agentRoster?: readonly {
@@ -716,6 +717,7 @@ export function createDefaultExecutionComposition(input: {
       const toolScope = input.providerToolScope;
       const providerToolExecutor = toolScope === undefined ? undefined : createResponsesFileToolExecutor({
         workspaceRoot: toolScope.workspaceRoot, projectKey: toolScope.projectKey, artifactRoot: toolScope.artifactRoot,
+        ...(toolScope.readonlyInventoryRoot === undefined ? {} : { readonlyInventoryRoot: toolScope.readonlyInventoryRoot }),
         ...(toolScope.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: toolScope.webSearchProviderConfig }),
         admission: {
           organJournal: input.journal,
@@ -1692,6 +1694,7 @@ export function createDefaultExecutionComposition(input: {
           const childRun = createChildRunComposition({ admission: admitted,
             journal: input.journal, filePath: input.filePath, artifactsRoot: input.artifactsRoot,
             workspaceRoot: toolScope.workspaceRoot, projectKey: toolScope.projectKey, tools: toolScope.tools,
+            ...(toolScope.readonlyInventoryRoot === undefined ? {} : { readonlyInventoryRoot: toolScope.readonlyInventoryRoot }),
             ...(toolScope.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: toolScope.webSearchProviderConfig }),
             principalOwner: input.principalOwner, now: input.now });
           childProducer = createAppChildProducer({ manager, parent: active, parentAssignment: assignment,

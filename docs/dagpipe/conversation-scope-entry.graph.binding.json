@@ -1,0 +1,55 @@
+{
+  "graph": "humanagent-conversation-scope-entry",
+  "operator": {
+    "operator": "humanagent-conversation-scope-entry",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "request": {
+      "ownerPath": "packages/app/src/ui-runtime/server.ts",
+      "ownerRel": "packages/app/src/ui-runtime/server.ts",
+      "ownerSymbol": "createUiRuntimeRequestDispatcher/handleRequest",
+      "implementationStatus": "candidate-scoped-http"
+    },
+    "resolve_scope": {
+      "ownerPath": "packages/app/src/ui-runtime/server.ts",
+      "ownerRel": "packages/app/src/ui-runtime/server.ts",
+      "ownerSymbol": "conversationScopeFromQuery at request boundary",
+      "implementationStatus": "candidate-scoped-http",
+      "designNote": "裸入口与 scope=system 归一为 alex；project 必须带唯一 projectKey；拒绝 workspace/agentId 覆盖。"
+    },
+    "read_projection": {
+      "ownerPath": "packages/app/src/conversation-scope-backend.ts",
+      "ownerRel": "packages/app/src/conversation-scope-backend.ts",
+      "ownerSymbol": "ScopedConversationBackend.readMainTopic",
+      "implementationStatus": "candidate-scoped-read",
+      "designNote": "engine.read 观测式，不写状态、不建 session、不 backfill。"
+    },
+    "ensure_and_record": {
+      "ownerPath": "packages/app/src/conversation-scope-backend.ts",
+      "ownerRel": "packages/app/src/conversation-scope-backend.ts",
+      "ownerSymbol": "ScopedConversationBackend.receiveInput",
+      "implementationStatus": "candidate-scoped-submit",
+      "designNote": "幂等键与摘要由 backend 记录；真正接收输入的 session.receiveInput 收到原请求。"
+    },
+    "explicit_turn_subgraph": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService.interpretExplicitInput",
+      "implementationStatus": "existing-explicit-interpret-observable-turn"
+    },
+    "durable_same_scope_state": {
+      "ownerPath": "packages/runtime/src/conversation-scope-engine.ts",
+      "ownerRel": "packages/runtime/src/conversation-scope-engine.ts",
+      "ownerSymbol": "ScopedConversationEngine",
+      "implementationStatus": "candidate-scoped-state",
+      "designNote": "每 scope 一份状态，串行化写入，跨 scope 读取拒绝。"
+    },
+    "unified_response": {
+      "ownerPath": "packages/app/src/ui-runtime/server.ts",
+      "ownerRel": "packages/app/src/ui-runtime/server.ts",
+      "ownerSymbol": "writeScopedValue/scopedResponseMetadata",
+      "implementationStatus": "candidate-scoped-http"
+    }
+  }
+}

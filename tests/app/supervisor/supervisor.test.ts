@@ -1036,6 +1036,125 @@ test('dispose cleanup failure is durable in the lease and the caller receipt', a
   assert.equal((await readDaemonLease(paths))?.leaseId, receipt.lease.leaseId);
 });
 
+test('exact disposed lease recovery advances a dead failed-cleanup owner and preserves its failure', async () => {
+  const paths = await fixture();
+  const configModule = new URL('../../../packages/config/src/index.js', import.meta.url).href;
+  const supervisorModule = new URL('../../../packages/app/src/supervisor/index.js', import.meta.url).href;
+  const script = `
+    import { resolveRuntimePaths } from ${JSON.stringify(configModule)};
+    import { runSupervisorStartup } from ${JSON.stringify(supervisorModule)};
+    const paths = await resolveRuntimePaths({ controlRoot: ${JSON.stringify(paths.controlRoot)}, workspace: ${JSON.stringify(paths.workspaceCwd)} });
+    const cleanupFailure = 'execution ended before stop control could start';
+    const startup = await runSupervisorStartup(paths, [
+      {
+        name: 'fixture-runtime',
+        ownerId: 'humanagent.runtime.ui',
+        start: async () => {},
+        dispose: async () => { throw new Error(cleanupFailure); },
+      },
+    ], {
+      lease: {
+        ownerId: 'humanagent.app.serve',
+        startup: {
+          launcherPath: process.execPath,
+          cwd: ${JSON.stringify(paths.workspaceCwd)},
+          args: [],
+          source: { entryPath: process.execPath, packageVersion: '0.0.0-test' },
+        },
+      },
+    });
+    const receipt = await startup.dispose();
+    console.log(JSON.stringify({
+      pid: process.pid,
+      leaseId: receipt.lease.leaseId,
+      generation: receipt.lease.generation,
+    }));
+  `;
+  const child = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    stdio: 'pipe',
+  }).trim().split('\n').at(-1)!) as {
+    readonly pid: number;
+    readonly leaseId: string;
+    readonly generation: number;
+  };
+  const failed = await readDaemonLease(paths);
+  assert.equal(failed?.leaseId, child.leaseId);
+  assert.equal(failed?.generation, child.generation);
+  assert.ok(failed?.disposedAt);
+  assert.equal(failed?.failure?.errorCode, 'supervisor-dispose.cleanup-failed');
+  assert.equal(processIsAliveForTest(child.pid), false);
+
+  let prepared = 0;
+  await assert.rejects(() => runSupervisorServeStartup(paths, () => {
+    prepared += 1;
+    return [];
+  }), (error: any) => error.code === 'daemon-takeover.previous-close-unverified');
+  await assert.rejects(() => runSupervisorServeStartup(paths, () => {
+    prepared += 1;
+    return [];
+  }, { recoverDisposedLeaseId: 'different-lease' }), (error: any) => {
+    assert.equal(error.code, 'daemon-recovery.lease-mismatch');
+    return true;
+  });
+  assert.equal(prepared, 0);
+  assert.equal((await readDaemonLease(paths))?.leaseId, child.leaseId);
+  await assert.rejects(() => runSupervisorServeStartup(paths, () => [], {
+    recoverDisposedLeaseId: child.leaseId,
+    restartRequest: 'restart-in-same-invocation',
+  }), (error: any) => {
+    assert.equal(error.code, 'daemon-recovery.option-conflict');
+    return true;
+  });
+
+  const recovered = await runSupervisorServeStartup(paths, async () => {
+    prepared += 1;
+    return [
+      {
+        name: 'fixture-serve',
+        ownerId: 'humanagent.app.serve',
+        start: async () => {},
+      },
+    ];
+  }, { startup: serveStartup(paths), recoverDisposedLeaseId: child.leaseId });
+  assert.equal(recovered.status, 'started');
+  if (recovered.status !== 'started') return;
+  assert.equal(prepared, 1);
+  assert.equal(recovered.startup.lease.record.generation, child.generation + 1);
+  assert.equal(recovered.startup.lease.record.disposedAt, undefined);
+  assert.equal(recovered.startup.lease.record.failure, undefined);
+  assert.equal(recovered.startup.lease.record.takeover?.previousLeaseId, child.leaseId);
+  assert.equal(recovered.startup.lease.record.takeover?.termination, 'already-dead');
+  assert.deepEqual(recovered.startup.lease.record.takeover?.previousFailure, failed?.failure);
+  assert.equal(recovered.startup.lease.record.terminations?.find((entry) =>
+    entry.previousLeaseId === child.leaseId)?.termination, 'already-dead');
+  await recovered.startup.dispose();
+});
+
+test('exact disposed lease recovery refuses a still-live recorded owner', async () => {
+  const paths = await fixture();
+  const startup = await runSupervisorStartup(paths, [
+    {
+      name: 'fixture-runtime',
+      ownerId: 'humanagent.runtime.ui',
+      start: async () => {},
+      dispose: async () => { throw new Error('execution ended before stop control could start'); },
+    },
+  ], { lease: { ownerId: 'humanagent.app.serve', startup: serveStartup(paths) } });
+  const receipt = await startup.dispose();
+
+  let prepared = 0;
+  await assert.rejects(() => runSupervisorServeStartup(paths, () => {
+    prepared += 1;
+    return [];
+  }, { recoverDisposedLeaseId: receipt.lease.leaseId }), (error: any) => {
+    assert.equal(error.code, 'daemon-recovery.owner-alive');
+    return true;
+  });
+  assert.equal(prepared, 0);
+  assert.equal((await readDaemonLease(paths))?.leaseId, receipt.lease.leaseId);
+});
+
 test('startup dispose remains retryable when lease release fails', async () => {
   const paths = await fixture();
   const startup = await runSupervisorStartup(paths, []);

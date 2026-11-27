@@ -11,6 +11,7 @@ import {
   createProviderExplicitBrainInterpreter,
   parseInterpreterOutput,
   type ExplicitBrainInputInterpreter,
+  type ExplicitBrainRequestCandidate,
 } from '../../packages/app/src/explicit-brain-runtime.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import {
@@ -52,8 +53,96 @@ import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 
-const parentFixtureRoot = join(process.env.HUMANAGENT_TEST_ROOT ?? '/Users/fanzhang/.humanagent/test-fixtures/provider-parent-close-fact-20261016', `app-${randomUUID()}`);
+const parentFixtureRoot = join(process.env.HUMANAGENT_TEST_ROOT ?? '/Volumes/extension/playground/humanagent/alex-conversation-scope-20261123/.tmp-test-fixtures', `app-${randomUUID()}`);
 const parentEvidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(parentFixtureRoot, 'assets')));
+
+// Failure basis: service candidates were absent from the model contract and a
+// retry restored only taskCandidates. Impact: lost or changed continuation
+// targets after checkpoint interruption. Cost: one recorded turn per relation,
+// no business operations, plus one cold Journal read with drifted live history.
+for (const relation of [{ kind: 'new' }, { kind: 'continue', candidateId: 'original-open' }] as const) {
+  test(`model request relation wiring preserves ${relation.kind} through C07 and cold replay`, async () => {
+    const deps = parentDependencies();
+    const leaseRoot = join(parentFixtureRoot, `relation-control-${randomUUID()}`);
+    const paths = await resolveRuntimePaths({ controlRoot: leaseRoot, workspace: process.cwd() });
+    await ensureControlLayout(paths);
+    const lease = await acquireDaemonLease(paths);
+    try {
+    const binding: ProviderBinding = {
+      bindingId: 'relation-wire', providerId: 'recorded', protocol: 'responses',
+      endpointRef: 'http://recorded.test', modelRef: 'relation-wire',
+      configDigest: 'test:relation', capabilityDigest: 'test:relation',
+    };
+    const requestCandidates: readonly ExplicitBrainRequestCandidate[] = [
+      { candidateId: 'preceding-settled', candidateKind: 'previous', interactionId: 'previous',
+        state: 'settled', summary: '同一个完整审计请求已完成', taskId: 'settled-task' },
+      { candidateId: 'original-open', candidateKind: 'historical', interactionId: 'original',
+        state: 'awaiting-clarification', summary: '原始只读审计尚未交付',
+        openClarification: { question: '继续原始交付吗？', options: ['继续', '取消'] } },
+    ];
+    const request = {
+      interactionId: `relation-${relation.kind}`, inputRevision: 1, sourceRef: 'test:relation',
+      rawInput: relation.kind === 'new' ? '请再次完整执行审计' : '继续最初那个还没有交付的审计',
+      clarifications: [], taskCandidates: [], requestCandidates,
+    };
+    const legacyDecision = { kind: 'answer', normalizedInput: request.rawInput, knownFacts: [],
+      decisionRefs: [], answer: '历史回答', requestRelation: relation };
+    assert.deepEqual(parseInterpreterOutput(JSON.stringify(legacyDecision), request).requestRelation, relation);
+    assert.throws(() => parseInterpreterOutput(JSON.stringify({ ...legacyDecision,
+      requestRelation: { ...relation, scope: 'model-selected-scope' } }), request), /request relation/);
+    let generations = 0;
+    const port = new RecordedParentPort({ binding, stepDelayMs: 0, replay: [], respond: async (wire) => {
+      generations++;
+      const serialized = JSON.stringify(wire.input);
+      assert.ok(serialized.includes(JSON.stringify(requestCandidates).replaceAll('"', '\\"')),
+        'the model receives the exact bounded previous/historical candidate snapshot');
+      assert.match(wire.instructions, /repeated complete request after the old task has settled is a new execution/);
+      assert.match(wire.instructions, /continue delivery of the original open request/);
+      const endTool = wire.tools.find((tool: any) => tool.name === 'humanagent_turn_end');
+      assert.deepEqual(endTool.parameters.properties.decision.properties.requestRelation.oneOf.map((entry: any) => entry.required),
+        [['kind'], ['kind', 'candidateId']]);
+      assert.ok(endTool.parameters.properties.decision.properties.requestRelation.oneOf.every((entry: any) => entry.additionalProperties === false));
+      return [{ type: 'response.output_text.done', item_id: 'relation-decision', text: JSON.stringify({
+        kind: 'requirement', normalizedInput: request.rawInput, knownFacts: [], decisionRefs: [],
+        requestRelation: relation,
+        proposal: { revision: 1, intent: 'create', title: '审计', objective: request.rawInput,
+          deliverable: '审计结果', deliveryConditions: ['结果可读'], evidenceRefs: [], blockingGaps: [] },
+      }) }];
+    } });
+    const options = { ...deps, binding, port, lease, templateRoot: join(process.cwd(), 'packages/agent-templates/templates'),
+      prepareAgentProvider: async () => ({ roleId: 'interaction' as const, source: 'http' as const, binding, port,
+        provider: { source: 'http' as const, provider: 'http' as const, binding: binding.bindingId, protocol: 'responses' as const,
+          model: binding.modelRef, route: 'recorded', baseUrl: binding.endpointRef } }),
+      clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('no business work'); }, turnHelperJournal: deps.helperJournal };
+    const interrupted = createProviderExplicitBrainInterpreter({ ...options,
+      checkpointJournal: { ...deps.checkpointJournal,
+        readSemanticCheckpointExact: deps.helperJournal.readSemanticCheckpointExact.bind(deps.helperJournal),
+        readScopeSemanticCheckpoints: deps.helperJournal.readScopeSemanticCheckpoints.bind(deps.helperJournal),
+        appendSemanticCheckpoint: async () => { throw new Error('relation checkpoint interrupted'); } } });
+    await assert.rejects(() => interrupted.interpret(request), /relation checkpoint interrupted/);
+    const opened = await deps.parentJournal.readScopeOpenedTurns(deps);
+    const before = await deps.parentJournal.readTurnSnapshot(opened[0]!.fact.turn);
+    const accepted = before.endControls?.map(entry => entry.fact).find(fact =>
+      fact.kind === 'submission' && fact.result.kind === 'accepted');
+    assert.ok(accepted && accepted.kind === 'submission' && accepted.result.kind === 'accepted');
+    if (accepted?.kind === 'submission' && accepted.result.kind === 'accepted') {
+      assert.deepEqual(accepted.result.decision.requestRelation, relation);
+    }
+    const recovered = await createProviderExplicitBrainInterpreter({ ...options, lease: undefined }).interpret({ ...request,
+      requestCandidates: [{ ...requestCandidates[0]!, state: 'changed-after-start' }] });
+    assert.equal(recovered.kind, 'requirement');
+    if (recovered.kind !== 'partial') assert.deepEqual(recovered.requestRelation, relation);
+    assert.equal(generations, 1, 'cold replay uses the accepted relation without another model generation');
+    assert.ok(await deps.helperJournal.readSemanticCheckpointExact(opened[0]!.fact.turn));
+    assert.deepEqual(await deps.parentJournal.readScopeAbandonedTurns(deps), []);
+    } finally {
+      await lease.release();
+      await rm(leaseRoot, { recursive: true, force: true });
+    }
+  });
+}
+
 function parentDependencies() {
   const journal = new JsonlOrganJournal(join(parentFixtureRoot, `${randomUUID()}.jsonl`));
   const helperJournal = new JsonlInteractionHelperJournal(journal);
@@ -2788,7 +2877,7 @@ test('provider explicit brain interpreter holds an interrupted turn with no auth
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'), port,
   });
   const nextRequest = {
-    interactionId: 'interaction-next-task', inputRevision: 1, sourceRef: 'ui:new-task',
+    interactionId: 'interaction-crashed', inputRevision: 1, sourceRef: 'ui:new-task',
     rawInput: '整理新的启动步骤', clarifications: [], taskCandidates: [],
   };
   await assert.rejects(
@@ -2865,7 +2954,7 @@ test('provider explicit brain interpreter refuses to discharge a turn owned by t
     });
     await assert.rejects(
       () => interpreter.interpret({
-        interactionId: 'interaction-live-next', inputRevision: 1, sourceRef: 'ui:live-next',
+        interactionId: 'interaction-live-stream', inputRevision: 1, sourceRef: 'ui:live-next',
         rawInput: '同时到来的新输入', clarifications: [], taskCandidates: [],
       }),
       (error: unknown) => error instanceof Error
@@ -2937,7 +3026,7 @@ test('provider explicit brain interpreter refuses to discharge a turn owned by t
         binding, templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
         lease, port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [] }),
       }).interpret({
-        interactionId: 'interaction-live-unknown-next', inputRevision: 1, sourceRef: 'ui:live-unknown-next',
+        interactionId: 'interaction-live-unknown', inputRevision: 1, sourceRef: 'ui:live-unknown-next',
         rawInput: '未知旧 owner 的新输入', clarifications: [], taskCandidates: [],
       }),
       (error: unknown) => error instanceof Error
@@ -3505,7 +3594,7 @@ test('provider explicit brain interpreter retains recovery after an interpret fa
       'failed drain and resource close cannot discharge recovery responsibility');
     // A later input must not replace the live owner's unresolved execution.
     const nextRequest = {
-      interactionId: 'interaction-after-intake-failure', inputRevision: 1, sourceRef: 'ui:after-intake-failure',
+      interactionId: 'interaction-intake-failure', inputRevision: 1, sourceRef: 'ui:after-intake-failure',
       rawInput: '4 加 4 等于几？', clarifications: [], taskCandidates: [],
     };
     await assert.rejects(() => interpreter.interpret(nextRequest), /current active lease owner/);
@@ -3576,7 +3665,7 @@ test('provider explicit brain interpreter holds an interrupted turn that dispatc
     await assert.rejects(
       () => createProviderExplicitBrainInterpreter({ ...interpreterOptions,
         organId: toolScope.organId, interactionScopeId: toolScope.interactionScopeId })
-        .interpret({ interactionId: 'interaction-side-effect-next', inputRevision: 1, sourceRef: 'ui:side-effect-next',
+        .interpret({ interactionId: 'interaction-side-effect-tool', inputRevision: 1, sourceRef: 'ui:side-effect-next',
           rawInput: '写文件后的新输入', clarifications: [], taskCandidates: [] }),
       (error: unknown) => error instanceof Error
         && error.message.includes('exact prior input')
@@ -3621,7 +3710,7 @@ test('provider explicit brain interpreter holds an interrupted turn that dispatc
     await assert.rejects(
       () => createProviderExplicitBrainInterpreter({ ...interpreterOptions,
         organId: helperScope.organId, interactionScopeId: helperScope.interactionScopeId })
-        .interpret({ interactionId: 'interaction-side-effect-helper-next', inputRevision: 1, sourceRef: 'ui:side-effect-helper-next',
+        .interpret({ interactionId: 'interaction-side-effect-helper', inputRevision: 1, sourceRef: 'ui:side-effect-helper-next',
           rawInput: 'helper 后的新输入', clarifications: [], taskCandidates: [] }),
       (error: unknown) => error instanceof Error
         && error.message.includes('exact prior input')
@@ -3657,7 +3746,7 @@ test('provider explicit brain interpreter holds an interrupted turn that dispatc
         { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
       ] })) });
     const served = await reasoningInterpreter.interpret({
-      interactionId: 'interaction-side-effect-reasoning-next', inputRevision: 1,
+      interactionId: 'interaction-side-effect-reasoning', inputRevision: 1,
       sourceRef: 'ui:side-effect-reasoning-next', rawInput: '崩溃后仍可服务',
       clarifications: [], taskCandidates: [],
     });
@@ -3811,7 +3900,7 @@ test('provider explicit brain interpreter closes the dead continued epoch of a r
         }) },
         { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
       ] })) }).interpret({
-        interactionId: 'interaction-reconciled-dead-epoch-next', inputRevision: 1,
+        interactionId: 'interaction-reconciled-dead-epoch', inputRevision: 1,
         sourceRef: 'ui:reconciled-dead-epoch-next', rawInput: 'reconcile 之后的新输入',
         clarifications: [], taskCandidates: [],
       });
@@ -3980,7 +4069,7 @@ test('provider explicit brain interpreter never closes the epoch a concurrent re
       ] }),
     });
     const dischargeOutcome = dischargeInterpreter.interpret({
-      ...originalRequest, interactionId: 'interaction-guard-epoch-race-next',
+      ...originalRequest,
       sourceRef: 'ui:guard-epoch-race-next', rawInput: '竞态期间到达的新输入',
     }).then(
       (value) => ({ ok: true as const, value }),
@@ -4143,7 +4232,7 @@ test('provider explicit brain interpreter discharges a turn whose committed owne
         }) },
         { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
       ] })) }).interpret({
-        interactionId: 'interaction-stranded-generation-next', inputRevision: 1,
+        interactionId: 'interaction-stranded-generation', inputRevision: 1,
         sourceRef: 'ui:stranded-generation-next', rawInput: '两代之后的新输入',
         clarifications: [], taskCandidates: [],
       });
@@ -4180,7 +4269,7 @@ test('provider explicit brain interpreter discharges a turn whose committed owne
       () => createProviderExplicitBrainInterpreter({ ...interpreterOptions,
         organId: evictedScope.organId, interactionScopeId: evictedScope.interactionScopeId, lease,
         port: new RecordedParentPort({ binding, evidence, stepDelayMs: 0, replay: [] }) }).interpret({
-          interactionId: 'interaction-stranded-evicted-next', inputRevision: 1,
+          interactionId: 'interaction-stranded-evicted', inputRevision: 1,
           sourceRef: 'ui:stranded-evicted-next', rawInput: '窗口之外的新输入',
           clarifications: [], taskCandidates: [],
         }),

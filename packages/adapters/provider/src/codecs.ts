@@ -313,6 +313,7 @@ function businessText(
 }
 
 const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
+  ['workspace.inventory', 'workspace_inventory'],
   ['task.read_result', 'task_read_result'],
   ['task.resume', 'task_resume'],
   ['project.snapshot', 'project_snapshot'],
@@ -334,6 +335,7 @@ const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
   ['interaction.select_skills', 'interaction_select_skills'],
 ]);
 const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
+  ['workspace_inventory', 'workspace.inventory'],
   ['task_read_result', 'task.read_result'],
   ['task_resume', 'task.resume'],
   ['project_snapshot', 'project.snapshot'],

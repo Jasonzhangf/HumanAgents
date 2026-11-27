@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { ImmutableAssetStore, evidenceReference } from '../../packages/adapters/filesystem/src/index.js';
@@ -822,7 +822,7 @@ test('Responses file.read executes through Hand and returns actual bound-workspa
   }
 });
 
-test('every provider tool report reads back from its descriptor alone, so a restarted store still serves file.read', async () => {
+test('provider file and inventory reports read back from their descriptors after store restart', async () => {
   const root = await mkdtemp(join(process.cwd(), 'tmp-provider-tool-report-'));
   const workspaceRoot = join(root, 'workspace');
   await mkdir(workspaceRoot, { recursive: true });
@@ -836,7 +836,7 @@ test('every provider tool report reads back from its descriptor alone, so a rest
     parentScope: providerExecutionScope,
     inputRef: 'artifact://input/app-gateway',
   });
-  const first = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'report-project', artifactRoot, admission });
+  const first = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'report-project', artifactRoot, admission, readonlyInventoryRoot: await realpath(workspaceRoot) });
   try {
     const run = (toolId: string, arguments_: BusinessPayload, callId: string) => first.executor.execute({
       execution: { runtimeId: 'runtime-tool-report', taskId: task, operationId: operation, executionEpoch: 1 },
@@ -847,6 +847,14 @@ test('every provider tool report reads back from its descriptor alone, so a rest
     });
     const read = await run('file.read', { path: 'README.md' }, 'call-report-read');
     const search = await run('file.search', { path: '.', query: 'REPORT_MARKER', queryKind: 'literal' }, 'call-report-search');
+    // Confirmed defect: inventory returned no descriptor/outputRefs/evidence.
+    // The public executor plus cold report reader catches a nonpersisted report.
+    // Cost: one scan of the existing tiny fixture; no external repository access.
+    const inventory = await run('workspace.inventory', {}, 'call-report-inventory');
+    assert.equal(inventory.status, 'succeeded');
+    if (!inventory.outputRef || !inventory.outputDigest) throw new Error('inventory report descriptor missing');
+    assert.deepEqual(inventory.outputRefs, [inventory.outputRef]);
+    assert.equal(inventory.evidenceRefs.length > 0, true);
     const readRef = read.outputRef;
     const readDigest = read.outputDigest;
     const searchRef = search.outputRef;
@@ -860,6 +868,10 @@ test('every provider tool report reads back from its descriptor alone, so a rest
     // runtime can still serve the task-scoped tool-output route for file.read
     // exactly as it does for file.search.
     const restarted = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'report-project', artifactRoot });
+    const inventoryReport = await restarted.toolOutputs.readReport({ outputRef: inventory.outputRef, outputDigest: inventory.outputDigest });
+    assert.deepEqual(inventoryReport, JSON.parse(inventory.output));
+    assert.equal((inventoryReport as { workspaceRoot: string }).workspaceRoot, await realpath(workspaceRoot));
+    await assert.rejects(() => run('workspace.inventory', { path: '/' }, 'call-report-inventory-invalid'), /accepts no arguments/);
     const readReport = await restarted.toolOutputs.readReport({ outputRef: readRef, outputDigest: readDigest });
     assert.match(JSON.stringify(readReport), /REPORT_MARKER/);
     const searchReport = await restarted.toolOutputs.readReport({ outputRef: searchRef, outputDigest: searchDigest });

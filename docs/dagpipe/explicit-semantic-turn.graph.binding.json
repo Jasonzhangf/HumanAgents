@@ -31,6 +31,12 @@
       "implementationStatus": "pending-contract-and-runtime-validation",
       "designNote": "显式产品解释器不广告也不执行 dispatch_helper/accept_helper，不启动新 helper；旧 helper 的 dispatch-accepted/returned/owner-accepted 事实仍由既有 Journal 精确读取与恢复，返回结论不自动采纳。Requirement 结果把独立 title、完整 normalizedInput 与可选 taskFlow 交给既有 revision/envelope 保存；answer、clarification、status-query 不带任务分类。新协议 outcome 由 explicit-turn-end typed 结果决定：accepted 才获得 checkpoint 资格；第三次无效格式输出 typed partial，且不采纳错误 requirement。"
     },
+    "validate_request_relation": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "implementationStatus": "pending-c07-relation-contract-and-service-validation",
+      "designNote": "只把当前 service 从 scope 已接收 ExplicitIntakeState 构造的候选交给 route；模型只返回不透明候选引用和关系种类。service 按原 interactionId/inputRevision 解析，并复核目标 state、draft revision、Task 关联及允许动作。任何未知、跨 scope、过期或冲突引用都进入既有显式错误出口，不消费候选、不产生 Task。候选不是第二份持久收件箱。"
+    },
     "history": {
       "ownerPath": "packages/runtime/src/context/interaction-semantic-context.ts",
       "ownerRel": "packages/runtime/src/context/interaction-semantic-context.ts",

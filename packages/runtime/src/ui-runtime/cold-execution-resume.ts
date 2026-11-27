@@ -18,7 +18,8 @@ import type { RetryCycleControlRecord } from '../orchestration/retry-cycle.js';
 import type { RuntimePoolAcquireResult } from '../orchestration/runtime-pool.js';
 import type { TaskExecutionHandle } from '../orchestration/types.js';
 import { RuntimeTaskControlError, type OperationRecord, type TaskRecord,
-  type RuntimeExecutionAllocation, type RuntimeExecutionDriver,
+  type RuntimeExecutionAllocation, type RuntimeExecutionDriver, type RuntimeTaskProviderSettlementReadPort,
+  type RuntimeTaskProviderSettlementCapture,
   type RuntimeExecutionRelease, type RuntimeTaskAssembly } from './coordinator.js';
 
 export interface RuntimeColdExecutionResumeRequest {
@@ -34,6 +35,7 @@ export interface RuntimeColdExecutionFacts {
   readonly scope: ScopeRef;
   readonly segments: readonly ResumedTurnSegmentOpened[];
   readonly tail: ActiveTurnSegmentPredecessorRef;
+  readonly captures: readonly RuntimeTaskProviderSettlementCapture[];
   readonly current: ColdCurrentFacts;
   readonly durableEpochs: readonly { readonly executionEpoch: number }[];
   readonly retryCycle: RetryCycleControlRecord | null;
@@ -63,6 +65,10 @@ export type RuntimeColdTurnPreparation =
 
 /** Bound by the real App composition. None of these are public resume inputs. */
 export interface RuntimeColdExecutionProducer {
+  resolveColdExecutionResumeRequest?(input: {
+    readonly taskId: RuntimeExecutionAllocation['taskId'];
+    readonly operationId: RuntimeExecutionAllocation['operationId'];
+  }): Promise<RuntimeColdExecutionResumeRequest>;
   readColdExecutionSource(input: {
     readonly allocation: RuntimeExecutionAllocation;
     readonly request: RuntimeColdExecutionResumeRequest;
@@ -113,6 +119,7 @@ export interface ColdExecutionResumeOwner {
     taskId: RuntimeExecutionAllocation['taskId'],
     cycleId: NonNullable<ScopeRef['cycleId']>,
   ) => CheckpointJournalPort;
+  readonly nativeProviderSettlement?: RuntimeTaskProviderSettlementReadPort;
 }
 
 /** Coordinator owns the same actual lifecycle and resource transfer. */
@@ -122,6 +129,17 @@ export interface ColdExecutionLifecycleBinding {
 }
 
 const OWNER = 'humanagent.runtime.cold-execution';
+
+/** A saved predecessor is evidence only when it is the selected physical tail. */
+export function currentColdSegment(source: Pick<RuntimeColdExecutionFacts, 'tail' | 'captures'>): RuntimeTaskProviderSettlementCapture | null {
+  const receiptRef = source.tail.recoveryAssetsReceiptRef;
+  if (receiptRef === undefined) return null;
+  return source.captures.find((capture) =>
+    capture.source.receipt.commitIdentity === receiptRef
+    && (capture.version === 1
+      ? capture.source.receipt.turnId === source.tail.segmentId
+      : capture.source.receipt.segmentId === source.tail.segmentId)) ?? null;
+}
 function hold(code: string, message: string): never {
   throw new RuntimeTaskControlError(code, OWNER, message,
     'resolve the original owner binding and retain the durable recovery responsibility');
@@ -194,6 +212,8 @@ export async function resumeColdExecution(
   if (!producer) hold('cold-execution.producer-unbound',
     'the actual source, grant, incarnation config, original turn recovery and native v2 composition are not bound');
   const source = await producer.readColdExecutionSource({ allocation, request });
+  const currentExecution = source.segments.at(-1)?.binding.execution
+    ?? (source.initial.kind === 'captured' ? source.initial.body.binding.execution : source.initial.binding.execution);
   const initial = source.initial.kind === 'captured'
     ? source.initial.body.binding
     : source.initial.binding;
@@ -236,13 +256,19 @@ export async function resumeColdExecution(
   ) {
     const ledger = owner.effectLedgerFor(taskId, source.scope.cycleId);
     const checkpointStore = owner.checkpointStoreFor(taskId, source.scope.cycleId);
+    const nativeSettlement = await owner.nativeProviderSettlement?.read({
+      taskId,
+      scope: source.scope,
+      turnId: request.businessTurnId,
+      currentSegment: currentColdSegment(source),
+    });
     const recoveryDecision = await evaluateAndPersistTurnRecovery({
       ledger,
       checkpointStore,
       scope: source.scope,
       turnId: request.businessTurnId,
       directiveRevision: allocation.directiveRevision,
-      executionEpoch: allocation.executionEpoch,
+      executionEpoch: currentExecution.executionEpoch,
       recoveryStateRef: {
         evidenceId: id('evidence', `cold-recovery-${operationId.value}`),
         kind: 'operation',
@@ -250,6 +276,9 @@ export async function resumeColdExecution(
         locator: `operation/${operationId.value}/cold-recovery`,
         scope: source.scope,
       },
+      ...(owner.nativeProviderSettlement === undefined ? {} : {
+        providerSettlements: nativeSettlement?.state === 'verified' ? nativeSettlement.receipts : [],
+      }),
     });
     if (recoveryDecision.checkpoint) {
       record.checkpoint = recoveryDecision.checkpoint.checkpoint;

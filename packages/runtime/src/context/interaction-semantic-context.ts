@@ -321,9 +321,14 @@ function sameInteractionTurnIdentity(
  * History may cross interactionId and inputRevision inside the same organ and
  * interactionScopeId; the current turn itself is excluded, so a retry of the
  * same identity does not read its own partial history back.
+ * Independent new interactions may opt to omit unrelated unclosed turns. Their
+ * recovery responsibility stays with the original path; committed checkpoints
+ * still enter the startup snapshot. Same-interaction gaps remain errors.
  */
 export async function prepareScopeSemanticHistory(input: {
   readonly activeTurn: InteractionTurnIdentity;
+  /** Independent interaction paths consume the committed checkpoint snapshot captured at start. */
+  readonly ignoreUnclosedTurns?: boolean;
   readonly parentJournal: Pick<
     InteractionParentOpenedTurnScopeReadPort,
     'readScopeOpenedTurns' | 'readScopeAbandonedTurns' | 'readScopeParseFailures' | 'readScopeExecutionFailures'
@@ -359,6 +364,7 @@ export async function prepareScopeSemanticHistory(input: {
     const entry = committed.find((candidate) =>
       sameInteractionTurnIdentity(candidate.checkpoint, opened.fact.turn));
     if (entry === undefined) {
+      if (input.ignoreUnclosedTurns === true && opened.fact.turn.interactionId !== input.activeTurn.interactionId) continue;
       // A discharged interrupted turn left no output and no history. It is
       // already closed by its own durable fact, so it neither blocks nor feeds
       // the next turn.

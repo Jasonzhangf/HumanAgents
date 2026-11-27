@@ -217,6 +217,17 @@ export {
   UiRuntimeApiError,
   UiRuntimeService,
 } from './ui-runtime/index.js';
+export {
+  ScopedConversationBackend,
+  ScopedConversationBackendError,
+  scopedSessionFromUiRuntime,
+} from './conversation-scope-backend.js';
+export type {
+  ScopedConversationResponse,
+  ScopedConversationSession,
+  ScopedConversationSessionFactory,
+  ScopedMainTopicProjection,
+} from './conversation-scope-backend.js';
 export { AccessControlError, AccessControlService } from './ui-runtime/access-control.js';
 export {
   createJsonlConditionalReentrySubmissionPort,

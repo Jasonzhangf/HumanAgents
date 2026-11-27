@@ -2353,6 +2353,25 @@ test('canonical standard turn end uses summary.result.text and rejects the retir
 test('explicit turn end keeps simple and complex intake separate and exposes a typed partial result', () => {
   const simple = validExplicitTurnEndInput();
   assert.doesNotThrow(() => validateExplicitTurnEndInput(simple));
+  assert.doesNotThrow(() => validateExplicitTurnEndInput(validExplicitTurnEndInput({
+    decision: { ...simple.decision, requestRelation: { kind: 'new' } },
+  })));
+  assert.doesNotThrow(() => validateExplicitTurnEndInput(validExplicitTurnEndInput({
+    decision: { ...simple.decision, requestRelation: { kind: 'continue', candidateId: 'request-a' } },
+  })));
+  for (const requestRelation of [
+    { kind: 'new', scope: 'project-a' },
+    { kind: 'continue', candidateId: 'request-a', revision: 2 },
+    { kind: 'continue', candidateId: ' ' },
+  ]) {
+    assert.match(
+      (captureContractError(() => validateExplicitTurnEndInput({
+        ...simple,
+        decision: { ...simple.decision, requestRelation },
+      } as unknown as ExplicitTurnEndInput)) as Error).message,
+      /explicit-turn-end\.decision\.request-relation/,
+    );
+  }
   // Accepted receipts persisted before the index field was introduced remain readable.
   assert.doesNotThrow(() => validateExplicitTurnEndAcceptedResult({
     kind: 'accepted', interactionId: 'interaction-a', inputRevision: 1,

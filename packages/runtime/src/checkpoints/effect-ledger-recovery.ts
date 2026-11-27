@@ -518,13 +518,14 @@ export async function evaluateAndPersistTurnRecovery(
     const entries = ledgerRecords.map((item) => item.entry);
     const providerSettlements = input.providerSettlements ?? [];
     const latestSettle = providerSettlements.at(-1);
-    const priorFact =
-      latestSettle === undefined
+    const priorCandidate =
+      input.providerSettlements === undefined
         ? await input.ledger.readLatestTurnSegmentRecoveryFact({
             scope: input.scope,
             turnId: input.turnId,
           })
         : null;
+    const priorFact = priorCandidate?.executionEpoch === input.executionEpoch ? priorCandidate : null;
     const resolvedSettleReceipt: ProviderSettleReceipt = latestSettle
       ? {
           providerRequestId: latestSettle.providerRequestId,
@@ -543,6 +544,7 @@ export async function evaluateAndPersistTurnRecovery(
     const digestToken = sha256Hex(
       canonicalJsonStringify({
         turnId: input.turnId,
+        executionEpoch: input.executionEpoch,
         outcome: recoveryOutcome,
         settleState: resolvedSettleReceipt.state,
         providerRequestId: resolvedSettleReceipt.providerRequestId,

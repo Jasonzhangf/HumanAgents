@@ -9,6 +9,7 @@ import type {
   ExecutionPolicyDefinition,
   ExplicitInteractionToolActivity,
   ExplicitTurnPartialResult,
+  ExplicitTurnEndRequestRelation,
   InteractionRequestKind,
   ProductMessageActor,
   RequirementIntent,
@@ -186,6 +187,7 @@ export interface ExplicitInteractionStep extends ExplicitInteractionStepInput {
 
 export interface ExplicitInteractionSnapshot {
   readonly interactionId: InteractionId;
+  readonly inputRevision: number;
   readonly requestNumber?: number;
   readonly state: ExplicitInteractionState;
   readonly sourceRef: string;
@@ -209,7 +211,19 @@ export interface ExplicitInteractionSnapshot {
   readonly confirmation?: ConfirmedRequirementDraft;
   readonly steps: readonly ExplicitInteractionStep[];
   readonly history: readonly ExplicitInteractionState[];
+  readonly requestRelation?: ExplicitInteractionRequestRelation;
 }
+
+export type ExplicitInteractionRequestRelation =
+  | { readonly kind: 'new' }
+  | {
+      readonly kind: 'continue';
+      readonly candidateId: string;
+      readonly candidateKind: 'previous' | 'historical';
+      readonly targetInteractionId: InteractionId;
+      readonly taskId?: string;
+      readonly requestId?: string;
+    };
 
 export interface ClarificationExchange {
   readonly question: string;
@@ -293,6 +307,7 @@ interface ExplicitInteractionRecordState {
   readonly confirmation?: ConfirmedRequirementDraft;
   readonly steps: readonly ExplicitInteractionStep[];
   readonly history: readonly ExplicitInteractionState[];
+  readonly requestRelation?: ExplicitInteractionRequestRelation;
 }
 
 interface InteractionRecord {
@@ -323,6 +338,7 @@ interface InteractionRecord {
   confirmation?: ConfirmedRequirementDraft;
   steps: ExplicitInteractionStep[];
   readonly history: ExplicitInteractionState[];
+  requestRelation?: ExplicitInteractionRequestRelation;
 }
 
 interface ExplicitInteractionIdempotency {
@@ -588,6 +604,7 @@ export class ExplicitIntake {
     const interaction = this.requireInteraction(input);
     return structuredClone({
       interactionId: interaction.interactionId,
+      inputRevision: interaction.inputRevision,
       requestNumber: interaction.requestNumber,
       state: interaction.state,
       sourceRef: interaction.sourceRef,
@@ -611,7 +628,42 @@ export class ExplicitIntake {
       confirmation: interaction.confirmation,
       steps: interaction.steps,
       history: interaction.history,
+      requestRelation: interaction.requestRelation,
     });
+  }
+
+  recordRequestRelation(
+    input: InteractionId,
+    choice: Extract<ExplicitTurnEndRequestRelation, { readonly kind: 'continue' }>,
+    target: {
+      readonly candidateKind: 'previous' | 'historical';
+      readonly targetInteractionId: InteractionId;
+      readonly taskId?: string;
+      readonly requestId?: string;
+    },
+  ): ExplicitInteractionRequestRelation {
+    const interaction = this.requireState(input, ['matching'], 'record request relation');
+    const relation: ExplicitInteractionRequestRelation = {
+      kind: 'continue',
+      candidateId: choice.candidateId,
+      candidateKind: target.candidateKind,
+      targetInteractionId: target.targetInteractionId,
+      ...(target.taskId === undefined ? {} : { taskId: target.taskId }),
+      ...(target.requestId === undefined ? {} : { requestId: target.requestId }),
+    };
+    this.persistMutation(() => {
+      interaction.requestRelation = relation;
+    });
+    return relation;
+  }
+
+  recordNewRequestRelation(input: InteractionId): ExplicitInteractionRequestRelation {
+    const interaction = this.requireState(input, ['matching'], 'record request relation');
+    const relation: ExplicitInteractionRequestRelation = { kind: 'new' };
+    this.persistMutation(() => {
+      interaction.requestRelation = relation;
+    });
+    return relation;
   }
 
   /**

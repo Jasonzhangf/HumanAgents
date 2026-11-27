@@ -13,7 +13,9 @@ declare module 'node:http' {
     write(chunk: string): boolean;
     end(chunk?: string | Uint8Array, callback?: () => void): void;
     end(callback: () => void): void;
+    readonly headersSent: boolean;
     readonly writableEnded: boolean;
+    destroy(error?: Error): void;
     once(event: 'close', listener: () => void): void;
   }
   export interface AddressInfo { readonly address: string; readonly family: string; readonly port: number; }

@@ -73,9 +73,12 @@ import { createJournalCallUsageReader } from './call-usage-journal-read.js';
 import { createJsonlRuntimeTaskCurrentStateJournal } from '../runtime-current-state-journal.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
 import { createNativeRecoveryAssets } from '../native-recovery-assets.js';
+import { createNativeProviderSettlementReader } from './native-provider-settlement.js';
 import { createFilesystemRefinedDeliveryStore } from './refined-delivery-store.js';
 import type { RuntimeExecutionAllocation } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
+export { ScopedConversationBackend, scopedSessionFromUiRuntime, type ScopedConversationSession } from '../conversation-scope-backend.js';
+import type { ScopedConversationBackend } from '../conversation-scope-backend.js';
 import {
   UiTaskGrantControl,
   TASK_EXECUTION_ACTION_ID,
@@ -110,6 +113,7 @@ import {
   RESPONSES_TODO_WRITE_TOOL,
   RESPONSES_UPDATE_GOAL_TOOL,
   RESPONSES_WEB_SEARCH_TOOL,
+  RESPONSES_WORKSPACE_INVENTORY_TOOL,
 } from '../provider-tool-execution.js';
 
 export interface RccModeConfig {
@@ -144,6 +148,12 @@ export interface UiRuntimeLaunchOptions {
   readonly portNumber?: number;
   readonly projectKey?: string;
   readonly workspaceRoot?: string;
+  /** Private adapter storage key. It never becomes the Runtime project identity. */
+  readonly providerToolStorageKey?: string;
+  /** Fixed root for provider file tools, independent of the serve project. */
+  readonly providerToolWorkspaceRoot?: string;
+  /** Fixed host-authorized root for the no-argument read-only inventory tool. */
+  readonly providerToolReadonlyInventoryRoot?: string;
   /**
    * Canonical Config-owned paths for the serve-bound project. Injected by the
    * entry that owns configuration so the read model never recomputes identity.
@@ -164,6 +174,12 @@ export interface UiRuntimeLaunchOptions {
     readonly config: RetryCycleConfigSet;
     readonly journalRoot: string;
   };
+  /**
+   * The independently scoped cold-recovery retry owner. A scoped runtime such
+   * as Alex can own a retry journal without enabling provider avoidance; the
+   * cold source still needs this port to prove the original assignment owner.
+   */
+  readonly providerRetryJournalRoot?: string;
   /**
    * Explicit override of the UI runtime execution budget for one observed
    * provider request. Absent keeps `DEFAULT_UI_EXECUTION_EVENT_BUDGET`, the
@@ -247,6 +263,31 @@ export interface UiRuntimeLaunchOptions {
    * test can drive due times without wall-clock sleeps.
    */
   readonly now?: () => Date;
+  /** Optional config-owned Alex/project conversation registry for scoped routes. */
+  readonly scopedConversationBackend?: ScopedConversationBackend;
+  /**
+   * A secondary conversation service may need the real runtime owners without
+   * owning the public listener. The default serve launch remains listening.
+   */
+  readonly listen?: boolean;
+}
+
+/** The retry owner used by the native execution composition. */
+export function nativeRetryCycleJournalPath(options: {
+  readonly runtimePaths?: Pick<RuntimePaths, 'journalRoot'>;
+  readonly providerRetryConfig?: { readonly journalRoot: string };
+  readonly providerRetryJournalRoot?: string;
+}): string | undefined {
+  // Provider avoidance writes through providerRetryConfig.journalRoot. A
+  // scoped Alex runtime has no project RuntimePaths, so that root is also the
+  // one cold recovery must read; falling back to the project UI-runtime root
+  // preserves existing launches without a retry configuration.
+  const journalRoot = options.providerRetryConfig?.journalRoot
+    ?? options.providerRetryJournalRoot
+    ?? (options.runtimePaths === undefined
+      ? undefined
+      : join(options.runtimePaths.journalRoot, 'ui-runtime'));
+  return journalRoot === undefined ? undefined : retryCycleJournalFilePath({ journalRoot });
 }
 
 function providerStateFromReadiness(readiness: ProviderReadiness): string {
@@ -309,13 +350,16 @@ const NATIVE_PROVIDER_TOOLS = [
   RESPONSES_UPDATE_GOAL_TOOL,
   RESPONSES_PRESENT_TOOL,
   RESPONSES_WEB_SEARCH_TOOL,
+  RESPONSES_WORKSPACE_INVENTORY_TOOL,
 ] as const;
 
-function nativeProviderToolsFor(webSearchProviderConfig: WebSearchBackendConfig | undefined):
-  readonly typeof NATIVE_PROVIDER_TOOLS[number][] {
-  return webSearchProviderConfig === undefined
-    ? NATIVE_PROVIDER_TOOLS.filter((tool) => tool.toolId !== RESPONSES_WEB_SEARCH_TOOL.toolId)
-    : NATIVE_PROVIDER_TOOLS;
+function nativeProviderToolsFor(
+  webSearchProviderConfig: WebSearchBackendConfig | undefined,
+  readonlyInventoryRoot?: string,
+): readonly typeof NATIVE_PROVIDER_TOOLS[number][] {
+  return NATIVE_PROVIDER_TOOLS.filter((tool) =>
+    (webSearchProviderConfig !== undefined || tool.toolId !== RESPONSES_WEB_SEARCH_TOOL.toolId)
+      && (readonlyInventoryRoot !== undefined || tool.toolId !== RESPONSES_WORKSPACE_INVENTORY_TOOL.toolId));
 }
 
 export function buildRccExecutionPort(config: RccModeConfig, evidenceRoot: string): ExecutionRuntimePort {
@@ -350,9 +394,8 @@ class InMemoryAttentionPort implements AttentionPort {
   }
 }
 
-export interface UiRuntime {
+export interface HeadlessUiRuntime {
   readonly service: UiRuntimeService;
-  readonly server: UiRuntimeServer;
   /**
    * The due-time patrol. It is absent when the runtime was started without a
    * supervisor lease; in that case no execution plan may run.
@@ -361,7 +404,13 @@ export interface UiRuntime {
   close(): Promise<void>;
 }
 
-export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<UiRuntime> {
+export interface UiRuntime extends HeadlessUiRuntime {
+  readonly server: UiRuntimeServer;
+}
+
+export function startUiRuntime(options: UiRuntimeLaunchOptions & { readonly listen: false }): Promise<HeadlessUiRuntime>;
+export function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<UiRuntime>;
+export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<UiRuntime | HeadlessUiRuntime> {
   if (!options.accessControl) {
     throw new AppLifecycleError(
       'ui-runtime.access-control.missing',
@@ -514,15 +563,20 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const effectLedgerFor = () =>
     createJsonlToolEffectLedgerJournal({ filePath: effectLedgerPath, journal: effectLedgerJournal });
   const i2Journal = createJsonlI2JournalPort({ filePath: taskControlJournalPath, journal: taskControlJournal });
+  const providerToolStorageKey = options.providerToolStorageKey ?? options.projectKey;
+  const providerToolWorkspaceRoot = options.providerToolWorkspaceRoot ?? options.workspaceRoot;
   const providerToolExecutor = options.mode === 'rcc'
     && options.binding.protocol === 'responses'
-    && options.workspaceRoot !== undefined
-    && options.projectKey !== undefined
+    && providerToolWorkspaceRoot !== undefined
+    && providerToolStorageKey !== undefined
     ? (() => {
         const built = createResponsesFileToolExecutor({
-          workspaceRoot: options.workspaceRoot,
-          projectKey: options.projectKey,
+          workspaceRoot: providerToolWorkspaceRoot,
+          projectKey: providerToolStorageKey,
           artifactRoot: join(options.evidenceRoot, 'provider-tools'),
+          ...(options.providerToolReadonlyInventoryRoot === undefined ? {} : {
+            readonlyInventoryRoot: options.providerToolReadonlyInventoryRoot,
+          }),
           ...(options.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: options.webSearchProviderConfig }),
         });
         return { executor: built.executor, toolOutputs: built.toolOutputs };
@@ -546,13 +600,16 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   // the HTTP read already use: the control Organ Journal, the prepared
   // UI-runtime journal, and the canonical checkpoint store. It is built once,
   // before the coordinator; its callbacks only delegate to that coordinator.
-  const nativeToolScope = options.workspaceRoot === undefined || options.projectKey === undefined
+  const nativeToolScope = providerToolWorkspaceRoot === undefined || providerToolStorageKey === undefined
     ? undefined
     : {
-        workspaceRoot: options.workspaceRoot,
-        projectKey: options.projectKey,
+        workspaceRoot: providerToolWorkspaceRoot,
+        projectKey: providerToolStorageKey,
         artifactRoot: join(options.evidenceRoot, 'provider-tools'),
-        tools: nativeProviderToolsFor(options.webSearchProviderConfig),
+        tools: nativeProviderToolsFor(options.webSearchProviderConfig, options.providerToolReadonlyInventoryRoot),
+        ...(options.providerToolReadonlyInventoryRoot === undefined ? {} : {
+          readonlyInventoryRoot: options.providerToolReadonlyInventoryRoot,
+        }),
         ...(options.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: options.webSearchProviderConfig }),
       };
   const fakeAdmission = options.mode === 'fake'
@@ -618,9 +675,9 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           closedTurnPlannerPool: (taskId) => coordinator.closedTurnPlannerPool(taskId),
           taskIdentity,
           i2Journal,
-          ...(options.runtimePaths === undefined ? {} : {
+          ...(nativeRetryCycleJournalPath(options) === undefined ? {} : {
             retryJournal: createJsonlRetryCycleJournalPort({
-              filePath: retryCycleJournalFilePath({ journalRoot: join(options.runtimePaths.journalRoot, 'ui-runtime') }),
+              filePath: nativeRetryCycleJournalPath(options)!,
             }),
           }),
         });
@@ -631,6 +688,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           closeRetainedTransientRetryProvider: composition.closeRetainedTransientRetryProvider,
           inspectionStop: composition.inspectionStop,
           coldExecution: {
+            resolveColdExecutionResumeRequest: composition.resolveColdExecutionResumeRequest,
             readColdExecutionSource: composition.readColdExecutionSource,
             admitSegment: composition.admitSegment,
             readIncarnationBinding: composition.readIncarnationBinding,
@@ -714,7 +772,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.executionBudget === undefined ? {} : { executionBudget: options.executionBudget }),
     childToolOutputStore: createProviderToolOutputStore(options.evidenceRoot),
     ...(providerToolExecutor === undefined ? {} : {
-      providerTools: [...nativeProviderToolsFor(options.webSearchProviderConfig)],
+      providerTools: [...nativeProviderToolsFor(options.webSearchProviderConfig, options.providerToolReadonlyInventoryRoot)],
       providerToolExecutor: providerToolExecutor.executor,
       toolOutputStore: providerToolExecutor.toolOutputs,
       providerToolRoundLimit: PROVIDER_TOOL_ROUND_LIMIT,
@@ -729,6 +787,10 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         turn: { ...input, organId: options.organId, interactionScopeId },
       }),
     },
+    nativeProviderSettlement: createNativeProviderSettlementReader({
+      journal: taskControlJournal,
+      now: executionNow,
+    }),
     callUsage: createJournalCallUsageReader({
       organId: options.organId,
       interactionScopeId,
@@ -794,40 +856,43 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     },
     stopTask: (taskId) => runtimeService.stop(taskId),
   });
-  const server = await startUiRuntimeServer({
+  const server = options.listen === false
+    ? undefined
+    : await startUiRuntimeServer({
+        service: runtimeService,
+        accessControl: options.accessControl,
+        productRoot: options.productRoot,
+        uiRoot: options.uiRoot,
+        ...(options.scopedConversationBackend === undefined ? {} : { scopedConversationBackend: options.scopedConversationBackend }),
+        host: options.host,
+        port: options.portNumber,
+        taskControl,
+        ...(displayPreference === undefined ? {} : { displayPreference }),
+        ...(workspaceManagement === undefined ? {} : { workspaceManagement }),
+        ...(options.restart === undefined ? {} : { restart: options.restart }),
+        ...(options.identity === undefined ? {} : { identity: options.identity }),
+        schedulerStatus: async () => scheduler === undefined
+          ? {
+              state: 'blocked',
+              reason: {
+                code: 'scheduler.lease.unavailable',
+                ownerId: 'humanagent.app.scheduled-occurrence-patrol',
+                message: 'the runtime was started without a supervisor lease, so no execution plan may be patrolled',
+                nextAction: 'start the runtime through the supervisor-owned serve entry',
+              },
+            }
+          : scheduler.status(),
+      });
+  const runtime: HeadlessUiRuntime = {
     service: runtimeService,
-    accessControl: options.accessControl,
-    productRoot: options.productRoot,
-    uiRoot: options.uiRoot,
-    host: options.host,
-    port: options.portNumber,
-    taskControl,
-    ...(displayPreference === undefined ? {} : { displayPreference }),
-    ...(workspaceManagement === undefined ? {} : { workspaceManagement }),
-    ...(options.restart === undefined ? {} : { restart: options.restart }),
-    ...(options.identity === undefined ? {} : { identity: options.identity }),
-    schedulerStatus: async () => scheduler === undefined
-      ? {
-          state: 'blocked',
-          reason: {
-            code: 'scheduler.lease.unavailable',
-            ownerId: 'humanagent.app.scheduled-occurrence-patrol',
-            message: 'the runtime was started without a supervisor lease, so no execution plan may be patrolled',
-            nextAction: 'start the runtime through the supervisor-owned serve entry',
-          },
-        }
-      : scheduler.status(),
-  });
-  return {
-    service: runtimeService,
-    server,
     ...(scheduler === undefined ? {} : { scheduler }),
     async close() {
       await scheduler?.stop();
       await runtimeService.quiesceImplicitConsumption();
       let serverCloseFailure: unknown;
       try {
-        await server.close();
+        await server?.close();
+        await options.scopedConversationBackend?.close();
       } catch (error) {
         serverCloseFailure = error;
       }
@@ -867,6 +932,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
       }
     },
   };
+  return server === undefined ? runtime : { ...runtime, server };
 }
 
 export { UiRuntimeApiError } from './errors.js';

@@ -24,6 +24,7 @@ import {
   type ProviderToolDefinition,
   STANDARD_TURN_END_WIRE_TOOL_ID,
   type ExplicitTurnEndAcceptedResult,
+  type ExplicitTurnEndRequestRelation,
   type ExplicitTurnPartialResult,
 } from '../../contracts/src/index.js';
 import {
@@ -186,6 +187,15 @@ const EXPLICIT_END_TOOL: ProviderToolDefinition = {
           normalizedInput: NONEMPTY_STRING_SCHEMA, knownFacts: STRING_LIST_SCHEMA, decisionRefs: STRING_LIST_SCHEMA,
           answer: NONEMPTY_STRING_SCHEMA, question: NONEMPTY_STRING_SCHEMA, options: STRING_LIST_SCHEMA,
           matchedTaskId: NONEMPTY_STRING_SCHEMA,
+          requestRelation: {
+            oneOf: [
+              { type: 'object', additionalProperties: false, required: ['kind'],
+                properties: { kind: { type: 'string', const: 'new' } } },
+              { type: 'object', additionalProperties: false, required: ['kind', 'candidateId'],
+                properties: { kind: { type: 'string', const: 'continue' }, candidateId: NONEMPTY_STRING_SCHEMA,
+                  action: { type: 'string', const: 'resume-dispatch' } } },
+            ],
+          },
           taskFlow: {
             type: 'object', additionalProperties: false, required: ['kind', 'definitionVersion'],
             properties: { kind: { type: 'string', enum: [...TASK_FLOW_KINDS] }, definitionVersion: { type: 'integer', const: TASK_FLOW_DEFINITION_VERSION } },
@@ -220,13 +230,28 @@ const REGISTERED_TOOL_SURFACE = [
 ].join('\n');
 
 const INTAKE_OUTPUT_PROTOCOL = [
-  '# Explicit end-tool protocol',
-  'After the required actions, call humanagent_turn_end with one decision. Text alone does not end the turn. If validation fails, correct the paired error in this turn. Three invalid submissions return a recoverable partial.',
-  'Use kind=simple for answer, status-query or clarification. Use kind=complex for requirement and include capsule with summary, goal, process, findings and nextStep. Both forms require checkpointRecord.index with action and result.',
-  'Use normalizedInput, knownFacts and decisionRefs inside decision. Provide answer for answer and status-query or question and optional options for clarification. Use decision.proposal for a requirement and the current input revision, and match the exact task for append or change.',
+  '# Explicit intake decision output',
+  'This is one intake decision, not one turn of task execution. Produce exactly one decision object for the current input and claim no task execution.',
+  'For a simple question you can answer from the supplied context, call humanagent_turn_end with kind=simple and your structured decision.',
+  'For a request that needs registered Skill guidance, call interaction.select_skills once with every relevant registered Skill ID. The tool only loads prompt guidance; it does not perform project, agent, or communication operations.',
+  'After any Skill result, call humanagent_turn_end. Do not dispatch helpers or execute business work. Text alone cannot finish this turn.',
+  'The end arguments contain kind=simple or complex, a decision object, and checkpointRecord.index with one-sentence action and result. decision.kind must be requirement, status-query, clarification, or answer. A requirement uses complex and must include capsule with summary, goal, process (string array), findings (string array), nextStep and optional detailRefs. All other decisions use simple with no capsule; the answer is its detail.',
+  'Inside decision, always include kind, normalizedInput, knownFacts (string array), and decisionRefs (string array). Add proposal, optional taskFlow and matchedTaskId for requirement; answer for status-query and answer; or question and optional options (string array) for clarification. Proposal fields belong only inside proposal.',
   'For a requirement, proposal.title is a short business title of at most 50 characters. Do not include paths, internal identifiers, or the whole request text; the full request remains in normalizedInput and objective.',
   'A new independent deliverable in the current project keeps the current main Topic and uses create. If the request needs another Topic or Project, or crosses the current project scope, ask for clarification, preserve the original interaction, task and Topic, and do not claim either new scope exists.',
-  `If supplied, decision.taskFlow.definitionVersion is the JSON integer ${TASK_FLOW_DEFINITION_VERSION}. The advertised schema governs the remaining fields.`,
+  'Put the complete decision under decision in the end tool arguments. Do not put control state, selected actions, tool intents or user-input flags in it.',
+  'Never echo the input envelope back as output fields: interactionId, inputRevision, sourceRef, rawInput, clarifications, taskCandidates, and requestCandidates are input only.',
+  'When requestCandidates is supplied, select decision.requestRelation: {"kind":"new"} for an independent request, or {"kind":"continue","candidateId":"exact supplied candidateId"} for a continuation. Add action="resume-dispatch" only when the user explicitly asks to submit the exact unchanged pending create draft of that candidate; do not use it for a historical mention, a changed scope/goal, or a mere status question. These are bounded same-scope host candidates; candidateKind=previous identifies the preceding request and candidateKind=historical identifies an older request. Select by the current user meaning and candidate state, summary and open questions. Do not infer a continuation from equal text or always select the preceding request. If the intended target is ambiguous, ask a clarification without selecting a continuation.',
+  'For an explicit request to submit an unchanged original pending draft, return decision.kind=answer with a neutral answer and requestRelation {"kind":"continue","candidateId":"exact supplied candidateId","action":"resume-dispatch"}. Do not include proposal, intent or matchedTaskId. The host submits the saved draft; never restate its content as a new proposal.',
+  'A repeated complete request after the old task has settled is a new execution when the user asks for the work again: choose requestRelation.kind=new and proposal.intent=create. An explicit request to continue delivery of the original open request must select that exact original candidate, even when it is historical and a newer request intervened. Request relation does not replace existing task matching: append/change still require matchedTaskId from taskCandidates.',
+  'Request relation selects only an opaque candidate reference. Never set actual target revision, scope, lease, epoch, grants or permissions. The host resolves the target and validates current authority. proposal.revision is only the supplied current inputRevision, never a target task revision.',
+  'The committed rawInput is the only request in this turn. Use relevant prior checkpoints to answer follow-up questions and carry forward confirmed facts, constraints, and corrections. Use taskCandidates to identify a status-query or an explicitly requested change. A historical task status alone does not authorize new work.',
+  'Submit one end decision. If its validation fails, repair the arguments in this same turn. The third valid attempt is accepted normally; three failed attempts produce a recoverable partial. Do not repeat business work.',
+  'Classify by the requested outcome, not by whether intake can execute a requested tool. A concrete request to perform work and deliver a result is a requirement; when it asks for new work, use proposal.intent=create even if taskCandidates is empty.',
+  'If rawInput is addressed to an execution runtime but still states a concrete deliverable, preserve that deliverable as a requirement. Do not ask the user to decide whether the interaction entry should execute the runtime mechanics; it does not.',
+  'Do not turn a request to perform read-only work into status-query because it names tools or because intake cannot call them. Preserve the requested work, deliverable, and constraints in normalizedInput and the requirement proposal; execution happens only in the confirmed task flow.',
+  'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
+  `For requirement, put taskFlow inside decision with definitionVersion as the JSON integer ${TASK_FLOW_DEFINITION_VERSION} (never a quoted string), and kind chosen from semantic task shape only: one-shot for one bounded deliverable; inspection for recurring check-and-report work; long-running for an open-ended goal. Omit taskFlow only when genuinely ambiguous, and clarify when that blocks a decision.`,
   'Simple end example: {"kind":"simple","decision":{"kind":"answer","normalizedInput":"hello","knownFacts":[],"decisionRefs":[],"answer":"Hello."},"checkpointRecord":{"index":{"action":"answered the question","result":"answered"}}}',
 ].join('\n\n');
 
@@ -307,6 +332,23 @@ export interface ExplicitBrainTaskCandidate {
   readonly currentInput: string;
 }
 
+export interface ExplicitBrainRequestCandidate {
+  readonly candidateId: string;
+  readonly candidateKind: 'previous' | 'historical';
+  readonly interactionId: string;
+  readonly requestNumber?: number;
+  readonly state: string;
+  readonly summary: string;
+  readonly taskId?: string;
+  readonly openClarification?: { readonly question: string; readonly options?: readonly string[] };
+  readonly openTaskInputRequest?: {
+    readonly requestId: string;
+    readonly expectedRevision: number;
+    readonly question: string;
+    readonly options?: readonly string[];
+  };
+}
+
 export interface ExplicitBrainInterpretationInput {
   readonly interactionId: string;
   readonly inputRevision: number;
@@ -318,6 +360,8 @@ export interface ExplicitBrainInterpretationInput {
     readonly answer?: string;
   }[];
   readonly taskCandidates: readonly ExplicitBrainTaskCandidate[];
+  /** Bounded same-scope candidates supplied by the service, frozen with this turn. */
+  readonly requestCandidates?: readonly ExplicitBrainRequestCandidate[];
   /** Host-bound service read authority. Never serialized into business input. */
   readonly readTaskResult?: (taskId: string) => Promise<unknown>;
   readonly readProjectSnapshot?: (members?: readonly string[]) => Promise<unknown>;
@@ -338,7 +382,7 @@ export interface ExplicitBrainInterpretationInput {
   readonly resumePartialRef?: string;
 }
 
-export type ExplicitBrainInterpretation =
+export type ExplicitBrainInterpretation = { readonly requestRelation?: ExplicitTurnEndRequestRelation } & (
   | {
       readonly kind: 'requirement';
       readonly normalizedInput: string;
@@ -372,7 +416,7 @@ export type ExplicitBrainInterpretation =
       readonly question: string;
       readonly options?: readonly string[];
       readonly decisionRefs: readonly string[];
-    };
+    });
 
 export interface ExplicitBrainInputInterpreter {
   interpret(input: ExplicitBrainInterpretationInput): Promise<ExplicitBrainInterpretation | ExplicitTurnPartialResult>;
@@ -673,6 +717,7 @@ function parseDecisionRecord(record: Record<string, unknown>, input: ExplicitBra
     normalizedInput,
     knownFacts: knownFacts as string[],
     decisionRefs: decisionRefs as string[],
+    ...parseRequestRelation(record.requestRelation),
   };
   if (kind === 'clarification') {
     if (typeof record.question !== 'string' || !record.question.trim()) {
@@ -732,6 +777,23 @@ function parseDecisionRecord(record: Record<string, unknown>, input: ExplicitBra
     proposal: taskDocument,
     structuredProposal: proposal,
   };
+}
+
+function parseRequestRelation(value: unknown): { readonly requestRelation?: ExplicitTurnEndRequestRelation } {
+  if (value === undefined) return {};
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const relation = value as Record<string, unknown>;
+    if (relation.kind === 'new' && Object.keys(relation).length === 1) {
+      return { requestRelation: { kind: 'new' } };
+    }
+    if (relation.kind === 'continue' && (Object.keys(relation).length === 2 || Object.keys(relation).length === 3)
+      && typeof relation.candidateId === 'string' && relation.candidateId.trim()
+      && (relation.action === undefined || relation.action === 'resume-dispatch')) {
+      return { requestRelation: { kind: 'continue', candidateId: relation.candidateId,
+        ...(relation.action === undefined ? {} : { action: 'resume-dispatch' as const }) } };
+    }
+  }
+  throw new ExplicitBrainOperationalToolError('unsupported-tool', 'request relation requires new or continue with only an exact candidateId');
 }
 
 /** New calls consume only the runtime's accepted structured decision. The
@@ -892,7 +954,7 @@ export function createProviderExplicitBrainInterpreter(input: {
     throw parseError;
   };
   // Retain the actual live owners only. Scoped Journal reads select every retry.
-  let retained: {
+  type RetainedProviderTurn = {
     readonly owner: InteractionParentTurnRawOwner;
     readonly helpers: ExplicitTurnHelperSession;
     readonly reconciled: boolean;
@@ -910,8 +972,11 @@ export function createProviderExplicitBrainInterpreter(input: {
           readonly receipt: ProviderCloseResult;
         }
       | undefined;
-  } | undefined;
-  const finish = async (live: NonNullable<typeof retained>, request: ExplicitBrainInterpretationInput) => {
+  };
+  const retained = new Map<string, RetainedProviderTurn>();
+  const requestKey = (request: Pick<ExplicitBrainInterpretationInput, 'interactionId' | 'inputRevision'>) =>
+    `${request.interactionId}\u0000${request.inputRevision}`;
+  const finish = async (live: RetainedProviderTurn, request: ExplicitBrainInterpretationInput) => {
     if (live.owned !== undefined) {
       const receipt = await closeAgentProvider(live.owned, { returnReceipt: true });
       live.closed = { composition: live.owned, receipt };
@@ -928,7 +993,7 @@ export function createProviderExplicitBrainInterpreter(input: {
     }
     const endResult = await readExplicitEndOutcome({ journal: input.parentJournal, turn: live.owner.turn });
     if (endResult?.kind === 'partial') {
-      retained = undefined;
+      retained.delete(requestKey(request));
       return endResult;
     }
     const finalParentOutput = live.reconciled
@@ -983,7 +1048,7 @@ export function createProviderExplicitBrainInterpreter(input: {
       throw error;
     }
     request.onStep?.({ kind: 'turn.completed', summary: '显式整理回合已完成', turnId: live.owner.turn.turnId });
-    retained = undefined;
+    retained.delete(requestKey(request));
     return interpretation;
   };
   /**
@@ -1008,13 +1073,14 @@ export function createProviderExplicitBrainInterpreter(input: {
         readonly partialDrain?: ExplicitTurnPartialResult;
       } | undefined;
       const scopeKey = { organId: input.organId, interactionScopeId: input.interactionScopeId };
+      const pathOpened = (turn: InteractionTurnIdentity) => turn.interactionId === request.interactionId;
       const readPendingTurn = async () => {
         const opened = await input.parentJournal.readScopeOpenedTurns(scopeKey);
         const closed = await input.checkpointJournal.readScopeSemanticCheckpoints(scopeKey);
         const abandoned = await input.parentJournal.readScopeAbandonedTurns(scopeKey);
         const unusable = await input.parentJournal.readScopeParseFailures(scopeKey);
         const failedEpochs = await input.parentJournal.readScopeExecutionFailures(scopeKey);
-        return opened.find(({ fact }) => !closed.some(({ checkpoint }) =>
+        return opened.find(({ fact }) => pathOpened(fact.turn) && !closed.some(({ checkpoint }) =>
           checkpoint.organId.scope === fact.turn.organId.scope
           && checkpoint.organId.value === fact.turn.organId.value
           && checkpoint.interactionScopeId === fact.turn.interactionScopeId
@@ -1167,11 +1233,14 @@ export function createProviderExplicitBrainInterpreter(input: {
       };
       // The live task list is rebuilt from the current coordinator on every
       // retry, so it can drift from the snapshot committed with the submitted
-      // turn. Only that dynamic field may be restored from the committed input;
+      // turn. Only the candidate snapshots may be restored from the committed input;
       // every other read below must then use the recovered request.
       let effectiveRequest = request;
       let pending = await readPendingTurn();
       while (pending !== undefined) {
+        if (pending.fact.turn.inputRevision !== effectiveRequest.inputRevision) {
+          throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} requires its exact prior input revision`);
+        }
         const original = await input.rawContent.read({ scope: pending.fact.scope, content: pending.fact.initialInput });
         const committedText = new TextDecoder('utf-8', { fatal: true }).decode(original);
         if (committedText === JSON.stringify({ ...effectiveRequest, resumePartialRef: undefined })) break;
@@ -1195,7 +1264,7 @@ export function createProviderExplicitBrainInterpreter(input: {
             `unclosed interaction parent turn ${pending.fact.turn.turnId} has an invalid committed input asset: root ${rootKind}`,
           );
         }
-        const committedRecord = committed as { readonly taskCandidates?: unknown };
+        const committedRecord = committed as { readonly taskCandidates?: unknown; readonly requestCandidates?: unknown };
         // An explicit non-array taskCandidates has the same meaning: the asset
         // cannot be restored and is not a different user input. A legacy object
         // without that field keeps the existing different-input boundary.
@@ -1207,13 +1276,17 @@ export function createProviderExplicitBrainInterpreter(input: {
             `unclosed interaction parent turn ${pending.fact.turn.turnId} has an invalid committed input asset: taskCandidates ${candidatesKind}`,
           );
         }
+        if (Object.hasOwn(committedRecord, 'requestCandidates') && !Array.isArray(committedRecord.requestCandidates)) {
+          throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} has an invalid committed input asset: requestCandidates must be an array`);
+        }
         // Substituting the committed candidates back into the retry must
         // reproduce the committed input byte for byte. That single strict
         // comparison keeps this path to the same interaction/revision with all
         // user business input unchanged; any other difference still reaches
         // the existing different-input boundary.
         const restored = Array.isArray(committedRecord.taskCandidates)
-          ? { ...effectiveRequest, taskCandidates: committedRecord.taskCandidates as readonly ExplicitBrainTaskCandidate[] }
+          ? { ...effectiveRequest, taskCandidates: committedRecord.taskCandidates as readonly ExplicitBrainTaskCandidate[],
+            requestCandidates: committedRecord.requestCandidates as readonly ExplicitBrainRequestCandidate[] | undefined }
           : undefined;
         if (restored !== undefined && JSON.stringify({ ...restored, resumePartialRef: undefined }) === committedText) {
           effectiveRequest = restored;
@@ -1223,7 +1296,8 @@ export function createProviderExplicitBrainInterpreter(input: {
         pending = await readPendingTurn();
       }
       if (pending !== undefined) {
-        if (retained === undefined || retained.owner.turn.turnId !== pending.fact.turn.turnId) {
+        const retainedTurn = retained.get(requestKey(effectiveRequest));
+        if (retainedTurn === undefined || !sameInteractionTurn(retainedTurn.owner.turn, pending.fact.turn)) {
           if (pending.fact.providerBinding === undefined) {
             throw new Error(`unclosed interaction parent turn ${pending.fact.turn.turnId} cannot recover without the original committed provider binding`);
           }
@@ -1342,8 +1416,7 @@ export function createProviderExplicitBrainInterpreter(input: {
               && entry.fact.settlement.state === 'succeeded') ? { partialDrain: durableEnd } : {}),
             ...(durableEnd?.kind === 'accepted' ? { acceptedEnd: durableEnd } : {}) };
         } else {
-          await prepareScopeSemanticHistory({ activeTurn: pending.fact.turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
-          return finish(retained, effectiveRequest);
+          return finish(retainedTurn, effectiveRequest);
         }
       }
       if (input.lease !== undefined && activeLease === undefined) {
@@ -1357,7 +1430,8 @@ export function createProviderExplicitBrainInterpreter(input: {
         interactionId: effectiveRequest.interactionId, inputRevision: effectiveRequest.inputRevision, turnId: runtimeId,
       };
       const priorCheckpoints = continuation?.fact.priorCheckpoints
-        ?? await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal, checkpointJournal: input.checkpointJournal });
+        ?? await prepareScopeSemanticHistory({ activeTurn: turn, parentJournal: input.parentJournal,
+          checkpointJournal: input.checkpointJournal, ignoreUnclosedTurns: true });
       const owned = await input.prepareAgentProvider?.({ roleId: 'interaction' });
       const configuredAgent = input.agentRoster?.find(agent => agent.agentId === owned?.configuredAgentId);
       const readProjectSnapshot = configuredAgent !== undefined && managementRoleForAgent(configuredAgent) === 'project-lead'
@@ -1396,7 +1470,7 @@ export function createProviderExplicitBrainInterpreter(input: {
       const hasEndConclusion = () => endResult?.kind === 'accepted' || endResult?.kind === 'partial';
       let selectedSkillIds: readonly IntakeSkillId[] = [];
       const toolDetails = new Map<string, NonNullable<import('../../contracts/src/index.js').ExplicitInteractionToolActivity['detail']>>();
-      let live: NonNullable<typeof retained>;
+      let live: RetainedProviderTurn;
       try {
         if (continuation !== undefined && (owned === undefined
           || (['bindingId', 'providerId', 'protocol', 'endpointRef', 'modelRef', 'configDigest', 'capabilityDigest'] as const)
@@ -1767,7 +1841,7 @@ export function createProviderExplicitBrainInterpreter(input: {
           settlement: driver.settlement(),
           publishOnRetry: false,
         };
-        retained = live;
+        retained.set(requestKey(effectiveRequest), live);
       } catch (error) {
         let failure: unknown = error;
         const cleanupFailures: unknown[] = [];

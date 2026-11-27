@@ -12,6 +12,7 @@ export * from './turn-closure.js';
 export * from './standard-turn-end.js';
 export * from './agent-debug-inspection.js';
 export * from './turn-segment-recovery.js';
+export * from './conversation-scope.js';
 import type { InteractionHelperIdentity, InteractionTurnIdentity } from './interaction-helper.js';
 import { validateInteractionHelperIdentity, validateInteractionTurnIdentity } from './interaction-helper.js';
 import { validateTaskFlowBinding, type TaskFlowBinding } from './task-flow.js';

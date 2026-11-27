@@ -119,6 +119,7 @@ export interface ChildRunCompositionInput {
   readonly artifactsRoot: string;
   readonly workspaceRoot: string;
   readonly projectKey: string;
+  readonly readonlyInventoryRoot?: string;
   readonly webSearchProviderConfig?: WebSearchProviderBackendConfig;
   /** The real admitted child tool surface, never an availability echo. */
   readonly tools: readonly ProviderToolDefinition[];
@@ -544,6 +545,7 @@ export function createChildRunComposition(input: ChildRunCompositionInput): {
       workspaceRoot: input.workspaceRoot,
       projectKey: input.projectKey,
       artifactRoot: input.artifactsRoot,
+      ...(input.readonlyInventoryRoot === undefined ? {} : { readonlyInventoryRoot: input.readonlyInventoryRoot }),
       ...(input.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: input.webSearchProviderConfig }),
       admission: {
         organJournal: input.journal,

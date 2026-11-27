@@ -136,6 +136,7 @@ export type ExplicitTurnEndDecision =
       readonly knownFacts: readonly string[];
       readonly decisionRefs: readonly string[];
       readonly answer: string;
+      readonly requestRelation?: ExplicitTurnEndRequestRelation;
     }
   | {
       readonly kind: 'status-query';
@@ -144,6 +145,7 @@ export type ExplicitTurnEndDecision =
       readonly decisionRefs: readonly string[];
       readonly answer: string;
       readonly matchedTaskId?: string;
+      readonly requestRelation?: ExplicitTurnEndRequestRelation;
     }
   | {
       readonly kind: 'clarification';
@@ -152,6 +154,7 @@ export type ExplicitTurnEndDecision =
       readonly decisionRefs: readonly string[];
       readonly question: string;
       readonly options?: readonly string[];
+      readonly requestRelation?: ExplicitTurnEndRequestRelation;
     }
   | {
       readonly kind: 'requirement';
@@ -161,7 +164,17 @@ export type ExplicitTurnEndDecision =
       readonly proposal: ExplicitRequirementProposal;
       readonly matchedTaskId?: string;
       readonly taskFlow?: TaskFlowBinding;
+      readonly requestRelation?: ExplicitTurnEndRequestRelation;
     };
+
+/**
+ * Model-owned relation choice for the current interaction. A continuation only
+ * names an opaque candidate supplied by the current scope's host; scope, lease,
+ * epoch, revision, permissions and the resolved target stay with the host.
+ */
+export type ExplicitTurnEndRequestRelation =
+  | { readonly kind: 'new' }
+  | { readonly kind: 'continue'; readonly candidateId: string; readonly action?: 'resume-dispatch' };
 
 export interface ExplicitRequirementProposal {
   readonly revision: number;
@@ -249,6 +262,7 @@ function validateExplicitDecision(decision: unknown): asserts decision is Explic
   requireNonEmptyString(value.normalizedInput, 'explicit-turn-end.decision.normalized-input');
   requireStringArray(value.knownFacts, 'explicit-turn-end.decision.known-facts');
   requireStringArray(value.decisionRefs, 'explicit-turn-end.decision.refs');
+  validateExplicitRequestRelation(value.requestRelation);
   if (value.kind === 'answer' || value.kind === 'status-query') {
     requireNonEmptyString(value.answer, 'explicit-turn-end.decision.answer');
   } else if (value.kind === 'clarification') {
@@ -279,6 +293,27 @@ function validateExplicitDecision(decision: unknown): asserts decision is Explic
       }
       validateTaskFlowBinding(value.taskFlow as TaskFlowBinding);
     }
+  }
+}
+
+function validateExplicitRequestRelation(value: unknown): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ContractError('explicit-turn-end.decision.request-relation');
+  }
+  const relation = value as Record<string, unknown>;
+  if (relation.kind === 'new') {
+    if (Object.keys(relation).length !== 1) {
+      throw new ContractError('explicit-turn-end.decision.request-relation.control-field');
+    }
+    return;
+  }
+  if (relation.kind !== 'continue' || typeof relation.candidateId !== 'string' || !relation.candidateId.trim()
+    || (relation.action !== undefined && relation.action !== 'resume-dispatch')) {
+    throw new ContractError('explicit-turn-end.decision.request-relation.kind');
+  }
+  if (Object.keys(relation).some((key) => key !== 'kind' && key !== 'candidateId' && key !== 'action')) {
+    throw new ContractError('explicit-turn-end.decision.request-relation.control-field');
   }
 }
 

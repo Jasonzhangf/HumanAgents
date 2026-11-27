@@ -1,0 +1,12 @@
+{
+  "graph": "humanagent-conversation-scope-entry",
+  "labels": {
+    "request": "同一 WebUI 发起读取或提交",
+    "resolve_scope": "解析经授权的会话范围并归一 system 到 Alex",
+    "read_projection": "只读既有投影或返回空会话，不持久化",
+    "ensure_and_record": "首条提交按稳定范围与幂等键交给真正接收的 owner",
+    "explicit_turn_subgraph": "复用既有显式轮次子图完成解释与结果",
+    "durable_same_scope_state": "按同一范围持久化 Journal、checkpoint 与恢复事实",
+    "unified_response": "按真实身份生成共享会话投影并统一返回"
+  }
+}

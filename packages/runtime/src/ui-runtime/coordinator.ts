@@ -52,6 +52,7 @@ import {
   type PublicOutputCandidate,
   type PublicOutputJournalPort,
   type PublicOutputPublication,
+  type RecoveryAssetsReadback,
 } from '../../../contracts/src/index.js';
 import type { TaskPlanRevisionConsumerPort } from '../orchestration/task-plan-revisions.js';
 import {
@@ -77,7 +78,7 @@ import type { InteractionClosureRecord } from '../checkpoints/closure.js';
 import { produceAdmittedTurn, newActiveTurnId, type RuntimeBindingSnapshot } from '../admission/admitted-turn.js';
 import { TaskGrantDeniedError } from '../admission/task-grant.js';
 import { ActiveTurnContext, RuntimeActiveTurnError, childInvocationId } from '../context/active-turn-context.js';
-import type { ActiveTurnJournalPort } from '../context/active-turn-journal.js';
+import type { ActiveTurnJournalPort, ActiveTurnSegmentCaptureExactRead } from '../context/active-turn-journal.js';
 import { ActiveTurnRecoveryCapture, type ActiveTurnProviderProducer, type RecoveryCaptureReferences } from '../context/recovery-assets.js';
 import type {
   ChildCallAdoptionInput,
@@ -125,7 +126,7 @@ import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
 import type { RequirementInboxState } from '../intake/requirement-inbox.js';
 import type { ConfirmationLedgerState, PersistedSubmittedReceipt } from '../explicit-brain/router.js';
 import type { DispatchInput } from '../orchestration/types.js';
-import { resumeColdExecution, type ColdExecutionLifecycleBinding, type PreparedColdExecution,
+import { currentColdSegment, resumeColdExecution, type ColdExecutionLifecycleBinding, type PreparedColdExecution,
   type RuntimeColdExecutionProducer, type RuntimeColdExecutionResumeRequest } from './cold-execution-resume.js';
 import { classifyErrorPolicy } from '../../../core/src/error-policy.js';
 import { planBlockedRecovery } from '../../../core/src/tool-execution-lifecycle.js';
@@ -719,6 +720,38 @@ export interface RuntimePreparedExecutionStopPort {
   settle(selector: RuntimePreparedStopSelector): Promise<RuntimePreparedStopSettleResult>;
 }
 
+/** Exact inputs for deriving Provider settlement from committed native facts. */
+export type RuntimeTaskProviderSettlementCapture =
+  | { readonly version: 1; readonly source: RecoveryAssetsReadback }
+  | { readonly version: 2; readonly source: ActiveTurnSegmentCaptureExactRead };
+
+export interface RuntimeTaskProviderSettlementReadInput {
+  readonly taskId: TaskId;
+  readonly scope: ScopeRef;
+  readonly turnId: string;
+  /** Exact immutable capture selected by the cold-source tail, never an older allocation. */
+  readonly currentSegment: RuntimeTaskProviderSettlementCapture | null;
+}
+
+export type RuntimeTaskProviderSettlementRead =
+  | {
+      readonly state: 'verified';
+      readonly receipts: readonly ProviderSettleReceipt[];
+    }
+  | {
+      readonly state: 'unknown';
+      readonly reason: string;
+    };
+
+/**
+ * Owner-bound cold settlement read. The App composition derives a receipt from
+ * the committed active-turn terminal, producer drain and resource close. The
+ * public recovery request never supplies this evidence.
+ */
+export interface RuntimeTaskProviderSettlementReadPort {
+  read(input: RuntimeTaskProviderSettlementReadInput): Promise<RuntimeTaskProviderSettlementRead>;
+}
+
 export type RuntimeInspectionStopCompletion =
   | { readonly state: 'not-applicable' }
   | {
@@ -759,6 +792,8 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
   readonly defaultBoardOwner?: RuntimeTaskBoardOwner;
   readonly createDriver: RuntimeExecutionDriverFactory;
+  /** Exact committed settlement read; absence retains the unknown-settlement hold. */
+  readonly nativeProviderSettlement?: RuntimeTaskProviderSettlementReadPort;
   /**
    * Cold stop recovery has the durable allocation but no in-memory driver.
    * Bind the App's retained resource owner here; Runtime never re-enters the
@@ -3309,16 +3344,18 @@ export class RuntimeTaskCoordinator {
       lifecycle: this.coldLifecycle(),
       effectLedgerFor: this.options.effectLedgerFor,
       checkpointStoreFor: this.options.checkpointStoreFor,
+      nativeProviderSettlement: this.options.nativeProviderSettlement,
     }, taskId, operationId, request);
   }
 
   /**
    * Explicit operator recovery from a `recovery-hold-effect-unknown` hold.
-   * Re-evaluates persisted recovery facts. An unknown mutating tool effect stays
-   * held unless the ledger already contains a trusted reconciled fact; operator
-   * notes and Provider settlement are not external tool-effect confirmation.
-   * A safe recovery commits `recovery-auto-resumed` and resumes the same business
-   * Turn without replaying the held mutating tool call.
+   * Re-evaluates persisted recovery facts and current Provider settlement. An
+   * unknown mutating tool effect stays held unless the ledger already contains
+   * a trusted reconciled fact; operator notes and Provider settlement are not
+   * external tool-effect confirmation. A safe recovery commits
+   * `recovery-auto-resumed` and resumes the same business Turn without replaying
+   * the held mutating tool call.
    * Duplicate or concurrent calls for the same held Turn are idempotent.
    */
   async recoverTask(
@@ -3388,6 +3425,30 @@ export class RuntimeTaskCoordinator {
           scope,
           `recovery/${operation.operationId.value}`,
         );
+        let executionEpoch = record.executionEpoch ?? operation.executionEpoch;
+        let currentSegment: RuntimeTaskProviderSettlementCapture | null = null;
+        const cold = this.options.coldExecution;
+        if (cold?.resolveColdExecutionResumeRequest && operation.allocation) {
+          const request = await cold.resolveColdExecutionResumeRequest({ taskId, operationId: operation.operationId });
+          const source = await cold.readColdExecutionSource({ allocation: operation.allocation, request });
+          currentSegment = currentColdSegment(source);
+          executionEpoch = source.segments.at(-1)?.binding.execution.executionEpoch
+            ?? (source.initial.kind === 'captured' ? source.initial.body.binding.execution.executionEpoch : source.initial.binding.execution.executionEpoch);
+        }
+        const nativeSettlement = await this.options.nativeProviderSettlement?.read({
+          taskId: record.taskId,
+          scope,
+          turnId,
+          currentSegment,
+        });
+        // Once the native owner is bound, a caller supplied receipt cannot
+        // override its unknown result. Only legacy coordinators without this
+        // owner may use the explicit operator receipt path.
+        const providerSettlements = this.options.nativeProviderSettlement === undefined
+          ? options?.providerSettlements
+          : nativeSettlement?.state === 'verified'
+            ? nativeSettlement.receipts
+            : [];
         const decision = await reconcileHeldTurnEffectsForRecover({
           ledger,
           checkpointStore,
@@ -3395,9 +3456,9 @@ export class RuntimeTaskCoordinator {
           scope,
           turnId,
           directiveRevision: record.directiveRevision,
-          executionEpoch: record.executionEpoch ?? operation.executionEpoch,
+          executionEpoch,
           recoveryStateRef,
-          providerSettlements: options?.providerSettlements,
+          providerSettlements,
           operatorNote: options?.operatorNote,
         });
         if (decision.checkpoint) {
@@ -3412,7 +3473,7 @@ export class RuntimeTaskCoordinator {
           record.state = 'waiting';
           record.currentState = '已对账安全副作用，自动恢复中';
           record.nextStep = '在同一业务 Turn 继续执行';
-          this.resumeInterruptedTaskTurn(record, operation, scope);
+          await this.resumeInterruptedTaskTurn(record, operation, scope);
         } else if (decision.outcome === 'recovery-hold-effect-unknown') {
           record.state = 'blocked';
           record.running = false;
@@ -3431,12 +3492,18 @@ export class RuntimeTaskCoordinator {
     return promise;
   }
 
-  private resumeInterruptedTaskTurn(
+  private async resumeInterruptedTaskTurn(
     record: TaskRecord,
     operation: OperationRecord,
     scope: ScopeRef,
-  ): void {
+  ): Promise<void> {
     if (record.running || record.releasePending) return;
+    const cold = this.options.coldExecution;
+    if (cold?.resolveColdExecutionResumeRequest) {
+      const request = await cold.resolveColdExecutionResumeRequest({ taskId: record.taskId, operationId: operation.operationId });
+      await this.resumeExecution(record.taskId, operation.operationId, request);
+      return;
+    }
     const allocation: RuntimeExecutionAllocation = operation.allocation ?? {
       taskId: record.taskId,
       operationId: operation.operationId,
@@ -3558,6 +3625,7 @@ export class RuntimeTaskCoordinator {
     // executor, which resolves the driver from this record instead of a second
     // acquire or a stale placeholder.
     record.driver = prepared.driver;
+    record.executionReady = new Promise<boolean>((resolve) => { record.resolveExecutionReady = resolve; });
     this.bindChildCallManager(prepared.driver, assembly, record, operation, scope);
     const assignment = prepared.source.assignment;
     const stageNodeId = `stage-${operation.operationId.value}`;
@@ -3618,6 +3686,21 @@ export class RuntimeTaskCoordinator {
       return { state: 'released' };
     } catch (error) {
       failure = error;
+      record.resolveExecutionReady?.(false);
+      record.resolveExecutionReady = undefined;
+      if (!record.postCommitRecoveryPending && record.state !== 'stopped') {
+        record.running = false;
+        record.error ??= errorFromUnknown(error);
+        record.state = 'blocked';
+        record.currentState = '执行中断，等待恢复';
+        record.nextStep = record.error.nextAction;
+        record.allowedActions = ['recover', 'stop'];
+        this.activeExecutions.delete(operation.operationId.value);
+        this.pushEvent(record, operation, 'provider.error', 'blocked', record.error.message,
+          [], record.error.ownerId, record.error.retryable, record.error.nextAction, { error: record.error });
+        this.pushEvent(record, operation, 'execution.terminal', 'blocked', record.error.message,
+          [], record.error.ownerId, record.error.retryable, record.error.nextAction, { error: record.error }, 'final');
+      }
       throw error;
     } finally {
       try {
@@ -3717,6 +3800,10 @@ export class RuntimeTaskCoordinator {
       this.providerAttemptReport(input, input.assignment.attempt, lease.executionEpoch),
       composition,
       composition.runtime,
+      (ready) => {
+        record.resolveExecutionReady?.(ready);
+        record.resolveExecutionReady = undefined;
+      },
     );
     record.resumedClosure = attempt.closure;
     return attempt.result;
@@ -8693,6 +8780,13 @@ export class RuntimeTaskCoordinator {
                 scope,
                 `recovery/${operation.operationId.value}`,
               );
+              const cold = this.options.coldExecution;
+              if (cold?.resolveColdExecutionResumeRequest && operation.allocation) {
+                const request = await cold.resolveColdExecutionResumeRequest({ taskId: task.taskId, operationId: operation.operationId });
+                const current = await cold.readColdExecutionSource({ allocation: operation.allocation, request });
+                task.executionEpoch = current.segments.at(-1)?.binding.execution.executionEpoch
+                  ?? (current.initial.kind === 'captured' ? current.initial.body.binding.execution.executionEpoch : current.initial.binding.execution.executionEpoch);
+              }
               const decision = await evaluateAndPersistTurnRecovery({
                 ledger,
                 checkpointStore: fullStore,
@@ -8702,6 +8796,8 @@ export class RuntimeTaskCoordinator {
                 directiveRevision: task.directiveRevision,
                 executionEpoch: task.executionEpoch ?? operation.executionEpoch,
                 recoveryStateRef,
+                // Hydration does not authorize native generation from a cached receipt.
+                ...(this.options.nativeProviderSettlement === undefined ? {} : { providerSettlements: [] }),
               });
               if (decision.checkpoint) {
                 task.checkpoint = decision.checkpoint.checkpoint;
@@ -8743,7 +8839,7 @@ export class RuntimeTaskCoordinator {
                 task.nextStep = '在同一业务 Turn 继续执行';
                 task.allowedActions = ['stop'];
                 if (this.options.autoResumeOnHydrate !== false) {
-                  this.resumeInterruptedTaskTurn(task, operation, scope);
+                  await this.resumeInterruptedTaskTurn(task, operation, scope);
                 }
                 continue;
               }

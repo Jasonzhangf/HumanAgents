@@ -11,6 +11,7 @@ import {
   id,
   type Attention,
   type ExplicitTurnPartialResult,
+  type ExplicitTurnEndRequestRelation,
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
   type AgentMemoryContextRequest,
@@ -166,6 +167,7 @@ import {
   type RuntimeChildLifecycleObserver,
   type RuntimeTaskBoard,
   type RuntimeTaskBoardOwner,
+  type RuntimeTaskProviderSettlementReadPort,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
 import type { RuntimeColdExecutionResumeRequest } from '../../../runtime/src/ui-runtime/cold-execution-resume.js';
 import type { RuntimeInspectionStopCompletionReadPort } from '../../../runtime/src/ui-runtime/coordinator.js';
@@ -227,6 +229,7 @@ import type {
   ExplicitBrainAgentTarget,
   ExplicitBrainInputInterpreter,
   ExplicitBrainInterpretation,
+  ExplicitBrainRequestCandidate,
 } from '../explicit-brain-runtime.js';
 import type { MemoryReviewState } from '../memory-runtime.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
@@ -663,6 +666,8 @@ export interface UiRuntimeServiceOptions {
   readonly explicitBrainInterpreter: ExplicitBrainServiceInterpreter;
   /** Read-only exact Provider settlement receipt over the composition-bound parent Journal. */
   readonly explicitProviderSettlementRead?: ExplicitProviderSettlementReadPort;
+  /** Exact committed settlement proof for the same native recovery journal. */
+  readonly nativeProviderSettlement?: RuntimeTaskProviderSettlementReadPort;
   /** The composition-bound parent Journal; bound reads reuse this instance instead of opening a second authority. */
   readonly interactionParentJournal?: InteractionParentTurnRawJournalPort & InteractionParentOpenedTurnScopeReadPort;
   /** Collector-owned committed per-call usage facts for the existing authorized product session read. */
@@ -760,9 +765,26 @@ export interface UiRuntimeServiceOptions {
   readonly refinedDeliveryStore?: import('../../../runtime/src/ui-runtime/coordinator.js').RefinedDeliveryStore;
 }
 
-type ExplicitBrainServiceInterpretation = ExplicitBrainInterpretation | ExplicitTurnPartialResult;
+interface ExplicitBrainRequestCandidateContext {
+  readonly candidates: readonly ExplicitBrainRequestCandidate[];
+  readonly targets: ReadonlyMap<string, {
+    readonly candidate: ExplicitBrainRequestCandidate;
+    readonly snapshot: ExplicitInteractionSnapshot;
+    readonly task: RuntimeTaskSnapshot | undefined;
+  }>;
+}
+
+const EXPLICIT_REQUEST_CANDIDATE_LIMIT = 32;
+const EXPLICIT_REQUEST_SUMMARY_LIMIT = 1000;
+
+type ExplicitBrainServiceInterpretation =
+  | (ExplicitBrainInterpretation & {
+      readonly requestRelation?: ExplicitTurnEndRequestRelation;
+    })
+  | ExplicitTurnPartialResult;
 type ExplicitBrainServiceInterpreter = {
   interpret(input: Parameters<ExplicitBrainInputInterpreter['interpret']>[0] & {
+    readonly requestCandidates?: readonly ExplicitBrainRequestCandidate[];
     readonly resumePartialRef?: string;
   }): Promise<ExplicitBrainServiceInterpretation>;
 };
@@ -2118,7 +2140,27 @@ function toPublicOutputProjection(
  * between them so no raw runtime type leaks into the projection.
  */
 function toRuntimeTaskSnapshotInput(task: RuntimeTaskSnapshot): RuntimeTaskSnapshotInput {
-  return { ...task, publicOutput: toPublicOutputProjection(task.publicOutput) };
+  const projected = { ...task, publicOutput: toPublicOutputProjection(task.publicOutput) };
+  const recovery = task.checkpoint?.recoveryFact;
+  const waitingForProvider = task.state === 'blocked'
+    && recovery?.recoveryOutcome === 'recovery-hold-effect-unknown'
+    && recovery.providerSettleReceipt.state === 'unknown'
+    && !recovery.toolEffects.some((effect) =>
+      effect.effectPolicy === 'mutating' && effect.state === 'dispatched-effect-unknown');
+  if (!waitingForProvider) return projected;
+  const nextStep = '核实当前执行段的模型请求收拢记录后，继续原任务。';
+  return {
+    ...projected,
+    currentState: '等待核实模型请求已收拢',
+    nextStep,
+    error: {
+      code: 'cold-execution.provider-settlement-unverified',
+      ownerId: 'humanagent.runtime.cold-execution',
+      message: '已核实工具操作的影响。当前这轮模型请求缺少收拢记录，编排 Agent 暂时无法继续。',
+      retryable: false,
+      nextAction: nextStep,
+    },
+  };
 }
 
 type ParentExecutionFact = Pick<RuntimeTaskSnapshotInput,
@@ -3398,6 +3440,9 @@ export class UiRuntimeService {
       checkpointStoreFor: options.checkpointStoreFor,
       publicOutputStoreFor: options.checkpointStoreFor,
       ...(options.effectLedgerFor === undefined ? {} : { effectLedgerFor: options.effectLedgerFor }),
+      ...(options.nativeProviderSettlement === undefined ? {} : {
+        nativeProviderSettlement: options.nativeProviderSettlement,
+      }),
       ...(options.autoResumeOnHydrate === undefined ? {} : { autoResumeOnHydrate: options.autoResumeOnHydrate }),
       attentionPort: options.attentionPort,
       journal: options.journal,
@@ -8664,12 +8709,14 @@ export class UiRuntimeService {
   }
 
   private async settleExplicitInterpretation(snapshot: ExplicitInteractionSnapshot): Promise<ExplicitInteractionSnapshot> {
-    const taskCandidates = this.coordinator.taskSnapshots().map((task) => ({
+    const taskSnapshots = this.coordinator.taskSnapshots();
+    const taskCandidates = taskSnapshots.map((task) => ({
       taskId: task.taskId.value,
       title: task.title,
       status: task.state,
       currentInput: task.input || task.directive,
     }));
+    const requestCandidateContext = await this.explicitRequestCandidateContext(snapshot, taskSnapshots);
     const interpreterInput = {
       interactionId: snapshot.interactionId,
       inputRevision: this.explicitIntake.inputRevision(snapshot.interactionId),
@@ -8677,6 +8724,7 @@ export class UiRuntimeService {
       rawInput: snapshot.rawInput,
       clarifications: snapshot.clarifications ?? [],
       taskCandidates,
+      requestCandidates: requestCandidateContext.candidates,
       readTaskResult: this.explicitTaskResultReader(snapshot),
       readProjectSnapshot: this.explicitProjectSnapshotReader(snapshot),
       onStep: (step: ExplicitInteractionStepInput) => this.recordExplicitStep(snapshot.interactionId, step),
@@ -8692,7 +8740,13 @@ export class UiRuntimeService {
       this.persistExplicitBrainState();
       return await this.explicitIntake.inspect(snapshot.interactionId);
     }
+    if (interpreted.requestRelation?.kind === 'continue' && interpreted.requestRelation.action === 'resume-dispatch') {
+      const target = await this.validateExplicitRequestRelation(snapshot, interpreted.requestRelation, requestCandidateContext);
+      return await this.resumeRelatedExplicitDraft(snapshot, interpreted, target);
+    }
     if (interpreted.kind === 'clarification') {
+      const target = await this.validateExplicitRequestRelation(snapshot, interpreted.requestRelation, requestCandidateContext);
+      this.recordExplicitRequestRelation(snapshot.interactionId, interpreted.requestRelation, target);
       await this.explicitIntake.requestClarification(
         snapshot.interactionId,
         interpreted.question,
@@ -8701,8 +8755,10 @@ export class UiRuntimeService {
       this.persistExplicitBrainState();
       return await this.explicitIntake.inspect(snapshot.interactionId);
     }
+    const relationTarget = await this.validateExplicitRequestRelation(snapshot, interpreted.requestRelation, requestCandidateContext);
     // A general answer ends before task matching or requirement recording.
     if (interpreted.kind === 'answer') {
+      this.recordExplicitRequestRelation(snapshot.interactionId, interpreted.requestRelation, relationTarget);
       this.commitExplicitIntakeSuccess(() => this.explicitIntake.completeAnswer(snapshot.interactionId, interpreted.answer));
       return await this.explicitIntake.inspect(snapshot.interactionId);
     }
@@ -8715,6 +8771,15 @@ export class UiRuntimeService {
         'humanagent.runtime.explicit-brain',
         `interaction agent selected an unknown task: ${interpreted.matchedTaskId}`,
         'retry interpretation using one of the current task candidates',
+        409,
+      );
+    }
+    if (relationTarget !== undefined && relationTarget.snapshot.state === 'partial') {
+      throw new UiRuntimeApiError(
+        'explicit-brain.request-relation-action-required',
+        'humanagent.runtime.explicit-brain',
+        'a partial request can only continue through its exact partial reference',
+        'continue the selected interaction with its current partialRef',
         409,
       );
     }
@@ -8738,11 +8803,24 @@ export class UiRuntimeService {
         409,
       );
     }
+    if (interpreted.kind === 'requirement' && relationTarget !== undefined
+      && ((interpreted.intent === 'create' && relationTarget.candidate.taskId !== undefined)
+        || ((interpreted.intent === 'append' || interpreted.intent === 'change')
+          && relationTarget.candidate.taskId !== matched?.taskId.value))) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.request-relation-action-conflict',
+        'humanagent.runtime.explicit-brain',
+        'request relation target does not match the selected requirement action',
+        'select the exact continuation target and its existing Task, or create an independent request',
+        409,
+      );
+    }
     const matchResult = {
       normalizedInput: interpreted.normalizedInput,
       matchedTasks: matched === undefined ? [] : [{ taskId: matched.taskId, relation: 'current' as const, status: matched.state }],
       knownFacts: interpreted.knownFacts,
     };
+    this.recordExplicitRequestRelation(snapshot.interactionId, interpreted.requestRelation, relationTarget);
     if (interpreted.kind === 'status-query') {
       // The status-only success fact, its request number and the counter
       // advance belong to the same explicit-brain.state save. A status query
@@ -8769,6 +8847,238 @@ export class UiRuntimeService {
       this.persistExplicitBrainState();
     }
     return await this.explicitIntake.inspect(snapshot.interactionId);
+  }
+
+  private async explicitRequestCandidateContext(
+    current: ExplicitInteractionSnapshot,
+    taskSnapshots = this.coordinator.taskSnapshots(),
+  ): Promise<ExplicitBrainRequestCandidateContext> {
+    const acceptedInteractions = this.explicitIntake.exportState().interactions
+      .filter((entry) => entry.workspace?.projectKey === current.workspace?.projectKey
+        || (entry.workspace === undefined && current.workspace === undefined));
+    const currentIndex = acceptedInteractions.findIndex((entry) => entry.interactionId === current.interactionId);
+    if (currentIndex < 0) return { candidates: [], targets: new Map() };
+    const acceptedBeforeCurrent = acceptedInteractions.slice(0, currentIndex);
+    const relationTaskIds = new Map<string, string>();
+    for (const entry of acceptedBeforeCurrent) {
+      const relation = entry.requestRelation;
+      if (relation?.kind === 'continue' && relation.taskId !== undefined) {
+        relationTaskIds.set(relation.targetInteractionId, relation.taskId);
+      }
+    }
+    const taskRefs = this.explicitInteractionTaskRefs(acceptedBeforeCurrent, await this.snapshotsWithIdentitySource());
+    const interactions = acceptedBeforeCurrent
+      .slice(-EXPLICIT_REQUEST_CANDIDATE_LIMIT);
+    const previousId = interactions.at(-1)?.interactionId;
+    const candidates: ExplicitBrainRequestCandidate[] = [];
+    const targets = new Map<string, { candidate: ExplicitBrainRequestCandidate; snapshot: ExplicitInteractionSnapshot; task: RuntimeTaskSnapshot | undefined }>();
+    for (const entry of interactions) {
+      const snapshot: ExplicitInteractionSnapshot = {
+        ...entry,
+        steps: entry.steps ?? [],
+        history: entry.history ?? [],
+      };
+      const taskId = taskRefs.get(entry.interactionId)?.value
+        ?? entry.draft?.matchedTasks.find((task) => task.relation === 'current')?.taskId.value
+        ?? (entry.draft === undefined ? undefined : this.dispatchLedger.get(entry.draft.draftId)?.taskId.value)
+        ?? (entry.revision === undefined ? undefined : this.dispatchLedger.get(entry.revision.draftId)?.taskId.value)
+        ?? relationTaskIds.get(entry.interactionId);
+      const task = taskId === undefined ? undefined : taskSnapshots.find((candidate) => candidate.taskId.value === taskId);
+      const requestId = task?.inputRequest?.requestId;
+      const candidate: ExplicitBrainRequestCandidate = {
+        candidateId: `request-${createHash('sha256').update(entry.interactionId).digest('hex').slice(0, 20)}`,
+        candidateKind: entry.interactionId === previousId ? 'previous' : 'historical',
+        interactionId: entry.interactionId,
+        ...(entry.requestNumber === undefined ? {} : { requestNumber: entry.requestNumber }),
+        state: entry.state,
+        summary: (entry.draft?.normalizedInput ?? entry.rawInput).slice(0, EXPLICIT_REQUEST_SUMMARY_LIMIT),
+        ...(taskId === undefined ? {} : { taskId }),
+        ...(entry.state === 'awaiting-clarification' && entry.clarifications?.at(-1)?.answer === undefined
+          ? { openClarification: {
+              question: entry.clarifications?.at(-1)?.question ?? entry.reply ?? '',
+              ...(entry.clarifications?.at(-1)?.options === undefined ? {} : { options: entry.clarifications!.at(-1)!.options }),
+            } }
+          : {}),
+        ...(task?.inputRequest === undefined || requestId === undefined ? {} : { openTaskInputRequest: {
+            requestId,
+            expectedRevision: task.inputRequest.expectedRevision,
+            question: task.inputRequest.question,
+            ...(task.inputRequest.options === undefined ? {} : { options: task.inputRequest.options }),
+          } }),
+      };
+      candidates.push(candidate);
+      targets.set(candidate.candidateId, { candidate, snapshot, task });
+    }
+    return { candidates, targets };
+  }
+
+  private async validateExplicitRequestRelation(
+    current: ExplicitInteractionSnapshot,
+    relation: ExplicitTurnEndRequestRelation | undefined,
+    candidateContext: ExplicitBrainRequestCandidateContext,
+  ): Promise<{ readonly candidate: ExplicitBrainRequestCandidate; readonly snapshot: ExplicitInteractionSnapshot; readonly task: RuntimeTaskSnapshot | undefined } | undefined> {
+    if (relation === undefined || relation.kind === 'new') return undefined;
+    const target = candidateContext.targets.get(relation.candidateId);
+    if (target === undefined || target.candidate.interactionId === current.interactionId) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.request-relation-invalid',
+        'humanagent.runtime.explicit-brain',
+        'request relation does not identify a current same-scope interaction candidate',
+        'retry interpretation using a candidate from the current request context',
+        409,
+      );
+    }
+    const fresh = (await this.explicitRequestCandidateContext(current)).targets.get(relation.candidateId);
+    const binding = (entry: typeof target): string => canonicalJsonStringify({
+      interactionId: entry.snapshot.interactionId,
+      inputRevision: entry.snapshot.inputRevision,
+      state: entry.snapshot.state,
+      draftId: entry.snapshot.draft?.draftId,
+      draftInputRevision: entry.snapshot.draft?.inputRevision,
+      revisionVersion: entry.snapshot.revision?.revisionVersion,
+      revisionHash: entry.snapshot.revision?.revisionHash,
+      confirmationRef: entry.snapshot.confirmation?.confirmationRef,
+      taskId: entry.candidate.taskId,
+      requestId: entry.candidate.openTaskInputRequest?.requestId,
+      expectedRevision: entry.candidate.openTaskInputRequest?.expectedRevision,
+    });
+    if (fresh === undefined || binding(fresh) !== binding(target)) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.request-relation-stale',
+        'humanagent.runtime.explicit-brain',
+        'request relation target changed after candidate construction',
+        'reload the current interaction and retry against its current state',
+        409,
+      );
+    }
+    return fresh;
+  }
+
+  private async resumeRelatedExplicitDraft(
+    current: ExplicitInteractionSnapshot,
+    interpreted: ExplicitBrainInterpretation,
+    target: { readonly candidate: ExplicitBrainRequestCandidate; readonly snapshot: ExplicitInteractionSnapshot; readonly task: RuntimeTaskSnapshot | undefined } | undefined,
+  ): Promise<ExplicitInteractionSnapshot> {
+    const original = target?.snapshot;
+    const revision = original === undefined ? undefined : this.explicitIntake.currentDraftRevision(original.interactionId);
+    const savedCreateDraft = original !== undefined
+      && (original.requestKind === 'new-task-create' || original.requestKind === 'new-task-preview')
+      && original.draft !== undefined
+      && revision !== undefined
+      && revision.draftId === original.draft.draftId
+      && revision.inputRevision === original.draft.inputRevision
+      && revision.inputRevision === original.inputRevision
+      && revision.proposedIntent === 'create'
+      && revision.title !== undefined;
+    if (interpreted.kind !== 'answer' || !savedCreateDraft) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.request-relation-resume-invalid',
+        'humanagent.runtime.explicit-brain',
+        'resume-dispatch requires an action-only answer without a requirement proposal',
+        'submit changed requirements through the normal confirmation path',
+        409,
+      );
+    }
+    const submitted = revision === undefined ? undefined : this.requirementSubmissions.finalReceipts().find(({ requestIdentity, requirement }) =>
+      requestIdentity === 'new-task-create'
+      && requirement.draftId === revision.draftId
+      && requirement.inputRevision === revision.inputRevision
+      && requirement.draftRevisionVersion === revision.revisionVersion
+      && requirement.draftRevisionHash === revision.revisionHash
+      && original?.confirmations?.some(confirmation => confirmation.confirmationRef === requirement.confirmationRef
+        && confirmation.draftId === revision.draftId
+        && confirmation.draftRevisionVersion === revision.revisionVersion
+        && confirmation.draftRevisionHash === revision.revisionHash));
+    if (target !== undefined && original !== undefined
+      && (original.state === 'confirmed' || original.state === 'dispatched')
+      && submitted !== undefined) {
+      const status = target.task === undefined ? '已提交'
+        : target.task.state === 'succeeded' ? '已完成'
+        : target.task.state === 'running' || target.task.state === 'settling' ? '正在执行'
+        : runtimeTaskStateLabel(target.task.state);
+      this.recordExplicitRequestRelation(current.interactionId, interpreted.requestRelation, target);
+      this.commitExplicitIntakeSuccess(() => this.explicitIntake.completeAnswer(current.interactionId,
+        `“${target.task?.title ?? revision?.title ?? '原任务'}”${status}。`));
+      return await this.explicitIntake.inspect(current.interactionId);
+    }
+    const exactUnchangedDraft = original !== undefined
+      && (original.requestKind === 'new-task-create' || original.requestKind === 'new-task-preview')
+      && (original.state === 'awaiting-confirmation' || original.state === 'awaiting-intent')
+      && original.confirmation === undefined
+      && original.draft !== undefined
+      && revision !== undefined
+      && revision.state === 'draft'
+      && revision.proposedIntent === 'create'
+      && revision.inputRevision === original.inputRevision
+      && revision.title !== undefined
+      && revision.proposal === original.draft.proposal
+      && revision.normalizedInput === original.draft.normalizedInput;
+    if (target === undefined || !exactUnchangedDraft) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.request-relation-resume-invalid',
+        'humanagent.runtime.explicit-brain',
+        'resume-dispatch requires the exact unchanged, unsubmitted create draft and cannot carry new scope or goal content',
+        'select a normal continuation action for changed requirements or submit the original draft explicitly',
+        409,
+      );
+    }
+    const actor = original.actor;
+    const confirmedBy = actor?.kind === 'human'
+      && actor.sourceKind === 'product-principal'
+      && actor.sourceRef.length > 0
+      && (this.options.principalOwner === undefined || actor.sourceRef === this.options.principalOwner)
+      ? actor.sourceRef
+      : undefined;
+    if (confirmedBy === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.request-relation-resume-actor-invalid',
+        'humanagent.runtime.explicit-brain',
+        'resume-dispatch requires the original interaction’s verified product-principal actor',
+        'confirm the original draft through an interaction received from the configured product principal',
+        403,
+      );
+    }
+    this.recordExplicitRequestRelation(current.interactionId, interpreted.requestRelation, target);
+    const receipt = await this.confirmExplicitRequirement({
+      interactionId: original!.interactionId,
+      draftId: original!.draft!.draftId,
+      inputRevision: original!.draft!.inputRevision,
+      confirmationRef: `resume-dispatch:${current.interactionId}:${original!.interactionId}:${revision!.revisionVersion}`,
+      confirmedBy,
+      confirmedAt: current.occurredAt ?? new Date().toISOString(),
+      payloadRef: `interaction://${original!.interactionId}/draft/${revision!.draftId}/revision/${revision!.revisionVersion}`,
+      draftRevisionVersion: revision!.revisionVersion,
+      draftRevisionHash: revision!.revisionHash,
+      idempotencyKey: `resume-dispatch:${original!.interactionId}:${revision!.revisionVersion}:${revision!.revisionHash}`,
+    });
+    const status = target.task?.state === 'succeeded' ? '已完成'
+      : target.task?.state === 'failed' ? '执行失败'
+      : target.task?.state === 'running' || target.task?.state === 'settling' ? '正在执行'
+      : receipt.status === 'duplicate' ? '已提交' : '已续接提交';
+    this.commitExplicitIntakeSuccess(() => this.explicitIntake.completeAnswer(current.interactionId,
+      `“${target.task?.title ?? revision!.title}”${status}。`));
+    this.persistExplicitBrainState();
+    return await this.explicitIntake.inspect(current.interactionId);
+  }
+
+  private recordExplicitRequestRelation(
+    currentInteractionId: string,
+    relation: ExplicitTurnEndRequestRelation | undefined,
+    target: { readonly candidate: ExplicitBrainRequestCandidate; readonly snapshot: ExplicitInteractionSnapshot } | undefined,
+  ): void {
+    if (relation?.kind === 'new') {
+      this.explicitIntake.recordNewRequestRelation(currentInteractionId);
+      return;
+    }
+    if (relation?.kind !== 'continue' || target === undefined) return;
+    this.explicitIntake.recordRequestRelation(currentInteractionId, relation, {
+      candidateKind: target.candidate.candidateKind,
+      targetInteractionId: target.snapshot.interactionId,
+      ...(target.candidate.taskId === undefined ? {} : { taskId: target.candidate.taskId }),
+      ...(target.candidate.openTaskInputRequest === undefined
+        ? {}
+        : { requestId: target.candidate.openTaskInputRequest.requestId }),
+    });
   }
 
   async answerExplicitClarification(input: {

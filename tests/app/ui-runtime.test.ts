@@ -93,6 +93,7 @@ import {
   FakeReplayExecutionRuntimePort,
   MemoryBoundExecutionDriver,
   MemoryContextCapture,
+  nativeRetryCycleJournalPath,
   UiRuntimeJournal,
   UiRuntimeApiError,
   UiRuntimeService,
@@ -663,6 +664,7 @@ function serviceFor(
   taskGrantPort?: TaskGrantPort,
   principalOwner?: string,
   maxConcurrentTasks?: number,
+  taskIdentity?: TaskIdentityConsumer,
 ): UiRuntimeService {
   const runtimeJournal = journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   return new UiRuntimeService({
@@ -683,6 +685,7 @@ function serviceFor(
     ...(taskGrantPort === undefined ? {} : { taskGrantPort }),
     ...(principalOwner === undefined ? {} : { principalOwner }),
     ...(maxConcurrentTasks === undefined ? {} : { maxConcurrentTasks }),
+    ...(taskIdentity === undefined ? {} : { taskIdentity }),
     runtimeComposition: { admitExecution: async () => {} },
   });
 }
@@ -1645,6 +1648,37 @@ class PersistentTaskCreateFailureJournal extends UiRuntimeJournal {
     super.append(record);
   }
 }
+
+test('native retry owner uses the provider retry root without project runtime paths', () => {
+  assert.equal(
+    nativeRetryCycleJournalPath({
+      providerRetryConfig: { journalRoot: '/tmp/alex/retry' },
+    }),
+    '/tmp/alex/retry/retry-cycle.jsonl',
+    'a scoped Alex launch must bind cold recovery to the retry root its provider attempts wrote',
+  );
+  assert.equal(
+    nativeRetryCycleJournalPath({
+      runtimePaths: { journalRoot: '/tmp/project/journal' },
+      providerRetryConfig: { journalRoot: '/tmp/project/retry' },
+    }),
+    '/tmp/project/retry/retry-cycle.jsonl',
+    'a configured retry owner must win over the UI-runtime fallback',
+  );
+  assert.equal(
+    nativeRetryCycleJournalPath({
+      providerRetryJournalRoot: '/tmp/alex/retry',
+      runtimePaths: { journalRoot: '/tmp/project/journal' },
+    }),
+    '/tmp/alex/retry/retry-cycle.jsonl',
+    'an independently scoped cold owner must bind without provider avoidance',
+  );
+  assert.equal(
+    nativeRetryCycleJournalPath({ runtimePaths: { journalRoot: '/tmp/project/journal' } }),
+    '/tmp/project/journal/ui-runtime/retry-cycle.jsonl',
+  );
+  assert.equal(nativeRetryCycleJournalPath({}), undefined);
+});
 
 test('ui runtime binds memory to the real operation identity and exposes deterministic recall evidence', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-binding-'));
@@ -7024,6 +7058,615 @@ test('explicit brain interprets create, query, append, change, and clarification
     () => service.dispatchNextExplicitRequirement(),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'explicit-brain.inbox.empty',
   );
+});
+
+test('explicit request relation selects exact previous and historical interactions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-request-relation-'));
+  let selected: 'previous' | 'historical' | 'new' = 'previous';
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret(input) {
+        if (selected === 'new') return {
+          kind: 'answer',
+          normalizedInput: input.rawInput,
+          knownFacts: ['the request is independent'],
+          answer: '作为独立请求处理。',
+          decisionRefs: ['decision:relation-new'],
+          requestRelation: { kind: 'new' },
+        };
+        const candidate = input.requestCandidates?.find((entry) => entry.candidateKind === selected);
+        assert.ok(candidate, `expected a ${selected} request candidate`);
+        return {
+          kind: 'answer',
+          normalizedInput: input.rawInput,
+          knownFacts: ['exact prior interaction candidate is available'],
+          answer: '已关联原请求。',
+          decisionRefs: [`decision:relation-${selected}`],
+          requestRelation: { kind: 'continue', candidateId: candidate!.candidateId },
+        };
+      },
+    },
+  );
+  const historical = await service.receiveExplicitInput({ sourceRef: 'ui:relation-old', rawInput: 'old request', channel: 'business' });
+  const prior = await service.receiveExplicitInput({ sourceRef: 'ui:relation-prior', rawInput: 'prior request', channel: 'business' });
+
+  selected = 'historical';
+  const currentHistorical = await service.receiveExplicitInput({ sourceRef: 'ui:relation-current-history', rawInput: 'answer the old question', channel: 'business' });
+  const linkedHistorical = await service.interpretExplicitInput({ interactionId: currentHistorical });
+  assert.equal(linkedHistorical.state, 'answered');
+  assert.deepEqual(linkedHistorical.requestRelation, {
+    kind: 'continue',
+    candidateId: `request-${createHash('sha256').update(historical).digest('hex').slice(0, 20)}`,
+    candidateKind: 'historical',
+    targetInteractionId: historical,
+  });
+
+  selected = 'previous';
+  const currentPrevious = await service.receiveExplicitInput({ sourceRef: 'ui:relation-current-previous', rawInput: 'answer the previous question', channel: 'business' });
+  const linkedPrevious = await service.interpretExplicitInput({ interactionId: currentPrevious });
+  assert.equal(linkedPrevious.state, 'answered');
+  assert.deepEqual(linkedPrevious.requestRelation, {
+    kind: 'continue',
+    candidateId: `request-${createHash('sha256').update(currentHistorical).digest('hex').slice(0, 20)}`,
+    candidateKind: 'previous',
+    targetInteractionId: currentHistorical,
+  });
+
+  selected = 'new';
+  const currentNew = await service.receiveExplicitInput({ sourceRef: 'ui:relation-current-new', rawInput: 'new independent request', channel: 'business' });
+  const linkedNew = await service.interpretExplicitInput({ interactionId: currentNew });
+  assert.equal(linkedNew.state, 'answered');
+  assert.deepEqual(linkedNew.requestRelation, { kind: 'new' });
+  const restored = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+  );
+  await restored.hydrate();
+  assert.deepEqual((await restored.inspectExplicitInteraction(currentNew)).requestRelation, { kind: 'new' });
+});
+
+test('explicit request relation excludes same-scope receipts accepted after a delayed current request', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-request-order-'));
+  let delayedId = '';
+  let futureId = '';
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret(input) {
+        if (input.interactionId === futureId) {
+          assert.deepEqual(input.requestCandidates?.map((entry) => ({
+            interactionId: entry.interactionId,
+            candidateKind: entry.candidateKind,
+          })), [
+            { interactionId: 'interaction-1', candidateKind: 'historical' },
+            { interactionId: delayedId, candidateKind: 'previous' },
+          ]);
+          return {
+            kind: 'answer',
+            normalizedInput: input.rawInput,
+            knownFacts: [],
+            answer: 'This is an independent later request.',
+            decisionRefs: ['decision:request-order-future'],
+            requestRelation: { kind: 'new' },
+          };
+        }
+        assert.equal(input.interactionId, delayedId);
+        assert.deepEqual(input.requestCandidates?.map((entry) => entry.interactionId), ['interaction-1'],
+          'a delayed interpretation cannot see a receipt accepted after the current request');
+        const target = input.requestCandidates?.[0];
+        if (target === undefined) throw new Error('missing earlier accepted request candidate');
+        return {
+          kind: 'answer',
+          normalizedInput: input.rawInput,
+          knownFacts: [],
+          answer: 'Continue the request accepted before this one.',
+          decisionRefs: ['decision:request-order-delayed'],
+          requestRelation: { kind: 'continue', candidateId: target.candidateId },
+        };
+      },
+    },
+  );
+  try {
+    await service.receiveExplicitInput({ sourceRef: 'ui:request-order-target', rawInput: 'earlier target', channel: 'business' });
+    delayedId = await service.receiveExplicitInput({
+      sourceRef: 'ui:request-order-delayed',
+      rawInput: 'delayed current request',
+      channel: 'business',
+    });
+    futureId = await service.receiveExplicitInput({
+      sourceRef: 'ui:request-order-future',
+      rawInput: 'later independent request',
+      channel: 'business',
+    });
+
+    const future = await service.interpretExplicitInput({ interactionId: futureId });
+    assert.deepEqual(future.requestRelation, { kind: 'new' });
+    const delayed = await service.interpretExplicitInput({ interactionId: delayedId });
+    assert.equal(delayed.state, 'answered');
+    assert.equal(delayed.requestRelation?.kind, 'continue');
+    if (delayed.requestRelation?.kind !== 'continue') throw new Error('missing delayed relation receipt');
+    assert.equal(delayed.requestRelation.targetInteractionId, 'interaction-1');
+    assert.equal(delayed.requestRelation.candidateKind, 'previous');
+  } finally {
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('resume-dispatch submits the exact unchanged historical draft once and rejects changed scope', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-resume-dispatch-'));
+  const taskIdentity = new TaskIdentityConsumer(
+    new JsonlTaskIdentityJournal(new JsonlOrganJournal(join(root, 'task-identities.jsonl'))),
+  );
+  let releaseExecution!: () => void;
+  const executionGate = new Promise<void>(resolve => { releaseExecution = resolve; });
+  const port = new GatedPayloadCapturingReplayPort({ binding, stepDelayMs: 1 }, executionGate);
+  let targetId = '';
+  let expectedTaskId: string | undefined;
+  let mode: 'draft' | 'resume' | 'invalid' | 'proposal' | 'changed' = 'draft';
+  const service = serviceFor(root, port, 'fake', 'ready',
+    undefined, undefined, undefined, undefined, {
+      async interpret(input) {
+        if (mode === 'draft') return {
+          kind: 'requirement', normalizedInput: input.rawInput, knownFacts: [], intent: 'create',
+          proposal: input.rawInput, decisionRefs: [],
+          structuredProposal: { revision: input.inputRevision, intent: 'create', title: 'original audit',
+            objective: 'read-only audit of ~/github', deliverable: 'audit report',
+            deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+        };
+        const target = input.requestCandidates?.find(candidate => candidate.interactionId === targetId);
+        assert.ok(target, 'original create draft is present as a scoped relation candidate');
+        if (target === undefined) throw new Error('missing original draft candidate');
+        assert.equal(target.taskId, expectedTaskId, 'candidate carries the authoritative dispatched Task reference');
+        if (mode === 'resume' || mode === 'invalid') return {
+          kind: 'answer', normalizedInput: input.rawInput, knownFacts: [], answer: 'I will submit the saved draft.', decisionRefs: [],
+          requestRelation: { kind: 'continue', candidateId: mode === 'invalid' ? 'request-not-supplied' : target.candidateId, action: 'resume-dispatch' },
+        };
+        return {
+          kind: 'requirement', normalizedInput: 'read-only audit of ~/github',
+          knownFacts: [], intent: 'create', proposal: input.rawInput, decisionRefs: [],
+          structuredProposal: { revision: input.inputRevision, intent: 'create',
+            title: mode === 'changed' ? 'expanded audit' : 'original audit',
+            objective: mode === 'changed' ? 'audit another workspace' : 'read-only audit of ~/github',
+            deliverable: mode === 'changed' ? 'expanded report' : 'audit report',
+            deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+          requestRelation: { kind: 'continue', candidateId: target!.candidateId, action: 'resume-dispatch' },
+        };
+      },
+    }, undefined, undefined, 'humanagent.resume-test', undefined, taskIdentity);
+  try {
+    targetId = await service.receiveExplicitInput({ sourceRef: 'ui:resume-original', rawInput: 'read-only audit of ~/github',
+      channel: 'business', requestKind: 'new-task-preview',
+      actor: { kind: 'human', sourceKind: 'product-principal', sourceRef: 'humanagent.resume-test' } });
+    await service.interpretExplicitInput({ interactionId: targetId });
+    const original = await service.inspectExplicitInteraction(targetId);
+    assert.equal(original.state, 'awaiting-confirmation');
+    assert.ok(original.draft && original.revision);
+    if (original.revision === undefined) throw new Error('missing original typed revision');
+    assert.equal(original.revision.state, 'draft');
+    mode = 'invalid';
+    const invalidId = await service.receiveExplicitInput({ sourceRef: 'ui:resume-invalid',
+      rawInput: 'continue the unchanged original audit', channel: 'business' });
+    await assert.rejects(() => service.interpretExplicitInput({ interactionId: invalidId }),
+      (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'explicit-brain.request-relation-invalid');
+    assert.equal(service.listTasks().counts.total, 0);
+    assert.deepEqual(await service.inspectExplicitInteraction(targetId), original);
+    mode = 'resume';
+    const followupId = await service.receiveExplicitInput({ sourceRef: 'ui:resume-followup',
+      rawInput: 'continue the unchanged original audit', channel: 'business' });
+    const resumed = await service.interpretExplicitInput({ interactionId: followupId });
+    assert.equal(resumed.state, 'answered');
+    assert.equal(resumed.draft, undefined, 'follow-up closes as an answer and owns no second draft');
+    assert.equal(service.listTasks().counts.total, 1);
+    const submitted = await service.inspectExplicitInteraction(targetId);
+    assert.equal(submitted.state, 'confirmed');
+    assert.equal(submitted.confirmation?.confirmedBy, 'humanagent.resume-test',
+      'resume confirmation retains the verified principal from the original acceptance');
+    assert.equal(submitted.confirmation?.confirmedBy === 'explicit-brain:resume-dispatch', false,
+      'the model action does not create a separate authority');
+    const submittedTaskId = queuedDraftRow(service.listTasks(), original.draft!.draftId).taskId.value;
+    assert.ok(resumed.reply?.includes('original audit'));
+    assert.equal(resumed.reply?.includes(submittedTaskId), false);
+    const repeatId = await service.receiveExplicitInput({ sourceRef: 'ui:resume-repeat',
+      rawInput: 'continue the unchanged original audit again', channel: 'business' });
+    const repeated = await service.interpretExplicitInput({ interactionId: repeatId });
+    assert.equal(repeated.state, 'answered');
+    assert.equal(service.listTasks().counts.total, 1, 'repeated continuation reuses the original submission');
+    assert.equal(queuedDraftRow(service.listTasks(), original.draft!.draftId).taskId.value,
+      submittedTaskId, 'duplicate retains the original task identity');
+    assert.equal((await service.inspectExplicitInteraction(repeatId)).reply?.includes(original.revision!.title ?? ''), true);
+
+    const dispatched = await service.dispatchNextExplicitRequirement();
+    assert.equal(dispatched.taskId.value, submittedTaskId);
+    await port.firstStarted;
+    await waitFor(() => assert.equal(service.taskDashboard(id('task', submittedTaskId)).state, 'running'));
+    const dispatchedOriginal = await service.inspectExplicitInteraction(targetId);
+    assert.equal(dispatchedOriginal.state, 'dispatched');
+    assert.equal(dispatchedOriginal.confirmation?.taskRef, undefined, 'a create has no pre-existing Task match');
+    assert.deepEqual(dispatchedOriginal.draft?.matchedTasks, []);
+    expectedTaskId = submittedTaskId;
+    for (const state of ['running', 'succeeded'] as const) {
+      if (state === 'succeeded') {
+        releaseExecution();
+        await waitFor(() => assert.equal(service.taskDashboard(id('task', submittedTaskId)).state, state));
+      }
+      const dispatchedRepeatId = await service.receiveExplicitInput({ sourceRef: `ui:resume-repeat-${state}`,
+        rawInput: 'continue the unchanged original audit again', channel: 'business' });
+      const dispatchedRepeat = await service.interpretExplicitInput({ interactionId: dispatchedRepeatId });
+      assert.equal(dispatchedRepeat.state, 'answered');
+      assert.equal(dispatchedRepeat.draft, undefined);
+      assert.equal(dispatchedRepeat.requestRelation?.kind, 'continue');
+      if (dispatchedRepeat.requestRelation?.kind !== 'continue') throw new Error('missing continuation receipt');
+      assert.equal(dispatchedRepeat.requestRelation.targetInteractionId, targetId);
+      assert.equal(dispatchedRepeat.requestRelation.taskId, submittedTaskId);
+      assert.ok(dispatchedRepeat.reply?.includes('original audit'));
+      assert.ok(dispatchedRepeat.reply?.includes(state === 'running' ? '正在执行' : '已完成'));
+      assert.equal(dispatchedRepeat.reply?.includes(submittedTaskId), false);
+      assert.equal(service.listTasks().counts.total, 1, 'dispatched continuation keeps exactly the original Task');
+      assert.equal(port.startPayloads.length, 1, 'resuming never starts another execution');
+      assert.deepEqual(await service.inspectExplicitInteraction(targetId), dispatchedOriginal);
+    }
+
+    mode = 'proposal';
+    const proposalFollowupId = await service.receiveExplicitInput({ sourceRef: 'ui:resume-proposal',
+      rawInput: 'submit the original unchanged draft', channel: 'business' });
+    await assert.rejects(() => service.interpretExplicitInput({ interactionId: proposalFollowupId }),
+      (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'explicit-brain.request-relation-resume-invalid');
+    assert.equal(service.listTasks().counts.total, 1, 'a proposal with resume action has no effect');
+
+    mode = 'changed';
+    const changedFollowupId = await service.receiveExplicitInput({ sourceRef: 'ui:resume-changed',
+      rawInput: 'also audit another workspace', channel: 'business' });
+    await assert.rejects(() => service.interpretExplicitInput({ interactionId: changedFollowupId }),
+      (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'explicit-brain.request-relation-resume-invalid');
+    assert.equal(service.listTasks().counts.total, 1, 'changed scope cannot consume the continuation action');
+    assert.equal((await service.inspectExplicitInteraction(changedFollowupId)).draft, undefined);
+
+    mode = 'draft';
+    const resentId = await service.receiveExplicitInput({ sourceRef: 'ui:resume-full-resend', rawInput: original.rawInput,
+      channel: 'business', requestKind: 'new-task-preview',
+      actor: { kind: 'human', sourceKind: 'product-principal', sourceRef: 'humanagent.resume-test' } });
+    const resent = await service.interpretExplicitInput({ interactionId: resentId });
+    assert.equal(resent.state, 'awaiting-confirmation', 'full input resent independently still creates its own draft');
+    assert.ok(resent.draft?.draftId !== original.draft!.draftId);
+    assert.equal(resent.requestRelation, undefined);
+  } finally {
+    releaseExecution();
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('resume-dispatch rejects an original actor that does not match the configured principal', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-resume-dispatch-actor-'));
+  let targetId = '';
+  let resume = false;
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }), 'fake', 'ready',
+    undefined, undefined, undefined, undefined, {
+      async interpret(input) {
+        if (!resume) return {
+          kind: 'requirement', normalizedInput: input.rawInput, knownFacts: [], intent: 'create',
+          proposal: input.rawInput, decisionRefs: [],
+          structuredProposal: { revision: input.inputRevision, intent: 'create', title: 'original audit',
+            objective: 'read-only audit', deliverable: 'audit report', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+        };
+        const target = input.requestCandidates?.find(candidate => candidate.interactionId === targetId);
+        assert.ok(target);
+        return {
+          kind: 'answer', normalizedInput: input.rawInput, knownFacts: [], answer: 'Submit the saved draft.', decisionRefs: [],
+          requestRelation: { kind: 'continue', candidateId: target!.candidateId, action: 'resume-dispatch' },
+        };
+      },
+    }, undefined, undefined, 'humanagent.expected-principal');
+  try {
+    targetId = await service.receiveExplicitInput({ sourceRef: 'ui:resume-foreign-original', rawInput: 'read-only audit',
+      channel: 'business', requestKind: 'new-task-preview',
+      actor: { kind: 'human', sourceKind: 'product-principal', sourceRef: 'humanagent.foreign-principal' } });
+    await service.interpretExplicitInput({ interactionId: targetId });
+    resume = true;
+    const followupId = await service.receiveExplicitInput({ sourceRef: 'ui:resume-foreign-followup',
+      rawInput: 'continue the saved audit', channel: 'business' });
+    await assert.rejects(() => service.interpretExplicitInput({ interactionId: followupId }),
+      (error: unknown) => error instanceof UiRuntimeApiError
+        && error.code === 'explicit-brain.request-relation-resume-actor-invalid');
+    assert.equal(service.listTasks().counts.total, 0, 'mismatched principal cannot authorize submission');
+    assert.equal((await service.inspectExplicitInteraction(targetId)).state, 'awaiting-confirmation');
+  } finally {
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('explicit request relation rejects unknown cross-scope and stale targets without local coupling', async () => {
+  for (const scenario of ['unknown', 'cross-scope', 'stale'] as const) {
+    const root = await mkdtemp(join(tmpdir(), `humanagent-ui-explicit-request-relation-${scenario}-`));
+    let targetId = '';
+    let selectedCandidateId = 'request-not-supplied';
+    const service = serviceFor(
+      root,
+      new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+      'fake',
+      'ready',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        async interpret(input) {
+          const target = input.requestCandidates?.find((entry) => entry.interactionId === targetId);
+          if (scenario !== 'unknown') selectedCandidateId = target?.candidateId ?? selectedCandidateId;
+          if (scenario === 'stale' && target !== undefined) await service.beginExplicitMatching(target.interactionId);
+          return {
+            kind: 'answer',
+            normalizedInput: input.rawInput,
+            knownFacts: [],
+            answer: '关联原请求。',
+            decisionRefs: [`decision:relation-${scenario}`],
+            requestRelation: { kind: 'continue', candidateId: selectedCandidateId },
+          };
+        },
+      },
+    );
+    targetId = await service.receiveExplicitInput({
+      sourceRef: 'ui:relation-target',
+      rawInput: 'target request',
+      channel: 'business',
+      ...(scenario === 'cross-scope' ? { workspace: { workspaceCwd: '/tmp/project-a', projectKey: 'project-a' } } : {}),
+    });
+    const currentId = await service.receiveExplicitInput({
+      sourceRef: 'ui:relation-current',
+      rawInput: 'continue the target request',
+      channel: 'business',
+      ...(scenario === 'cross-scope' ? { workspace: { workspaceCwd: '/tmp/project-b', projectKey: 'project-b' } } : {}),
+    });
+
+    await assert.rejects(
+      () => service.interpretExplicitInput({ interactionId: currentId }),
+      (error: unknown) => error instanceof UiRuntimeApiError
+        && error.code === (scenario === 'stale'
+          ? 'explicit-brain.request-relation-stale'
+          : 'explicit-brain.request-relation-invalid'),
+    );
+    const current = await service.inspectExplicitInteraction(currentId);
+    assert.equal(current.state, 'matching');
+    assert.equal(current.requestRelation, undefined);
+    assert.equal(service.listTasks().counts.total, scenario === 'cross-scope' ? 0 : 0);
+  }
+});
+
+test('explicit request relation reuses the confirmed original FIFO entry without another draft', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-request-relation-confirmed-'));
+  let targetId = '';
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret(input) {
+        const target = input.requestCandidates?.find((entry) => entry.interactionId === targetId);
+        assert.ok(target);
+        assert.equal(target!.state, 'confirmed');
+        return {
+          kind: 'status-query',
+          normalizedInput: input.rawInput,
+          knownFacts: ['the confirmed original request remains queued'],
+          answer: '原请求已在投递队列中。',
+          decisionRefs: ['decision:relation-confirmed'],
+          requestRelation: { kind: 'continue', candidateId: target!.candidateId },
+        };
+      },
+    },
+  );
+  targetId = await confirmExplicitRequirementFor(service, 'relation-original');
+  const before = service.listTasks();
+  assert.equal(before.draft.length, 1);
+
+  const currentId = await service.receiveExplicitInput({ sourceRef: 'ui:relation-follow-up', rawInput: '继续投递', channel: 'business' });
+  const current = await service.interpretExplicitInput({ interactionId: currentId });
+  assert.equal(current.state, 'status-only');
+  assert.equal(current.requestRelation?.kind, 'continue');
+  assert.equal(service.listTasks().draft.length, 1, 'the follow-up must not mint another queued draft');
+
+  const dispatched = await service.dispatchNextExplicitRequirement();
+  assert.equal(dispatched.taskId.value, queuedDraftRow(before, 'draft-1').taskId.value);
+  assert.equal(service.listTasks().counts.total, 1);
+});
+
+test('resume-dispatch reports a blocked task instead of claiming submission', async () => {
+  for (const expected of [
+    { state: 'blocked' as const, label: /受阻/ },
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), `humanagent-ui-explicit-request-order-${expected.state}-`));
+    const taskIdentity = new TaskIdentityConsumer(
+      new JsonlTaskIdentityJournal(new JsonlOrganJournal(join(root, 'task-identities.jsonl'))),
+    );
+    let targetId = '';
+    let resume = false;
+    const service = serviceFor(
+      root,
+      new FakeReplayExecutionRuntimePort({
+        binding,
+        stepDelayMs: 1,
+        replay: [
+          { kind: 'model', state: 'model', summary: `${expected.state} request accepted` },
+          { kind: 'terminal', state: expected.state, summary: `execution ${expected.state}`, terminalState: expected.state },
+        ],
+      }),
+      'fake',
+      'ready',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        async interpret(input) {
+          if (!resume) return {
+            kind: 'requirement', normalizedInput: input.rawInput, knownFacts: [], intent: 'create',
+            proposal: input.rawInput, decisionRefs: [],
+            structuredProposal: { revision: input.inputRevision, intent: 'create', title: `${expected.state} audit`,
+              objective: `verify ${expected.state} reporting`, deliverable: 'receipt', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+          };
+          const target = input.requestCandidates?.find((entry) => entry.interactionId === targetId);
+          assert.ok(target, 'the submitted original task remains available for its continuation');
+          return {
+            kind: 'answer', normalizedInput: input.rawInput, knownFacts: [], answer: 'Continue the original task.', decisionRefs: [],
+            requestRelation: { kind: 'continue', candidateId: target!.candidateId, action: 'resume-dispatch' },
+          };
+        },
+      },
+      undefined,
+      undefined,
+      'humanagent.request-order-test',
+      undefined,
+      taskIdentity,
+    );
+    try {
+      targetId = await service.receiveExplicitInput({
+        sourceRef: `ui:request-order-${expected.state}`,
+        rawInput: 'run the audit and report the outcome',
+        channel: 'business',
+        requestKind: 'new-task-preview',
+        actor: { kind: 'human', sourceKind: 'product-principal', sourceRef: 'humanagent.request-order-test' },
+      });
+      const proposed = await service.interpretExplicitInput({ interactionId: targetId });
+      assert.ok(proposed.draft);
+      await service.confirmExplicitRequirement({
+        interactionId: targetId,
+        draftId: proposed.draft!.draftId,
+        inputRevision: 1,
+        requestKind: 'new-task-create',
+        confirmationRef: `confirmation:request-order-${expected.state}`,
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-11-25T00:00:00.000Z',
+        payloadRef: `asset://requirements/request-order-${expected.state}`,
+      });
+      const dispatched = await service.dispatchNextExplicitRequirement();
+      await waitFor(() => assert.equal(service.taskDashboard(dispatched.taskId).state, expected.state));
+
+      resume = true;
+      const followupId = await service.receiveExplicitInput({
+        sourceRef: `ui:request-order-${expected.state}-followup`,
+        rawInput: 'what happened to the original task?',
+        channel: 'business',
+      });
+      const followup = await service.interpretExplicitInput({ interactionId: followupId });
+      assert.equal(followup.state, 'answered');
+      assert.match(followup.reply ?? '', expected.label);
+      assert.equal(followup.reply?.includes('已提交'), false);
+    } finally {
+      await service.quiesceImplicitConsumption();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('resume-dispatch reports a stopped task instead of claiming submission', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-request-order-stopped-'));
+  const taskIdentity = new TaskIdentityConsumer(
+    new JsonlTaskIdentityJournal(new JsonlOrganJournal(join(root, 'task-identities.jsonl'))),
+  );
+  let releaseExecution!: () => void;
+  const executionGate = new Promise<void>((resolve) => { releaseExecution = resolve; });
+  const port = new GatedPayloadCapturingReplayPort({ binding, stepDelayMs: 1 }, executionGate);
+  let targetId = '';
+  let resume = false;
+  const service = serviceFor(
+    root,
+    port,
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret(input) {
+        if (!resume) return {
+          kind: 'requirement', normalizedInput: input.rawInput, knownFacts: [], intent: 'create',
+          proposal: input.rawInput, decisionRefs: [],
+          structuredProposal: { revision: input.inputRevision, intent: 'create', title: 'stopped audit',
+            objective: 'verify stopped reporting', deliverable: 'receipt', deliveryConditions: [], evidenceRefs: [], blockingGaps: [] },
+        };
+        const target = input.requestCandidates?.find((entry) => entry.interactionId === targetId);
+        assert.ok(target, 'the stopped original task remains available for its continuation');
+        return {
+          kind: 'answer', normalizedInput: input.rawInput, knownFacts: [], answer: 'Continue the original task.', decisionRefs: [],
+          requestRelation: { kind: 'continue', candidateId: target!.candidateId, action: 'resume-dispatch' },
+        };
+      },
+    },
+    undefined,
+    undefined,
+    'humanagent.request-order-test',
+    undefined,
+    taskIdentity,
+  );
+  try {
+    targetId = await service.receiveExplicitInput({
+      sourceRef: 'ui:request-order-stopped',
+      rawInput: 'run the audit and report the outcome',
+      channel: 'business',
+      requestKind: 'new-task-preview',
+      actor: { kind: 'human', sourceKind: 'product-principal', sourceRef: 'humanagent.request-order-test' },
+    });
+    const proposed = await service.interpretExplicitInput({ interactionId: targetId });
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      interactionId: targetId,
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      requestKind: 'new-task-create',
+      confirmationRef: 'confirmation:request-order-stopped',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-11-25T00:00:00.000Z',
+      payloadRef: 'asset://requirements/request-order-stopped',
+    });
+    const dispatched = await service.dispatchNextExplicitRequirement();
+    await port.firstStarted;
+    await waitFor(() => assert.equal(service.taskDashboard(dispatched.taskId).state, 'running'));
+    const stopping = service.stop(dispatched.taskId);
+    releaseExecution();
+    assert.equal((await stopping).state, 'stopped');
+    await waitFor(() => assert.equal(service.taskDashboard(dispatched.taskId).state, 'stopped'));
+
+    resume = true;
+    const followupId = await service.receiveExplicitInput({
+      sourceRef: 'ui:request-order-stopped-followup',
+      rawInput: 'what happened to the original task?',
+      channel: 'business',
+    });
+    const followup = await service.interpretExplicitInput({ interactionId: followupId });
+    assert.equal(followup.state, 'answered');
+    assert.match(followup.reply ?? '', /已停止/);
+    assert.equal(followup.reply?.includes('已提交'), false);
+  } finally {
+    releaseExecution();
+    await service.quiesceImplicitConsumption();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('explicit brain persists a live-shaped structured provider proposal after successful settlement', async () => {

@@ -1455,6 +1455,13 @@ test('an unclosed parent turn blocks next-turn history until its semantic checkp
         && /unclosed interaction parent turn turn-one/.test((error as Error).message),
     );
 
+    // An independent path can start without consuming another path's raw
+    // context. The default recovery gate above must still reject that shape.
+    assert.deepEqual(await prepareScopeSemanticHistory({
+      activeTurn: turnTwo, parentJournal, checkpointJournal: helperJournal,
+      ignoreUnclosedTurns: true,
+    }), []);
+
     const bound = new ExplicitTurnHelperSession({
       identity: turnOne,
       latestTurn: latestTurnOne,
@@ -1486,6 +1493,10 @@ test('an unclosed parent turn blocks next-turn history until its semantic checkp
     // History crosses interactionId inside the same interactionScopeId.
     assert.equal(history[0]?.interactionId, 'interaction-one');
     assert.equal(history[0]?.turnId, 'turn-one');
+    assert.deepEqual(await prepareScopeSemanticHistory({
+      activeTurn: turnTwo, parentJournal, checkpointJournal: helperJournal,
+      ignoreUnclosedTurns: true,
+    }), history, 'independent paths still consume committed cross-interaction history');
     // A different interactionScopeId stays isolated: no history is selected and
     // no foreign turn can block or feed the active turn.
     assert.deepEqual(

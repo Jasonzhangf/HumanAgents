@@ -1,0 +1,230 @@
+{
+  "id": "humanagent-conversation-scope-entry",
+  "version": "1",
+  "meta": {
+    "title": "会话入口范围路由：Alex 与项目 Jenny 的读取和提交",
+    "description": "固定 /api/main-topic 与 /api/explicit/inputs 入口按 typed scope 解析；GET 只读不持久化，POST 首条按稳定 scope 与幂等键交给真正接收输入的 owner，随后复用既有显式轮次子图，权威事实按相同 scope 持久化并统一返回。",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "scopeContract": "裸入口与 scope=system 归一到 {kind:alex}；scope=project&projectKey 解析到唯一 Jenny。身份和权限来自 config，URL 只选择目标。",
+    "readOnlyContract": "GET 读取既有事实或返回空投影，不创建 session/scope 状态、不 backfill legacy、不调用 provider。",
+    "submitContract": "POST 首条才 ensure 唯一主会话；幂等键传到真正接收输入的 owner；重复键返回原 interaction，不新增消息或二次 bootstrap。只读与写入共用同一 scope 路由。",
+    "isolationContract": "Alex 不携带 projectKey、workspace 或项目历史；跨 scope 的 inspect/interpret/continue/events 以 scope.interaction-not-found 拒绝。",
+    "terminalContract": {
+      "success": "同一 scope 的读取结果或提交后轮次结果",
+      "failure": "未知/歧义范围或未接通操作显式失败，保留原 scope 与恢复责任",
+      "cancel": "标准停止收拢，HTTP 取消不等于业务取消",
+      "cleanup": "只读路径无副作用"
+    }
+  },
+  "inputs": [
+    {
+      "id": "browser_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "request",
+      "operator": "humanagent-conversation-scope-request",
+      "operator_version": "1",
+      "inputs": [
+        "browser_request"
+      ],
+      "output": {
+        "id": "inbound_request",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_scope",
+      "operator": "humanagent-conversation-scope-resolve",
+      "operator_version": "1",
+      "inputs": [
+        "inbound_request"
+      ],
+      "output": {
+        "id": "resolved_scope",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "read_projection",
+      "operator": "humanagent-conversation-scope-read",
+      "operator_version": "1",
+      "inputs": [
+        "resolved_scope"
+      ],
+      "output": {
+        "id": "read_projection_value",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "ensure_and_record",
+      "operator": "humanagent-conversation-scope-record",
+      "operator_version": "1",
+      "inputs": [
+        "resolved_scope"
+      ],
+      "output": {
+        "id": "recorded_interaction",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "explicit_turn_subgraph",
+      "operator": "humanagent-conversation-scope-explicit-turn",
+      "operator_version": "1",
+      "inputs": [
+        "recorded_interaction"
+      ],
+      "output": {
+        "id": "turn_outcome",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "durable_same_scope_state",
+      "operator": "humanagent-conversation-scope-durable",
+      "operator_version": "1",
+      "inputs": [
+        "read_projection_value",
+        "turn_outcome"
+      ],
+      "output": {
+        "id": "scoped_state",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "unified_response",
+      "operator": "humanagent-conversation-scope-response",
+      "operator_version": "1",
+      "inputs": [
+        "scoped_state"
+      ],
+      "output": {
+        "id": "response",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "request",
+      "to": "resolve_scope",
+      "arc_id": "inbound_request"
+    },
+    {
+      "from": "resolve_scope",
+      "to": "read_projection",
+      "arc_id": "resolved_scope"
+    },
+    {
+      "from": "resolve_scope",
+      "to": "ensure_and_record",
+      "arc_id": "resolved_scope"
+    },
+    {
+      "from": "ensure_and_record",
+      "to": "explicit_turn_subgraph",
+      "arc_id": "recorded_interaction"
+    },
+    {
+      "from": "read_projection",
+      "to": "durable_same_scope_state",
+      "arc_id": "read_projection_value"
+    },
+    {
+      "from": "explicit_turn_subgraph",
+      "to": "durable_same_scope_state",
+      "arc_id": "turn_outcome"
+    },
+    {
+      "from": "durable_same_scope_state",
+      "to": "unified_response",
+      "arc_id": "scoped_state"
+    }
+  ],
+  "outputs": [
+    "response"
+  ]
+}

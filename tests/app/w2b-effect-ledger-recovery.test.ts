@@ -537,6 +537,10 @@ test('W2-B Scenario 4, 5, 6, 7 & 8: recovery-auto-resumed, recovery-hold-effect-
       'dispatched-effect-unknown',
       'an operator note must not append a reconciled effect fact',
     );
+    // The independent effect owner supplies this trusted fact, after checking
+    // the external outcome; recover itself must never manufacture it.
+    await ledger.appendToolEffectLedgerEntry({ ...holdEntriesAfterEffectReconcile[0]!.entry,
+      scope: scopeHold, state: 'reconciled', operatorNote: 'trusted external effect verification fixture' });
 
     // Scenario 6b (Negative): Provider settlement alone cannot confirm an unknown mutating effect
     const confirmedHoldSettlement = {
@@ -606,6 +610,29 @@ test('W2-B Scenario 4, 5, 6, 7 & 8: recovery-auto-resumed, recovery-hold-effect-
       'duplicate recover call must be idempotent and return the same recovery checkpoint',
     );
     assert.equal(journalAfterDuplicateRecover, journalBeforeDuplicateRecover, 'duplicate recover must not append duplicate records');
+
+    // Same business turn, newer physical attempt: the old receipt and old
+    // recovery checkpoint must not discharge a new unknown Provider stream.
+    const repeated = await evaluateAndPersistTurnRecovery({
+      ledger, checkpointStore, scope: scopeHold, turnId: 'turn-hold', directiveRevision: 1,
+      executionEpoch: 2, recoveryStateRef: refHold,
+    });
+    assert.equal(repeated.outcome, 'recovery-hold-effect-unknown');
+    assert.equal(repeated.fact?.providerSettleReceipt.state, 'unknown');
+    assert.equal(repeated.checkpoint?.checkpoint.executionEpoch, 2);
+    assert.ok(repeated.checkpoint?.checkpoint.id.value !== recoveredFirst.checkpoint?.checkpoint.id.value);
+
+    const fresh = await evaluateAndPersistTurnRecovery({
+      ledger, checkpointStore, scope: scopeHold, turnId: 'turn-hold', directiveRevision: 1,
+      executionEpoch: 2, recoveryStateRef: refHold, providerSettlements: [confirmedHoldSettlement],
+    });
+    assert.equal(fresh.outcome, 'recovery-auto-resumed');
+    assert.equal(fresh.checkpoint?.checkpoint.executionEpoch, 2, 'a repeated receipt identity cannot return an epoch-1 checkpoint');
+    const explicitlyUnknown = await evaluateAndPersistTurnRecovery({
+      ledger, checkpointStore, scope: scopeHold, turnId: 'turn-hold', directiveRevision: 1,
+      executionEpoch: 2, recoveryStateRef: refHold, providerSettlements: [],
+    });
+    assert.equal(explicitlyUnknown.outcome, 'recovery-hold-effect-unknown', 'native unknown overrides a same-epoch cached receipt');
 
     // Confirm reconciled mutating tool is NOT re-executed when the resumed turn encounters its idempotencyKey
     let bashReexecuted = 0;
@@ -726,6 +753,15 @@ test('W2-B Coordinator hydrate & recoverTask E2E: unknown mutating effect stays 
       },
     });
 
+    const confirmedCoordSettle = [
+      {
+        providerRequestId: 'req-coord-stopped-1',
+        state: 'stopped' as const,
+        verifiedBy: 'lease-process-exit-reconcile' as const,
+        verifiedAt: '2026-11-02T05:15:05.000Z',
+      },
+    ];
+    let nativeSettlementState: 'unknown' | 'verified' = 'unknown';
     const makeCoordinator = () =>
       new RuntimeTaskCoordinator({
         organId: id('organ', 'brain'),
@@ -738,6 +774,13 @@ test('W2-B Coordinator hydrate & recoverTask E2E: unknown mutating effect stays 
         currentStatePort,
         createTaskAssembly: () => createStubTaskAssembly(),
         createDriver: async (driverInput: RuntimeExecutionDriverInput) => makeDriver(driverInput),
+        nativeProviderSettlement: {
+          async read() {
+            return nativeSettlementState === 'verified'
+              ? { state: 'verified' as const, receipts: confirmedCoordSettle }
+              : { state: 'unknown' as const, reason: 'native settlement evidence is incomplete' };
+          },
+        },
       });
 
     const coordinator1 = makeCoordinator();
@@ -789,14 +832,6 @@ test('W2-B Coordinator hydrate & recoverTask E2E: unknown mutating effect stays 
     assert.equal(resumedRuns, 0, 'recoverTask must not resume while providerSettleReceipt.state is unknown');
 
     // Negative: Provider settlement alone cannot confirm the unknown mutating effect
-    const confirmedCoordSettle = [
-      {
-        providerRequestId: 'req-coord-stopped-1',
-        state: 'stopped' as const,
-        verifiedBy: 'lease-process-exit-reconcile' as const,
-        verifiedAt: '2026-11-02T05:15:05.000Z',
-      },
-    ];
     const [heldSnap1, heldSnap2] = await Promise.all([
       coordinator2.recoverTask(task.taskId, { providerSettlements: confirmedCoordSettle }),
       coordinator2.recoverTask(task.taskId, { providerSettlements: confirmedCoordSettle }),
@@ -808,7 +843,10 @@ test('W2-B Coordinator hydrate & recoverTask E2E: unknown mutating effect stays 
     const heldLedger = await ledger.readToolEffectLedgerEntries({ scope, turnId });
     assert.equal(heldLedger[0]?.entry.state, 'dispatched-effect-unknown');
 
-    // Positive compatibility: A pre-existing trusted reconciled fact permits recovery
+    // Positive compatibility: A pre-existing trusted reconciled fact and verified settlement permit recovery
+    nativeSettlementState = 'verified';
+    assert.equal((await coordinator2.recoverTask(task.taskId)).state, 'blocked',
+      'Provider settlement cannot reconcile the unknown effect');
     await ledger.appendToolEffectLedgerEntry({
       ...heldLedger[0]!.entry,
       scope,
@@ -816,8 +854,8 @@ test('W2-B Coordinator hydrate & recoverTask E2E: unknown mutating effect stays 
       operatorNote: 'trusted external effect verification fixture',
     });
     const [recoveredSnap1, recoveredSnap2] = await Promise.all([
-      coordinator2.recoverTask(task.taskId, { providerSettlements: confirmedCoordSettle }),
-      coordinator2.recoverTask(task.taskId, { providerSettlements: confirmedCoordSettle }),
+      coordinator2.recoverTask(task.taskId),
+      coordinator2.recoverTask(task.taskId),
     ]);
     assert.equal(recoveredSnap1.taskId.value, task.taskId.value);
     assert.equal(recoveredSnap2.taskId.value, task.taskId.value);

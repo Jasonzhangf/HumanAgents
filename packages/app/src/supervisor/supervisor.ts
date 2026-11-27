@@ -16,6 +16,7 @@ const LEASE_SCHEMA_VERSION = 1 as const;
 const PROCESS_START_TOKEN = `node:${randomUUID()}`;
 export const SERVE_OWNER = 'humanagent.app.serve';
 export const SUPERVISOR_RESTART_REQUEST_OPTION = '--restart-request';
+export const SUPERVISOR_RECOVER_DISPOSED_LEASE_OPTION = '--recover-disposed-lease';
 
 export interface SupervisorFailureRecord {
   readonly phase: string;
@@ -178,6 +179,7 @@ export interface SupervisorServeStartupOptions {
   readonly startup?: SupervisorStartupDeclaration;
   readonly restartRequest?: string;
   readonly restartStop?: SupervisorTakeoverStopOptions;
+  readonly recoverDisposedLeaseId?: string;
 }
 
 export type SupervisorServeStartupResult =
@@ -1133,6 +1135,56 @@ function previousCloseUnverifiedError(record: SupervisorLeaseRecord): AppLifecyc
   );
 }
 
+function resolveDisposedLeaseRecovery(
+  current: SupervisorLeaseRecord | undefined,
+  recoverDisposedLeaseId: string,
+): { readonly current: SupervisorLeaseRecord; readonly takeover: SupervisorTakeoverRecord } {
+  if (current === undefined || current.leaseId !== recoverDisposedLeaseId) {
+    throw supervisorError(
+      'daemon-recovery.lease-mismatch',
+      `disposed lease recovery requested ${recoverDisposedLeaseId}, but that is not the current lease`,
+      'read the current daemon lease and pass its exact lease id only after confirming the owner is dead and disposal failed',
+      SERVE_OWNER,
+    );
+  }
+  if (current.ownerId !== SERVE_OWNER) throw serveOwnerMismatchError(current);
+  if (current.disposedAt === undefined) {
+    throw supervisorError(
+      'daemon-recovery.not-disposed',
+      `lease ${current.leaseId} has not completed disposal`,
+      'use the normal serve or formal restart path for an undisposed owner',
+      current.ownerId,
+    );
+  }
+  if (!hasCleanupFailure(current.failure)) {
+    throw supervisorError(
+      'daemon-recovery.not-required',
+      `disposed lease ${current.leaseId} has no unresolved cleanup failure`,
+      'start a normal serve without the disposed lease recovery option',
+      current.ownerId,
+    );
+  }
+  if (processIsAlive(current.pid)) {
+    throw supervisorError(
+      'daemon-recovery.owner-alive',
+      `disposed lease ${current.leaseId} still has a live recorded PID ${current.pid}`,
+      'inspect and stop the exact recorded owner before requesting disposed lease recovery',
+      current.ownerId,
+    );
+  }
+  return {
+    current,
+    takeover: {
+      previousLeaseId: current.leaseId,
+      previousGeneration: current.generation,
+      reason: `explicit recovery of disposed lease ${current.leaseId} after verified owner death`,
+      detectedAt: new Date().toISOString(),
+      termination: 'already-dead',
+      ...(current.failure === undefined ? {} : { previousFailure: current.failure }),
+    },
+  };
+}
+
 function commitServeLease(
   paths: RuntimePaths,
   generation: number,
@@ -1158,10 +1210,33 @@ async function decideServeLease(
   startup: SupervisorStartupDeclaration | undefined,
   restartRequest: string | undefined,
   restartStop: SupervisorTakeoverStopOptions | undefined,
+  recoverDisposedLeaseId: string | undefined,
 ): Promise<ServeLeaseOutcome> {
   const leasePath = daemonLeasePath(paths);
   const decision = await withLeaseGuard(leasePath, async (): Promise<ServeLeaseOutcome | ServeLeaseReplacement> => {
     const current = await readLeaseRecord(paths);
+    if (recoverDisposedLeaseId !== undefined && restartRequest !== undefined) {
+      throw supervisorError(
+        'daemon-recovery.option-conflict',
+        'disposed lease recovery and formal restart cannot run in the same invocation',
+        'run the exact disposed lease recovery first, then use the normal restart path for later replacement',
+        ownerId,
+      );
+    }
+    if (recoverDisposedLeaseId !== undefined) {
+      const recovery = resolveDisposedLeaseRecovery(current, recoverDisposedLeaseId);
+      const lease = commitServeLease(
+        paths,
+        recovery.current.generation + 1,
+        ownerId,
+        startup,
+        undefined,
+        recovery.current,
+        recovery.takeover,
+      );
+      await writeLeaseRecord(paths, lease.record);
+      return { kind: 'acquired', lease };
+    }
     if (restartRequest !== undefined) {
       if (current === undefined) {
         throw supervisorError(
@@ -1284,6 +1359,7 @@ export async function runSupervisorServeStartup(
     options.startup,
     options.restartRequest,
     options.restartStop,
+    options.recoverDisposedLeaseId,
   );
   if (decision.kind === 'already-running') {
     return { status: 'already-running', lease: decision.record };

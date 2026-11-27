@@ -548,6 +548,50 @@ test('task.read_result round trips native protocol declarations calls and result
   assert.equal(anthEnd.events.find(event => event.toolCall)?.toolCall?.toolId, 'task.read_result');
 });
 
+// The combined real RCC request failed at declaration for this argument-free tool.
+// Impact: business execution cannot start. Cost: one in-memory codec round trip.
+test('workspace.inventory round trips declarations invocations and results with native protocol names', async () => {
+  const inputSchema = { type: 'object', properties: {}, additionalProperties: false };
+  const tools = [{ toolId: 'workspace.inventory', description: 'inspect authorized workspace inventory', inputSchema }];
+  const output = JSON.stringify({ repositories: [{ name: 'humanagent', worktrees: [] }] });
+  const call = { callId: 'inventory-1', toolId: 'workspace.inventory', arguments: {}, continuationRef: 'inventory-response' };
+  const requestContext: ProviderRequestContext = { units: [
+    { kind: 'tool-call', ...call },
+    { kind: 'tool-result', callId: call.callId, toolId: call.toolId, output, status: 'succeeded' },
+  ] };
+  const responses = new ResponsesProviderCodec();
+  const started = responses.encodeStart(startInput({ tools }), ccBinding, 'cc-route');
+  assert.deepEqual(started.tools, [{ type: 'function', name: 'workspace_inventory', description: tools[0]!.description, parameters: inputSchema }]);
+  assert.match(started.instructions, /Only these function tools can be called: workspace_inventory\./);
+  const context = codecContext();
+  await responses.decodeEvent({ protocol: 'responses', type: 'response.created', response: { id: call.continuationRef } }, context);
+  const decoded = await responses.decodeEvent({ protocol: 'responses', type: 'response.output_item.done', output_index: 0,
+    item: { type: 'function_call', call_id: call.callId, name: 'workspace_inventory', arguments: '{}' } }, context);
+  assert.deepEqual(decoded.events.find(event => event.toolCall)?.toolCall, call);
+  const expectedInput = [
+    { type: 'function_call' as const, call_id: call.callId, name: 'workspace_inventory', arguments: '{}' },
+    { type: 'function_call_output' as const, call_id: call.callId, output },
+  ];
+  assert.deepEqual(responses.encodeSubmit(submitInput({ tools, requestContext }), ccBinding, 'cc-route').input, expectedInput);
+  assert.deepEqual(responses.encodeSubmit(submitInput({ tools, toolContinuations: [{ ...call, output }] }), ccBinding, 'cc-route').input.slice(-2), expectedInput);
+
+  const anthropic = new AnthropicProviderCodec(4096);
+  assert.deepEqual(anthropic.encodeStart(startInput({ tools }), goaichatBinding, 'goaichat-route').tools,
+    [{ name: 'workspace.inventory', description: tools[0]!.description, input_schema: inputSchema }]);
+  const anthContext = codecContext();
+  await anthropic.decodeEvent({ protocol: 'anthropic', type: 'message_start', message: { id: 'inventory-anth', model: 'm', role: 'assistant' } }, anthContext);
+  await anthropic.decodeEvent({ protocol: 'anthropic', type: 'content_block_start', index: 0,
+    content_block: { type: 'tool_use', id: call.callId, name: call.toolId, input: {} } }, anthContext);
+  const anthEnd = await anthropic.decodeEvent({ protocol: 'anthropic', type: 'content_block_stop', index: 0 }, anthContext);
+  assert.deepEqual(anthEnd.events.find(event => event.toolCall)?.toolCall, { ...call, continuationRef: 'inventory-anth' });
+  assert.deepEqual(anthropic.encodeSubmit(submitInput({ tools, requestContext }), goaichatBinding, 'goaichat-route').messages, [
+    { role: 'assistant', content: [{ type: 'tool_use', id: call.callId, name: call.toolId, input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: call.callId, content: output }] },
+  ]);
+  assert.throws(() => responses.encodeStart(startInput({ tools: [{ ...tools[0]!, toolId: 'workspace.unregistered' }] }), ccBinding, 'cc-route'),
+    (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'tool.name.unsupported');
+});
+
 test('responses codec keeps tool control typed and encodes a call-bound continuation', () => {
   const codec = new ResponsesProviderCodec();
   const tools = [{ toolId: 'file.read', description: 'read one file', inputSchema: { type: 'object' } }];

@@ -30,6 +30,7 @@
     "settlementEvidenceBoundary": "explicit-brain.state、trace 或回复文本不能证明 Provider settlement。原 typed 成功 Provider settlement receipt 作为一条 provider-settlement 控制记录写入现有 interaction-parent Journal，关联同一 interactionId、inputRevision 与真实 terminal request；不得写入 prompt、回答 JSON、reply、explicit-brain.state、decisionRefs 或任务 payload。除既有 continue owner-reconciliation 分支外，physical close 后只新增允许该控制记录追加，request 与 raw fact 仍冻结。独立只读 control GET 精确消费该记录；缺失、未就绪或完整性失败必须显式报错，不得伪造或重放。已完成 answer 的旧历史无 receipt 仍可读取；receipt 强制只用于需要 settlement 证据的 incomplete recovery。",
     "multipleDecisionReanswerContract": "一次 fresh 本地执行的终态批次若解析出多于一个完整 decision 对象，整批拒绝：写 parse-failure 事实、不写 semantic checkpoint、不按相等/位置/相关度选择或截断其中任一个；真实 close、settle、journal ack 与 helper 守卫全部成立且无 cleanup 错误时，才允许同一 committed input 的至多一次 replacement generation（新 parent turn、复用同一 role/provider/model/route、仅第二次构造追加 repair 指令）。第二次若仍多 decision 则诚实关闭并传播其 parse error，无第三次、无合成成功。既已 settled 的冷读、finish 与恢复读分支不触发 replacement，也不额外联系 Provider；parse-failure 与 replacement 检查点均不混入被拒对象。",
     "explicitEndContract": "新协议显式父轮使用 explicit-turn-end 结束：outer kind 只有 simple/complex，inner decision 沿 answer/status-query/clarification/requirement；requirement 只能 complex 且必须携带五部分 capsule，simple 禁止 capsule。身份、错误计数、checkpoint 引用和恢复控制由 runtime 注入，不接受模型参数。",
+    "requestRelationContract": "route 从本次已接收 scope 中的既有显式交互构造有限候选，模型在现有 explicit-turn-end decision 中选独立新请求或一个确切候选；候选 ID 由服务端生成，不能含或接受 scope、lease、epoch、revision、权限等控制真相。outcome/service 解析回当前 scope 的原交互与现有 Task，检查状态、revision 和动作合法性；未知、跨 scope、过期或动作冲突一律拒绝当前输入，不消费候选、不创建 Task。保持已接收 interaction 身份，明确重发仍由新 submission key 创建新 interaction。",
     "partialBoundary": "同一尝试内真实结束调用的前两次格式错误返回模型；第三次仍无效时发布 typed partial，不推进 semantic checkpoint、不采纳错误 requirement、不创建第二业务任务。partial 必须携带可读 partialRef、用户可见错误和恢复责任；继续仅通过原交互的 resumePartialRef 恢复，新物理执行重置格式计数并保留旧失败记忆。",
     "turnEndGates": "1) 未接受有效 explicit-turn-end call 不得正常语义收拢；2) 未取得真实 Provider drain、同 execution epoch 成功 settlement 和 released 证据不得发布成功收拢；owned composition 另须真实 physical close，borrowed port 保持外部所有者的 Provider 开放且不得伪造 close。归属由 App 实际 composition 通过 typed runtime 参数传递，缺省仍要求 owned close；3) partial、无效结束与失败探索不得写主路径 checkpoint。普通尾部文本只能触发临时续推，不能替代结束工具。",
     "existingCheckpointDesign": "native-turn-checkpoint.graph.json"
@@ -111,11 +112,34 @@
       "iterator": "Whole"
     },
     {
+      "id": "validate_request_relation",
+      "operator": "humanagent-explicit-request-relation-validation",
+      "operator_version": "1",
+      "inputs": [
+        "outcome_result"
+      ],
+      "output": {
+        "id": "validated_relation_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
       "id": "history",
       "operator": "humanagent-explicit-semantic-turn-history",
       "operator_version": "1",
       "inputs": [
-        "outcome_result"
+        "validated_relation_result"
       ],
       "output": {
         "id": "history_result",
@@ -170,8 +194,13 @@
     },
     {
       "from": "outcome",
-      "to": "history",
+      "to": "validate_request_relation",
       "arc_id": "outcome_result"
+    },
+    {
+      "from": "validate_request_relation",
+      "to": "history",
+      "arc_id": "validated_relation_result"
     },
     {
       "from": "history",

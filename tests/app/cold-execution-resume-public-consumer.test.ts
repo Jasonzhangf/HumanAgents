@@ -40,6 +40,8 @@ import {
   JsonlOrganJournal,
   type JournalRecord,
 } from '../../packages/adapters/jsonl/src/index.js';
+import { evaluateAndPersistTurnRecovery } from '../../packages/runtime/src/checkpoints/effect-ledger-recovery.js';
+import { createNativeProviderSettlementReader } from '../../packages/app/src/ui-runtime/native-provider-settlement.js';
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import {
   createJsonlActiveTurnJournal,
@@ -188,6 +190,7 @@ interface ResumeAssembly {
 }
 
 interface ResumeRuntimeOptions {
+  readonly effectRecovery?: 'native' | 'legacy';
   readonly beforeProvider?: (roleId: string) => void;
   readonly onExecutionInstance?: () => void;
   readonly omitAssemblyFactory?: boolean;
@@ -653,7 +656,7 @@ async function upstream(
   deliveryText?: string,
   summaryText?: { readonly original: Readonly<Record<'goal' | 'actions' | 'result' | 'expectedNextStep', string>>;
     readonly next: Readonly<Record<'goal' | 'actions' | 'result' | 'expectedNextStep', string>> },
-  executionFrames?: (body: string) => readonly unknown[] | undefined,
+  executionFrames?: (body: string) => readonly unknown[] | undefined | Promise<readonly unknown[] | undefined>,
 ): Promise<Upstream> {
   const wires: { path: string; body: string }[] = [];
   const errors: Upstream['errors'] = [];
@@ -733,7 +736,8 @@ async function upstream(
         throw new Error('the controlled upstream could not identify a lawful cold-resume Responses stage');
       }
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end((executionFrames?.(body) ?? turnEndFrames()).map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+      response.write(': stream-open\n\n');
+      response.end(((await executionFrames?.(body)) ?? turnEndFrames()).map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
     })().catch((error: unknown) => {
       const record = error as { cause?: unknown; errors?: unknown };
       const describe = (value: unknown): string => value instanceof Error
@@ -1800,6 +1804,12 @@ function buildResumeRuntime(fixture: ColdFixture, upstreamBaseUrl: string, model
     // The cold producer is the only new coordinator binding. The coordinator
     // owns the matching ColdExecutionLifecycleBinding internally.
     coldExecution: composition,
+    ...(options.effectRecovery ? {
+      effectLedgerFor: () => createJsonlToolEffectLedgerJournal({ filePath: fixture.journalPath, journal: fixture.journal }),
+    } : {}),
+    ...(options.effectRecovery === 'native' ? {
+      nativeProviderSettlement: createNativeProviderSettlementReader({ journal: fixture.journal, now }),
+    } : {}),
   });
   return { coordinator, composition, assemblies };
 }
@@ -3318,6 +3328,146 @@ async function runHttpResumeAssertions(
 }
 
 function registerPublicConsumers(): void {
+  // Observed epoch-1 auto-resume over an interrupted epoch-2 tail. Impact:
+  // replay or false settlement. Cost: one existing exact-source fixture.
+  test('current segment hydrate and recover retain epoch-2 unknown despite epoch-1 auto-resume', async () => {
+    const fixture = await buildInterruptedColdFixture('current-segment-hold');
+    const ledger = createJsonlToolEffectLedgerJournal({ filePath: fixture.journalPath, journal: fixture.journal });
+    const checkpointStore = new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at));
+    const scope = fixture.allocation.scope;
+    await evaluateAndPersistTurnRecovery({ ledger, checkpointStore, scope, turnId: fixture.businessTurnId,
+      directiveRevision: 1, executionEpoch: 1, recoveryStateRef: evidence(scope, 'old-recovery'),
+      providerSettlements: [{ providerRequestId: 'old-completed-request', state: 'settled',
+        verifiedBy: 'response-stream-eof', verifiedAt: at }] });
+    await ledger.appendToolEffectLedgerEntry({ scope, turnId: fixture.businessTurnId,
+      toolCallId: 'unavailable-sibling', toolName: 'Bash', effectPolicy: 'mutating',
+      idempotencyKey: 'unavailable-sibling', argsDigest: 'unavailable', state: 'dispatched-effect-unknown' });
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture);
+    try {
+      const { coordinator } = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model', { effectRecovery: 'native' });
+      await coordinator.hydrate();
+      const hydrated = coordinator.taskSnapshot(fixture.taskId);
+      assert.equal(hydrated.executionEpoch, 2);
+      assert.equal(hydrated.state, 'blocked');
+      assert.equal((await checkpointStore.readLatest(scope))?.checkpoint.executionEpoch, 2);
+      assert.equal(hydrated.checkpoint?.recoveryOutcome, 'recovery-hold-effect-unknown');
+      assert.deepEqual(hydrated.allowedActions, ['recover', 'stop']);
+      const recovered = await coordinator.recoverTask(fixture.taskId);
+      assert.equal(recovered.state, 'blocked');
+      assert.equal((await checkpointStore.readLatest(scope))?.checkpoint.executionEpoch, 2);
+      const fact = await ledger.readLatestTurnSegmentRecoveryFact({ scope, turnId: fixture.businessTurnId });
+      assert.equal(fact?.executionEpoch, 2);
+      assert.equal(fact?.providerSettleReceipt.state, 'unknown');
+      assert.equal((await ledger.readToolEffectLedgerEntries({ scope }))[0]?.entry.state, 'dispatched-effect-unknown');
+      assert.equal((await fixture.segmentJournal.readSegments(fixture.businessTurnId)).length, 1);
+      assert.equal(http.wires.length, 0, 'hold must not dispatch a Provider or replay a tool');
+    } finally {
+      await http.close();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  // Observed resumed dispatch errors left the public task running. Cost:
+  // one retained fixture and one local Provider failure response.
+  test('resumed provider failure clears running and retains recovery actions', async () => {
+    const fixture = await buildColdFixture('current-segment-failure');
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture, undefined, undefined,
+      () => [{ type: 'response.failed', response: { id: 'failed-resumed-request',
+        error: { code: 'invalid_request', message: 'resumed request rejected' } } }]);
+    try {
+      const { coordinator } = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model');
+      await assert.rejects(() => coordinator.resumeExecution(fixture.taskId, fixture.allocation.operationId, {
+        businessTurnId: fixture.businessTurnId, predecessor: fixture.predecessor,
+      }));
+      const failed = coordinator.taskSnapshot(fixture.taskId);
+      assert.equal(failed.state, 'blocked');
+      assert.equal(failed.executionEpoch, 2);
+      assert.deepEqual(failed.allowedActions, ['recover', 'stop']);
+      assert.ok(failed.error);
+      assert.ok(coordinator.eventsSince(fixture.allocation.operationId).some((event) =>
+        event.kind === 'execution.terminal' && event.state === 'blocked' && event.terminalPhase === 'final'));
+      assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output);
+      await assert.rejects(() => coordinator.stop(fixture.taskId), /no running execution/);
+    } finally {
+      await http.close();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  // Observed missing readiness resolver stranded stop after cold dispatch.
+  // Cost: one in-flight local request; assert stop returns through its owner.
+  test('resumed generation signals readiness to standard stop control', async () => {
+    const fixture = await buildColdFixture('current-segment-stop');
+    let arrived!: () => void;
+    let finish!: () => void;
+    const requestArrived = new Promise<void>((resolve) => { arrived = resolve; });
+    const requestGate = new Promise<void>((resolve) => { finish = resolve; });
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture, undefined, undefined,
+      async () => { arrived(); await requestGate; return []; });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const { coordinator } = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model');
+      const resumed = coordinator.resumeExecution(fixture.taskId, fixture.allocation.operationId, {
+        businessTurnId: fixture.businessTurnId, predecessor: fixture.predecessor,
+      }).then(() => undefined, (error: unknown) => error);
+      await requestArrived;
+      const stopped = coordinator.stop(fixture.taskId).then((result) => ({ result }), (error: unknown) => ({ error }));
+      const outcome = await Promise.race([stopped, new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('resumed stop readiness never resolved')), 3000);
+      })]);
+      // This saved predecessor does not promise a stop checkpoint can close.
+      // A typed stop result or owned refusal both prove readiness was signalled.
+      if ('error' in outcome) assert.ok(outcome.error instanceof Error);
+      else assert.ok(['stopped', 'settling'].includes(outcome.result.state));
+      finish();
+      await resumed;
+      assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      finish();
+      await http.close();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  // The public recover action must use the same cold generation as resume,
+  // preserving the accepted input and original business turn.
+  test('recover action enters the retained business turn through the cold owner', async () => {
+    const fixture = await buildColdFixture('current-segment-recover', undefined, undefined, true);
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture, undefined, undefined,
+      () => [{ type: 'response.failed', response: { id: 'failed-recovered-request',
+        error: { code: 'invalid_request', message: 'recovered request rejected' } } }]);
+    try {
+      const ledger = createJsonlToolEffectLedgerJournal({ filePath: fixture.journalPath, journal: fixture.journal });
+      await ledger.appendToolEffectLedgerEntry({ scope: fixture.allocation.scope, turnId: fixture.businessTurnId,
+        toolCallId: 'committed-effect', toolName: 'file.write', effectPolicy: 'mutating',
+        idempotencyKey: 'committed-effect', argsDigest: 'confirmed', state: 'dispatched-effect-unknown' });
+      await ledger.appendToolEffectLedgerEntry({ scope: fixture.allocation.scope, turnId: fixture.businessTurnId,
+        toolCallId: 'committed-effect', toolName: 'file.write', effectPolicy: 'mutating',
+        idempotencyKey: 'committed-effect', argsDigest: 'confirmed', state: 'effect-committed' });
+      const { coordinator } = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model', { effectRecovery: 'legacy' });
+      await coordinator.hydrate();
+      // This consumer supplies the already verified settlement through the
+      // legacy explicit port; the native settlement reader has separate exact
+      // v1/v2 and stale-tail tests.
+      await assert.rejects(() => coordinator.recoverTask(fixture.taskId, { providerSettlements: [{
+        providerRequestId: 'confirmed-predecessor', state: 'settled', verifiedBy: 'response-stream-eof', verifiedAt: at,
+      }] }));
+      const recovered = coordinator.taskSnapshot(fixture.taskId);
+      assert.equal(recovered.taskId.value, fixture.taskId.value);
+      assert.equal(recovered.state, 'blocked');
+      assert.equal(recovered.executionEpoch, 2);
+      const segments = await fixture.segmentJournal.readSegments(fixture.businessTurnId);
+      assert.equal(segments.length, 1);
+      assert.equal(segments[0]?.binding.businessTurnRef.businessTurnId, fixture.businessTurnId);
+      assert.equal(await readFile(fixture.effectPath, 'utf8'), fixture.output);
+      assert.ok(http.wires.length > 0);
+    } finally {
+      await http.close();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   // Observed live 409 task.assembly.missing strands an already saved turn.
   // Cost: one existing fixture, one preparation run and one boundary resume.
   // Observed source-conflict: allocation epoch 1 differs from closing epoch 2.

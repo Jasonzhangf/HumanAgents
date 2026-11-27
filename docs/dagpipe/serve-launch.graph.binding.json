@@ -17,7 +17,7 @@
       "ownerRel": "packages/app/src/supervisor/supervisor.ts",
       "ownerSymbol": "acquireDaemonLease / runSupervisorStartup lease guard",
       "implementationStatus": "candidate; guarded decision not implemented",
-      "contract": "supervisor 是 lease 决策唯一 owner，复用它自己的 guard 与 lease 读写，不新增第二个 lease parser、lock 或状态源。分类使用既有进程活跃度分类：无 lease 或已干净释放取得 owner；live humanagent.app.serve owner 已 ready 且已发布 endpoint 返回 already-running 且不写 lease；starting 或 ready 无 endpoint 返回 not-ready；pending restart transition 返回 transition-in-progress；未 disposed 且进程已退出返回 recovery-required；wrong owner、corrupt lease、cleanup failure 返回既有 typed failure。guard 只序列化决策，不承诺 owner 之后永不停机，因此不增加 retry 或 takeover。"
+      "contract": "supervisor 是 lease 决策唯一 owner，复用它自己的 guard 与 lease 读写，不新增第二个 lease parser、lock 或状态源。分类使用既有进程活跃度分类：无 lease 或已干净释放取得 owner；live humanagent.app.serve owner 已 ready 且已发布 endpoint 返回 already-running 且不写 lease；starting 或 ready 无 endpoint 返回 not-ready；pending restart transition 返回 transition-in-progress；未 disposed 且进程已退出返回 recovery-required。仅当调用方给出精确 leaseId 且同一次 guard 内确认 serve owner、disposedAt、cleanup failure 与 recorded PID 已退出时，才提交带 already-dead termination 和 previousFailure 的 recovery lease；leaseId 不符、wrong owner、corrupt lease、仍存活的 recorded owner 或无精确 recovery intent 的 cleanup failure 返回既有 typed failure。guard 只序列化决策，不承诺 owner 之后永不停机，因此不增加 retry 或 takeover。"
     },
     "prepare_and_start_owner": {
       "ownerPath": "packages/app/src/supervisor/supervisor.ts",

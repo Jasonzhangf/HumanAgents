@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "humanagent/conversation-scope/v1",
+  "title": "HumanAgent scoped conversation API response",
+  "description": "A caller selects a typed Alex or project conversation scope. The server resolves the canonical Agent identity and a separately registered conversation session. Alex has no project identity. The legacy query spelling scope=system is accepted at the HTTP boundary and normalized to {kind:alex}.",
+  "$defs": {
+    "conversationScope": {
+      "oneOf": [
+        {
+          "title": "No-project CEO conversation",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "alex" } }
+        },
+        {
+          "title": "Project conversation",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "projectKey"],
+          "properties": {
+            "kind": { "const": "project" },
+            "projectKey": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "legacyAlexBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["legacySessionRef", "scope", "preservedInteractionRefs", "preservedTaskRefs", "sourceEvidenceRef"],
+      "properties": {
+        "legacySessionRef": { "const": "50661" },
+        "scope": { "$ref": "#/$defs/conversationScope" },
+        "preservedInteractionRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "preservedTaskRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "sourceEvidenceRef": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "type": "object",
+  "required": ["scope", "canonicalAddress", "agentId", "role", "preservedInteractionRefs", "preservedTaskRefs"],
+  "properties": {
+    "scope": { "$ref": "#/$defs/conversationScope" },
+    "canonicalAddress": { "type": "string", "minLength": 1 },
+    "agentId": { "type": "string", "minLength": 1 },
+    "role": { "enum": ["ceo", "project-lead"] },
+    "projectKey": { "type": "string", "minLength": 1 },
+    "workspaceCwd": { "type": "string", "minLength": 1 },
+    "preservedInteractionRefs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "preservedTaskRefs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "legacySessionRef": { "const": "50661" },
+    "legacyBindingEvidenceRef": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": { "properties": { "scope": { "properties": { "kind": { "const": "alex" } } } } },
+      "then": {
+        "properties": { "role": { "const": "ceo" }, "canonicalAddress": { "type": "string", "pattern": "^[^.]+\\.CEO$" } },
+        "not": { "anyOf": [{ "required": ["projectKey"] }, { "required": ["workspaceCwd"] }] }
+      }
+    },
+    {
+      "if": { "properties": { "scope": { "properties": { "kind": { "const": "project" } } } } },
+      "then": {
+        "required": ["projectKey", "workspaceCwd"],
+        "properties": {
+          "role": { "const": "project-lead" },
+          "canonicalAddress": { "type": "string", "pattern": "^[^.]+\\.[^.]+\\.Jenny$" }
+        }
+      }
+    }
+  ],
+  "x-http": {
+    "request": {
+      "scope=system": { "normalizesTo": { "kind": "alex" }, "persistedAs": "never" },
+      "scope=alex": { "resolvesTo": { "kind": "alex" } },
+      "scope=project&projectKey=<declared-key>": { "resolvesTo": { "kind": "project", "projectKey": "<declared-key>" } },
+      "identityOverrides": ["workspace", "agentId"],
+      "identityOverridePolicy": "reject with 400 conversation.scope.conflict"
+    },
+    "routes": {
+      "GET /api/main-topic": "read the selected scope's current conversation projection",
+      "POST /api/explicit/inputs": "record input in the selected scope",
+      "GET /api/explicit/interactions/<id>": "read an interaction only when the selected scope owns it",
+      "POST /api/explicit/interactions/<id>/interpret": "interpret an interaction only when the selected scope owns it",
+      "POST /api/explicit/interactions/<id>/continue": "continue an interaction only when the selected scope owns it",
+      "GET /api/explicit/interactions/<id>/events": "subscribe to only the selected scope's explicit steps"
+    },
+    "errors": {
+      "400": "conversation.scope.invalid or conversation.scope.conflict",
+      "404": "scope.unknown or scope.interaction-not-found",
+      "409": "scope.ambiguous or scope.session-shared",
+      "501": "conversation.scope.unsupported or scope.operation-unavailable",
+      "503": "conversation.scope.unavailable or scope.engine-unavailable"
+    },
+    "legacyBinding": {
+      "legacySessionRef": "50661",
+      "scope": { "kind": "alex" },
+      "preservedInteractionRefs": ["interaction-1", "interaction-2"],
+      "preservedTaskRefs": ["ui-task-implicit-draft-2", "scheduled-task-665227213af5adf02045"],
+      "sourceEvidenceRef": "../mvp-delivery-audit-20261122/50661实际执行者回执.md"
+    },
+    "persistence": {
+      "scopeState": "one record per logical scope under the HumanAgent control root",
+      "sessions": "one independently registered session engine per logical scope",
+      "crossScopeRead": "rejected with 404 scope.interaction-not-found"
+    }
+  }
+}

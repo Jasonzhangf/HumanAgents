@@ -57,6 +57,7 @@ import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/inde
 import { ActiveTurnSegmentContext } from '../../packages/runtime/src/context/active-turn-context.js';
 import type { ActiveTurnProductionObligationRef } from '../../packages/runtime/src/context/active-turn-live-prefix.js';
 import { readResumedSegmentSemanticTurnContext } from '../../packages/runtime/src/context/semantic-turn-context-reader.js';
+import { createNativeProviderSettlementReader } from '../../packages/app/src/ui-runtime/native-provider-settlement.js';
 
 /**
  * Project rule: durable artifacts live under `~/.humanagent`. This variable is
@@ -602,6 +603,31 @@ test('J1 v2 backing: original v1 capture, real TG1 reservation to S1/S2, fresh c
     assert.deepEqual(parsed.completionStates, ['unknown'], 'an intent without a completion stays reconcile-only');
     assert.equal(parsed.drainBoundary, `boundary-s1-${turnId}`);
     assert.equal(parsed.recoveryResponsibilityRef, s1Prepared.recovery.recoveryResponsibilityRef);
+
+    // Settlement consumes the real v2 exact asset read, preserving its epoch
+    // and save boundary. The separate resource custody must close that epoch.
+    const exactCapture = await port.readSegmentCaptureExact({ businessTurnId: turnId,
+      segmentId: segmentId1, recoveryAssetsReceiptRef: s1Receipt.commitIdentity });
+    const journal = new JsonlOrganJournal(journalPath);
+    const providerBinding = { bindingId: 'v2-settlement-binding', providerId: 'v2-provider', protocol: 'responses',
+      endpointRef: 'endpoint://fixture', modelRef: 'model://fixture', configDigest: 'fixture', capabilityDigest: 'fixture' };
+    const preparedResource = await journal.append({ commitId: 'v2-settlement:prepared', kind: 'event', scope: value.scope,
+      payload: { kind: 'prepared-execution-stop/v1', fact: { kind: 'preparation-entered', allocation: {
+        ...s1.segment.binding.execution, taskId: value.taskId, operationId: value.scope.operationId,
+        scope: value.scope, assignmentId: value.assignment.assignmentId,
+      } } } });
+    const commitRef = (record: typeof preparedResource) => ({ commitId: record.commitId!, journalSeq: record.seq, recordDigest: record.recordDigest });
+    const acquiredResource = await journal.append({ commitId: 'v2-settlement:acquired', kind: 'event', scope: value.scope,
+      payload: { kind: 'prepared-execution-stop/v1', fact: { kind: 'resource-acquired',
+        resource: { preparation: commitRef(preparedResource), binding: providerBinding } } } });
+    await journal.append({ commitId: 'v2-settlement:closed', kind: 'event', scope: value.scope,
+      payload: { kind: 'prepared-execution-stop/v1', fact: { kind: 'resource-closed', acquisition: commitRef(acquiredResource),
+        receipt: { ...providerBinding, state: 'closed', evidenceRefs: [] } } } });
+    const settlement = await createNativeProviderSettlementReader({ journal, now: () => new Date('2026-11-25T20:00:00.000Z') })
+      .read({ taskId: value.taskId, scope: value.scope, turnId,
+        currentSegment: { version: 2, source: exactCapture } });
+    assert.equal(settlement.state, 'verified', JSON.stringify(settlement));
+    if (settlement.state === 'verified') assert.equal(settlement.receipts[0]?.providerRequestId, requestId);
 
     // S2 resumes S1 through the real v2 predecessor receipt.
     const segmentId2 = 'segment-s2';
