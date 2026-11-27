@@ -211,7 +211,20 @@ export function createExecutionOwnerReaders(input: ExecutionOwnerFactsInput): Na
       ]);
       const unresolvedOperationRefs = unique([
         ...current.value.retainedDuties.map((duty) => duty.operationRef),
-        ...control.operations.filter((operation) => !operation.result).map((operation) => operation.intent.operationId.value),
+        ...control.operations
+          .filter((operation) => {
+            const terminal = operation.status === 'succeeded'
+              || operation.status === 'failed'
+              || operation.status === 'cancelled'
+              || operation.status === 'blocked';
+            const uncertain = operation.status === 'reconcile_required'
+              || operation.reconcile !== undefined
+              || operation.observation?.sideEffectState === 'possible'
+              || operation.blocked?.sideEffectState === 'possible';
+            const settled = terminal && (operation.result !== undefined || operation.failure !== undefined);
+            return !settled || uncertain;
+          })
+          .map((operation) => operation.intent.operationId.value),
       ]);
       return {
         permission: {

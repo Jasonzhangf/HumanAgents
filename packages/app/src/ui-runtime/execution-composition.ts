@@ -1807,7 +1807,11 @@ export function createDefaultExecutionComposition(input: {
                 closingCheckpoint = structuredClone(checkpoint);
                 return native.prepareTurnClosure(checkpoint, boundaryId, closingInput!.source);
               },
-              outcome: 'waiting',
+              outcome: facts.unresolvedOperationRefs.length > 0
+                ? 'unknown'
+                : facts.permission.revoked || facts.hardBlockers.length > 0
+                  ? 'blocked'
+                  : 'waiting',
               source: 'agent-tool',
               permissionRevoked: facts.permission.revoked,
               hardBlockers: facts.hardBlockers,

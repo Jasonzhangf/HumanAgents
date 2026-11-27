@@ -1081,10 +1081,14 @@ async function handleRequest(
       // conversation routes select the no-project CEO.
       requestedScope = scopedConversationBackend === undefined ? undefined : { kind: 'alex' };
     } else if (conversationScopedRoute && scopedKind === null && scopedProjectKey !== undefined) {
-      try {
-        requestedScope = conversationScopeFromQuery({ scope: 'project', projectKey: scopedProjectKey });
-      } catch {
-        throw new UiRuntimeApiError('conversation.scope.invalid', APP_OWNER, 'projectKey must be non-empty', 'send a declared projectKey or scope=alex', 400);
+      if (scopedConversationBackend === undefined) {
+        requestedScope = undefined;
+      } else {
+        try {
+          requestedScope = conversationScopeFromQuery({ scope: 'project', projectKey: scopedProjectKey });
+        } catch {
+          throw new UiRuntimeApiError('conversation.scope.invalid', APP_OWNER, 'projectKey must be non-empty', 'send a declared projectKey or scope=alex', 400);
+        }
       }
     } else if (scopedKind !== null) {
       try {

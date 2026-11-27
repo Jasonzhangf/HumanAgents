@@ -6731,9 +6731,8 @@ export class RuntimeTaskCoordinator {
           readonly status: 'succeeded' | 'failed' | 'blocked' | 'cancelled';
         }> => {
           while (true) {
-            if (record.stopping) {
-              if (nativePendingFailure !== undefined
-                && nativePendingAttemptNumber !== undefined
+            if (record.stopping && nativePendingFailure !== undefined) {
+              if (nativePendingAttemptNumber !== undefined
                 && nativePendingDelayMs !== undefined
                 && nativePendingMaxAttempts !== undefined) {
                 await this.completeTransientRetryStop(

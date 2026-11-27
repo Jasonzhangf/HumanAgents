@@ -1600,8 +1600,14 @@ async function runConfiguredChild(input: ConfiguredChildRunInput): Promise<RunRe
       status,
       evidenceRefs: terminalEvidence,
       ...(result === undefined ? {} : { result }),
-      ...(status === 'failed' && resolved.state === 'blocked'
-        ? { failure: { message: failureMessage ?? resolved.reason } }
+      ...(status !== 'succeeded'
+        ? {
+            failure: {
+              message: failureMessage
+                ?? (resolved.state === 'blocked' ? resolved.reason : undefined)
+                ?? `child ${input.kind} ended in ${status}`,
+            },
+          }
         : {}),
     });
   } catch (error) {
