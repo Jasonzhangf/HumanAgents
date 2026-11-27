@@ -1211,12 +1211,13 @@ export function createInteractionParentTurnRawOwner(
         && failed.length > 0
         && requests.every(record => record.phase === 'settled' || record.phase === 'failed')
         && failed.every(record => record.request.parentRequestId === acceptedEnd.requestId
-          && !hasCommittedRequestCompletion(snapshot, record)
           && snapshot.acceptedFacts.filter(entry => sameRequestIdentity(entry.fact.envelope.request, record.request))
             .every(entry => (entry.fact.envelope.fact.kind === 'content'
                 && entry.fact.envelope.fact.channel !== 'tool-arguments')
               || entry.fact.envelope.fact.kind === 'content-complete'
-              || entry.fact.envelope.fact.kind === 'usage'))) {
+              || entry.fact.envelope.fact.kind === 'usage'
+              || (entry.fact.envelope.fact.kind === 'request-complete'
+                && entry.fact.envelope.fact.terminal === 'failed')))) {
         return { mode: 'continue', unsettledRequestIds: failed.map(record => record.request.requestId),
           effectiveExecutionEpoch: active.execution.executionEpoch + 1 };
       }

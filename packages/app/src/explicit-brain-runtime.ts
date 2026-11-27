@@ -878,6 +878,8 @@ async function holdsDispatchedHelper(
 
 export function createProviderExplicitBrainInterpreter(input: {
   readonly executionBudget?: Partial<AgentIoEventBudget>;
+  readonly maxTransientRetries?: number;
+  readonly transientRetryDelaysMs?: readonly number[];
   readonly lease?: SupervisorLease | (() => SupervisorLease | undefined);
   readonly port?: ExecutionRuntimePort<InteractionParentProviderExecutionIdentityRef>;
   readonly organId: OrganId;
@@ -2027,6 +2029,26 @@ export function createProviderExplicitBrainInterpreter(input: {
   // before any asynchronous Journal reads so two fresh inputs cannot both
   // see an empty scope and open concurrent parent turns.
   let performingTurn = false;
+  const maxTransientRetries = Math.max(0, input.maxTransientRetries ?? DEFAULT_EXPLICIT_MAX_TRANSIENT_RETRIES);
+  const transientRetryDelaysMs = input.transientRetryDelaysMs ?? DEFAULT_EXPLICIT_RETRY_DELAYS_MS;
+  const runWithTransientRccRetry = async (
+    runRequest: ExplicitBrainInterpretationInput,
+    attemptCfg: InterpretAttempt,
+  ): Promise<ExplicitBrainInterpretation | ExplicitTurnPartialResult | ReanswerNeeded> => {
+    for (let retryAttempt = 0; ; retryAttempt += 1) {
+      try {
+        return await interpretOnce(runRequest, attemptCfg);
+      } catch (cause) {
+        if (input.binding.providerId !== 'rcc'
+          || retryAttempt >= maxTransientRetries
+          || !isRetryableExplicitRccFailure(cause)) {
+          throw cause;
+        }
+        const delayMs = transientRetryDelaysMs[Math.min(retryAttempt, transientRetryDelaysMs.length - 1)] ?? 0;
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  };
   return {
     async interpret(request) {
       if (performingTurn) {
@@ -2039,10 +2061,10 @@ export function createProviderExplicitBrainInterpreter(input: {
       }
       performingTurn = true;
       try {
-        const first = await interpretOnce(request, { allowReanswer: true, repair: false });
+        const first = await runWithTransientRccRetry(request, { allowReanswer: true, repair: false });
         if (first.kind !== 'reanswer-needed') return first;
         // Only the already-closed first batch may be replaced for this input.
-        const replacement = await interpretOnce(first.request, { allowReanswer: false, repair: true });
+        const replacement = await runWithTransientRccRetry(first.request, { allowReanswer: false, repair: true });
         if (replacement.kind === 'reanswer-needed') {
           throw new ExplicitBrainOperationalToolError(
             'unsupported-tool',
@@ -2055,6 +2077,58 @@ export function createProviderExplicitBrainInterpreter(input: {
       }
     },
   };
+}
+
+const DEFAULT_EXPLICIT_MAX_TRANSIENT_RETRIES = 10;
+const DEFAULT_EXPLICIT_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
+
+function isExplicitAllAccountsExhausted429(message: string): boolean {
+  return /所有候选账号对模型.*均已限额或禁用/.test(message);
+}
+
+function extractExplicitFailure(cause: unknown): {
+  readonly code: string;
+  readonly message: string;
+  readonly category?: string;
+  readonly retryable?: string;
+} | undefined {
+  if (cause === null || typeof cause !== 'object') return undefined;
+  if (cause instanceof AggregateError && cause.errors.length > 0) {
+    return extractExplicitFailure(cause.errors[0]);
+  }
+  if ('providerError' in cause) {
+    const err = (cause as { readonly providerError?: { readonly code?: unknown; readonly message?: unknown; readonly category?: unknown; readonly retryable?: unknown } }).providerError;
+    if (err && typeof err.code === 'string' && typeof err.message === 'string') {
+      return {
+        code: err.code,
+        message: err.message,
+        ...(typeof err.category === 'string' ? { category: err.category } : {}),
+        ...(typeof err.retryable === 'string' ? { retryable: err.retryable } : {}),
+      };
+    }
+  }
+  if (cause instanceof AppLifecycleError) {
+    return { code: cause.code, message: cause.message };
+  }
+  return undefined;
+}
+
+function isRetryableExplicitRccFailure(cause: unknown): boolean {
+  const detail = extractExplicitFailure(cause);
+  if (!detail) return false;
+  if (isExplicitAllAccountsExhausted429(detail.message)) return false;
+  if (/interaction request budget exhausted|explicit-brain\.|unsupported-tool|runtime\.|provider\.production\.closed/.test(`${detail.code} ${detail.message}`)) {
+    return false;
+  }
+  if (detail.category === 'timeout' || detail.code === 'transport.empty.body') return true;
+  if (detail.category === 'transport') return detail.retryable === 'retryable';
+  if (/^http\.5\d\d$/.test(detail.code) || detail.code === 'http.429') return true;
+  if (detail.code === 'unknown_parameter' || detail.code === 'server_error' || detail.code === 'rate_limit_exceeded'
+    || detail.code === 'upstream_error' || detail.code === 'provider.failed') {
+    return true;
+  }
+  return /rate_limit|server_error|upstream_error|overloaded|unavailable|暂时不可用|请稍后重试|too_many_requests|too many requests/i
+    .test(`${detail.code} ${detail.message}`);
 }
 
 function createWorkspacePort(options: ExplicitBrainRuntimeOptions): ExplicitBrainWorkspaceToolPort {

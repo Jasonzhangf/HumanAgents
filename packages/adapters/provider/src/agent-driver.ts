@@ -501,7 +501,7 @@ export class ProviderAgentDriver<
     let receipt: ProviderStartReceipt<TIdentity>;
     try {
       const context = await this.materializeRequestContext(request, 'initial');
-      receipt = await this.track(this.port.start({
+      receipt = await this.track(this.callWithTransientRetry(() => this.port.start({
         ...this.execution,
         ...this.currentRequestIdentity(),
         inputRefs: [...this.options.inputRefs],
@@ -509,7 +509,7 @@ export class ProviderAgentDriver<
         payload: input.payload,
         ...this.requestContextFields(context),
         ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
-      }));
+      })));
       this.providerStarted = true;
       this.assertProviderIdentity(receipt, 'provider start receipt', 'start');
     } catch (cause) {
@@ -1640,12 +1640,18 @@ export class ProviderAgentDriver<
   private async submitWithTransientRetry(
     input: ProviderSubmitInput<TIdentity>,
   ): Promise<ProviderSubmitResult<TIdentity>> {
+    return this.callWithTransientRetry(() => this.port.submit(input));
+  }
+
+  private async callWithTransientRetry<R>(
+    fn: () => Promise<R>,
+  ): Promise<R> {
     const delays = this.options.submitRetryDelaysMs ?? DEFAULT_SUBMIT_RETRY_DELAYS_MS;
     const maxAttempts = DEFAULT_SUBMIT_MAX_RETRIES + 1;
     let attempt = 1;
     while (true) {
       try {
-        return await this.port.submit(input);
+        return await fn();
       } catch (cause) {
         if (this.stopping || this.productionClosed || attempt >= maxAttempts || !isTransientProviderSubmitFailure(cause)) {
           throw cause;

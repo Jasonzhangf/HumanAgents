@@ -8486,3 +8486,186 @@ test('provider explicit brain preserves settlement error details instead of mask
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// Failure basis: RCC load balancing can emit SSE `unknown_parameter` on a drain request after `humanagent_turn_end` succeeded,
+// while exhausted 429 must fail fast immediately. Impact: hung or lost turn vs explicit failure. Cost: one isolated lease and local transport.
+test('provider explicit brain retries transient RCC SSE errors across drain recovery while failing fast on exhausted 429', async () => {
+  const root = join(parentFixtureRoot, `rcc-sse-retry-${randomUUID()}`);
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const lease = await acquireDaemonLease(paths);
+  const binding: ProviderBinding = {
+    bindingId: 'rcc-entry', providerId: 'rcc', protocol: 'responses',
+    endpointRef: 'rcc-v3:test', modelRef: 'model-rcc-sse-retry',
+    configDigest: 'sha256:rcc-sse-retry-config', capabilityDigest: 'sha256:rcc-sse-retry-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  const encoder = new TextEncoder();
+  let modelRounds = 0;
+  let drainRounds = 0;
+  const prepareAgentProvider = async () => {
+    const transport = new V3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
+      binding,
+      baseUrl: 'http://rcc-sse-retry.test',
+      source: 'rcc',
+      evidence,
+      fetch: async (_url, init) => ({
+        status: 200,
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        body: (async function* () {
+          const wire = JSON.parse(String(init?.body ?? '{}'));
+          if (!Array.isArray(wire?.tools)) {
+            drainRounds += 1;
+            if (drainRounds === 1) {
+              yield encoder.encode('event: error\ndata: {"type":"error","error":{"code":"unknown_parameter","message":"Unknown parameter: \'input[6].text\'."}}\n\n');
+              return;
+            }
+            yield encoder.encode([
+              { type: 'response.created', response: { id: 'rcc-drain-ok' } },
+              { type: 'response.output_text.done', item_id: 'rcc-drain-text', text: 'drain complete' },
+              { type: 'response.completed', response: { id: 'rcc-drain-ok' } },
+            ].map((value) => `data: ${JSON.stringify(value)}\n\n`).join(''));
+            return;
+          }
+          modelRounds += 1;
+          const endArgs = JSON.stringify({
+            kind: 'simple',
+            decision: { kind: 'answer', normalizedInput: '1+1?', knownFacts: [], decisionRefs: [], answer: '2' },
+            checkpointRecord: { index: { action: '回答简单问题', result: '已回答' } },
+          });
+          yield encoder.encode([
+            { type: 'response.created', response: { id: 'rcc-model-end' } },
+            {
+              type: 'response.output_item.done',
+              output_index: 0,
+              item: {
+                type: 'function_call',
+                id: 'rcc-end-item',
+                call_id: 'rcc-end-call',
+                name: 'humanagent_turn_end',
+                arguments: endArgs,
+              },
+            },
+            { type: 'response.completed', response: { id: 'rcc-model-end' } },
+          ].map((value) => `data: ${JSON.stringify(value)}\n\n`).join(''));
+        })(),
+        text: async () => '',
+      }),
+    });
+    const port = new ProviderAdapter({
+      binding,
+      routeRef: 'rcc-sse-retry',
+      codec: new ResponsesProviderCodec(),
+      transport,
+      evidence,
+    });
+    return {
+      roleId: 'interaction' as const,
+      provider: { source: 'rcc', provider: 'rcc', binding: 'rcc-entry', protocol: 'responses', model: binding.modelRef, route: 'rcc-sse-retry', baseUrl: 'http://rcc-sse-retry.test' } as const,
+      source: 'rcc' as const,
+      binding,
+      port,
+    };
+  };
+  try {
+    const interpreter = createProviderExplicitBrainInterpreter({
+      organId: id('organ', 'explicit-rcc-retry-test'),
+      interactionScopeId: 'runtime:rcc-sse-retry',
+      parentJournal,
+      checkpointJournal: helperJournal,
+      helperJournal,
+      turnHelperJournal: helperJournal,
+      rawEvidence: evidence,
+      rawContent,
+      clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding,
+      templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease,
+      prepareAgentProvider,
+      maxTransientRetries: 3,
+      transientRetryDelaysMs: [1],
+    });
+
+    const result = await interpreter.interpret({
+      interactionId: 'interaction-rcc-drain-retry',
+      inputRevision: 1,
+      sourceRef: 'ui:rcc-drain-retry',
+      rawInput: '1+1?',
+      clarifications: [],
+      taskCandidates: [],
+    });
+    assert.equal(result.kind, 'answer');
+    if (result.kind === 'answer') assert.equal(result.answer, '2');
+    assert.equal(modelRounds, 1, 'accepted humanagent_turn_end must not re-run when only drain retries');
+    assert.equal(drainRounds, 2, 'failed drain on transient unknown_parameter must retry in next epoch');
+
+    let exhaustedRequests = 0;
+    const exhaustedInterpreter = createProviderExplicitBrainInterpreter({
+      organId: id('organ', 'explicit-rcc-exhausted-test'),
+      interactionScopeId: 'runtime:rcc-sse-exhausted',
+      parentJournal,
+      checkpointJournal: helperJournal,
+      helperJournal,
+      turnHelperJournal: helperJournal,
+      rawEvidence: evidence,
+      rawContent,
+      clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding,
+      templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease,
+      maxTransientRetries: 3,
+      transientRetryDelaysMs: [1],
+      prepareAgentProvider: async () => ({
+        roleId: 'interaction' as const,
+        provider: { source: 'rcc', provider: 'rcc', binding: 'rcc-entry', protocol: 'responses', model: binding.modelRef, route: 'rcc-sse-exhausted', baseUrl: 'http://rcc-sse-exhausted.test' } as const,
+        source: 'rcc' as const,
+        binding,
+        port: new ProviderAdapter({
+          binding,
+          routeRef: 'rcc-sse-exhausted',
+          codec: new ResponsesProviderCodec(),
+          evidence,
+          transport: new V3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
+            binding,
+            baseUrl: 'http://rcc-sse-exhausted.test',
+            source: 'rcc',
+            evidence,
+            fetch: async () => {
+              exhaustedRequests += 1;
+              return {
+                status: 429,
+                headers: new Headers({ 'content-type': 'application/json' }),
+                body: null,
+                text: async () => JSON.stringify({ error: { message: '所有候选账号对模型 gpt-5.1 均已限额或禁用' } }),
+              };
+            },
+          }),
+        }),
+      }),
+    });
+    await assert.rejects(
+      () => exhaustedInterpreter.interpret({
+        interactionId: 'interaction-rcc-exhausted',
+        inputRevision: 1,
+        sourceRef: 'ui:rcc-exhausted',
+        rawInput: '1+1?',
+        clarifications: [],
+        taskCandidates: [],
+      }),
+      (error: unknown) => error instanceof Error && /所有候选账号对模型/.test(error.message),
+    );
+    assert.equal(exhaustedRequests, 1, 'exhausted 429 must fail fast without retrying');
+  } finally {
+    await lease.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
