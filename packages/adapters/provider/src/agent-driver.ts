@@ -146,6 +146,8 @@ export interface ProviderAgentDriverCommonOptions<TIdentity extends AnyProviderE
    * materialization; the driver never invents or caches context.
    */
   readonly requestContext?: ProviderRequestContextHook<TIdentity>;
+  /** Backoff delays for transient continuation/drain `port.submit` retries (10 retries by default). */
+  readonly submitRetryDelaysMs?: readonly number[];
   readonly now?: () => Date;
 }
 
@@ -566,7 +568,7 @@ export class ProviderAgentDriver<
       // A stop or drain can begin while registration or the context hook was
       // awaited; never dispatch across that boundary.
       this.assertDispatchOpen();
-        const submitted = await this.port.submit({
+      const submitted = await this.submitWithTransientRetry({
         ...this.execution,
         ...this.continuationRequestIdentity(request),
         inputRefs: [...this.options.inputRefs],
@@ -756,7 +758,7 @@ export class ProviderAgentDriver<
             ]),
           ],
         };
-        submitted = await this.track(this.port.submit({
+        submitted = await this.track(this.submitWithTransientRetry({
           ...this.execution,
           ...this.continuationRequestIdentity(continuation),
           inputRefs: [...this.options.inputRefs],
@@ -1635,6 +1637,35 @@ export class ProviderAgentDriver<
     return 'interactionTurn' in input && input.interactionTurn !== undefined;
   }
 
+  private async submitWithTransientRetry(
+    input: ProviderSubmitInput<TIdentity>,
+  ): Promise<ProviderSubmitResult<TIdentity>> {
+    const delays = this.options.submitRetryDelaysMs ?? DEFAULT_SUBMIT_RETRY_DELAYS_MS;
+    const maxAttempts = DEFAULT_SUBMIT_MAX_RETRIES + 1;
+    let attempt = 1;
+    while (true) {
+      try {
+        return await this.port.submit(input);
+      } catch (cause) {
+        if (this.stopping || this.productionClosed || attempt >= maxAttempts || !isTransientProviderSubmitFailure(cause)) {
+          throw cause;
+        }
+        const delayMs = delays[Math.min(attempt - 1, delays.length - 1)] ?? 0;
+        const controller = new AbortController();
+        this.toolControllers.add(controller);
+        try {
+          await sleepWithAbort(delayMs, controller.signal);
+        } finally {
+          this.toolControllers.delete(controller);
+        }
+        if (this.stopping || this.productionClosed || controller.signal.aborted) {
+          throw cause;
+        }
+        attempt += 1;
+      }
+    }
+  }
+
   private error(
     code: string,
     message: string,
@@ -1651,6 +1682,38 @@ export class ProviderAgentDriver<
       cause,
     });
   }
+}
+
+const DEFAULT_SUBMIT_MAX_RETRIES = 10;
+const DEFAULT_SUBMIT_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
+
+function isAllAccountsExhausted429(message: string): boolean {
+  return /所有候选账号对模型.*均已限额或禁用/.test(message);
+}
+
+function isTransientProviderSubmitFailure(cause: unknown): boolean {
+  if (cause === null || typeof cause !== 'object' || !('providerError' in cause)) return false;
+  const error = (cause as { readonly providerError?: ProviderError }).providerError;
+  if (!error) return false;
+  if (error.category === 'transport' || error.category === 'timeout') return true;
+  if (/^http\.5\d\d$/.test(error.code)) return true;
+  return error.code === 'http.429' && !isAllAccountsExhausted429(error.message);
+}
+
+async function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function inputPayloadMissing(): never {

@@ -2,6 +2,7 @@ import { element, formatTime } from './runtime-api.js'
 import { conversationStatus, conversationStatusTime } from './conversation-status.js'
 import { explicitRequestMetadata, explicitStepsWithToolEvents, explicitToolActivityFinished } from './explicit-tool-activity.js'
 import { sanitizeUserVisibleText } from './step-labels.js'
+import { userFacingErrorReason } from './task-blocker.js'
 import { disposeToolBody, renderToolBody } from './tool-presentation.js'
 
 export function renderTurnProgressDetail(turn, { readOutput } = {}) {
@@ -20,8 +21,9 @@ export function renderTurnProgressDetail(turn, { readOutput } = {}) {
     if (time) item.append(element('span', time))
     if (row.statusLabel) item.append(element('span', row.statusLabel))
     if (row.error) {
-      const message = sanitizeUserVisibleText([row.error.code, row.error.message].filter(Boolean).join('：'))
-      item.append(element('span', message))
+      const reason = userFacingErrorReason(row.error)
+      const message = reason || sanitizeUserVisibleText([row.error.code, row.error.message].filter(Boolean).join('：'))
+      if (message) item.append(element('span', message))
     }
     if (row.startedAt) item.append(element('time', formatTime(row.startedAt)))
     list.append(item)

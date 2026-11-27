@@ -934,6 +934,8 @@ export function createDefaultExecutionComposition(input: {
       // self-drains. The caller acts on the accepted command only after the
       // real request drain.
       let acceptedEnd: StandardTurnEndCommand | undefined;
+      let acceptedEndDrainError: unknown;
+      let stopRequested = false;
       const endOwner: StandardTurnEndOwnerPort = {
         async resolveBoundTurn({ execution }) {
           if (execution.runtimeId !== physical.runtimeId
@@ -1724,18 +1726,32 @@ export function createDefaultExecutionComposition(input: {
           // re-orients the model through request-scoped instructions only.
           while (true) {
             let completed = false;
-            for await (const event of liveNative.driver.observe(value)) {
-              if (event.terminalState !== undefined) completed = event.terminalState === 'succeeded';
-              // Provider completion is transport truth. Standard-end and
-              // alignment are still owed, so it is never read as terminal.
-              yield event.terminalState === 'succeeded' ? { ...event, terminalState: 'waiting' as const } : event;
+            try {
+              for await (const event of liveNative.driver.observe(value)) {
+                if (event.terminalState !== undefined) completed = event.terminalState === 'succeeded';
+                // Provider completion is transport truth. Standard-end and
+                // alignment are still owed, so it is never read as terminal.
+                yield event.terminalState === 'succeeded' ? { ...event, terminalState: 'waiting' as const } : event;
+              }
+            } catch (error) {
+              if (acceptedEnd !== undefined && !stopRequested) {
+                // Once `humanagent_turn_end` is durably accepted, a post-end
+                // transport drain failure must not discard the accepted result
+                // or `input-required` turn transition.
+                acceptedEndDrainError = error;
+                return;
+              }
+              throw error;
             }
             if (!completed) return;
             if (acceptedEnd !== undefined) return;
             await liveNative.continueCurrentTurn({ instructions: renderTaskReorientation(assignment) });
           }
         },
-        requestStop: (value) => liveNative.driver.requestStop(value),
+        requestStop: (value) => {
+          stopRequested = true;
+          return liveNative.driver.requestStop(value);
+        },
         async settle(value) {
           await liveNative.drainCurrentTurn(boundaryId);
           const settled = liveNative.driver.settlement();
@@ -1804,7 +1820,9 @@ export function createDefaultExecutionComposition(input: {
             };
             return { state: 'waiting' as const, evidenceRefs: settled.evidenceRefs };
           }
-          const status = settled.state === 'succeeded' && acceptedEnd ? 'succeeded'
+          const drainSatisfied = settled.state === 'succeeded'
+            || (acceptedEndDrainError !== undefined && settled.state !== 'stopped' && settled.state !== 'cancelled');
+          const status = drainSatisfied && acceptedEnd ? 'succeeded'
             : settled.state === 'stopped' || settled.state === 'cancelled' ? 'cancelled'
             : settled.state === 'failed' ? 'failed' : 'blocked';
           // This parent is the pure Provider controller, not an IO effect.

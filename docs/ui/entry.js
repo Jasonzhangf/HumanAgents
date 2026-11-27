@@ -1765,6 +1765,7 @@ async function waitForTask(identity) {
     throw taskLandingUnresolved('entry.task-identity-unresolved', '需求已接收，但返回的执行身份不完整，无法定位本次任务。')
   }
   const deadline = Date.now() + 20_000
+  let polls = 0
   while (Date.now() < deadline) {
     if (pageLeaving) return undefined
     const tasks = await api.listTasks()
@@ -1775,7 +1776,8 @@ async function waitForTask(identity) {
       (sourceInteractionId && row.sourceInteractionId === sourceInteractionId)
       || rowMatchesIdentitySource(row.identitySource, requirementIdentity)))
     if (candidate?.taskId?.value) return candidate.taskId.value
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    polls += 1
+    await new Promise((resolve) => setTimeout(resolve, polls <= 20 ? 25 : 100))
   }
   throw taskLandingUnresolved('entry.task-not-ready', '任务已提交，但任务列表尚未返回本次任务。')
 }

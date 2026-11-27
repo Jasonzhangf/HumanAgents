@@ -4548,3 +4548,135 @@ test('P1-L2: closeProductionAndDrain waits for an in-flight observe raw acceptan
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('ProviderAgentDriver retries transient http.429 tool continuations without re-running tools and stops fast on exhausted accounts', async () => {
+  let toolExecutions = 0;
+  let observeRound = 0;
+  let submitCalls = 0;
+  const runtimePort = port({
+    async submit(input) {
+      submitCalls += 1;
+      if (submitCalls === 1) {
+        throw new ProviderAdapterError({
+          code: 'http.429',
+          category: 'provider',
+          phase: 'submit',
+          message: 'RCC v3 returned HTTP 429: temporary rate limit',
+          scope: input,
+        });
+      }
+      return { ...input, status: 'accepted', outputRefs: [], evidenceRefs: [evidence], ownerId: 'test', nextAction: { kind: 'continue', ref: 'observe' } };
+    },
+    async *observe() {
+      observeRound += 1;
+      if (observeRound === 1) {
+        yield {
+          ...identity,
+          eventId: 'tool-call-1',
+          kind: 'tool',
+          summary: 'file.read',
+          outputRefs: ['artifact://tool-call-1'],
+          toolCall: { callId: 'call-1', toolId: 'file.read', arguments: { path: 'a.txt' }, continuationRef: 'c1' },
+          evidenceRefs: [evidence],
+          ownerId: 'humanagent.provider-adapter',
+          nextAction: { kind: 'continue' },
+        };
+        yield {
+          ...identity,
+          eventId: 'wait-1',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          ownerId: 'humanagent.provider-adapter',
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      yield { ...identity, eventId: 'out-2', kind: 'output', outputRefs: ['o2'], summary: 'done after 429 retry', evidenceRefs: [evidence] };
+      yield { ...identity, eventId: 'term-2', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence], ownerId: 'humanagent.provider-adapter', nextAction: { kind: 'continue' } };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-429',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    submitRetryDelaysMs: [1],
+    executeTool: {
+      async execute() {
+        toolExecutions += 1;
+        return { output: 'file-contents', outputRefs: [], evidenceRefs: [evidence] };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-429', payload: { prompt: 'run' } });
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+  assert.equal(toolExecutions, 1, 'tool must execute only once when post-tool submit retries');
+  assert.equal(submitCalls, 2, 'transient http.429 continuation must retry once and succeed');
+  assert.equal(events.at(-1)?.kind, 'provider.terminal');
+  assert.equal(events.at(-1)?.terminalState, 'succeeded');
+
+  let exhaustedCalls = 0;
+  const exhaustedPort = port({
+    async submit(input) {
+      exhaustedCalls += 1;
+      throw new ProviderAdapterError({
+        code: 'http.429',
+        category: 'provider',
+        phase: 'submit',
+        message: 'RCC v3 returned HTTP 429: {"error":{"message":"所有候选账号对模型 gpt-5.1 均已限额或禁用"}}',
+        scope: input,
+      });
+    },
+    async *observe() {
+      yield {
+        ...identity,
+        eventId: 'tool-call-exhausted',
+        kind: 'tool',
+        summary: 'file.read',
+        outputRefs: ['artifact://tool-call-2'],
+        toolCall: { callId: 'call-2', toolId: 'file.read', arguments: { path: 'a.txt' }, continuationRef: 'c2' },
+        evidenceRefs: [evidence],
+        ownerId: 'humanagent.provider-adapter',
+        nextAction: { kind: 'continue' },
+      };
+      yield {
+        ...identity,
+        eventId: 'wait-exhausted',
+        kind: 'terminal',
+        terminalState: 'waiting',
+        evidenceRefs: [evidence],
+        ownerId: 'humanagent.provider-adapter',
+        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+      };
+    },
+  });
+  const exhaustedDriver = new ProviderAgentDriver({
+    port: exhaustedPort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-429-exhausted',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    submitRetryDelaysMs: [1],
+    executeTool: { async execute() { return { output: 'ok', outputRefs: [], evidenceRefs: [evidence] }; } },
+  });
+  await exhaustedDriver.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await exhaustedDriver.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-429-exhausted', payload: { prompt: 'run' } });
+  await assert.rejects(async () => {
+    for await (const _event of exhaustedDriver.observe({ runtimeId: identity.runtimeId })) void _event;
+  }, /http\.429|429/);
+  assert.equal(exhaustedCalls, 1, 'all-accounts-exhausted 429 must fail fast without retrying');
+});

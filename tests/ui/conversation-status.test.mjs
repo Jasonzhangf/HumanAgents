@@ -193,3 +193,21 @@ test('retrying shows the real attempt summary and typed error; blocked stays ter
   assert.equal(terminalRows.find((row) => row.phase === 'terminal').error.code, 'http.503')
   assert.equal(conversationStatus({ state: 'blocked', events: [blocked] }).some((row) => row.phase === 'retry'), false)
 })
+
+test('provider.error closes the active sending row as well as wait and response', () => {
+  const rows = conversationStatus({
+    state: 'blocked',
+    events: [
+      event('provider.model', 1, { state: 'dispatching', requestId: 'req-429' }),
+      event('provider.error', 2, {
+        requestId: 'req-429',
+        error: { code: 'http.429', message: 'RCC v3 returned HTTP 429' },
+      }),
+    ],
+  })
+  const sending = rows.find((row) => row.phase === 'sending')
+  assert.ok(sending, 'sending row must stay visible with its closed duration')
+  assert.equal(sending.running, false)
+  assert.equal(sending.endedAt, at(2))
+  assert.equal(rows.some((row) => row.phase === 'error'), true)
+})

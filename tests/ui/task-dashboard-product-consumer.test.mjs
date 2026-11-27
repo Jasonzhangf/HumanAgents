@@ -1320,3 +1320,30 @@ test('a project-scoped memory board keeps the query task read only for the same 
   assert.equal(projectBoardWithoutTaskQuery.kind, 'invalid')
   assert.equal(projectBoardWithoutTaskQuery.failure?.code, 'read.scope.invalid')
 })
+
+test('taskBlocker localizes http.429 exhausted accounts and recover actions without raw leaks', () => {
+  const exhausted = taskBlocker({
+    state: 'blocked',
+    error: {
+      code: 'http.429',
+      message: 'RCC v3 returned HTTP 429: {"error":{"code":429,"message":"当前模型的所有候选账号均已禁用或不可用，所有候选账号对模型 gpt-5.1 均已限额或禁用"}}',
+      nextAction: 'recover:humanagent.provider-adapter',
+    },
+  })
+  assert.equal(exhausted.reason.includes('限额或禁用'), true)
+  assert.equal(exhausted.reason.includes('RCC v3'), false)
+  assert.equal(exhausted.reason.includes('{"error"'), false)
+  assert.equal(exhausted.next.includes('recover:'), false)
+  assert.equal(exhausted.next.includes('模型账号'), true)
+
+  const generic429 = taskBlocker({
+    state: 'blocked',
+    error: {
+      code: 'http.429',
+      message: 'Rate limit exceeded',
+      nextAction: 'recover:execution.retry.task-1',
+    },
+  })
+  assert.equal(generic429.reason.includes('过于频繁'), true)
+  assert.equal(generic429.next.includes('recover:'), false)
+})

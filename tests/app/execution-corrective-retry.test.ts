@@ -1582,3 +1582,49 @@ test('有界纠正重试：非 native 非编排执行不得进入纠正重试循
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('有界纠正重试：暂态 http.429 进入 native 退避重试，所有候选账号限额/禁用则立即失败', async () => {
+  const transientRoot = await mkdtemp(join(tmpdir(), 'humanagent-corrective-retry-429-transient-'));
+  try {
+    const port = new NativeStartFailurePort({ binding }, {
+      code: 'http.429',
+      message: 'RCC v3 returned HTTP 429: temporary upstream rate limit',
+      failures: 1,
+    });
+    const waits: Parameters<RuntimeTransientRetryWaiter>[0][] = [];
+    const service = nativeServiceFor(transientRoot, port, async (input) => { waits.push(input); });
+    const task = service.createTask({ title: 'native transient 429 retry' });
+    await service.startExecution(task.taskId, { prompt: 'retry transient 429' });
+    await waitFor(() => {
+      const dashboard = service.taskDashboard(task.taskId);
+      assert.equal(dashboard.state, 'succeeded');
+      assert.ok(dashboard.history.events.some((event) => (event.kind as string) === 'execution.terminal' && event.terminalPhase === 'final'));
+    });
+    assert.equal(port.startCount, 2);
+    assert.equal(waits.length, 1);
+    assert.equal(service.taskDashboard(task.taskId).history.events.some((event) => (event.kind as string) === 'execution.retry' && event.error?.code === 'http.429'), true);
+  } finally {
+    await rm(transientRoot, { recursive: true, force: true });
+  }
+
+  const exhaustedRoot = await mkdtemp(join(tmpdir(), 'humanagent-corrective-retry-429-exhausted-'));
+  try {
+    const port = new NativeStartFailurePort({ binding }, {
+      code: 'http.429',
+      message: 'RCC v3 returned HTTP 429: {"error":{"code":429,"message":"所有候选账号对模型 gpt-5.1 均已限额或禁用"}}',
+      failures: 2,
+    });
+    const service = nativeServiceFor(exhaustedRoot, port);
+    const task = service.createTask({ title: 'native exhausted 429 no retry' });
+    await service.startExecution(task.taskId, { prompt: 'do not retry exhausted 429' });
+    await waitFor(() => {
+      const dashboard = service.taskDashboard(task.taskId);
+      assert.equal(dashboard.state, 'blocked');
+      assert.ok(dashboard.history.events.some((event) => (event.kind as string) === 'execution.terminal' && event.terminalPhase === 'final'));
+    });
+    assert.equal(port.startCount, 1, 'exhausted all-accounts 429 must not burn 10 start retries');
+    assert.equal(service.taskDashboard(task.taskId).error?.code, 'http.429');
+  } finally {
+    await rm(exhaustedRoot, { recursive: true, force: true });
+  }
+});

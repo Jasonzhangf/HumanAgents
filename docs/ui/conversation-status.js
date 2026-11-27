@@ -173,6 +173,7 @@ export function conversationStatus(facts = {}, { allRequests = false } = {}) {
       settle(group, e.occurredAt)
     }
     if (e.kind === 'provider.error') {
+      close(group?.sending, e.occurredAt)
       close(group?.wait, e.occurredAt)
       close(group?.response, e.occurredAt)
       const row = add(`${key}:error:${e.seq}`, 'error', '请求失败', undefined, 'danger')
