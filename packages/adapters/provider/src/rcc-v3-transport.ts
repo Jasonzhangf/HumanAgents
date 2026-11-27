@@ -958,7 +958,7 @@ export class RccV3ProviderTransport<
     const body = response.body;
     if (!body) {
       controller.abort('RCC v3 start returned no streaming body');
-      throw new ProviderAdapterError({ code: 'transport.empty.body', category: 'transport', phase: 'start', message: 'RCC v3 returned no streaming body', scope: input });
+      throw new ProviderAdapterError({ code: 'transport.empty.body', category: 'transport', phase: 'start', message: 'RCC v3 returned no streaming body', scope: input, retryable: 'retryable' });
     }
     const evidenceScope = scopeFor(input, input.evidenceRefs[0]?.scope);
     const execution: ActiveExecution = {
@@ -1064,7 +1064,7 @@ export class RccV3ProviderTransport<
       active.streamDone = true;
       active.resourceReleased = true;
       active.terminalState = 'failed';
-      throw new ProviderAdapterError({ code: 'transport.empty.body', category: 'transport', phase: 'submit', message: 'RCC v3 continuation returned no streaming body', scope: input });
+      throw new ProviderAdapterError({ code: 'transport.empty.body', category: 'transport', phase: 'submit', message: 'RCC v3 continuation returned no streaming body', scope: input, retryable: 'retryable' });
     }
     active.body = response.body;
     const continuationReceipt = input.toolContinuations === undefined || input.toolContinuations.length === 0
@@ -1763,10 +1763,11 @@ export class RccV3ProviderTransport<
           phase,
           message: `${message}; RCC v3 request-failure evidence write failed: ${writeError instanceof Error ? writeError.message : 'unknown error'}`,
           scope: input,
+          retryable: 'retryable',
           cause: new AggregateError([cause, writeError], 'RCC v3 request and request-failure evidence both failed'),
         });
       }
-      throw new ProviderAdapterError({ code: 'transport.failure', category: 'transport', phase, message, scope: input, cause, evidenceRefs: [evidenceRef] });
+      throw new ProviderAdapterError({ code: 'transport.failure', category: 'transport', phase, message, scope: input, retryable: 'retryable', cause, evidenceRefs: [evidenceRef] });
     }
     if (response.status < 200 || response.status >= 300) {
       const errorBody = (await response.text()).slice(0, this.maxEventBytes);

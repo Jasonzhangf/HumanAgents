@@ -38,10 +38,20 @@ test('explicit HTTP composition completes legal streams and aborts budget exhaus
   await ensureControlLayout(schedulerPaths);
   const evidenceRoot = join(schedulerPaths.artifactsRoot, 'ui-provider-evidence');
   const schedulerLease = await acquireDaemonLease(schedulerPaths, { ownerId: 'explicit-budget-http' });
-  const provider = createServer((request, response) => {
+  const provider = createServer(async (request, response) => {
     if (request.method !== 'POST') { response.end('{}'); return; }
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const wire = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { readonly tools?: unknown };
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     const frame = (value: unknown) => response.write(`data: ${JSON.stringify(value)}\n\n`);
+    if (!endless && wire.tools === undefined) {
+      frame({ type: 'response.created', response: { id: 'controlled-explicit-drain' } });
+      frame({ type: 'response.output_text.done', item_id: 'drain-answer', text: 'transport drained' });
+      frame({ type: 'response.completed', response: { id: 'controlled-explicit-drain' } });
+      response.end();
+      return;
+    }
     frame({ type: 'response.created', response: { id: 'controlled-explicit' } });
     let count = 0;
     const timer = setInterval(() => {
@@ -49,9 +59,17 @@ test('explicit HTTP composition completes legal streams and aborts budget exhaus
       frame({ type: 'response.reasoning_summary_text.delta', item_id: 'reasoning', delta: 'thinking' });
       count += 1;
       if (!endless && count === 4) {
-        frame({ type: 'response.output_text.done', item_id: 'answer', text: JSON.stringify({
-          kind: 'answer', normalizedInput: 'hello', knownFacts: [], answer: 'hello', decisionRefs: [],
-        }) });
+        frame({ type: 'response.output_item.done', output_index: 0, item: {
+          type: 'function_call',
+          id: 'controlled-explicit-end-item',
+          call_id: 'controlled-explicit-end-call',
+          name: 'humanagent_turn_end',
+          arguments: JSON.stringify({
+            kind: 'simple',
+            decision: { kind: 'answer', normalizedInput: 'hello', knownFacts: [], decisionRefs: [], answer: 'hello' },
+            checkpointRecord: { index: { action: '回答用户问题', result: '已回答' } },
+          }),
+        } });
         frame({ type: 'response.completed', response: { id: 'controlled-explicit' } });
         clearInterval(timer);
         response.end();

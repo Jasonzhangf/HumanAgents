@@ -6318,19 +6318,23 @@ export class UiRuntimeService {
    * callers that only need task state.
    */
   async taskDashboardWithPlan(taskId: TaskId, agentSelection?: DecodedTaskAgentActivitySelectionQuery): Promise<RuntimeTaskDashboardView> {
-    const { task, executionTaskId } = await this.taskSnapshotWithParentExecutionTarget(taskId);
-    const withPublication = await this.taskDashboardWithPublication(taskId, task);
-    const plan = await this.executionPlanForTask(taskId);
-    const identity = await this.options.taskIdentity?.read({ organId: this.options.organId, taskId });
-    const resumeAction = await this.taskDashboardResumeAction(task, executionTaskId);
-    return {
-      ...withPublication,
-      ...(identity?.title === undefined ? {} : { semanticTitle: identity.title }),
-      ...(plan === undefined ? {} : { plan }),
-      ...resumeAction,
-      taskPlanHistory: await this.boundTaskPlanHistory(taskId),
-      agentActivity: await this.taskAgentActivityFor(this.boundProjectSource(), this.mode, taskId, agentSelection),
-    };
+    try {
+      const { task, executionTaskId } = await this.taskSnapshotWithParentExecutionTarget(taskId);
+      const withPublication = await this.taskDashboardWithPublication(taskId, task);
+      const plan = await this.executionPlanForTask(taskId);
+      const identity = await this.options.taskIdentity?.read({ organId: this.options.organId, taskId });
+      const resumeAction = await this.taskDashboardResumeAction(task, executionTaskId);
+      return {
+        ...withPublication,
+        ...(identity?.title === undefined ? {} : { semanticTitle: identity.title }),
+        ...(plan === undefined ? {} : { plan }),
+        ...resumeAction,
+        taskPlanHistory: await this.boundTaskPlanHistory(taskId),
+        agentActivity: await this.taskAgentActivityFor(this.boundProjectSource(), this.mode, taskId, agentSelection),
+      };
+    } catch (error) {
+      throw apiError(error);
+    }
   }
 
   // Main Topic needs published output and state, not plan/activity reads. Both

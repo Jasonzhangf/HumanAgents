@@ -1695,7 +1695,8 @@ function isTransientProviderSubmitFailure(cause: unknown): boolean {
   if (cause === null || typeof cause !== 'object' || !('providerError' in cause)) return false;
   const error = (cause as { readonly providerError?: ProviderError }).providerError;
   if (!error) return false;
-  if (error.category === 'transport' || error.category === 'timeout') return true;
+  if (error.category === 'timeout' || error.code === 'transport.empty.body') return true;
+  if (error.category === 'transport') return error.retryable === 'retryable';
   if (/^http\.5\d\d$/.test(error.code)) return true;
   return error.code === 'http.429' && !isAllAccountsExhausted429(error.message);
 }
