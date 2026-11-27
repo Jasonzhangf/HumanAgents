@@ -1456,6 +1456,15 @@ export class RccV3ProviderTransport<
         if (active.stopRequested) throw active.stopCause;
         if (bufferedMessageDrainDeadline !== undefined && observedTerminal) break;
       }
+      if (!retryStream
+        && !active.terminalState
+        && !yieldedWireEvent
+        && this.source === 'rcc'
+        && !active.stopRequested
+        && active.lastRequest !== undefined
+        && streamAttempt < this.transientStreamRetries) {
+        retryStream = true;
+      }
       if (retryStream) {
         const delayMs = this.transientStreamRetryDelaysMs[
           Math.min(streamAttempt, this.transientStreamRetryDelaysMs.length - 1)

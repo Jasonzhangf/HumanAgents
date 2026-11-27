@@ -2847,6 +2847,15 @@ test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled whi
           text: async () => '',
         };
       }
+      if (calls === 2) {
+        return {
+          status: 200,
+          body: (async function* () {
+            yield encoder.encode(': keepalive\n\n:\n\n');
+          })(),
+          text: async () => '',
+        };
+      }
       return {
         status: 200,
         body: (async function* () {
@@ -2862,7 +2871,7 @@ test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled whi
   await ad.start(startInput());
   const observed = [];
   for await (const event of ad.observe(execution)) observed.push(event);
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.equal(observed.some((event) => event.kind === 'error'), false, 'retried pre-output error must stay below event boundary');
   assert.equal(observed.at(-1)?.kind, 'terminal');
   const settled = await ad.settle(execution);
