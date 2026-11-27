@@ -2811,3 +2811,60 @@ test('RCC v3 observe ends a stream emitting only SSE keepalive comments within n
   assert.equal(settled.state, 'failed');
   assert.equal(settled.error?.code, 'stream.no-progress');
 });
+
+test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled while failing fast on exhausted 429', async () => {
+  const writes: ProviderEvidenceWrite[] = [];
+  const encoder = new TextEncoder();
+  let calls = 0;
+  const transport = createV3ProviderHttpTransport({
+    binding,
+    baseUrl: 'http://rcc-stream-retry.test',
+    source: 'rcc',
+    transientStreamRetries: 2,
+    transientStreamRetryDelaysMs: [1],
+    evidence: {
+      async write(input) {
+        writes.push(input);
+        return {
+          evidenceId: id('evidence', `rcc-stream-retry-${writes.length}`),
+          kind: input.kind,
+          source: 'rcc-v3-transport-test',
+          locator: input.locator,
+          scope: input.scope,
+        };
+      },
+      async read() { return new Uint8Array(); },
+    },
+    fetch: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          status: 200,
+          body: (async function* () {
+            yield encoder.encode(': keepalive\n\n');
+            yield encoder.encode('event: error\ndata: {"type":"error","error":{"code":"unknown_parameter","message":"Unknown parameter: \'input[9].text\'."}}\n\n');
+          })(),
+          text: async () => '',
+        };
+      }
+      return {
+        status: 200,
+        body: (async function* () {
+          yield encoder.encode('data: {"type":"response.created","response":{"id":"resp-retry-ok"}}\n\n');
+          yield encoder.encode('data: {"type":"response.output_text.done","item_id":"item-1","text":"recovered output"}\n\n');
+          yield encoder.encode('data: {"type":"response.completed","response":{"id":"resp-retry-ok"}}\n\n');
+        })(),
+        text: async () => '',
+      };
+    },
+  });
+  const ad = new ProviderAdapter({ binding, routeRef: 'rcc-stream-retry', codec: new ResponsesProviderCodec(), transport, evidence: sink() });
+  await ad.start(startInput());
+  const observed = [];
+  for await (const event of ad.observe(execution)) observed.push(event);
+  assert.equal(calls, 2);
+  assert.equal(observed.some((event) => event.kind === 'error'), false, 'retried pre-output error must stay below event boundary');
+  assert.equal(observed.at(-1)?.kind, 'terminal');
+  const settled = await ad.settle(execution);
+  assert.equal(settled.state, 'succeeded');
+});

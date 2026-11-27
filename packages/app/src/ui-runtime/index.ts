@@ -364,7 +364,7 @@ function nativeProviderToolsFor(
 
 export function buildRccExecutionPort(config: RccModeConfig, evidenceRoot: string): ExecutionRuntimePort {
   const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot));
-  const transport = new V3ProviderHttpTransport({ binding: config.binding, baseUrl: config.baseUrl, evidence });
+  const transport = new V3ProviderHttpTransport({ binding: config.binding, baseUrl: config.baseUrl, evidence, transientStreamRetries: 10 });
   const codec = config.binding.protocol === 'anthropic'
     ? new AnthropicProviderCodec(config.maxTokens ?? 4096)
     : config.binding.protocol === 'openai'

@@ -51,6 +51,7 @@ export function assembleProviderExecutionPort<
     evidence,
     credential,
     source: input.source,
+    ...(input.source === 'rcc' ? { transientStreamRetries: 10 } : {}),
   });
   const codec = input.binding.protocol === 'anthropic'
     ? new AnthropicProviderCodec(input.maxTokens ?? DEFAULT_MAX_TOKENS)

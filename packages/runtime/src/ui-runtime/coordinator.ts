@@ -7094,7 +7094,7 @@ export class RuntimeTaskCoordinator {
           if (cleanup.code === effectiveError.code && cleanup.message === effectiveError.message) return;
           effectiveError.cleanupError = cleanup;
         };
-        if (primaryError !== undefined) attachCleanupError(projection);
+        if (primaryError !== undefined) attachCleanupError(error);
         let closedProviderEvidenceRefs: readonly EvidenceRef[] = [];
         try {
           const close = await this.closeForExecution(operation.operationId, driver, []);

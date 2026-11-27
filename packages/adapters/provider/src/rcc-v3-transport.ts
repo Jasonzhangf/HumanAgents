@@ -142,6 +142,8 @@ export interface RccV3ProviderTransportOptions<
    */
   readonly deltaRunawayCap?: number;
   readonly postMessageCompletionGraceMs?: number;
+  readonly transientStreamRetries?: number;
+  readonly transientStreamRetryDelaysMs?: readonly number[];
 }
 
 interface ActiveExecution {
@@ -152,6 +154,11 @@ interface ActiveExecution {
   readonly route: string;
   readonly model: string;
   readonly evidenceScope: ScopeRef;
+  lastRequest?: {
+    readonly executionInput: AnyProviderExecutionIdentityRef;
+    readonly request: ProviderWireRequest;
+    readonly phase: 'start' | 'submit';
+  };
   stopRequested: boolean;
   stopCause?: unknown;
   observed: boolean;
@@ -853,6 +860,8 @@ export class RccV3ProviderTransport<
   private readonly noProgressBudgetMs: number;
   private readonly postMessageCompletionGraceMs: number;
   private readonly deltaRunawayCap: number;
+  private readonly transientStreamRetries: number;
+  private readonly transientStreamRetryDelaysMs: readonly number[];
   private credential: string | undefined;
 
   constructor({ credential, ...options }: RccV3ProviderTransportOptions<TIdentity>) {
@@ -892,6 +901,8 @@ export class RccV3ProviderTransport<
     this.noProgressBudgetMs = options.noProgressBudgetMs ?? DEFAULT_NO_PROGRESS_BUDGET_MS;
     this.postMessageCompletionGraceMs = options.postMessageCompletionGraceMs ?? DEFAULT_POST_MESSAGE_COMPLETION_GRACE_MS;
     this.deltaRunawayCap = options.deltaRunawayCap ?? DEFAULT_DELTA_RUNAWAY_CAP;
+    this.transientStreamRetries = Math.max(0, options.transientStreamRetries ?? 0);
+    this.transientStreamRetryDelaysMs = options.transientStreamRetryDelaysMs ?? DEFAULT_TRANSIENT_STREAM_RETRY_DELAYS_MS;
     this.maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
     this.probeTtlMs = options.probeTtlMs ?? DEFAULT_PROBE_TTL_MS;
     this.now = options.now ?? (() => new Date());
@@ -969,6 +980,7 @@ export class RccV3ProviderTransport<
       route,
       model: request.model,
       evidenceScope,
+      lastRequest: { executionInput: input, request, phase: 'start' },
       stopRequested: false,
       observed: false,
       streamDone: false,
@@ -1067,6 +1079,7 @@ export class RccV3ProviderTransport<
       throw new ProviderAdapterError({ code: 'transport.empty.body', category: 'transport', phase: 'submit', message: 'RCC v3 continuation returned no streaming body', scope: input, retryable: 'retryable' });
     }
     active.body = response.body;
+    active.lastRequest = { executionInput: input, request, phase: 'submit' };
     const continuationReceipt = input.toolContinuations === undefined || input.toolContinuations.length === 0
       ? undefined
       : {
@@ -1127,25 +1140,29 @@ export class RccV3ProviderTransport<
     // here, never from the stream start, so a slow but advancing stream never
     // trips the no-progress budget.
     let lastProgressAtMs = this.now().getTime();
+    let yieldedWireEvent = false;
+    let streamAttempt = 0;
     try {
-      for await (const frame of parseSse(
-        active.body,
-        this.maxEventBytes,
-        this.maxBufferBytes,
-        () => {
-          if (!awaitingPostMessageCompletion()) return this.noProgressBudgetMs;
-          return bufferedMessageDrainDeadline === undefined
-            ? this.postMessageCompletionGraceMs
-            : Math.max(0, bufferedMessageDrainDeadline - performance.now());
-        },
-        () => {
-          if (awaitingPostMessageCompletion() && !active.controller.signal.aborted) {
-            active.controller.abort(
-              new DOMException('RCC v3 single-round message completed after post-message grace', 'AbortError'),
-            );
-          }
-        },
-      )) {
+      while (true) {
+        let retryStream = false;
+        for await (const frame of parseSse(
+          active.body,
+          this.maxEventBytes,
+          this.maxBufferBytes,
+          () => {
+            if (!awaitingPostMessageCompletion()) return this.noProgressBudgetMs;
+            return bufferedMessageDrainDeadline === undefined
+              ? this.postMessageCompletionGraceMs
+              : Math.max(0, bufferedMessageDrainDeadline - performance.now());
+          },
+          () => {
+            if (awaitingPostMessageCompletion() && !active.controller.signal.aborted) {
+              active.controller.abort(
+                new DOMException('RCC v3 single-round message completed after post-message grace', 'AbortError'),
+              );
+            }
+          },
+        )) {
         if (active.stopRequested) throw active.stopCause;
         if (!frame.data) continue;
         if (frame.data === '[DONE]') {
@@ -1361,6 +1378,28 @@ export class RccV3ProviderTransport<
           openUnits.delete(`content:block:${index}`);
         }
         if (isTerminalEvent(active.protocol, type)) {
+          if ((type === 'error' || type.endsWith('.failed'))
+            && this.source === 'rcc'
+            && !yieldedWireEvent
+            && !active.stopRequested
+            && active.lastRequest !== undefined
+            && streamAttempt < this.transientStreamRetries) {
+            const errorRecord = type.endsWith('.failed')
+              ? (readRecord(record.response).error ?? {})
+              : (record.error ?? {});
+            const providerCode = typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).code === 'string'
+              ? (errorRecord as Record<string, unknown>).code as string
+              : typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).type === 'string'
+                ? (errorRecord as Record<string, unknown>).type as string
+                : 'provider.failed';
+            const providerMessage = typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).message === 'string'
+              ? (errorRecord as Record<string, unknown>).message as string
+              : 'RCC v3 provider reported a failure';
+            if (isTransientRccStreamError(providerCode, providerMessage)) {
+              retryStream = true;
+              break;
+            }
+          }
           observedTerminal = true;
           openUnits.clear();
           if (type === 'error' || type.endsWith('.failed')) {
@@ -1412,9 +1451,66 @@ export class RccV3ProviderTransport<
           const delta = readRecord(record.delta);
           if (typeof delta.stop_reason === 'string') this.stopReasons.set(active.identity, delta.stop_reason);
         }
+        yieldedWireEvent = true;
         yield raw;
         if (active.stopRequested) throw active.stopCause;
         if (bufferedMessageDrainDeadline !== undefined && observedTerminal) break;
+      }
+      if (retryStream) {
+        const delayMs = this.transientStreamRetryDelaysMs[
+          Math.min(streamAttempt, this.transientStreamRetryDelaysMs.length - 1)
+        ] ?? 0;
+        await sleepStreamRetry(delayMs, active.controller.signal);
+        if (active.stopRequested) throw active.stopCause;
+        streamAttempt += 1;
+        let resent: RccV3SendResult;
+        while (true) {
+          try {
+            resent = await this.send(
+              active.lastRequest!.request.protocol,
+              active.lastRequest!.request,
+              active.controller,
+              active.lastRequest!.executionInput,
+              active.lastRequest!.phase,
+              active.evidenceScope,
+            );
+            break;
+          } catch (sendError) {
+            if (!active.stopRequested
+              && streamAttempt < this.transientStreamRetries
+              && isTransientRccSendError(sendError)) {
+              const retryDelayMs = this.transientStreamRetryDelaysMs[
+                Math.min(streamAttempt, this.transientStreamRetryDelaysMs.length - 1)
+              ] ?? 0;
+              await sleepStreamRetry(retryDelayMs, active.controller.signal);
+              if (active.stopRequested) throw active.stopCause;
+              streamAttempt += 1;
+              continue;
+            }
+            throw sendError;
+          }
+        }
+        if (!resent.response.body) {
+          throw new ProviderAdapterError({
+            code: 'transport.empty.body',
+            category: 'transport',
+            phase: active.lastRequest!.phase,
+            message: 'RCC v3 returned no streaming body',
+            scope: active.lastRequest!.executionInput,
+            retryable: 'retryable',
+          });
+        }
+        active.body = resent.response.body;
+        observedTerminal = false;
+        activeReasoningItemId = undefined;
+        reasoningSummaryStarted = false;
+        roundOneMessageCompleted = false;
+        bufferedMessageDrainDeadline = undefined;
+        openUnits.clear();
+        lastProgressAtMs = this.now().getTime();
+        continue;
+      }
+      break;
       }
       if (!active.terminalState && awaitingPostMessageCompletion()) {
         observedTerminal = true;
@@ -1987,4 +2083,46 @@ export function createRccV3ProviderTransport<
   options: RccV3ProviderTransportOptions<TIdentity>,
 ): RccV3ProviderTransport<TIdentity> {
   return new RccV3ProviderTransport(options);
+}
+
+const DEFAULT_TRANSIENT_STREAM_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
+
+function isExhausted429Message(message: string): boolean {
+  return /所有候选账号对模型.*均已限额或禁用/.test(message);
+}
+
+function isTransientRccStreamError(code: string, message: string): boolean {
+  if (isExhausted429Message(message)) return false;
+  if (/^http\.5\d\d$/.test(code) || code === 'http.429') return true;
+  if (code === 'unknown_parameter' || code === 'server_error' || code === 'rate_limit_exceeded'
+    || code === 'upstream_error' || code === 'provider.failed') {
+    return true;
+  }
+  return /rate_limit|server_error|upstream_error|overloaded|unavailable|暂时不可用|请稍后重试|too_many_requests|too many requests/i
+    .test(`${code} ${message}`);
+}
+
+function isTransientRccSendError(cause: unknown): boolean {
+  if (cause === null || typeof cause !== 'object' || !('providerError' in cause)) return false;
+  const err = (cause as { readonly providerError?: ProviderError }).providerError;
+  if (!err || isExhausted429Message(err.message)) return false;
+  if (err.category === 'timeout' || err.code === 'transport.empty.body') return true;
+  if (err.category === 'transport') return err.retryable === 'retryable';
+  return /^http\.5\d\d$/.test(err.code) || err.code === 'http.429';
+}
+
+async function sleepStreamRetry(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
