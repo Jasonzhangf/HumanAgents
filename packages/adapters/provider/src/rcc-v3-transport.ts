@@ -1385,17 +1385,7 @@ export class RccV3ProviderTransport<
             && !active.stopRequested
             && active.lastRequest !== undefined
             && streamAttempt < this.transientStreamRetries) {
-            const errorRecord = type.endsWith('.failed')
-              ? (readRecord(record.response).error ?? {})
-              : (record.error ?? {});
-            const providerCode = typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).code === 'string'
-              ? (errorRecord as Record<string, unknown>).code as string
-              : typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).type === 'string'
-                ? (errorRecord as Record<string, unknown>).type as string
-                : 'provider.failed';
-            const providerMessage = typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).message === 'string'
-              ? (errorRecord as Record<string, unknown>).message as string
-              : 'RCC v3 provider reported a failure';
+            const { code: providerCode, message: providerMessage } = extractStreamErrorFields(record, type);
             if (isTransientRccStreamError(providerCode, providerMessage)) {
               retryStream = true;
               break;
@@ -1404,17 +1394,7 @@ export class RccV3ProviderTransport<
           observedTerminal = true;
           openUnits.clear();
           if (type === 'error' || type.endsWith('.failed')) {
-            const errorRecord = type.endsWith('.failed')
-              ? (readRecord(record.response).error ?? {})
-              : (record.error ?? {});
-            const providerCode = typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).code === 'string'
-              ? (errorRecord as Record<string, unknown>).code as string
-              : typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).type === 'string'
-                ? (errorRecord as Record<string, unknown>).type as string
-                : 'provider.failed';
-            const providerMessage = typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).message === 'string'
-              ? (errorRecord as Record<string, unknown>).message as string
-              : 'RCC v3 provider reported a failure';
+            const { code: providerCode, message: providerMessage } = extractStreamErrorFields(record, type);
             active.terminalError = this.providerError(active.evidenceScope, 'observe', providerCode, providerMessage, 'provider');
             active.terminalState = 'failed';
           } else if (active.protocol === 'responses' && type === 'response.completed' && active.responsesToolCallsPending) {
@@ -2110,6 +2090,24 @@ export function createRccV3ProviderTransport<
 }
 
 const DEFAULT_TRANSIENT_STREAM_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
+const TRANSIENT_WIRE_ERROR_TYPES = new Set(['server_error', 'rate_limit_exceeded', 'upstream_error']);
+
+function extractStreamErrorFields(
+  record: Record<string, unknown>,
+  type: string,
+): { readonly code: string; readonly message: string } {
+  const rawError = type.endsWith('.failed') ? (readRecord(record.response).error ?? {}) : (record.error ?? {});
+  const errObj = typeof rawError === 'object' && rawError !== null ? (rawError as Record<string, unknown>) : undefined;
+  const rawCode = errObj && typeof errObj.code === 'string' && errObj.code.trim().length > 0 ? errObj.code.trim() : undefined;
+  const rawType = errObj && typeof errObj.type === 'string' && errObj.type.trim().length > 0 ? errObj.type.trim() : undefined;
+  const code = rawCode !== undefined && /^\d+$/.test(rawCode) && rawType !== undefined && TRANSIENT_WIRE_ERROR_TYPES.has(rawType)
+    ? rawType
+    : rawCode ?? rawType ?? 'provider.failed';
+  const message = errObj && typeof errObj.message === 'string'
+    ? errObj.message
+    : 'RCC v3 provider reported a failure';
+  return { code, message };
+}
 
 function isExhausted429Message(message: string): boolean {
   return /所有候选账号对模型.*均已限额或禁用/.test(message);

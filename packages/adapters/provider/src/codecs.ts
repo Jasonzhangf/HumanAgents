@@ -745,6 +745,35 @@ function providerError(
   };
 }
 
+const TRANSIENT_WIRE_ERROR_TYPES = new Set(['server_error', 'rate_limit_exceeded', 'upstream_error']);
+
+/**
+ * Normalizes a Responses wire error code so numeric status codes paired with a
+ * transient wire `type` (such as `code: "400", type: "server_error"`) retain
+ * their semantic class instead of collapsing into an opaque HTTP number.
+ */
+function responsesWireErrorCode(
+  errorRecord: Record<string, unknown>,
+  execution: AnyProviderExecutionIdentityRef,
+  eventType: string,
+  allowMissingCode: boolean,
+): string {
+  const rawType = typeof errorRecord.type === 'string' && errorRecord.type.trim().length > 0
+    ? errorRecord.type.trim()
+    : undefined;
+  if (errorRecord.code == null) {
+    if (!allowMissingCode) {
+      return requireString(errorRecord, 'code', execution, eventType);
+    }
+    return rawType ?? 'provider.failed';
+  }
+  const rawCode = requireString(errorRecord, 'code', execution, eventType);
+  if (/^\d+$/.test(rawCode) && rawType !== undefined && TRANSIENT_WIRE_ERROR_TYPES.has(rawType)) {
+    return rawType;
+  }
+  return rawCode;
+}
+
 function eventId<TIdentity extends AnyProviderExecutionIdentityRef>(context: DecodeContext<TIdentity>, type: string, locator: string): string {
   return context.nextEventId(type, locator);
 }
@@ -2026,7 +2055,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         }
         const usage = await usageFact(context, 'responses', responsesUsage(record), context.callCapture?.responseModel);
         const errorRecord = requireObject(response, 'error', context.execution, raw.type);
-        const code = requireString(errorRecord, 'code', context.execution, raw.type);
+        const code = responsesWireErrorCode(errorRecord, context.execution, raw.type, false);
         const message = requireString(errorRecord, 'message', context.execution, raw.type);
         const errorEvidence = await captureEvidence(context, raw.type, `error/${responseId}`, errorRecord);
         const error = providerError(context.execution, context.scope, code, message, 'provider', [errorEvidence]);
@@ -2041,11 +2070,12 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'error': {
         this.clearToolArguments(context);
         const errorRecord = requireObject(record, 'error', context.execution, raw.type);
-        const code = errorRecord.code == null ? 'provider.failed' : requireString(errorRecord, 'code', context.execution, raw.type);
+        const code = responsesWireErrorCode(errorRecord, context.execution, raw.type, true);
         const message = requireString(errorRecord, 'message', context.execution, raw.type);
         const param = typeof errorRecord.param === 'string' ? errorRecord.param : undefined;
         const errorEvidence = await captureEvidence(context, raw.type, `error/${code}`, {
           ...(errorRecord.code === undefined ? {} : { code: errorRecord.code }),
+          ...(typeof errorRecord.type === 'string' ? { type: errorRecord.type } : {}),
           message,
           ...(param === undefined ? {} : { param }),
         });

@@ -2820,7 +2820,7 @@ test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled whi
     binding,
     baseUrl: 'http://rcc-stream-retry.test',
     source: 'rcc',
-    transientStreamRetries: 3,
+    transientStreamRetries: 4,
     transientStreamRetryDelaysMs: [1],
     evidence: {
       async write(input) {
@@ -2866,6 +2866,16 @@ test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled whi
           text: async () => '',
         };
       }
+      if (calls === 4) {
+        return {
+          status: 200,
+          body: (async function* () {
+            yield encoder.encode(': keepalive\n\n');
+            yield encoder.encode('event: error\ndata: {"code":"400","error":{"code":"400","message":"upstream 400: invalid request parameters","type":"server_error"},"message":"upstream 400: invalid request parameters","type":"error"}\n\n');
+          })(),
+          text: async () => '',
+        };
+      }
       return {
         status: 200,
         body: (async function* () {
@@ -2881,9 +2891,49 @@ test('RCC v3 retries pre-output transient SSE errors seamlessly when enabled whi
   await ad.start(startInput());
   const observed = [];
   for await (const event of ad.observe(execution)) observed.push(event);
-  assert.equal(calls, 4);
+  assert.equal(calls, 5);
   assert.equal(observed.some((event) => event.kind === 'error'), false, 'retried pre-output error must stay below event boundary');
   assert.equal(observed.at(-1)?.kind, 'terminal');
   const settled = await ad.settle(execution);
   assert.equal(settled.state, 'succeeded');
+
+  // Non-server_error numeric 400 (invalid_request_error) must NOT retry.
+  let badReqCalls = 0;
+  const badReqExecution = { ...execution, operationId: id('operation', 'op-bad-req-400') };
+  const badReqStart = { ...startInput(), operationId: badReqExecution.operationId };
+  const badReqTransport = createV3ProviderHttpTransport({
+    binding,
+    baseUrl: 'http://rcc-bad-req.test',
+    source: 'rcc',
+    transientStreamRetries: 4,
+    transientStreamRetryDelaysMs: [1],
+    evidence: {
+      async write(input) {
+        return {
+          evidenceId: id('evidence', `rcc-bad-req-${badReqCalls}`),
+          kind: input.kind,
+          source: 'rcc-v3-transport-test',
+          locator: input.locator,
+          scope: input.scope,
+        };
+      },
+      async read() { return new Uint8Array(); },
+    },
+    fetch: async () => {
+      badReqCalls += 1;
+      return {
+        status: 200,
+        body: (async function* () {
+          yield encoder.encode('event: error\ndata: {"error":{"code":"400","type":"invalid_request_error","message":"bad input"}}\n\n');
+        })(),
+        text: async () => '',
+      };
+    },
+  });
+  const badReqAd = new ProviderAdapter({ binding, routeRef: 'rcc-bad-req', codec: new ResponsesProviderCodec(), transport: badReqTransport, evidence: sink() });
+  await badReqAd.start(badReqStart);
+  const badReqObserved = [];
+  for await (const event of badReqAd.observe(badReqExecution)) badReqObserved.push(event);
+  assert.equal(badReqCalls, 1);
+  assert.equal(badReqObserved.find((e) => e.kind === 'error')?.error?.code, '400');
 });
