@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { id, canonicalJsonStringify, validateTaskPlanSnapshot, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type WorkResult, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef } from '../../packages/contracts/src/index.js';
+import { id, canonicalJsonStringify, validateTaskPlanSnapshot, type BusinessPayload, type ScopeRef, type AcceptedRawFact, type StandardTurnEndCommand, type WorkAssignment, type WorkResult, type RawContentReadPort, type EvidenceRef, type TaskId, type JournalCommitRef } from '../../packages/contracts/src/index.js';
 import { readStandardTurnDelivery, bindAssignmentDelivery, StandardTurnDeliveryError, type InspectToolCompletionDescriptor, type StandardTurnDeliveryReadInput, type StandardTurnDeliveryReaderPort } from '../../packages/runtime/src/ui-runtime/standard-turn-delivery.js';
 import { JsonlTaskGrantJournal } from '../../packages/adapters/jsonl/src/task-grants.js';
 import { JsonlTaskIdentityJournal } from '../../packages/adapters/jsonl/src/task-identities.js';
@@ -261,6 +261,65 @@ test('configured child review reads the retained execution asset when the carrie
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// A model schema mistake is correctable before child admission. This focused
+// no-provider guard checks both a missing required field and an invalid roster
+// selection; reaching either admission or child dispatch is a failure.
+test('child call schema errors stay paired before admission', async () => {
+  const taskId = id('task', 'child-argument-validation');
+  const scope: ScopeRef = {
+    organId: id('organ', 'child-argument-validation'),
+    taskId,
+    cycleId: id('cycle', 'child-argument-validation'),
+    operationId: id('operation', 'child-argument-validation'),
+  };
+  let admissions = 0;
+  let dispatches = 0;
+  let providerPreparations = 0;
+  const producer = createAppChildProducer({
+    manager: { async callChild() { dispatches += 1; throw new Error('invalid input reached dispatch'); } },
+    parent: {
+      admittedTurn: { turnId: 'child-argument-validation-turn' },
+      executionIdentity: () => ({ executionEpoch: 1 }),
+    } as never,
+    parentAssignment: { taskId, inputRevision: 1, requiredCapabilities: [] } as never,
+    checkpoints: {} as never,
+    refinedDeliveryStore: {} as never,
+    bodyAssets: {} as never,
+    bindChildRun: (async () => { throw new Error('invalid input reached child binding'); }) as never,
+    prepareAgentProvider: async () => { providerPreparations += 1; throw new Error('invalid input reached Provider'); },
+    roster: [{ agentId: 'configured-worker', roleId: 'execution' }],
+    admitChildOperation: async () => { admissions += 1; throw new Error('invalid input reached admission'); },
+  });
+  const execute = (suffix: string, input: BusinessPayload) => producer.execute({
+    execution: { runtimeId: 'child-argument-validation-runtime', taskId,
+      operationId: scope.operationId!, executionEpoch: 1 },
+    requestId: 'child-argument-validation-request', scope,
+    call: { callId: 'child-argument-invalid-' + suffix, toolId: APP_CHILD_CALL_TOOL.toolId,
+      continuationRef: 'child-argument-validation-continuation', arguments: input },
+    signal: new AbortController().signal,
+  });
+  const missingTarget = await execute('target', {
+    purpose: 'produce a result', agentId: 'configured-worker', kind: 'execution',
+    instructions: 'produce the bounded result', successCriteria: ['return a result'],
+  });
+  const missingTargetOutput = JSON.parse(missingTarget.output);
+  assert.equal(missingTarget.status, 'failed');
+  assert.equal(missingTarget.error?.code, 'tool.argument.invalid');
+  assert.equal(missingTargetOutput.callId, 'child-argument-invalid-target');
+  assert.equal(missingTargetOutput.executed, false);
+  assert.equal(missingTargetOutput.message, 'child call target is required');
+  const badRoster = await execute('roster', {
+    purpose: 'produce a result', agentId: 'not-configured', kind: 'execution',
+    instructions: 'produce the bounded result', successCriteria: ['return a result'], target: 'result',
+  });
+  assert.equal(badRoster.status, 'failed');
+  assert.equal(badRoster.error?.code, 'tool.argument.invalid');
+  assert.equal(JSON.parse(badRoster.output).executed, false);
+  assert.equal(admissions, 0, 'invalid child arguments never reach operation admission');
+  assert.equal(dispatches, 0, 'invalid child arguments never reach the orchestration manager');
+  assert.equal(providerPreparations, 0, 'invalid child arguments never prepare a Provider');
 });
 
 // Missing adapter and the legacy/native append split can lose recovery anchors.
@@ -1023,6 +1082,7 @@ async function textOnlyResponsesUpstream(input: {
   readonly holdInspectionAfterAdoptOnce?: () => Promise<void>;
   readonly failTurnEndDrain?: boolean;
   readonly orphanChildCallOnce?: boolean;
+  readonly invalidChildCallOnce?: boolean;
 }): Promise<{ readonly wires: Wire[]; readonly baseUrl: string; overlapped(): boolean;
   completedInReverse(): boolean; interruptedThirdTurn(): boolean; turnThreeHeld(): boolean;
   inspectionInvocations(): readonly { callId: string; invocationId: string }[];
@@ -1046,6 +1106,7 @@ async function textOnlyResponsesUpstream(input: {
   let inspectionAdoptHeld = false;
   let explicitHelperPhase: string | undefined;
   let orphanChildStreamed = false;
+  let invalidChildCallSent = false;
   const orphanChildStreamEvents: Record<string, unknown>[] = [];
   const frame = (events: readonly unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
   const server = createServer((request, response) => {
@@ -1550,6 +1611,16 @@ async function textOnlyResponsesUpstream(input: {
             return;
           }
         } else {
+          if (input.invalidChildCallOnce && !invalidChildCallSent) {
+            invalidChildCallSent = true;
+            invoke('call-parent-child-invalid', 'child_call', {
+              purpose: 'Produce an independent result',
+              instructions: 'The target is intentionally omitted in this first attempt.',
+              agentId: 'orchestration-default', kind: 'execution',
+              successCriteria: ['Return the complete result'],
+            });
+            return;
+          }
           const called = resultFor('call-parent-child');
           if (!called) {
             for (const name of ['child_call', 'child_adopt', 'child_not_select']) {
@@ -1749,6 +1820,7 @@ async function textOnlyFixture(
     | 'missing-location' | 'illegal-severity' | 'empty-evidence' | 'unaccepted-ref' | 'subject-child-body'
     | 'foreign-subject-child-body' | undefined = undefined,
   orphanChildCallOnce = false,
+  invalidChildCallOnce = false,
 ) {
   await mkdir(PERSISTENCE_ROOT, { recursive: true });
   const root = await mkdtemp(join(PERSISTENCE_ROOT, 'text-only-'));
@@ -1768,6 +1840,7 @@ async function textOnlyFixture(
     ...(scenario === undefined ? {} : { scenario }),
     ...(failTurnEndDrain ? { failTurnEndDrain: true } : {}),
     ...(orphanChildCallOnce ? { orphanChildCallOnce: true } : {}),
+    ...(invalidChildCallOnce ? { invalidChildCallOnce: true } : {}),
     ...(interruptThirdTurnOnce === undefined ? {} : { interruptThirdTurnOnce }),
     ...(holdFirstExecutionOnce === undefined ? {} : { holdFirstExecutionOnce }),
     ...(holdInspectionAfterAdoptOnce === undefined ? {} : { holdInspectionAfterAdoptOnce }),
@@ -2956,6 +3029,70 @@ if (!coldConsumerMode) test('native parallel child calls overlap and retain orde
     }
     console.log('parallel child consumer settled', JSON.stringify({ overlap: true, calls: returned.map((item) => item.call_id),
       invocations: refined.map((entry) => entry.invocationId), fixture: fixture.root }));
+  } finally {
+    await fixture.upstream.close();
+    await rm(fixture.root, { recursive: true });
+  }
+});
+
+// Real failure: missing target used to end the whole task. One bounded local
+// CLI/Provider consumer proves paired rejection, genuine dispatch and delivery.
+test('native child missing target returns a paired error and completes the same task', async () => {
+  const fixture = await textOnlyFixture(
+    false, true, false, 2, undefined, undefined, undefined, false, undefined, false, false,
+    undefined, false, undefined, false, true,
+  );
+  try {
+    const { taskId, result } = await runNativeMultiTurnConsumer(fixture, 2);
+    assert.equal(result.code, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout.slice(result.stdout.indexOf('{'), result.stdout.lastIndexOf('}') + 1));
+    assert.equal(receipt.taskId, taskId.value);
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
+    assert.equal(receipt.output, EXACT_BODY);
+    assert.equal(receipt.error, undefined);
+    const continuationIndex = fixture.upstream.wires.findIndex((wire) =>
+      parseResponsesWire(wire.body)?.input?.some((item) => item.type === 'function_call_output'
+        && item.call_id === 'call-parent-child-invalid'));
+    if (continuationIndex < 0) throw new Error('the invalid child result has no next Provider request');
+    const continuation = parseResponsesWire(fixture.upstream.wires[continuationIndex]!.body);
+    const invalidCall = continuation?.input?.find((item) => item.type === 'function_call'
+      && item.call_id === 'call-parent-child-invalid');
+    if (invalidCall === undefined || invalidCall.arguments === undefined) {
+      throw new Error('the rejected call stays paired in the next request');
+    }
+    assert.equal(JSON.parse(invalidCall.arguments).target, undefined);
+    const errorOutput = continuation?.input?.find((item) => item.type === 'function_call_output'
+      && item.call_id === 'call-parent-child-invalid');
+    if (errorOutput === undefined || errorOutput.output === undefined) {
+      throw new Error('the paired tool error is absent');
+    }
+    const failure = JSON.parse(errorOutput.output.split('\n[HumanAgent evidence refs]')[0]!);
+    assert.equal(failure.code, 'tool.argument.invalid');
+    assert.equal(failure.callId, 'call-parent-child-invalid');
+    assert.equal(failure.executed, false);
+    assert.equal(failure.message, 'child call target is required');
+    assert.equal(fixture.upstream.wires.slice(0, continuationIndex)
+      .some((wire) => parseResponsesWire(wire.body)?.model === 'child.only.model'), false,
+    'the invalid call must not start the child Provider');
+    const returned = fixture.upstream.wires.flatMap((wire) => parseResponsesWire(wire.body)?.input ?? [])
+      .find((item) => item.type === 'function_call_output' && item.call_id === 'call-parent-child');
+    if (returned === undefined || returned.output === undefined) {
+      throw new Error('the successful child output is absent');
+    }
+    const child = JSON.parse(returned.output.split('\n[HumanAgent evidence refs]')[0]!);
+    assert.equal(child.state, 'returned');
+    assert.equal(child.status, 'succeeded');
+    assert.equal(child.summary, CHILD_BODY);
+    assert.ok(fixture.upstream.wires.some((wire) => parseResponsesWire(wire.body)?.model === 'child.only.model'),
+      'the corrected call runs the genuine child Provider');
+    const verified = await fixture.journal.verify();
+    const childCheckpoints = verified.records.filter((record) => record.kind === 'checkpoint'
+      && record.checkpoint?.id.value.startsWith('child-call-'));
+    assert.equal(childCheckpoints.length, 1,
+      'the invalid call creates no child admission/checkpoint side effect; only the corrected call does');
+    console.log('child argument recovery receipt', JSON.stringify({ taskId: receipt.taskId,
+      state: receipt.state, output: receipt.output, rejectedCallId: failure.callId,
+      correctedChild: child.invocationId }));
   } finally {
     await fixture.upstream.close();
     await rm(fixture.root, { recursive: true });

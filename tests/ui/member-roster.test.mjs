@@ -67,8 +67,10 @@ test('DOM keeps real names and roles, no binding is explicit, and 404 is not an 
       read: async () => { throw Object.assign(new Error('not found'), { status: 404 }) },
     } })
     await new Promise((resolve) => setImmediate(resolve))
-    assert.equal(errorRoot.children.length, 0)
-    assert.doesNotMatch(text(errorRoot), /暂无成员|Sam|Jenny/)
+    assert.equal(errorRoot.children.length, 3)
+    assert.match(text(errorRoot), /成员名册读取失败（HTTP 404）.*not found/)
+    assert.match(text(errorRoot), /Jenny.*会话入口尚未接入/)
+    assert.doesNotMatch(text(errorRoot), /暂无历史成员|Sam/)
   } finally { globalThis.document = previous }
 })
 
@@ -78,7 +80,7 @@ test('serve-bound Jenny is one member row with separate session and detail contr
   const previous = globalThis.document
   globalThis.document = { createElement: (tag) => new Node(tag) }
   try {
-    const mainTopic = { projectKey: 'a', agentName: 'Jenny', href: './?projectKey=a', current: true }
+    const mainTopic = { projectKey: 'a', agentName: 'Jenny', agentId: 'interaction-default', href: './?projectKey=a', current: true }
     const reader = { read: async (projectKey) => ({ projectKey, rosterState: 'configured', members: [
       { memberName: 'Jenny', agentId: 'interaction-default', roleId: 'interaction', sessions: [] },
       { memberName: 'Sam', agentId: 'sam', roleId: 'review', sessions: [] },
@@ -96,12 +98,16 @@ test('serve-bound Jenny is one member row with separate session and detail contr
     await new Promise((resolve) => setImmediate(resolve))
     assert.equal(other.children[0].tag, 'button')
     let issue
+    let activations = 0
     const failed = mountMemberRoster({ projectKey: 'a', projectLabel: '同名', mainTopic,
-      reader: { read: async () => { throw new Error('not found') } }, onReadIssue: (value) => { issue = value } })
+      reader: { read: async () => { throw new Error('not found') } }, onReadIssue: (value) => { issue = value },
+      onCurrentActivate: () => { activations++ } })
     await new Promise((resolve) => setImmediate(resolve))
-    assert.equal(failed.children.length, 1)
+    assert.equal(failed.children.length, 3)
     assert.match(text(failed), /Jenny.*项目负责人/)
-    assert.doesNotMatch(text(failed), /不可读|not found/)
+    assert.match(text(failed), /成员名册读取失败.*not found/)
     assert.match(issue, /not found/)
+    failed.children[0].children[0].listeners.click({ preventDefault() {} })
+    assert.equal(activations, 1, 'clicking the current Jenny returns to the existing conversation')
   } finally { globalThis.document = previous }
 })

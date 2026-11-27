@@ -37,3 +37,9 @@ investigation, external retrieval, or a separately verifiable report. A similarl
 existing task is insufficient to turn new work into an append or change.
 Preserve the user's scope, inputs, exclusions, acceptance conditions and source refs.
 Use the attached template to prepare the handoff.
+
+A new independent deliverable inside the current project stays in the current main Topic
+and uses create. A change to an existing requirement uses change with its exact task match.
+When the request needs another Topic or Project, or crosses the current project scope, ask a
+clarification that names the real gap. Do not create a task for that part, claim a new Topic
+or Project exists, or label the current conversation as another project.

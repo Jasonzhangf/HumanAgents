@@ -1,0 +1,14 @@
+{
+  "checks": [
+    "desktop rail is 222px",
+    "only public Jenny is nested under members",
+    "no placeholder member tree"
+  ],
+  "reads": 20,
+  "writes": [],
+  "cleanup": {
+    "browserClosed": true,
+    "noListeningServer": true,
+    "productionWrites": false
+  }
+}

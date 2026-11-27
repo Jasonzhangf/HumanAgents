@@ -1,0 +1,76 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "id": "initial.single-workspace-row",
+      "ok": true,
+      "detail": "[\"冲突乙名称\",\"第二工作区旧名\"]"
+    },
+    {
+      "id": "initial.one-folder-per-workspace",
+      "ok": true,
+      "detail": "folders=[\"冲突乙名称\",\"第二工作区旧名\"]"
+    },
+    {
+      "id": "management.one-row-per-workspace",
+      "ok": true,
+      "detail": "rows=2"
+    },
+    {
+      "id": "management.no-shadow-project-alias",
+      "ok": true,
+      "detail": "技术详情 |  | 项目管理 | 关闭 |  | 当前可读取的工作区 |  | 选择一条或多条真实登记，分别填写显示名称后一次提交。失败项保留下方原因。 |  | 批量编辑显示名称 |  | 工作区路径是稳定身份。这里只修改显示名称，不迁移目录，也不清理真实项目。 |  | 可编辑 2 个工作区。 |  | 冲突乙名称 | /private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-As8x8p/workspace-alpha | 第二工作区旧名 | /private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-As8x8p/workspace-beta | 提交选中的名称"
+    },
+    {
+      "id": "management.paths-preserved",
+      "ok": true,
+      "detail": "[\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-As8x8p/workspace-alpha\",\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-As8x8p/workspace-beta\"]"
+    },
+    {
+      "id": "batch.mixed-result",
+      "ok": true,
+      "detail": "[\"completed\",\"rejected\"]"
+    },
+    {
+      "id": "batch.failure-reason",
+      "ok": true,
+      "detail": "显示名称不能为空"
+    },
+    {
+      "id": "batch.no-stale-workspace-alias",
+      "ok": true,
+      "detail": "title=产品主工作区 · Jenny dialog-has-old=false"
+    },
+    {
+      "id": "restart.alias-persisted",
+      "ok": true,
+      "detail": "[\"产品主工作区\",\"第二工作区旧名\"]"
+    },
+    {
+      "id": "restart.invalid-row-unchanged",
+      "ok": true,
+      "detail": "[\"产品主工作区\",\"第二工作区旧名\"]"
+    },
+    {
+      "id": "restart.batch-persisted",
+      "ok": true,
+      "detail": "[\"产品主工作区\",\"第二工作区\"]"
+    },
+    {
+      "id": "storage.paths-unchanged",
+      "ok": true,
+      "detail": "[\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-As8x8p/workspace-alpha\",\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-As8x8p/workspace-alpha\",\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-As8x8p/workspace-beta\"]"
+    },
+    {
+      "id": "storage.duplicate-registrations-unified",
+      "ok": true,
+      "detail": "[\"产品主工作区\",\"产品主工作区\"]"
+    }
+  ],
+  "resource": {
+    "servePid": 64656,
+    "serveStopped": true,
+    "browserClosed": true,
+    "tempRemoved": true
+  }
+}

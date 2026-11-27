@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { submissionView, canContinueSubmission, submissionNeedsResolution } from '../../docs/ui/send-lifecycle.js'
+import { submissionView, canContinueSubmission } from '../../docs/ui/send-lifecycle.js'
 
 const user = { turnId: 'user:interaction-2', interactionId: 'interaction-2', role: 'user', kind: 'message', text: 'same text' }
 const attempt = { key: 'second', rawInput: 'same text', interactionId: 'interaction-2' }
@@ -95,45 +95,38 @@ test('an interrupted model request retains the dispatch but labels its response 
   assert.equal(turns.at(-1).localStatus[0].error.code, error.code)
 })
 
-test('a queued message stays behind the active turn with explicit waiting semantics', () => {
-  const active = { ...attempt, snapshot: { state: 'matching' } }
-  const queued = { key: 'queued-3', rawInput: '第三条仍等待', startedAt: '2026-11-24T10:00:01Z', queued: true }
-  const projection = submissionView({ turns: [] }, [active, queued])
-  const users = projection.turns.filter(turn => turn.role === 'user').map(turn => turn.text)
-  assert.deepEqual(users, ['same text', '第三条仍等待'])
-  const queuedStatus = projection.turns.find(turn => turn.turnId === 'local-status:queued-3')
-  assert.equal(queuedStatus.localStatus[0].phase, 'queued')
-  assert.equal(queuedStatus.localStatus[0].label, '排队中，等待上一轮处理完成')
+test('accepted inputs keep independent states and tool facts while another request runs', () => {
+  const first = { ...attempt, key: 'first', interactionId: 'interaction-a', rawInput: '第一条正在运行',
+    snapshot: { state: 'matching' }, toolEvents: [{ eventId: 'a-call', kind: 'provider.tool',
+      taskId: { scope: 'task', value: 'task-a' }, operationId: 'operation-a', executionEpoch: 1,
+      turnId: 'turn-a', requestId: 'request-a', callId: 'call-a', toolId: 'file.read' }] }
+  const second = { ...attempt, key: 'second', interactionId: 'interaction-b', rawInput: '第二条独立判断',
+    snapshot: { state: 'awaiting-confirmation', draft: { proposedIntent: 'create' } } }
+  const third = { ...attempt, key: 'third', interactionId: 'interaction-c', rawInput: '第三条等待回答',
+    snapshot: { state: 'awaiting-clarification', clarifications: [{ question: '需要补充什么？', options: ['范围'] }] } }
+  const projection = submissionView({ turns: [] }, [first, second, third])
+  assert.deepEqual(projection.turns.filter(turn => turn.role === 'user').map(turn => turn.text),
+    ['第一条正在运行', '第二条独立判断', '第三条等待回答'])
+  const firstStatus = projection.turns.find(turn => turn.turnId === 'local-status:first')
+  const secondStatus = projection.turns.find(turn => turn.turnId === 'local-status:second')
+  assert.equal(firstStatus.toolEvents[0].callId, 'call-a')
+  assert.equal(secondStatus.toolEvents, undefined)
+  const thirdStatus = projection.turns.find(turn => turn.turnId === 'local-status:third')
+  assert.equal(thirdStatus.clarification.question, '需要补充什么？')
+  assert.equal(thirdStatus.toolEvents, undefined)
+  assert.equal(projection.turns.some(turn => turn.localStatus?.some(row => row.phase === 'queued')), false)
 })
 
-test('completion of the active turn cannot overwrite the queued draft or order', () => {
-  const active = { ...attempt, snapshot: { state: 'answered', reply: '第一条摘要' } }
-  const queued = { key: 'queued-4', rawInput: '用户第二条草稿', startedAt: '2026-11-24T10:00:02Z', queued: true }
-  const projection = submissionView({ turns: [user, { ...user, turnId: `reply:${user.interactionId}`, role: 'jenny', kind: 'message', text: '第一条摘要' }] }, [active, queued])
-  const local = projection.turns.filter(turn => turn.turnId.startsWith('local-'))
-  assert.deepEqual(local.map(turn => turn.turnId), ['local-user:queued-4', 'local-status:queued-4'])
-  assert.equal(local[0].text, '用户第二条草稿')
-  assert.equal(local.some(turn => turn.text === '第一条摘要'), false)
-})
-
-test('an active failure is rendered before the following queued draft', () => {
-  const failed = { key: 'failed-5', rawInput: '第一条失败内容', startedAt: '2026-11-24T10:00:01Z',
-    error: { code: 'transport.failure', message: '连接中断' } }
-  const queued = { key: 'queued-5', rawInput: '第二条新草稿', startedAt: '2026-11-24T10:00:02Z', queued: true }
-  const local = submissionView({ turns: [] }, [failed, queued]).turns
-    .filter(turn => turn.turnId.startsWith('local-'))
-  assert.deepEqual(local.map(turn => turn.turnId), [
-    'local-user:failed-5', 'local-status:failed-5', 'local-user:queued-5', 'local-status:queued-5',
-  ])
-  assert.equal(local[1].localStatus[0].error.code, 'transport.failure')
-  assert.equal(local[2].text, '第二条新草稿')
-})
-
-test('unfinished and user-owned states keep the next live turn queued', () => {
-  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1', snapshot: { state: 'matching' } }), true)
-  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1' }), true)
-  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1', snapshot: { state: 'awaiting-clarification' } }), true)
-  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1', snapshot: { state: 'awaiting-confirmation' } }), true)
-  assert.equal(submissionNeedsResolution({ interactionId: 'interaction-1', snapshot: { state: 'answered' } }), false)
-  assert.equal(submissionNeedsResolution({ error: { code: 'transport.failure' } }), false)
+test('each running receipt owns started and error state without another receipt\'s facts', () => {
+  const started = { kind: 'execution.started', occurredAt: '2026-11-25T20:00:00Z' }
+  const first = { key: 'running', interactionId: 'interaction-a', rawInput: 'A', snapshot: { state: 'confirmed' },
+    executionStarted: started }
+  const second = { key: 'error', interactionId: 'interaction-b', rawInput: 'B',
+    error: { code: 'request.rejected', message: 'B 未获接受' } }
+  const rows = submissionView({ turns: [] }, [first, second]).turns
+    .filter(turn => turn.turnId.startsWith('local-status:'))
+  assert.equal(rows[0].localStatus[0].phase, 'execution')
+  assert.equal(rows[0].localStatus[0].startedAt, started.occurredAt)
+  assert.equal(rows[0].localStatus[0].error, undefined)
+  assert.equal(rows[1].localStatus[0].error.message, 'B 未获接受')
 })

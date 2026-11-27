@@ -66,7 +66,7 @@ const retryProjection = () => {
   const retryEvent = {
     ...baseEvent, seq: 3, occurredAt: '2026-11-24T12:00:02.000Z', kind: 'execution.retry',
     state: 'retrying', attemptNumber: 2, summary: '第 2 次尝试',
-    retryDeadlineAt: '2026-11-24T23:59:59.000Z',
+    retryDeadlineAt: new Date(Date.now() + 60_000).toISOString(),
     error: { code: 'http.503', message: 'HTTP 503' },
   }
   const taskError = { code: 'http.503', message: 'HTTP 503' }
@@ -78,6 +78,32 @@ const retryProjection = () => {
     turns: [base.turns[0], { ...status, statusFacts: {
       state: 'running', events: [...status.statusFacts.events, retryEvent], waitingForUser: false, error: taskError,
     } }],
+  }
+}
+const retainedProjection = () => {
+  const retainedTaskId = { scope: 'task', value: 'scheduled-task-retained-contract-replay' }
+  const currentTask = {
+    ...task('blocked'), taskId: retainedTaskId,
+    title: '计划执行 subscription:requirement:draft-43:2::1::1', semanticTitle: undefined,
+    stateLabel: '受阻', currentStepLabel: '发出请求等待响应',
+    nextStep: '确认 Provider 资源已释放后再发起新执行', allowedActions: [],
+  }
+  const interaction = (id, marker) => [{
+    turnId: `user:${id}`, role: 'user', kind: 'message', interactionId: id,
+    text: `定位工作区文件 ${marker}`, occurredAt: marker.endsWith('000632') ? '2026-11-16T08:06:33.835Z' : '2026-11-16T08:34:14.639Z',
+  }, {
+    turnId: `draft:${id}`, role: 'jenny', kind: 'draft', interactionId: id,
+    text: '定位工作区文件并读取匹配行',
+    statusFacts: { state: 'dispatched', steps: [], waitingForUser: false },
+  }]
+  return {
+    surface: 'main-topic', projectKey: 'retained-contract-replay', projectName: '保留样本重放',
+    workspaceCwd: '/tmp/retained-contract-replay', mode: 'fake', agentName: 'Jenny', topicName: '主会话',
+    tasks: [currentTask], activeTask: undefined, rounds: [],
+    turns: [
+      ...interaction('interaction-000632', 'local-file-search-20261116-000632'),
+      ...interaction('interaction-003412', 'local-file-search-20261116-003412'),
+    ],
   }
 }
 const receipt = { checks: [], errors: [], mutations: [], cleanup: {} }
@@ -245,6 +271,28 @@ try {
     && blockedText.includes('季度预算项目 / 主会话'))
   check('internal task and operation identities are absent from visible bar copy', !blockedText.includes(taskOne)
     && !blockedText.includes(operationOne) && !blockedText.includes(callOne))
+  const retained = retainedProjection()
+  await page.evaluate(value => window.renderProbe(value), retained)
+  const retainedBar = page.locator('.jenny-task-bar')
+  const retainedCollapsed = await retainedBar.innerText()
+  check('retained subscription task keeps its exact public title and blocked phase',
+    retainedCollapsed.includes('计划执行 subscription:requirement:draft-43:2::1::1')
+      && retainedCollapsed.includes('执行受阻'))
+  await retainedBar.locator('.jenny-task-bar-toggle').click()
+  const retainedDetail = await retainedBar.locator('.jenny-task-bar-detail').innerText()
+  check('retained blocked task exposes only the generalized pause and provider resource hint',
+    retainedDetail.includes('任务暂停，等待处理。')
+      && retainedDetail.includes('下一步：确认 Provider 资源已释放后再发起新执行')
+      && !retainedDetail.includes('任务已完成') && !retainedDetail.includes('http.'))
+  check('retained blocked task does not invent an executable control action',
+    await retainedBar.getByRole('button', { name: /恢复|继续|重试|停止|重跑|删除/ }).count() === 0)
+  const retainedHostText = await page.locator('.main-topic-host').innerText()
+  check('both retained records are present by their source markers',
+    retainedHostText.includes('local-file-search-20261116-000632')
+      && retainedHostText.includes('local-file-search-20261116-003412'))
+  const unlinkedDraftStates = page.locator('.mt-draft-next', { hasText: '已整理 · 暂未取得任务投递回执' })
+  check('both retained unlinked drafts keep the no-delivery-receipt status', await unlinkedDraftStates.count() === 2)
+  check('retained sample hides the internal task id', !retainedHostText.includes('scheduled-task-retained-contract-replay'))
   await page.screenshot({ path: join(evidence, 'desktop-1440.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.evaluate(value => window.renderProbe(value), projection({ phase: 'tool' }))

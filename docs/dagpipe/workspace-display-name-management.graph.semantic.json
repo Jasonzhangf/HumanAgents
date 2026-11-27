@@ -1,0 +1,9 @@
+{
+  "graph": "humanagent-workspace-display-name-management",
+  "labels": {
+    "read_workspace_registry": "读取当前 control root 中真实登记及可读显示名，按 workspaceCwd 合并；同路径冲突名称按稳定 projectKey 确定一个，旧登记缺失显示名时保留目录名语义",
+    "validate_workspace_edits": "逐项核对稳定项目身份、工作区路径、当前登记和可编辑显示名",
+    "persist_display_names": "由 Config 以原子替换写入每一项 manifest，并保留失败项的明确原因",
+    "read_back_display_names": "冷读回执逐项确认持久化结果、新显示名和未变路径，再返回本次完整结果"
+  }
+}

@@ -282,11 +282,25 @@ export function createSessionUsageReader({ api, onChange }) {
   return { refresh, clear }
 }
 
+export function conversationScopeQuery(scope) {
+  if (scope === undefined) return ''
+  if (scope?.kind === 'alex' && scope.projectKey === undefined) return '?scope=system'
+  if (scope?.kind === 'project' && typeof scope.projectKey === 'string' && scope.projectKey.trim()) {
+    return `?${new URLSearchParams({ scope: 'project', projectKey: scope.projectKey })}`
+  }
+  throw new TypeError('conversation scope requires Alex or a selected projectKey')
+}
+
 export function createRuntimeApi(options = {}) {
   const baseUrl = (options.baseUrl || '').replace(/\/$/, '')
   const fetchImpl = options.fetchImpl || globalThis.fetch.bind(globalThis)
+  function conversationPath(path) {
+    const query = conversationScopeQuery(options.conversationScope)
+    return query ? `${path}${path.includes('?') ? '&' : '?'}${query.slice(1)}` : path
+  }
 
   async function request(path, init = {}) {
+    if (path.split('?')[0] === '/api/main-topic' || path.startsWith('/api/explicit/')) path = conversationPath(path)
     const headers = new Headers(init.headers || {})
     if (init.body !== undefined) headers.set('content-type', 'application/json')
     const response = await fetchImpl(`${baseUrl}${path}`, { ...init, headers })
@@ -313,6 +327,11 @@ export function createRuntimeApi(options = {}) {
       body: JSON.stringify(update),
     }),
     resetDisplayPreference: () => request('/api/ui/display-preference', { method: 'DELETE' }),
+    readWorkspaceManagement: () => request('/api/workspaces/management', { method: 'GET' }),
+    updateWorkspaceAliases: (updates) => request('/api/workspaces/management', {
+      method: 'PUT',
+      body: JSON.stringify({ updates }),
+    }),
     dashboard: () => request('/api/dashboard'),
     readProductBoard: (scope) => request(`/api/product/board${productReadScopeQuery(scope)}`),
     readProductSession: (scope, { signal } = {}) => request(`/api/product/session${productReadScopeQuery(scope, { includeSession: true })}`, { signal }),
@@ -362,6 +381,7 @@ export function createRuntimeApi(options = {}) {
       },
     ),
     readMainTopic: () => request('/api/main-topic'),
+    explicitEventsUrl: (interactionId) => `${baseUrl}${conversationPath(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/events`)}`,
     // Formal intervention surface. The UI labels these actions 批准/拒绝, but
     // only the existing grant/revoke/stop routes exist; no approve/reject
     // server action is invented. The exact scope is mandatory.
@@ -611,7 +631,11 @@ export function createRuntimeApi(options = {}) {
     }),
     stop: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/stop`, { method: 'POST' }),
     retryStop: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/stop/retry`, { method: 'POST' }),
-    eventsUrl: (operationId) => `${baseUrl}/api/executions/${encodeURIComponent(operationId)}/events`,
+    eventsUrl: (operationId) => `${baseUrl}${conversationPath(`/api/executions/${encodeURIComponent(operationId)}/events`)}`,
+    // Task events can be subscribed before the task has an operation. This is
+    // the only execution edge that works for Alex, whose conversation has no
+    // project scope from which to read a task dashboard.
+    taskEventsUrl: (taskId) => `${baseUrl}${conversationPath(`/api/tasks/${encodeURIComponent(typeof taskId === 'object' ? taskId?.value : taskId)}/events`)}`,
   }
 }
 

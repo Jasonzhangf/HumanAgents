@@ -1,30 +1,69 @@
-import { element, openTechnicalDetail } from './runtime-shell.js'
+import { bindDrawerLightDismiss, element, openTechnicalDetail } from './runtime-shell.js'
 import { encodeProductLocation } from './product-location.js'
 import { createProjectRosterReader, mountMemberRoster } from './member-roster.js'
+import { effectiveWorkspaceName, mountWorkspaceManagementPanel } from './workspace-management.js'
 
-// The public main-topic is serve-bound. Never relabel it as Alex or another project.
+export function entryConversationScope(search) {
+  const params = new URLSearchParams(search)
+  const kind = params.get('scope')
+  const projectKey = params.get('projectKey')?.trim()
+  if (params.getAll('scope').length > 1 || params.getAll('projectKey').length > 1) return null
+  if ((kind === null || kind === 'system' || kind === 'alex') && projectKey === undefined) return { kind: 'alex' }
+  if ((kind === null || kind === 'project') && projectKey) return { kind: 'project', projectKey }
+  return null
+}
+
+// Navigation selects a scope; only the server projection proves its identity.
 export function entryWorkspaceSelection(search, projection) {
   const params = new URLSearchParams(search)
-  if (params.get('scope') === 'system') return { available: false, label: 'Alex · CEO', reason: '全局 Alex 会话尚未提供公开入口。' }
-  if ((params.has('projectKey') && params.get('projectKey') !== projection?.projectKey)
-    || (params.has('mode') && params.get('mode') !== projection?.mode)) {
-    return { available: false, label: '所选项目', reason: '当前服务未提供所选项目的主会话入口。请从项目栏返回当前服务项目。' }
+  const requested = entryConversationScope(search)
+  if (!requested) return { available: false, label: '会话不可用', reason: '会话范围不明确，请重新选择 Alex 或项目。' }
+  const identified = projection?.surface === 'main-topic' && Boolean(projection.agentId)
+    && Boolean(projection.canonicalAddress)
+  if (requested.kind === 'alex') {
+    const available = identified && projection.scope?.kind === 'alex' && projection.role === 'ceo'
+      && projection.agentName === 'Alex' && projection.projectKey === undefined && projection.workspaceCwd === undefined
+    return { available: Boolean(available), label: 'Alex · CEO', reason: 'Alex 会话暂不可用。当前服务尚未返回可确认的 Alex 会话，请稍后重试。' }
   }
-  return { available: Boolean(projection), label: projection ? `${projection.projectName} · ${projection.agentName}` : '项目会话', reason: '项目会话尚未读取。' }
+  const available = identified && projection.scope?.kind === 'project'
+    && projection.scope.projectKey === requested.projectKey && projection.projectKey === requested.projectKey
+    && projection.role === 'project-lead' && projection.agentName === 'Jenny'
+    && (!params.has('mode') || params.get('mode') === projection.mode)
+  return { available: Boolean(available), label: available ? `${projection.projectName || '所选项目'} · ${projection.agentName}` : '所选项目',
+    reason: '当前服务未提供所选项目的主会话入口。请从项目栏返回当前服务项目。' }
 }
 
 export function entryProjectHref(page, projectKey, mode) {
   const query = new URLSearchParams({ projectKey })
+  if (page === '' || page === 'index.html') query.set('scope', 'project')
   // Task List's project route accepts projectKey alone; mode belongs to its
   // exact task deep link. Memory and dashboard accept the project/mode pair.
   if (page !== 'tasks.html' && (mode === 'rcc' || mode === 'fake')) query.set('mode', mode)
   return `./${page}?${query}`
 }
 
+export function entryProjectRows({ systemRead, current, search }) {
+  const rows = [...(systemRead?.projects ?? [])]
+  if (!current || rows.some((row) => row.scope?.projectKey === current.projectKey)) return rows
+  const params = new URLSearchParams(search)
+  const explicitCurrent = params.get('scope') !== 'system'
+    && params.get('projectKey') === current.projectKey
+    && (!params.has('mode') || params.get('mode') === current.mode)
+  if (explicitCurrent) {
+    rows.push({ scope: { projectKey: current.projectKey }, label: current.projectName })
+  }
+  return rows
+}
+
 // Only declared workspace data is a source. A project key is not a path.
 function workspaceName(workspace) {
   if (!workspace) return ''
   return workspace.split('/').filter(Boolean).at(-1) || ''
+}
+
+export function workspaceFolderName(workspace, managedName) {
+  const configured = typeof managedName === 'string' ? managedName.trim() : ''
+  return configured || workspaceName(workspace) || '未关联工作区'
 }
 
 export function mountEntryWorkspace({ root, template, api, search = window.location.search }) {
@@ -36,6 +75,7 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   rail.setAttribute('aria-label', '项目与成员')
   const mobileRail = element('dialog', undefined, 'entry-rail-dialog')
   mobileRail.setAttribute('aria-label', '项目导航')
+  bindDrawerLightDismiss(mobileRail)
   const closeRail = element('button', '关闭菜单', 'button entry-menu-close')
   closeRail.type = 'button'
   closeRail.addEventListener('click', () => mobileRail.close())
@@ -46,7 +86,12 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   brand.append(element('span', 'H', 'entry-mark'), element('span', 'HumanAgent'))
   const ceo = element('a', 'Alex · CEO', 'entry-person entry-ceo')
   ceo.href = './?scope=system'
-  if (new URLSearchParams(search).get('scope') === 'system') ceo.setAttribute('aria-current', 'page')
+  const alexState = element('p', '选择后读取会话', 'entry-read-state')
+  const alexSection = element('section', undefined, 'entry-alex')
+  alexSection.setAttribute('aria-labelledby', 'entry-alex-title')
+  const alexTitle = element('h2', '独立入口', 'entry-kicker')
+  alexTitle.id = 'entry-alex-title'
+  alexSection.append(alexTitle, ceo, alexState)
   const projects = element('div', undefined, 'entry-projects')
   projects.append(element('p', '正在读取项目…', 'muted entry-read-state'))
   const projectHead = element('div', undefined, 'entry-project-head')
@@ -54,8 +99,12 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   newProject.dataset.entryDialog = 'new-project'
   newProject.type = 'button'
   newProject.addEventListener('click', () => management(newProject))
-  projectHead.append(element('h2', '工作区', 'entry-kicker'), newProject)
-  rail.append(closeRail, brand, ceo, projectHead, projects)
+  const manageNames = element('button', '批量编辑', 'button entry-tool')
+  manageNames.dataset.entryDialog = 'workspace-names'
+  manageNames.type = 'button'
+  manageNames.addEventListener('click', () => management(manageNames))
+  projectHead.append(element('h2', '工作区', 'entry-kicker'), manageNames, newProject)
+  rail.append(closeRail, brand, alexSection, projectHead, projects)
   mobileRail.append(rail)
   const toolbar = element('header', undefined, 'entry-toolbar')
   const title = element('strong', '项目会话', 'entry-scope-title')
@@ -68,16 +117,28 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   const unavailable = (name, message, trigger) => openWorkspaceDetail({ title: name, eyebrow: name, content: element('p', message), trigger })
   function management(trigger, project) {
     const content = element('div', undefined, project ? 'entry-navigation member-roster-project-settings' : 'entry-navigation')
-    content.append(element('p', project ? `项目：${project.label || current?.projectName || project.scope.projectKey}` : '当前可读取的项目'))
-    if (!project) for (const row of systemRead?.projects ?? []) content.append(element('p', row.label || row.scope?.projectKey))
+    const workspace = project ? (current?.projectKey === project.scope?.projectKey ? current.workspaceCwd : project.workspaceCwd) : undefined
+    const projectLabel = project ? project.label || current?.projectName || project.scope.projectKey : '当前可读取的工作区'
+    content.append(element('p', project ? `项目：${projectLabel}` : projectLabel))
     if (project) {
       const key = project.scope?.projectKey
-      const workspace = current?.projectKey === key ? current.workspaceCwd : project.workspaceCwd
       if (workspace) content.append(element('h3', '工作区路径'), element('p', workspace, 'entry-workspace-path'))
       if (current?.projectKey !== key) content.append(element('p', `projectKey：${key}`, 'muted'))
       if (rosterIssues.get(key)) content.append(element('p', rosterIssues.get(key), 'muted'))
     }
-    content.append(element('p', '当前公开接口支持读取项目；尚未提供新建、修改项目或管理成员的能力。'))
+    content.append(element('p', '选择一条或多条真实登记，分别填写工作区名称后一次提交。失败项保留下方原因。'))
+    mountWorkspaceManagementPanel({
+      host: content,
+      api,
+      projectKey: project?.scope?.projectKey,
+      workspaceCwd: project ? (current?.projectKey === project.scope?.projectKey ? current.workspaceCwd : project.workspaceCwd) : undefined,
+      trigger,
+      onSaved: async (payload) => {
+        for (const workspace of payload.workspaces ?? []) managedNames.set(workspace.workspaceCwd, effectiveWorkspaceName(workspace))
+        if (current) update(current)
+        renderProjects()
+      },
+    })
     openWorkspaceDetail({ title: project ? '项目设置' : '项目管理', content, trigger })
   }
   function button(label, action) {
@@ -100,11 +161,11 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   const topicSelect = element('button', '主会话⌄', 'button entry-tool')
   topicSelect.dataset.entryDialog = 'topic'
   topicSelect.type = 'button'
-  topicSelect.addEventListener('click', () => unavailable('Topic', '当前公开入口提供项目主会话；尚未提供其他 Topic 列表与切换能力。', topicSelect))
+  topicSelect.addEventListener('click', () => unavailable('Topic', '当前公开入口提供主会话；尚未提供其他 Topic 列表与切换能力。', topicSelect))
   const newTopic = element('button', '＋ 旁支 Topic', 'button entry-tool')
   newTopic.dataset.entryDialog = 'new-topic'
   newTopic.type = 'button'
-  newTopic.addEventListener('click', () => unavailable('旁支 Topic', '旁支 Topic 创建尚未接入。当前消息仍属于项目主会话。', newTopic))
+  newTopic.addEventListener('click', () => unavailable('旁支 Topic', '旁支 Topic 创建尚未接入。当前消息仍属于所选主会话。', newTopic))
   topic.append(topicSelect, newTopic)
   button('任务板', (trigger) => {
     const queue = root.querySelector('[data-task-list-drawer-trigger]')
@@ -161,6 +222,8 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   let projectRefreshTimer
   const projectGroups = new Map()
   const workspaceGroups = new Map()
+  const managedNames = new Map()
+  let workspaceNamesRead
   let renderedProjects = ''
   const detailState = (label, message) => {
     const node = element('button', label, 'entry-person entry-unavailable')
@@ -169,13 +232,32 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
     node.addEventListener('click', () => unavailable(label, message, node))
     return node
   }
+  const focusCurrentConversation = () => {
+    const chat = root.querySelector('.main-topic-host')
+    const input = root.querySelector('#entry-form textarea, textarea[name="rawInput"]')
+    chat?.scrollIntoView?.({ block: 'start' })
+    if (input?.focus) input.focus({ preventScroll: true })
+    else if (chat) {
+      chat.setAttribute('tabindex', '-1')
+      chat.focus?.({ preventScroll: true })
+    }
+  }
+  ceo.addEventListener('click', (event) => {
+    if (ceo.getAttribute('aria-current') !== 'page') return
+    event.preventDefault()
+    if (mobileRail.open) mobileRail.close()
+    focusCurrentConversation()
+  })
   function renderProjects() {
     if (!systemRead && !current && !projectReadError) return
-    const rows = [...(systemRead?.projects ?? [])]
-    if (current && !rows.some((row) => row.scope?.projectKey === current.projectKey)) {
-      rows.push({ scope: { projectKey: current.projectKey }, label: current.projectName })
+    const rows = entryProjectRows({ systemRead, current, search })
+    if (current) {
+      const currentRow = rows.find((row) => row.scope?.projectKey === current.projectKey)
+      title.textContent = `${currentRow?.label || current.projectName} · ${current.agentName}`
+      title.title = title.textContent
     }
-    const signature = JSON.stringify([rows.map(row => [row.scope?.projectKey, row.label, row.workspaceCwd]), current?.projectKey,
+    const signature = JSON.stringify([rows.map(row => [row.scope?.projectKey, row.label, row.workspaceCwd,
+      managedNames.get(row.scope?.projectKey === current?.projectKey ? current.workspaceCwd : row.workspaceCwd)]), current?.projectKey,
       current?.projectName, current?.agentName, current?.workspaceCwd, current?.mode, Boolean(projectReadError)])
     if (signature === renderedProjects) return
     renderedProjects = signature
@@ -183,15 +265,20 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
     const present = new Set()
     const presentWorkspaces = new Set()
     const positions = new Map()
+    for (const { folder } of workspaceGroups.values()) {
+      folder.classList.remove('entry-workspace-current')
+      folder.querySelector(':scope > summary')?.removeAttribute('aria-current')
+    }
     for (const project of rows) {
       const key = project.scope?.projectKey
       if (!key || present.has(key)) continue
       present.add(key)
       const isCurrent = current?.projectKey === key
       const mode = isCurrent ? current.mode : undefined
-      const label = isCurrent ? current.projectName : project.label || '项目'
       const workspace = isCurrent ? current.workspaceCwd : project.workspaceCwd
       const workspaceKey = workspace || ''
+      const workspaceLabel = workspaceFolderName(workspace, managedNames.get(workspaceKey))
+      const label = project.label || (isCurrent ? current.projectName : '') || '项目'
       if (!workspaceGroups.has(workspaceKey)) {
         const folder = element('details', undefined, 'entry-workspace-folder')
         folder.open = saved().workspaces?.[workspaceKey] ?? true
@@ -201,16 +288,25 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
           wasOpen = folder.open
           remember({ workspaces: { ...saved().workspaces, [workspaceKey]: folder.open } })
         })
-        const name = element('summary', workspaceName(workspace) || '未关联工作区', 'entry-project-name')
+        const name = element('summary', workspaceLabel, 'entry-project-name')
         const directory = element('div', undefined, 'entry-workspace-projects')
         folder.append(name, directory)
-        workspaceGroups.set(workspaceKey, { folder, directory })
+        workspaceGroups.set(workspaceKey, { folder, directory, name, label: workspaceLabel })
       }
-      const { folder, directory: workspaceProjects } = workspaceGroups.get(workspaceKey)
+      const workspaceGroup = workspaceGroups.get(workspaceKey)
+      const { folder, directory: workspaceProjects } = workspaceGroup
+      if (workspaceGroup.label !== workspaceLabel) {
+        workspaceGroup.name.textContent = workspaceLabel
+        workspaceGroup.label = workspaceLabel
+      }
       if (!presentWorkspaces.has(workspaceKey)) {
         const position = projects.children[presentWorkspaces.size]
         if (position !== folder) projects.insertBefore(folder, position ?? null)
         presentWorkspaces.add(workspaceKey)
+      }
+      if (isCurrent) {
+        folder.classList.add('entry-workspace-current')
+        folder.querySelector(':scope > summary')?.setAttribute('aria-current', 'page')
       }
       const index = positions.get(workspaceKey) ?? 0
       positions.set(workspaceKey, index + 1)
@@ -224,6 +320,9 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
       previous?.group.remove()
       const group = element('details', undefined, 'entry-project')
       group.dataset.projectKey = key
+      if (isCurrent) {
+        group.classList.add('entry-project-current')
+      }
       group.open = saved().folders?.[key] ?? isCurrent
       let folderOpen = group.open
       group.addEventListener('toggle', () => {
@@ -232,6 +331,7 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
         remember({ folders: { ...saved().folders, [key]: group.open } })
       })
       const summary = element('summary', undefined, 'entry-project-name')
+      if (isCurrent) summary.setAttribute('aria-current', 'page')
       summary.append(element('span', label))
       group.append(summary)
       const directory = element('div', undefined, 'entry-project-directory')
@@ -250,11 +350,17 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
           remember({ members: { ...saved().members, [key]: members.open } })
         })
         members.append(element('summary', '成员'))
-        members.append(mountMemberRoster({ projectKey: key, projectLabel: label, reader: rosterReader,
+        const memberLabel = isCurrent ? current.projectName : project.label || '项目'
+        members.append(mountMemberRoster({ projectKey: key, projectLabel: memberLabel, reader: rosterReader,
           mainTopic: isCurrent ? { projectKey: key, agentName: current.agentName,
-            href: entryProjectHref('', key, mode), current: entryWorkspaceSelection(search, current).available } : null,
+            agentId: current.agentId, href: window.location.href, current: true } : null,
+          onCurrentActivate: () => {
+            if (mobileRail.open) mobileRail.close()
+            focusCurrentConversation()
+          },
           onReadIssue: (issue) => {
-            rosterIssues.set(key, issue)
+            if (issue) rosterIssues.set(key, issue)
+            else rosterIssues.delete(key)
             settings.title = issue ? '成员名册暂不可读，查看项目设置' : '项目设置'
           } }))
         directory.append(members)
@@ -302,9 +408,29 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
     })
     return projectRead
   }
+  function refreshWorkspaceNames() {
+    if (disposed || workspaceNamesRead) return workspaceNamesRead
+    workspaceNamesRead = api.readWorkspaceManagement().then((payload) => {
+      if (disposed) return
+      for (const workspace of payload.workspaces ?? []) {
+        managedNames.set(workspace.workspaceCwd, effectiveWorkspaceName(workspace))
+      }
+      if (current) update(current)
+      renderProjects()
+    }, () => {}).finally(() => {
+      workspaceNamesRead = undefined
+    })
+    return workspaceNamesRead
+  }
   function update(projection) {
-    current = projection
     const selection = entryWorkspaceSelection(search, projection)
+    current = selection.available && projection.scope.kind === 'project' ? projection : null
+    const alexSelected = entryConversationScope(search)?.kind === 'alex'
+    alexState.textContent = alexSelected
+      ? (selection.available ? '当前会话' : '会话暂不可用')
+      : '选择后读取会话'
+    if (alexSelected && selection.available) ceo.setAttribute('aria-current', 'page')
+    else ceo.removeAttribute('aria-current')
     topic.hidden = !selection.available
     for (const button of tools.children) {
       if (button !== tools.lastElementChild) button.hidden = !selection.available
@@ -320,10 +446,13 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   }
   title.textContent = entryWorkspaceSelection(search, null).label
   window.addEventListener('focus', refreshProjects)
+  window.addEventListener('focus', refreshWorkspaceNames)
   void refreshProjects()
+  void refreshWorkspaceNames()
   return { update, dispose() {
     disposed = true
     clearTimeout(projectRefreshTimer)
     window.removeEventListener('focus', refreshProjects)
+    window.removeEventListener('focus', refreshWorkspaceNames)
   } }
 }

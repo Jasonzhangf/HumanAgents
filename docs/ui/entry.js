@@ -1,6 +1,6 @@
 import {
-  api,
   appendPairingEntry,
+  bindDrawerLightDismiss,
   clearNode,
   element,
   formatTime,
@@ -16,15 +16,15 @@ import {
 import { mountInteractionWorkCard } from './interaction-work-card.js'
 import { renderMainTopic, disposeMainTopic, updateMainTopicUsage, mainTopicTurnGroups } from './main-topic.js'
 import { renderMainTopicHistoryDetail } from './main-topic-history-detail.js'
-import { createSessionUsageReader } from './runtime-api.js'
+import { createRuntimeApi, createSessionUsageReader } from './runtime-api.js'
 import { renderTurnProgressDetail } from './turn-progress-detail.js'
 import {
   projectInteractionCardFromEntries,
   projectInteractionCardFromSnapshot,
 } from './interaction-card-page.js'
 import { locationFromHash } from './product-location.js'
-import { entryWorkspaceSelection, entryProjectHref, mountEntryWorkspace } from './entry-workspace.js'
-import { submissionView, intakeFinished, draftReviewFromSnapshot, canContinueSubmission, submissionNeedsResolution } from './send-lifecycle.js'
+import { entryConversationScope, entryWorkspaceSelection, entryProjectHref, mountEntryWorkspace } from './entry-workspace.js'
+import { submissionView, intakeFinished, draftReviewFromSnapshot, canContinueSubmission } from './send-lifecycle.js'
 import { applyTaskCardResult, createDispatchTracking, taskValue } from './dispatch-tracking.js'
 import { createTaskDecisionPrompt, decisionMatchesTaskScope } from './product-control-view.js'
 
@@ -439,6 +439,41 @@ export function createSubmitStatusBanner(target, { onOpenDetail, clock = true } 
   return { mount, text, step, clear, isLive, history }
 }
 
+export function mergeLiveExplicitToolEvents(recorded = [], live = []) {
+  const merged = new Map()
+  for (const event of [...live, ...recorded]) {
+    const key = JSON.stringify([event.kind, event.taskId?.scope, event.taskId?.value,
+      event.operationId, event.executionEpoch, event.turnId, event.requestId, event.callId])
+    merged.set(key, event)
+  }
+  return [...merged.values()].sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0))
+}
+
+export function liveToolEvent(step, interactionId) {
+  if (step.kind !== 'tool.started' && step.kind !== 'tool.finished') return undefined
+  if (step.tool?.kind === 'select-skills' || step.tool?.kind === 'submit-turn') return undefined
+  const toolId = step.tool?.kind ? `humanagent.internal.${step.tool.kind}` : undefined
+  if (!toolId || !step.tool?.callId) return undefined
+  return {
+    eventId: `explicit-step-${step.seq}`,
+    kind: step.kind === 'tool.started' ? 'provider.tool' : 'provider.tool-result',
+    seq: step.seq,
+    occurredAt: step.occurredAt,
+    callId: step.tool.callId,
+    turnId: step.turnId,
+    requestId: step.requestId,
+    taskId: step.taskId ?? { scope: 'interaction', value: interactionId },
+    operationId: step.requestId,
+    executionEpoch: 1,
+    toolId,
+    toolClass: 'internal-helper',
+    arguments: step.tool.detail,
+    ...(step.kind === 'tool.finished' ? { status: step.tool.status, error: step.tool.errorCode ? {
+      code: step.tool.errorCode, message: step.tool.errorCode,
+    } : undefined } : {}),
+  }
+}
+
 // The page seams above are pure and import-safe in Node. Everything below owns
 // the real DOM surface and only runs when the page is actually mounted in a
 // browser, so the product consumer can exercise the seams without a document.
@@ -454,33 +489,61 @@ const template = mountPageTemplate(pageRoot, {
   title: '任务输入',
 })
 const { status } = template.hosts
+const conversationScope = entryConversationScope(window.location.search)
+const api = createRuntimeApi({
+  ...(conversationScope === null ? {} : { conversationScope }),
+})
 const workspaceShell = mountEntryWorkspace({ root: pageRoot, template, api })
-// The main Topic owns visible clocks. Keep the legacy submission consumer,
-// but do not run its hidden heading clock alongside the message cards.
-const submitBanner = createSubmitStatusBanner(status, { onOpenDetail: openSubmitProgressDetail, clock: false })
 let pageLeaving = false
-const submissionGate = createSubmissionGate()
 const mainTopicHost = element('div', undefined, 'main-topic-host')
 let latestMainTopic = null
 let mainTopicPoll = null
 let mainTopicRefreshing = null
 let mainTopicRefreshQueued = false
 let mainTopicUsageForce = false
-let sendAttempt = null
-const queuedSubmissions = []
-let activeQueuedSubmission = null
+const submissionAttempts = []
 let mainTopicReadFailures = 0
 const pendingDrafts = new Map()
+const liveExplicitToolEvents = new Map()
+const explicitStepStops = new Map()
+const executionStepStops = new Map()
 const dispatchTracking = createDispatchTracking({ api, openDetail: openTechnicalDetail,
   scope: () => latestMainTopic,
   onChange: () => { if (!pageLeaving) paintSubmission() },
 })
+function syncComposerIdentity(projection) {
+  const agentName = typeof projection?.agentName === 'string' && projection.agentName.trim()
+    ? projection.agentName.trim()
+    : '助手'
+  const heading = template.hosts.composer.querySelector('.entry-composer-heading')
+  if (heading) heading.textContent = `继续和 ${agentName} 对话`
+  const submitButton = template.hosts.composer.querySelector('#entry-form button[type="submit"]')
+  const mode = template.hosts.composer.querySelector('#entry-form select[name="executionMode"]')
+  if (submitButton && mode) {
+    submitButton.setAttribute('aria-label', mode.value === 'once' ? `发送给 ${agentName}` : '保存执行计划')
+  }
+}
 function paintSubmission() {
-  if (pageLeaving || (!latestMainTopic && !sendAttempt)) return
-  const projection = latestMainTopic || { turns: [], agentName: 'Jenny' }
-  const turns = (projection.turns || []).map(turn => turn.kind === 'draft' && pendingDrafts.has(turn.interactionId)
-    ? { ...turn, draftReview: pendingDrafts.get(turn.interactionId) } : turn)
-  const attempts = [sendAttempt, ...queuedSubmissions.map(item => item.attempt)].filter(Boolean)
+  if (pageLeaving || (!latestMainTopic && submissionAttempts.length === 0)) return
+  const projection = latestMainTopic || { turns: [] }
+  const attempts = submissionAttempts.filter(attempt => attempt !== undefined).map(attempt => {
+    const live = attempt.interactionId && liveExplicitToolEvents.get(attempt.interactionId)
+    return live?.length
+      ? { ...attempt, toolEvents: mergeLiveExplicitToolEvents(attempt.toolEvents, live) }
+      : attempt
+  })
+  const turns = (projection.turns || []).map(turn => {
+    const decorated = turn.kind === 'draft' && pendingDrafts.has(turn.interactionId)
+      ? { ...turn, draftReview: pendingDrafts.get(turn.interactionId) } : turn
+    const receiptOwnsExplicitSteps = submissionAttempts.some(attempt => attempt.interactionId === turn.interactionId)
+    const failure = decorated.kind === 'draft' && !decorated.taskId && attempts.find(attempt =>
+      attempt.interactionId === decorated.interactionId && attempt.error)?.error
+    return {
+      ...decorated,
+      ...(receiptOwnsExplicitSteps ? { explicitSteps: [] } : {}),
+      ...(failure ? { dispatchError: failure } : {}),
+    }
+  })
   renderMainTopic(mainTopicHost, submissionView({ ...projection, turns }, attempts), {
     onOpenDecision: (request) => openEntryDecision(request),
     onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, latestMainTopic),
@@ -488,91 +551,90 @@ function paintSubmission() {
     onOpenDispatch: dispatchTracking.open,
     dispatchObservation: dispatchTracking.observation,
     dispatchExecutionObserved: dispatchTracking.executionObserved,
+    readToolOutput: api.readToolOutput,
   })
 }
 
-function acceptSubmission(id) {
-  if (!sendAttempt || !id) return
-  sendAttempt.interactionId = id
-  sendAttempt.error = undefined
+function acceptSubmission(id, attempt) {
+  if (!attempt || !id) return
+  attempt.interactionId = id
+  attempt.error = undefined
   const form = document.querySelector('#entry-form')
   const submitButton = form?.querySelector('button[type="submit"]')
   if (submitButton) submitButton.disabled = false
   // Persist only the receipt identity for read-only reload recovery, never a
   // local phase start. A reload must obtain phase times from runtime facts.
+  const receipt = {
+    interactionId: id,
+    rawInput: attempt.rawInput,
+    key: attempt.key,
+    ...(attempt.submission === undefined ? {} : { submission: attempt.submission }),
+  }
+  const previous = Array.isArray(window.history.state?.entryReceipts)
+    ? window.history.state.entryReceipts : []
+  const entryReceipts = [...previous.filter(item => item?.interactionId !== id), receipt]
   window.history.replaceState({
     ...window.history.state,
-    entryReceipt: {
-      interactionId: id,
-      rawInput: sendAttempt.rawInput,
-      key: sendAttempt.key,
-      ...(pendingSubmission === undefined ? {} : { submission: pendingSubmission }),
-    },
+    // Keep the existing field for older reopened pages. The array lets one
+    // browser history item recover several independently accepted inputs.
+    entryReceipt: receipt,
+    entryReceipts,
   }, '', window.location.href)
   const input = document.querySelector('#entry-form textarea[name=rawInput]')
-  if (input?.value === sendAttempt.rawDraft) { input.value = ''; retainEntryDraft() }
+  if (input?.value === attempt.rawDraft) { input.value = ''; retainEntryDraft() }
   paintSubmission()
 }
 
-async function recoverSubmission() {
-  if (sendAttempt?.interactionId) {
+async function recoverSubmission(attempt) {
+  if (!attempt) return
+  if (attempt?.interactionId) {
     await refreshMainTopic()
     return
   }
-  if (!sendAttempt?.error) return
+  if (!attempt?.error) return
   const form = document.querySelector('#entry-form')
   const input = form?.elements.namedItem('rawInput')
   // Recovery belongs to the failed item. Restore its text only when the user
   // has not already started a newer draft, then unlock the ordinary form.
-  const recoveredAttempt = sendAttempt
-  const recoveredSubmission = pendingSubmission
+  const recoveredAttempt = attempt
   if (input && input.value.trim() === '') {
-    input.value = sendAttempt.rawDraft || sendAttempt.rawInput
+    input.value = attempt.rawDraft || attempt.rawInput
     retainEntryDraft()
   }
-  if (recoveredAttempt && recoveredSubmission) {
-    queuedSubmissions.unshift({ attempt: { ...recoveredAttempt, error: undefined, processError: undefined, queued: true, recovered: true }, submission: recoveredSubmission })
-  }
-  sendAttempt = null
-  activeQueuedSubmission = null
-  pendingSubmission = undefined
-  interactionId = undefined
-  confirmation = undefined
+  recoveredAttempt.error = undefined
+  recoveredAttempt.processError = undefined
+  recoveredAttempt.running = false
+  recoveredAttempt.submitting = false
   clearEntryError()
   paintSubmission()
   const button = form?.querySelector('button[type="submit"]')
   if (button) {
     button.textContent = '↑'
     button.setAttribute('aria-label', form.elements.namedItem('executionMode').value === 'once'
-      ? '发送给 Jenny' : '保存执行计划')
+      ? `发送给 ${latestMainTopic?.agentName || '助手'}` : '保存执行计划')
   }
   input?.focus()
+  void runAttempt(recoveredAttempt)
 }
 
-async function continueSubmission() {
+async function continueSubmission(attempt) {
   // A refreshed C07 interaction keeps its public interaction and partialRef;
   // the page-local pendingSubmission may be gone and must not be required for
   // resuming that exact turn.
-  const resumableSnapshot = sendAttempt?.interactionId && sendAttempt?.snapshot?.state === 'partial'
-    && typeof sendAttempt.snapshot.partial?.partialRef === 'string'
-    && sendAttempt.snapshot.partial.partialRef !== ''
-  if (submissionGate.pending || (!pendingSubmission && !resumableSnapshot)
-    || (!interactionId && !sendAttempt?.interactionId)
-    || !canContinueSubmission(sendAttempt?.snapshot, sendAttempt?.processError)) return
-  interactionId ??= sendAttempt?.interactionId
-  if (!pendingSubmission) {
+  const resumableSnapshot = attempt?.interactionId && attempt?.snapshot?.state === 'partial'
+    && typeof attempt.snapshot.partial?.partialRef === 'string'
+    && attempt.snapshot.partial.partialRef !== ''
+  if (!attempt || attempt.submitting || (!attempt.submission && !resumableSnapshot)
+    || !attempt.interactionId || !canContinueSubmission(attempt.snapshot, attempt.processError)) return
+  if (!attempt.submission) {
     const form = document.querySelector('#entry-form')
     if (!(form instanceof HTMLFormElement)) return
-    pendingSubmission = prepareSubmission(sendAttempt.rawInput, form)
+    attempt.submission = prepareSubmission(attempt.rawInput, form)
   }
-  sendAttempt.error = undefined
-  sendAttempt.processError = undefined
-  const run = submissionGate.begin(() => executeSubmission(pendingSubmission))
-  submitting = true
+  attempt.error = undefined
+  attempt.processError = undefined
   paintSubmission()
-  try { completeSubmission(await run.result) }
-  catch (error) { handleSubmissionError(error) }
-  finally { submitting = false; void refreshMainTopic(); processQueuedSubmission() }
+  void runAttempt(attempt)
 }
 const mainTopicUsage = createSessionUsageReader({ api,
   onChange: ({ usage, ...options }) => updateMainTopicUsage(mainTopicHost, usage, options),
@@ -678,12 +740,6 @@ function refreshEntryDecision(projection) {
     entryDecisionPrompt.sync(decision, scope, title, { recipient: current.agentName, project: current.projectName })
   }).finally(() => { decisionRead = undefined })
 }
-// A confirmed once task hands its live execution progress to the single entry
-// interface. While this handle exists the submit banner stays on the page and
-// mirrors the runtime's real execution steps; otherwise it settles normally.
-let liveTaskProgress = null
-let explicitStepStop = null
-
 /**
  * Keep this attempt's user input in a page-owning history state so browser
  * Back and a reload can restore the draft without a second submission. Only the
@@ -741,9 +797,10 @@ function disposeEntryPage(event) {
   mainTopicUsage.clear()
   entryDecisionPrompt.dismiss()
   disposeMainTopic(mainTopicHost)
-  submitBanner.clear()
-  explicitStepStop?.()
-  stopLiveTaskProgress()
+  for (const stop of explicitStepStops.values()) stop()
+  explicitStepStops.clear()
+  for (const stop of executionStepStops.values()) stop()
+  executionStepStops.clear()
   if (mainTopicPoll !== null) clearTimeout(mainTopicPoll)
   mainTopicPoll = null
   template.dispose()
@@ -753,7 +810,7 @@ window.addEventListener('pagehide', disposeEntryPage)
 function scheduleMainTopicPoll(projection) {
   if (mainTopicPoll !== null) clearTimeout(mainTopicPoll)
   mainTopicPoll = null
-  if (pageLeaving || (!sendAttempt && !projection?.activeTask && !projection?.tasks?.some(task => !['succeeded', 'completed', 'failed', 'blocked', 'stopped', 'cancelled'].includes(task.state)) && !projection?.turns?.some((turn) =>
+  if (pageLeaving || (submissionAttempts.length === 0 && !projection?.activeTask && !projection?.tasks?.some(task => !['succeeded', 'completed', 'failed', 'blocked', 'stopped', 'cancelled'].includes(task.state)) && !projection?.turns?.some((turn) =>
     turn.statusFacts?.steps !== undefined && ['received', 'matching'].includes(turn.statusFacts.state)))) return
   mainTopicPoll = setTimeout(() => {
     mainTopicPoll = null
@@ -763,7 +820,7 @@ function scheduleMainTopicPoll(projection) {
 
 async function refreshMainTopic({ forceUsage = false } = {}) {
   if (pageLeaving) return undefined
-  if (new URLSearchParams(window.location.search).get('scope') === 'system') {
+  if (!conversationScope) {
     clearEntryDecision()
     const selection = workspaceShell.update(null)
     mainTopicHost.replaceChildren(element('h2', selection.label), element('p', selection.reason))
@@ -781,43 +838,49 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
       if (pageLeaving) return projection
       latestMainTopic = projection
       dispatchTracking.sync(projection.tasks || [], projection.turns || [])
-      if (!sendAttempt && window.history.state?.entryReceipt) {
-        const receipt = window.history.state.entryReceipt
-        interactionId = receipt.interactionId
-        pendingSubmission = receipt.submission
-        sendAttempt = { ...receipt, onRecover: recoverSubmission, onContinue: continueSubmission }
+      const receipts = [
+        ...(Array.isArray(window.history.state?.entryReceipts) ? window.history.state.entryReceipts : []),
+        window.history.state?.entryReceipt,
+      ].filter(receipt => receipt?.interactionId)
+      for (const receipt of receipts) {
+        if (submissionAttempts.some(attempt => attempt.interactionId === receipt.interactionId)) continue
+        const restored = attemptRecord(receipt.rawInput || '', receipt.submission, receipt.key || receipt.interactionId)
+        restored.interactionId = receipt.interactionId
+        submissionAttempts.push(restored)
       }
-      if (!sendAttempt && !submitting) {
-        // Recover only an open user turn. A later result turn with the same
-        // interaction proves that the answer already settled; reconstructing
-        // the older user turn from the projection would turn that receipt into
-        // a false active sender and block the next real message.
-        const userIndex = projection.turns?.findLastIndex(turn => turn.role === 'user' &&
-          (turn.interactionId || turn.turnId.startsWith('user:interaction-'))) ?? -1
-        const user = userIndex === -1 ? undefined : projection.turns[userIndex]
-        const id = user?.interactionId || user?.turnId.slice('user:'.length)
-        const settled = user && projection.turns.slice(userIndex + 1).some(turn =>
+      // Recover every unresolved user turn, not only the latest one. A prior
+      // waiting question or running request cannot hide a later accepted input
+      // after a reload.
+      for (const [index, user] of (projection.turns || []).entries()) {
+        if (user.role !== 'user') continue
+        const id = user.interactionId || (user.turnId.startsWith('user:') ? user.turnId.slice(5) : undefined)
+        if (!id) continue
+        const settled = projection.turns.slice(index + 1).some(turn =>
           (turn.interactionId === id || turn.turnId === `user:${id}`)
           && ['message', 'result', 'error', 'draft', 'clarification'].includes(turn.kind))
-        if (id && !settled) {
-          interactionId = id
-          sendAttempt = { key: id, interactionId: id, rawInput: user.text,
-            onRecover: recoverSubmission, onContinue: continueSubmission }
+        if (!settled && !submissionAttempts.some(attempt => attempt.interactionId === id)) {
+          const restored = attemptRecord(user.text || '', undefined, id)
+          restored.interactionId = id
+          submissionAttempts.push(restored)
         }
       }
-      // Old services expose interaction snapshots/steps but no statusFacts.
-      // Read those facts for this exact receipt; never resume writes on reload.
-      if (sendAttempt?.interactionId) {
+      // Each receipt owns its read. One failed or waiting interaction does not
+      // overwrite or delay another input's status.
+      await Promise.all(submissionAttempts.filter(attempt => attempt.interactionId && !attempt.submitting).map(async attempt => {
         try {
-          sendAttempt.snapshot = await api.inspectExplicitInteraction(sendAttempt.interactionId)
-          const draft = draftReviewFromSnapshot(sendAttempt.snapshot)
-          if (draft) pendingDrafts.set(sendAttempt.interactionId, draft)
-          else pendingDrafts.delete(sendAttempt.interactionId)
-          const finished = intakeFinished.has(sendAttempt.snapshot.state) && !canContinueSubmission(sendAttempt.snapshot)
-          sendAttempt.error = finished ? undefined : sendAttempt.processError
-        } catch (error) { sendAttempt.error = error; mainTopicReadFailures++ }
-      }
-      if (!sendAttempt?.error) mainTopicReadFailures = 0
+          attempt.snapshot = await api.inspectExplicitInteraction(attempt.interactionId)
+          const draft = draftReviewFromSnapshot(attempt.snapshot)
+          if (draft) pendingDrafts.set(attempt.interactionId, draft)
+          else pendingDrafts.delete(attempt.interactionId)
+          const finished = intakeFinished.has(attempt.snapshot.state) && !canContinueSubmission(attempt.snapshot)
+          attempt.error = finished ? undefined : attempt.processError
+          if (!finished && !explicitStepStops.has(attempt.interactionId)) subscribeExplicitStepStream(attempt)
+        } catch (error) {
+          attempt.error = error
+          mainTopicReadFailures++
+        }
+      }))
+      if (!submissionAttempts.some(attempt => attempt.error)) mainTopicReadFailures = 0
       const selection = workspaceShell.update(projection)
       if (!selection.available) {
         clearEntryDecision()
@@ -828,19 +891,13 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
         return projection
       }
       template.hosts.composer.hidden = false
+      syncComposerIdentity(projection)
       refreshEntryDecision(projection)
       paintSubmission()
-      const needsUserAction = sendAttempt?.snapshot?.state === 'awaiting-clarification'
-        || sendAttempt?.snapshot?.state === 'awaiting-confirmation'
-      if (sendAttempt && !submitting && !needsUserAction && intakeFinished.has(sendAttempt.snapshot?.state) && !sendAttempt.error) {
-        activeQueuedSubmission = null
-        sendAttempt = null
-        interactionId = undefined
-        confirmation = undefined
-        pendingSubmission = undefined
-        const { entryReceipt, ...rest } = window.history.state || {}
+      if (submissionAttempts.length > 0 && submissionAttempts.every(attempt =>
+        intakeFinished.has(attempt.snapshot?.state) && attempt.snapshot?.state !== 'partial')) {
+        const { entryReceipt, entryReceipts: _entryReceipts, ...rest } = window.history.state || {}
         window.history.replaceState(rest, '', window.location.href)
-        processQueuedSubmission()
       }
       // Usage is an independent read: it must never delay the chat or submit.
       const force = mainTopicUsageForce
@@ -851,8 +908,7 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
     } catch (error) {
       if (pageLeaving) return undefined
       mainTopicReadFailures++
-      if (latestMainTopic || sendAttempt) {
-        if (sendAttempt) sendAttempt.error = error
+      if (latestMainTopic || submissionAttempts.length > 0) {
         paintSubmission()
         scheduleMainTopicPoll({ activeTask: { state: 'retry' } })
         return undefined
@@ -862,8 +918,8 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
       clearNode(mainTopicHost)
       const panel = element('section', undefined, 'section mt-unavailable')
       panel.append(
-        element('h2', '项目 Jenny'),
-        element('p', '主话题记录暂时无法读取。输入仍可按单个任务处理。', 'empty'),
+        element('h2', conversationScope?.kind === 'alex' ? 'Alex · CEO' : '项目主会话'),
+        element('p', '主会话记录暂时无法读取。请稍后重试。', 'empty'),
         technicalDetailTrigger(() => ({
           title: '技术详情',
           entries: [
@@ -887,27 +943,45 @@ async function refreshMainTopic({ forceUsage = false } = {}) {
   return mainTopicRefreshing
 }
 
-let interactionId
-let confirmation
-let latestState = 'received'
 let latestRuntimeStatus = null
-let submitting = false
-let pendingSubmission
-const cardState = { sequence: 0, entries: [] }
+function attemptRecord(rawInput, submission, key = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`) {
+  const attempt = {
+    key,
+    rawInput,
+    rawDraft: rawInput,
+    startedAt: new Date().toISOString(),
+    submission,
+    steps: [],
+    running: true,
+    submitting: false,
+  }
+  attempt.onRecover = () => recoverSubmission(attempt)
+  attempt.onContinue = () => continueSubmission(attempt)
+  attempt.onAnswer = (answer) => runAttempt(attempt, answer)
+  submissionAttempts.push(attempt)
+  return attempt
+}
 
-// Only a successfully returned submission releases its identity. A failed
-// attempt or an intake clarification must still retry the same interaction.
-function completeSubmission(snapshot) {
-  if (sendAttempt) { sendAttempt.snapshot = snapshot; sendAttempt.error = undefined; paintSubmission() }
+function setAttemptSubmitting(attempt, value) {
+  if (!attempt) return
+  attempt.submitting = value
+  attempt.running = value
+}
+
+// Every returned snapshot updates only the receipt that requested it. A prior
+// clarification, confirmation or running turn remains an independent card.
+function completeSubmission(snapshot, attempt) {
+  if (attempt) {
+    attempt.snapshot = snapshot
+    attempt.error = undefined
+    attempt.running = false
+    paintSubmission()
+  }
   if (snapshot.state === 'awaiting-clarification' || snapshot.state === 'awaiting-confirmation'
-    || snapshot.state === 'partial') return
-  activeQueuedSubmission = null
-  interactionId = undefined
-  confirmation = undefined
-  pendingSubmission = undefined
-  latestState = 'received'
-  cardState.sequence = 0
-  cardState.entries = []
+    || snapshot.state === 'partial') {
+    renderDraft(snapshot, attempt)
+    return
+  }
   const form = document.querySelector('#entry-form')
   // The exact submitted draft was cleared at receipt time. Text typed after
   // that receipt belongs to the next message and must survive completion.
@@ -917,76 +991,34 @@ function completeSubmission(snapshot) {
     form.elements.namedItem(name).disabled = false
   }
   form.querySelector('button[type="submit"]').setAttribute('aria-label',
-    form.elements.namedItem('executionMode').value === 'once' ? '发送给 Jenny' : '保存执行计划')
+    form.elements.namedItem('executionMode').value === 'once'
+      ? `发送给 ${latestMainTopic?.agentName || '助手'}`
+      : '保存执行计划')
   retainEntryDraft()
 }
 
-function processQueuedSubmission() {
-  if (activeQueuedSubmission || submissionGate.pending || sendAttempt?.error
-    || submissionNeedsResolution(sendAttempt)
-    || queuedSubmissions.length === 0 || pageLeaving) return
-  const item = queuedSubmissions.shift()
-  activeQueuedSubmission = item
-  sendAttempt = item.attempt
-  sendAttempt.onRecover = recoverSubmission
-  sendAttempt.onContinue = continueSubmission
-  interactionId = undefined
-  confirmation = undefined
-  pendingSubmission = item.submission
-  item.attempt.queued = false
-  submitting = true
+async function runAttempt(attempt, clarificationAnswer) {
+  if (!attempt || attempt.submitting || pageLeaving) return
+  setAttemptSubmitting(attempt, true)
   clearEntryError()
-  status.dataset.tone = 'warning'
-  submitBanner.mount()
-  submitBanner.text('正在发送排队消息…')
   const form = document.querySelector('#entry-form')
-  if (form) form.querySelector('button[type="submit"]').disabled = true
+  if (form) form.querySelector('button[type="submit"]').disabled = false
   paintSubmission()
-  const run = submissionGate.begin(() => executeSubmission(item.submission))
-  void run.result.then(completeSubmission).catch((error) => {
-    handleSubmissionError(error)
-  }).finally(() => {
-    submitting = false
+  try {
+    const snapshot = await executeSubmission(attempt, clarificationAnswer)
+    completeSubmission(snapshot, attempt)
+  } catch (error) {
+    handleSubmissionError(error, undefined, attempt)
+  } finally {
+    setAttemptSubmitting(attempt, false)
     const form = document.querySelector('#entry-form')
     if (form) {
       form.elements.namedItem('rawInput').readOnly = false
       form.querySelector('button[type="submit"]').disabled = false
     }
-    if (!liveTaskProgress) submitBanner.clear()
     void refreshMainTopic()
     paintSubmission()
-    if (!activeQueuedSubmission && !sendAttempt?.error) processQueuedSubmission()
-  })
-}
-
-function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
-  cardState.sequence += 1
-  // The interaction id is only the one the runtime reported. The page never
-  // mints a placeholder identity for an event that carries none.
-  const activeInteractionId = detail.interactionId || interactionId
-  cardState.entries = [
-    ...cardState.entries,
-    {
-      sequence: cardState.sequence,
-      interactionId: activeInteractionId,
-      kind,
-      sourceKind,
-      eventKey: detail.eventKey || kind,
-      text,
-      ...detail,
-    },
-  ]
-  if (interactionCardHost) interactionCardHost.hidden = true
-}
-
-function updateCardFromSnapshot(snapshot) {
-  cardState.sequence = 0
-  cardState.entries = []
-  const projection = projectInteractionCardFromSnapshot(snapshot)
-  if (!projection) return
-  // The entry form submit is this new requirement's business confirmation. The
-  // work card therefore never exposes a second confirmation action on this page.
-  if (interactionCardHost) interactionCardHost.hidden = true
+  }
 }
 
 function liveArea() {
@@ -1038,8 +1070,8 @@ function ensureDraftSection() {
   return section
 }
 
-function setEntryError(error) {
-  const panel = template.hosts.composer.querySelector('#entry-error')
+function setEntryError(error, target = template.hosts.composer.querySelector('#entry-error')) {
+  const panel = target
   if (!panel) return
   if (!error) {
     panel.hidden = true
@@ -1063,10 +1095,10 @@ function setEntryError(error) {
   appendPairingEntry(panel, error)
 }
 
-function renderDraft(snapshot) {
+function renderDraft(snapshot, attempt) {
   const section = ensureDraftSection()
   if (!section) return
-  if (mainTopicHost.dataset.surface === 'main-topic' && snapshot.state !== 'awaiting-clarification') {
+  if (mainTopicHost.dataset.surface === 'main-topic') {
     clearNode(section)
     section.hidden = true
     return
@@ -1103,22 +1135,11 @@ function renderDraft(snapshot) {
         }))
         return
       }
-      if (submissionGate.pending || !pendingSubmission) return
-      const run = submissionGate.begin(() => executeSubmission(pendingSubmission, answer))
-      if (!run.started) return
-      submitting = true
+      if (!attempt || attempt.submitting) return
       setClarificationControlsDisabled(true)
       clearEntryError()
-      void run.result
-        .then((snapshot) => {
-          completeSubmission(snapshot)
-          if (snapshot.state !== 'awaiting-clarification' && snapshot.state !== 'awaiting-confirmation') {
-            processQueuedSubmission()
-          }
-        })
-        .catch((error) => handleSubmissionError(error, triggerButton ?? button))
+      void runAttempt(attempt, answer)
         .finally(() => {
-          submitting = false
           setClarificationControlsDisabled(false)
         })
     }
@@ -1152,7 +1173,6 @@ function renderDraft(snapshot) {
     })
     panel.append(form)
     section.append(panel)
-    updateCardFromSnapshot(snapshot)
     return
   }
 
@@ -1195,7 +1215,6 @@ function renderDraft(snapshot) {
     interpretation.append(content)
     panel.append(interpretation)
     section.append(panel)
-    updateCardFromSnapshot(snapshot)
     return
   }
 
@@ -1205,11 +1224,10 @@ function renderDraft(snapshot) {
   if (snapshot.state !== 'answered' && snapshot.state !== 'status-only') {
     section.append(element('p', `状态：${snapshot.state} · ${snapshot.nextAction}`, 'empty'))
   }
-  updateCardFromSnapshot(snapshot)
 }
 
-function clearEntryError() {
-  setEntryError(null)
+function clearEntryError(target) {
+  setEntryError(null, target)
 }
 
 function renderStatus(summary, tasks) {
@@ -1342,11 +1360,11 @@ const LIVE_PROGRESS_OBSERVE_MS = 750
  * only mirrors them. The stream closes itself on the final terminal event so a
  * finished task does not reconnect.
  */
-function subscribeExecutionStepStream(operationId, onEvent) {
-  if (!operationId || typeof EventSource === 'undefined') return () => {}
+function subscribeStepStream(url, onEvent) {
+  if (!url || typeof EventSource === 'undefined') return () => {}
   let stream
   try {
-    stream = new EventSource(api.eventsUrl(operationId))
+    stream = new EventSource(url)
   } catch {
     return () => {}
   }
@@ -1378,59 +1396,12 @@ function subscribeExecutionStepStream(operationId, onEvent) {
   return stop
 }
 
-function stopLiveTaskProgress() {
-  if (!liveTaskProgress) return
-  try { liveTaskProgress.stop() } catch {}
-  liveTaskProgress = null
+function subscribeExecutionStepStream(operationId, onEvent) {
+  return subscribeStepStream(operationId ? api.eventsUrl(operationId) : undefined, onEvent)
 }
 
-// The progress card's next layer. It reports only the task identity, the
-// runtime state the dashboard read returned, and the real steps the page
-// mirrored from the execution stream. Closing it returns to this same entry.
-function openSubmitProgressDetail(trigger) {
-  const progress = liveTaskProgress
-  const content = element('div', undefined, 'stack progress-detail-body')
-  if (!progress) {
-    content.append(element('p', '任务尚未进入执行进度。', 'empty'))
-  } else {
-    const facts = element('dl', undefined, 'draft-receipt')
-    const addFact = (label, value) => {
-      const row = element('div')
-      row.append(element('dt', label), element('dd', value || '未提供'))
-      facts.append(row)
-    }
-    addFact('任务', progress.taskId)
-    addFact('状态', progress.dashboard?.stateLabel || progress.dashboard?.state)
-    addFact('执行来源', progress.operationId)
-    content.append(facts)
-    const steps = submitBanner.history()
-    if (steps.length === 0) {
-      content.append(element('p', '等待运行时返回执行步骤…', 'empty'))
-    } else {
-      const list = element('ol', undefined, 'progress-step-list')
-      for (let idx = 0; idx < steps.length; idx += 1) {
-        const step = steps[idx]
-        const phaseText = localizedStepPhase(step)
-        const summaryText = sanitizeUserVisibleText(step.summary || '')
-        const item = element('li', undefined, 'progress-step')
-        item.append(element('span', phaseText, 'progress-step-seq'))
-        if (summaryText !== '' && summaryText !== phaseText) {
-          item.append(element('span', summaryText, 'progress-step-summary'))
-        }
-        if (step.occurredAt) item.append(element('time', formatTime(step.occurredAt), 'progress-step-time'))
-        list.append(item)
-      }
-      content.append(list)
-    }
-    const link = element('a', '打开完整任务看板', 'button button--sm')
-    // The full-dashboard link exposes the committed business task (the queued
-    // parent work item), not the internal executing child that merely carries
-    // the operation. Internal child tasks stay readable via detail/Observation
-    // and never replace the task row's dashboard identity.
-    link.href = submittedTaskLandingHref(progress.taskId, progress.scope)
-    content.append(link)
-  }
-  openTechnicalDetail({ title: '任务执行进度', eyebrow: '实时进度', content, trigger })
+function subscribeTaskStepStream(taskId, onEvent) {
+  return subscribeStepStream(taskId ? api.taskEventsUrl(taskId) : undefined, onEvent)
 }
 
 function openMainTopicHistoryDetail(trigger, round, turns, host = mainTopicHost) {
@@ -1459,129 +1430,6 @@ function openMainTopicProgressDetail(trigger, turn, scope) {
 }
 
 /**
- * Keep a confirmed new-task submission on the single entry interface. Refresh
- * the committed task row in place, read the task's real dashboard to discover
- * its executing operation, then mirror the operation's real execution event
- * stream into the live submit banner. No navigation, no second confirmation,
- * and no fabricated step: a missing dashboard read stays an explicit failure.
- */
-async function startLiveTaskProgress({ taskId, scope }) {
-  stopLiveTaskProgress()
-  const taskIdValue = taskId && typeof taskId === 'object' ? taskId.value : taskId
-  const readDashboardFor = (idValue) => api.scopedTaskDashboard({
-    projectKey: scope.projectKey,
-    mode: scope.mode,
-    taskId: { scope: 'task', value: idValue },
-  })
-  // A committed new task is a queued parent whose real execution runs on its
-  // current execution child, the task that actually carries the operation. Read
-  // the parent's own dashboard first; when it has no operation yet, follow the
-  // child the runtime grouped under this row so the live card mirrors the real
-  // steps instead of waiting on an operation the parent never receives.
-  const resolveExecutingDashboard = async () => {
-    const own = await readDashboardFor(taskIdValue)
-    if (own?.operationId) return own
-    try {
-      const row = taskRows(await api.listTasks())
-        .find((candidate) => candidate.taskId?.value === taskIdValue)
-      const rawChild = row?.currentExecutionTaskId
-      const childId = rawChild && typeof rawChild === 'object' ? rawChild.value : rawChild
-      if (childId && childId !== taskIdValue) {
-        const child = await readDashboardFor(childId)
-        if (child?.operationId) return child
-      }
-    } catch {
-      // A task-list read failure must not hide the parent's own dashboard state.
-    }
-    return own
-  }
-  const dashboard = await resolveExecutingDashboard()
-  if (pageLeaving) return
-  const progress = {
-    taskId: taskIdValue,
-    scope,
-    operationId: dashboard?.operationId,
-    dashboard,
-    stop: () => {},
-  }
-  liveTaskProgress = progress
-  // A clarification loop re-enters submission without the original mount, so
-  // the live card must be (re)mounted here before its step history is used.
-  if (!submitBanner.isLive()) submitBanner.mount()
-  submitBanner.text('任务已提交，正在执行…')
-  let streamStop = () => {}
-  let observeTimer = null
-  progress.stop = () => {
-    if (observeTimer !== null) clearTimeout(observeTimer)
-    observeTimer = null
-    streamStop()
-  }
-  function observeDashboard() {
-    if (observeTimer !== null) return
-    observeTimer = setTimeout(async () => {
-      observeTimer = null
-      if (pageLeaving || liveTaskProgress !== progress) return
-      try {
-        const next = await resolveExecutingDashboard()
-        if (pageLeaving || liveTaskProgress !== progress) return
-        status.dataset.tone = 'success'
-        connect(next)
-      } catch {
-        if (pageLeaving || liveTaskProgress !== progress) return
-        status.dataset.tone = 'danger'
-        submitBanner.text('任务进度暂时不可读，正在重试…')
-        observeDashboard()
-      }
-    }, LIVE_PROGRESS_OBSERVE_MS)
-  }
-  function connect(nextDashboard) {
-    if (pageLeaving || liveTaskProgress !== progress) return
-    progress.dashboard = nextDashboard
-    progress.operationId = nextDashboard?.operationId
-    const resolvedTaskId = nextDashboard?.taskId?.value || nextDashboard?.taskId || progress.taskId
-    if (progress.operationId) {
-      if (typeof resolvedTaskId === 'string' && resolvedTaskId.trim() !== '') {
-        progress.executingTaskId = resolvedTaskId
-        status.dataset.liveTaskId = resolvedTaskId
-        status.dataset.liveTaskHref = submittedTaskLandingHref(resolvedTaskId, progress.scope)
-      }
-      submitBanner.text('任务已提交，正在执行…')
-      streamStop = subscribeExecutionStepStream(progress.operationId, (event) => {
-        if (pageLeaving || liveTaskProgress !== progress) return
-        submitBanner.step({
-          seq: event.seq,
-          summary: event.summary,
-          kind: event.kind,
-          occurredAt: event.occurredAt,
-        })
-        if (event.kind === 'execution.terminal') {
-          status.dataset.tone = ['failed', 'blocked', 'cancelled'].includes(event.status)
-            ? 'danger'
-            : 'success'
-        }
-        if (['checkpoint.committed', 'execution.terminal', 'execution.settling'].includes(event.kind)
-          || (event.kind === 'provider.model' && event.state === 'settled')) {
-          void refreshMainTopic({ forceUsage: event.kind === 'execution.terminal' })
-        }
-      })
-      return
-    }
-    if (!['created', 'admitted', 'running', 'settling'].includes(nextDashboard?.state)) {
-      if (typeof resolvedTaskId === 'string' && resolvedTaskId.trim() !== '') {
-        progress.executingTaskId = resolvedTaskId
-        status.dataset.liveTaskId = resolvedTaskId
-        status.dataset.liveTaskHref = submittedTaskLandingHref(resolvedTaskId, progress.scope)
-      }
-      submitBanner.text(nextDashboard?.stateLabel || nextDashboard?.state || '任务状态已更新')
-      return
-    }
-    submitBanner.text('任务已提交，等待调度…')
-    observeDashboard()
-  }
-  connect(dashboard)
-}
-
-/**
  * Move a confirmed new-task submission into the live execution main line. It
  * resolves the exact task scope and leaves the human on the single entry
  * interface so the live progress card shows the real execution steps. A read
@@ -1604,6 +1452,16 @@ async function landOnSubmittedTask(identity) {
     if (lookupError) throw lookupError
     throw taskLandingUnresolved('entry.task-not-ready', '任务已提交，但任务列表尚未返回本次任务。')
   }
+  // Alex has no project dashboard scope. The public task identity is enough to
+  // attach its task-scoped execution stream, so do not perform a guaranteed
+  // unresolved project landing read first.
+  if (conversationScope?.kind === 'alex') {
+    await refreshQueue()
+    const task = latestMainTopic?.tasks?.find(row => taskValue(row.taskId) === taskIdValue)
+      || { taskId: { scope: 'task', value: taskIdValue }, sourceInteractionId: identity.interactionId, state: 'created', title: '已交办任务' }
+    return { taskId: taskIdValue, taskIdRef: { scope: 'task', value: taskIdValue },
+      scope: null, task, interactionId: identity.interactionId }
+  }
   try {
     const landing = await resolveTaskLanding({
       api,
@@ -1622,10 +1480,59 @@ async function landOnSubmittedTask(identity) {
       || { taskId: { scope: 'task', value: taskIdValue }, sourceInteractionId: identity.interactionId, state: 'created', title: '已交办任务' }
     dispatchTracking.remember(task, landing.scope)
     dispatchTracking.sync([task])
+    return { taskId: taskIdValue, taskIdRef: { scope: 'task', value: taskIdValue },
+      scope: landing.scope, task, interactionId: identity.interactionId }
   } catch (error) {
     if (lookupError) throw lookupError
     throw error
   }
+}
+
+function mergeToolFact(events = [], event) {
+  if (event?.kind !== 'provider.tool' && event?.kind !== 'provider.tool-result') return events
+  if (String(event.toolId).startsWith('humanagent.turn.end')
+    || String(event.toolId).startsWith('humanagent_turn_end')) return events
+  const key = JSON.stringify([event.kind, event.taskId?.scope, event.taskId?.value,
+    event.operationId, event.executionEpoch, event.turnId, event.requestId, event.callId])
+  return [...events.filter(item => JSON.stringify([item.kind, item.taskId?.scope, item.taskId?.value,
+    item.operationId, item.executionEpoch, item.turnId, item.requestId, item.callId]) !== key), event]
+    .sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0))
+}
+
+/**
+ * Continue an accepted task on its task-scoped execution stream. This stream
+ * supports subscription before the first operation exists and replays the same
+ * public events, so it is also the path for Alex, whose conversation has no
+ * project dashboard scope. Each interaction owns its own stop handle.
+ */
+function observeAttemptExecution(attempt, landing) {
+  if (!attempt?.interactionId || !landing?.taskId || pageLeaving) return
+  attempt.landing = landing
+  attempt.landingError = undefined
+  const id = attempt.interactionId
+  executionStepStops.get(id)?.()
+  let stopped = false
+  const stop = subscribeTaskStepStream(taskIdValue(landing.taskId), event => {
+    if (stopped || pageLeaving || attempt.interactionId !== id) return
+    attempt.lastExecutionEvent = event
+    if (event.kind === 'execution.started') {
+      attempt.executionStarted = event
+      paintSubmission()
+    }
+    if (typeof event.operationId === 'string') attempt.operationId = event.operationId
+    if (typeof event.taskId?.value === 'string') attempt.executionTaskId = event.taskId.value
+    if (event.kind === 'provider.tool' || event.kind === 'provider.tool-result') {
+      attempt.toolEvents = mergeToolFact(attempt.toolEvents, event)
+      paintSubmission()
+    }
+    if (event.kind === 'execution.terminal') {
+      attempt.executionTerminal = event
+      attempt.running = false
+      paintSubmission()
+      void refreshMainTopic({ forceUsage: event.terminalPhase === 'final' })
+    }
+  })
+  executionStepStops.set(id, () => { stopped = true; stop() })
 }
 
 function value(form, name) {
@@ -1652,14 +1559,6 @@ function executionInputs(form) {
 
 function selectionInputs(rawInput, form) {
   return { rawInput, execution: executionInputs(form) }
-}
-
-// Text equality alone must not reuse a prepared submission: a retry reuses the
-// same receipt identity only when the goal and the trigger are unchanged.
-function selectionsEqual(left, right) {
-  if (!left || !right) return false
-  return left.rawInput === right.rawInput
-    && JSON.stringify(left.execution) === JSON.stringify(right.execution)
 }
 
 function timeZone() {
@@ -1893,49 +1792,55 @@ const POST_CONFIRMATION_STATES = new Set(['confirmed', 'dispatched'])
  * (server.ts:2460-2474). In a non-browser (or non-SSE) environment the call
  * degrades to a no-op so tests and server slices stay side-effect free.
  */
-function subscribeExplicitStepStream(activeId) {
+function subscribeExplicitStepStream(attempt) {
+  const activeId = attempt?.interactionId
   if (!activeId || typeof EventSource === 'undefined') return () => {}
   let stream
   try {
-    stream = new EventSource(`/api/explicit/interactions/${encodeURIComponent(activeId)}/events`)
+    stream = new EventSource(api.explicitEventsUrl(activeId))
   } catch {
     return () => {}
   }
   const seen = new Set()
-  stream.addEventListener('explicit.step', (event) => {
+  const acceptStep = (event) => {
     if (pageLeaving) return
     try {
       const payload = JSON.parse(event.data || '{}')
       const step = payload?.step ?? payload
+      const toolEvent = step && liveToolEvent(step, activeId)
+      if (toolEvent && (toolEvent.kind === 'provider.tool' || toolEvent.kind === 'provider.tool-result')) {
+        if (attempt.interactionId !== activeId) return
+        const current = liveExplicitToolEvents.get(activeId) ?? []
+        const key = JSON.stringify([toolEvent.taskId?.scope, toolEvent.taskId?.value, toolEvent.operationId,
+          toolEvent.executionEpoch, toolEvent.turnId, toolEvent.requestId, toolEvent.callId, toolEvent.kind])
+        const next = current.filter(item => JSON.stringify([item.taskId?.scope, item.taskId?.value,
+          item.operationId, item.executionEpoch, item.turnId, item.requestId, item.callId, item.kind]) !== key)
+        liveExplicitToolEvents.set(activeId, [...next, toolEvent].sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0)))
+        paintSubmission()
+        return
+      }
       if (step && typeof step.summary === 'string' && step.summary.trim() !== '') {
         if (Number.isSafeInteger(step.seq)) {
           if (seen.has(step.seq)) return
           seen.add(step.seq)
-          if (sendAttempt?.interactionId === activeId) {
-            sendAttempt.steps ??= []
-            sendAttempt.steps.push(step)
+          if (attempt.interactionId === activeId) {
+            attempt.steps ??= []
+            attempt.steps.push(step)
             paintSubmission()
           }
         }
-        appendCardEvent('status', localizedStepSummary(step.summary), 'progress', {
-          eventKey: step.kind || 'explicit.step',
-          interactionId: activeId,
-        })
-        status.dataset.tone = 'warning'
-        // Show the real step number and summary in the live banner and reset
-        // its per-step timer; the progress block survives each step update.
-        submitBanner.step(step)
         void refreshMainTopic()
       }
     } catch {
       // Ignore malformed step event payloads
     }
-  })
+  }
+  stream.addEventListener('explicit.step', acceptStep)
   const stop = () => {
     try { stream.close() } catch {}
-    if (explicitStepStop === stop) explicitStepStop = null
+    if (explicitStepStops.get(activeId) === stop) explicitStepStops.delete(activeId)
   }
-  explicitStepStop = stop
+  explicitStepStops.set(activeId, stop)
   stream.onopen = () => { if (!pageLeaving) void refreshMainTopic() }
   return stop
 }
@@ -1951,13 +1856,14 @@ function subscribeExplicitStepStream(activeId) {
  * snapshot the page read before the submit is read-only draft history and never
  * drives this projection. No state name is minted here.
  */
-async function postConfirmationState() {
+async function postConfirmationState(interactionId) {
   const current = await api.inspectExplicitInteraction(interactionId).catch(() => undefined)
   return POST_CONFIRMATION_STATES.has(current?.state) ? current.state : 'confirmed'
 }
 
-async function executeSubmission(submission, clarificationAnswer) {
-  if (!interactionId) {
+async function executeSubmission(attempt, clarificationAnswer) {
+  const submission = attempt.submission
+  if (!attempt.interactionId) {
     const received = await api.receiveExplicitInput({
       sourceRef: 'ui:entry',
       rawInput: submission.rawInput,
@@ -1966,44 +1872,35 @@ async function executeSubmission(submission, clarificationAnswer) {
       idempotencyKey: submission.idempotencyKey,
       topicRef: 'main',
     })
-    interactionId = received.interactionId
-    acceptSubmission(interactionId)
-    appendCardEvent('user', submission.rawInput, 'user', {
-      eventKey: 'explicit.raw-input',
-      interactionId,
-      ...(typeof received.occurredAt === 'string' && received.occurredAt.trim() !== ''
-        ? { occurredAt: received.occurredAt }
-        : {}),
-    })
+    attempt.interactionId = received.interactionId
+    acceptSubmission(attempt.interactionId, attempt)
     await refreshMainTopic()
   }
+  const interactionId = attempt.interactionId
 
   let snapshot = await api.inspectExplicitInteraction(interactionId)
   if (snapshot.state === 'partial' && snapshot.partial?.partialRef) {
     snapshot = await api.continueExplicitPartial(interactionId, snapshot.partial.partialRef)
   }
-  if (sendAttempt) { sendAttempt.snapshot = snapshot; paintSubmission() }
+  attempt.snapshot = snapshot
+  paintSubmission()
   if (snapshot.state === 'awaiting-clarification') {
-    if (!clarificationAnswer) {
-      renderDraft(snapshot)
-      return snapshot
-    }
+    if (!clarificationAnswer) return snapshot
     await api.answerExplicitClarification(interactionId, clarificationAnswer)
-    appendCardEvent('user', clarificationAnswer, 'user', { eventKey: 'explicit.clarification-answer' })
     snapshot = await api.inspectExplicitInteraction(interactionId)
     await refreshMainTopic()
   }
   if (snapshot.state === 'received' || snapshot.state === 'matching') {
-    const stopStepStream = subscribeExplicitStepStream(interactionId)
+    const stopStepStream = subscribeExplicitStepStream(attempt)
     try {
       snapshot = await api.interpretExplicitInput(interactionId)
     } finally {
       stopStepStream()
     }
-    if (sendAttempt) { sendAttempt.snapshot = snapshot; paintSubmission() }
+    attempt.snapshot = snapshot
+    paintSubmission()
   }
-  latestState = snapshot.state
-  renderDraft(snapshot)
+  attempt.latestState = snapshot.state
   if (snapshot.state === 'partial') return snapshot
   if (snapshot.state === 'awaiting-clarification') return snapshot
   // A simple answer and a status receipt are both the interaction's business
@@ -2011,8 +1908,6 @@ async function executeSubmission(submission, clarificationAnswer) {
   // result card, and no draft, requirement or task is created.
   const directResult = answeredSubmissionPresentation(snapshot)
   if (directResult) {
-    status.dataset.tone = directResult.tone
-    status.textContent = 'Jenny 已直接回答；本次没有创建任务'
     await refreshMainTopic({ forceUsage: true })
     if (mainTopicHost.dataset.surface !== 'main-topic') renderDirectAnswer(directResult)
     return snapshot
@@ -2021,11 +1916,15 @@ async function executeSubmission(submission, clarificationAnswer) {
     // The backend snapshot already proves the business confirmation. Keep that
     // fact so a later task-refresh failure still reports the accepted
     // demand instead of downgrading to an unfinished input.
-    confirmation = snapshot.confirmation || confirmation || snapshot
-    status.dataset.tone = 'success'
-    submitBanner.text('需求已接收，正在刷新任务进展…')
+    attempt.confirmation = snapshot.confirmation || attempt.confirmation || snapshot
     await refreshMainTopic()
-    void landOnSubmittedTask({ ...identityFromConfirmedSnapshot(snapshot), interactionId }).catch(() => { void refreshQueue() })
+    void landOnSubmittedTask({ ...identityFromConfirmedSnapshot(snapshot), interactionId, attempt })
+      .then(landing => { if (landing) observeAttemptExecution(attempt, landing) })
+      .catch(error => {
+        attempt.landingError = error
+        paintSubmission()
+        void refreshQueue()
+      })
     await refreshMainTopic()
     return snapshot
   }
@@ -2056,60 +1955,44 @@ async function executeSubmission(submission, clarificationAnswer) {
     scope: snapshot.draft.normalizedInput,
     executionPolicy: submission.executionPolicy,
   })
-  confirmation = receipt.requirement
+  attempt.confirmation = receipt.requirement
   // The submit is the confirmation. `latestState` still holds the
   // pre-confirmation snapshot the read-only draft above was rendered from, so
   // the card must project the runtime's post-confirmation state from here on.
-  latestState = await postConfirmationState()
-  appendCardEvent('decision', '需求已提交，正在刷新任务进展', 'decision', { eventKey: 'explicit.confirmation-submitted' })
-  status.dataset.tone = 'success'
+  attempt.latestState = await postConfirmationState(interactionId)
   if (submission.executionPolicy.executionMode !== 'once') {
-    status.textContent = '执行计划已保存；任务进展已刷新。'
     await refreshQueue()
     return snapshot
   }
-  submitBanner.text('需求已提交，正在刷新任务进展…')
   await refreshMainTopic()
-  void landOnSubmittedTask({ ...identityFromReceipt(receipt.requirement), interactionId }).catch(() => { void refreshQueue() })
+  void landOnSubmittedTask({ ...identityFromReceipt(receipt.requirement), interactionId, attempt })
+    .then(landing => { if (landing) observeAttemptExecution(attempt, landing) })
+    .catch(error => {
+      attempt.landingError = error
+      paintSubmission()
+      void refreshQueue()
+    })
   await refreshMainTopic()
-  return { ...snapshot, state: latestState }
+  return { ...snapshot, state: attempt.latestState }
 }
 
-function submissionFailureSummary() {
-  if (confirmation) return '需求已接收，任务进展尚未刷新。'
-  if (interactionId) return '输入已接收，本次处理未完成。'
+function submissionFailureSummary(attempt) {
+  if (attempt?.confirmation) return '需求已接收，任务进展尚未刷新。'
+  if (attempt?.interactionId) return '输入已接收，本次处理未完成。'
   return '本次提交未获接收确认。'
 }
 
-function handleSubmissionError(error, button) {
-  if (sendAttempt) {
-    sendAttempt.error = error
-    sendAttempt.processError = error
+function handleSubmissionError(error, button, attempt) {
+  if (attempt) {
+    attempt.error = error
+    attempt.processError = error
+    attempt.running = false
     paintSubmission()
     scheduleMainTopicPoll(latestMainTopic)
   }
-  clearNode(status)
-  status.dataset.tone = 'danger'
-  const recovered = confirmation
-    ? '需求已接收；保留已返回内容，刷新任务进展后继续。'
-    : interactionId
-      ? '输入已接收；保留已返回内容，继续本次处理。'
-      : '输入保留，可修正后重试本次提交。'
-  status.append(
-    element('strong', submissionFailureSummary()),
-    element('p', `${recovered} 技术详情保留原始诊断。`),
-    technicalDetailTrigger(() => ({
-      title: '技术详情',
-      entries: [
-        ['code', error?.code, 'data-detail-code'],
-        ['owner', error?.ownerId, 'data-detail-owner'],
-        ['message', error?.message, 'data-detail-message'],
-        ['nextAction', error?.nextAction, 'data-detail-next'],
-      ],
-    })),
-  )
-  appendPairingEntry(status, error)
-  if (button) button.textContent = confirmation ? '重试刷新任务进展' : interactionId ? '重试本次提交' : '重试提交'
+  const submit = template.hosts.composer.querySelector('#entry-form button[type="submit"]')
+  if (submit) submit.textContent = '↑'
+  if (button) button.textContent = '↑'
 }
 
 function field(labelText, control) {
@@ -2121,7 +2004,8 @@ function field(labelText, control) {
 function renderForm() {
   const section = element('section', undefined, 'section')
   const head = element('header', undefined, 'section-head')
-  head.append(element('h2', '继续和 Jenny 对话'), element('span', '简单问题直接回答 · 新任务一次提交即确认', 'section-meta'))
+  const heading = element('h2', '继续对话', 'entry-composer-heading')
+  head.append(heading, element('span', '简单问题直接回答 · 新任务一次提交即确认', 'section-meta'))
   section.append(head)
 
   const panel = element('div', undefined, 'panel')
@@ -2220,8 +2104,8 @@ function renderForm() {
   form.append(errorPanel)
 
   const actions = element('div', undefined, 'actions')
-  const submitButton = element('button', '发送给 Jenny', 'button button--primary')
-  submitButton.setAttribute('aria-label', '发送给 Jenny')
+  const submitButton = element('button', '发送', 'button button--primary')
+  submitButton.setAttribute('aria-label', '发送消息')
   submitButton.type = 'submit'
   actions.append(submitButton)
   form.append(actions)
@@ -2243,12 +2127,14 @@ function renderForm() {
     timezone.required = rendered(timezone)
     startAt.required = rendered(startAt)
     submitButton.textContent = '↑'
-    submitButton.setAttribute('aria-label', modeValue === 'once' ? '发送给 Jenny' : '保存执行计划')
+    submitButton.setAttribute('aria-label', modeValue === 'once'
+      ? `发送给 ${latestMainTopic?.agentName || '助手'}` : '保存执行计划')
     scheduleEdit.textContent = modeValue === 'once' ? '执行设置' : '已设置执行计划'
   }
   // The dialog stays inside this form, preserving named controls and validation.
   const scheduleDialog = element('dialog', undefined, 'entry-schedule-dialog')
   scheduleDialog.setAttribute('aria-label', '定时任务')
+  bindDrawerLightDismiss(scheduleDialog)
   const scheduleHead = element('div', undefined, 'entry-schedule-head')
   const scheduleClose = element('button', '完成设置', 'button')
   scheduleClose.type = 'button'
@@ -2264,7 +2150,9 @@ function renderForm() {
   scheduleDialog.addEventListener('close', () => {
     rememberEntryDrawer(null)
     retainEntryDraft()
-    scheduleEdit.focus()
+    setTimeout(() => {
+      if (!scheduleDialog.open && scheduleEdit.isConnected) scheduleEdit.focus()
+    }, 0)
   })
   actions.prepend(scheduleEdit)
   form.addEventListener('invalid', (event) => {
@@ -2287,16 +2175,9 @@ function renderForm() {
 
   form.addEventListener('submit', (event) => {
     event.preventDefault()
-    const requested = new URLSearchParams(window.location.search)
-    if ((requested.has('projectKey') || requested.get('scope') === 'system')
-      && !entryWorkspaceSelection(window.location.search, latestMainTopic).available) return
-    // An uncertain or interrupted request is recovered by reads from its card.
-    // The send button cannot turn that recovery into a second POST.
-    if (sendAttempt?.error || (sendAttempt && !sendAttempt.interactionId)) {
-      void recoverSubmission()
-      return
-    }
+    if (!entryWorkspaceSelection(window.location.search, latestMainTopic).available) return
     const rawInput = textarea.value.trim()
+    const rawDraft = textarea.value
     if (!rawInput) {
       setEntryError(Object.assign(new Error('请先填写任务输入。'), {
         code: 'request.invalid-field',
@@ -2305,58 +2186,19 @@ function renderForm() {
       }))
       return
     }
-    if (submissionGate.pending || activeQueuedSubmission || queuedSubmissions.length > 0
-      || submissionNeedsResolution(sendAttempt)) {
-      const recovered = queuedSubmissions[0]
-      const selection = selectionInputs(rawInput, form)
-      if (!submissionGate.pending && !activeQueuedSubmission && recovered?.attempt?.recovered
-        && recovered.attempt.rawDraft === textarea.value
-        && selectionsEqual(recovered.submission.selection, selection)) {
-        processQueuedSubmission()
-        return
-      }
-      let submission
-      try { submission = prepareSubmission(rawInput, form) }
-      catch (error) { setEntryError(error); return }
-      const attempt = { key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, rawInput,
-        rawDraft: textarea.value, startedAt: new Date().toISOString(), queued: true }
-      queuedSubmissions.push({ attempt, submission })
-      textarea.value = ''
-      retainEntryDraft()
-      clearEntryError()
-      paintSubmission()
-      processQueuedSubmission()
-      return
-    }
-    sendAttempt = { key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, rawInput, rawDraft: textarea.value, startedAt: new Date().toISOString(), onRecover: recoverSubmission, onContinue: continueSubmission }
+    let submission
+    try { submission = prepareSubmission(rawInput, form) }
+    catch (error) { setEntryError(error); return }
+    const attempt = attemptRecord(rawInput, submission)
+    attempt.rawDraft = rawDraft
     paintSubmission()
     scheduleMainTopicPoll(latestMainTopic)
-    const run = submissionGate.begin(async () => {
-      const selection = selectionInputs(rawInput, form)
-      if (!pendingSubmission || !selectionsEqual(pendingSubmission.selection, selection)) {
-        pendingSubmission = await prepareSubmission(rawInput, form)
-      }
-      retainEntryDraft()
-      return executeSubmission(pendingSubmission)
-    })
-    if (!run.started) return
-    submitting = true
-    submitButton.disabled = true
+    textarea.value = ''
+    retainEntryDraft()
+    submitButton.disabled = false
     textarea.readOnly = false
     clearEntryError()
-    status.dataset.tone = 'warning'
-    submitBanner.mount()
-    submitBanner.text('正在整理并提交任务…')
-    void run.result.then(completeSubmission).catch((error) => handleSubmissionError(error, submitButton)).finally(() => {
-      submitting = false
-      submitButton.disabled = false
-      // A confirmed once task keeps the live progress card after this settle;
-      // every other result (error, answer, saved plan) removes it normally.
-      if (!liveTaskProgress) submitBanner.clear()
-      textarea.readOnly = false
-      void refreshMainTopic()
-      processQueuedSubmission()
-    })
+    void runAttempt(attempt)
   })
 
   panel.append(form)
@@ -2376,6 +2218,7 @@ async function load() {
   interactionCardHost.hidden = true
   template.hosts.primary.append(decisionNotice, mainTopicHost, interactionCardHost, liveArea())
   template.hosts.composer.append(renderForm())
+  template.hosts.composer.hidden = true
   await refreshMainTopic()
   await refreshQueue()
   if (window.history.state?.entryDrawer === 'tasks') pageRoot.querySelector('[data-entry-board-trigger]')?.click()

@@ -47,11 +47,11 @@ const SERVE_STARTUP_EXCERPT_CHARS = 8_000;
 /**
  * Default confirmation-window length for a single submission. Read once at call
  * time so a test can override E2E_CONFIRM_TIMEOUT_MS and observe the change;
- * the default stays 90 seconds and existing behavior is unchanged when the
+ * the default stays 180 seconds and existing behavior is unchanged when the
  * variable is absent.
  */
 function confirmTimeoutMs() {
-  return Number(process.env.E2E_CONFIRM_TIMEOUT_MS ?? 90_000);
+  return Number(process.env.E2E_CONFIRM_TIMEOUT_MS ?? 180_000);
 }
 
 function byteLength(text) {
@@ -570,6 +570,18 @@ export async function attachToInstalledService(binding, options = {}) {
     );
   }
 
+  // Installed-attach is an observation of the operator's live owner. Pairing
+  // would write a challenge into the formal control root, so require a session
+  // the operator already obtained and never mint one here.
+  const existingSessionCookie = options.sessionCookie ?? process.env.HUMANAGENT_ATTACH_SESSION ?? null;
+  if (!existingSessionCookie && !options.auth) {
+    throw new Error(
+      'installed-attach is read-only and requires an existing browser session via HUMANAGENT_ATTACH_SESSION; '
+      + 'it will not issue a pairing challenge or write the formal control root',
+    );
+  }
+  binding.existingSessionCookie = existingSessionCookie;
+
   const supervisorModule = join(repoPath, 'dist', 'app', 'app', 'src', 'supervisor', 'index.js');
   if (!existsSync(supervisorModule)) {
     throw new Error(`supervisor module is not built at ${supervisorModule}; run \`pnpm build:app\` first`);
@@ -622,7 +634,6 @@ export async function attachToInstalledService(binding, options = {}) {
   };
   const auth = options.auth ?? createAttemptAuth(authBinding);
   binding.auth = auth;
-  if (typeof auth.pair === 'function') await auth.pair();
   const liveness = await requestJsonWithStatus(`${binding.serveBaseUrl}/api/liveness`, {}, auth);
   if (liveness.status !== 200 || liveness.body?.status !== 'alive') {
     throw new Error(`installed-attach readiness failed: ${JSON.stringify(liveness).slice(0, 600)}`);
@@ -1019,14 +1030,70 @@ function waitForHomepageNonNavigationOutcome(binding, timeoutMs) {
   return { promise, cancel: () => { cancelled = true; } };
 }
 
+function taskBoardRows(tasks) {
+  return ['running', 'waiting', 'draft', 'completed', 'stopped', 'failed']
+    .flatMap((group) => Array.isArray(tasks?.[group]) ? tasks[group] : []);
+}
+
+function matchesRequirementIdentity(identitySource, requirement) {
+  if (!identitySource || !requirement) return false;
+  const expected = {
+    requirementId: requirement.requirementId,
+    draftId: requirement.draftId,
+    inputRevision: requirement.inputRevision,
+  };
+  return Object.entries(expected).every(([key, value]) =>
+    value !== undefined && value !== null && value !== '' && identitySource[key] === value);
+}
+
+/**
+ * Resolve the task created by this exact confirmation from the product's live
+ * task board. The new-task form keeps the operator on `/` and grows its live
+ * progress surface there, so waiting for document navigation misses a real
+ * confirmed Task. A source interaction or the complete committed requirement
+ * identity must match; recency alone is never accepted as correlation.
+ */
+async function waitForTaskBoardBinding(binding, interactionId, requirement, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const tasks = await jsonRequest(`${binding.serveBaseUrl}/api/tasks`, {}, binding.auth);
+    const row = taskBoardRows(tasks).find((candidate) => {
+      if (!candidate?.taskId) return false;
+      if (interactionId && candidate.sourceInteractionId === interactionId) return true;
+      return matchesRequirementIdentity(candidate.identitySource, requirement);
+    });
+    if (row?.taskId) {
+      const current = new URL(pageUrlForBinding(binding));
+      return {
+        kind: 'task-board',
+        taskId: idValue(row.taskId),
+        href: current.href,
+        pathname: current.pathname,
+        origin: current.origin,
+      };
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Homepage confirmation was accepted, but the live task board did not expose its exact Task identity: ${JSON.stringify({ interactionId, requirement }).slice(0, 1000)}`,
+      );
+    }
+    await sleep(100);
+  }
+}
+
+function pageUrlForBinding(binding) {
+  return binding.browser.page.url();
+}
+
 /**
  * Drive the real new-task input on the homepage (`/`) and return the dispatched
  * task. One submit authorizes the new task: the explicit brain organizes the
- * input, confirms it, FIFO-enqueues the requirement and lands on the task-scoped
- * page, so there is no second visible confirmation. The confirmation POST, the
- * returned requirement identity, a status-only classification and clarification
- * prompts are all observed from the real served page. This function owns no task
- * API reads: the identity comes only from the accepted navigation.
+ * input, confirms it, FIFO-enqueues the requirement and leaves the operator on
+ * the live in-page progress surface, so there is no second visible confirmation.
+ * The confirmation POST, the returned requirement identity, a status-only
+ * classification and clarification prompts are all observed from the real
+ * served page. If the product navigates, that task-scoped URL owns the identity;
+ * otherwise the live task board must carry the exact confirmation source.
  */
 export async function submitDirectiveAndConfirmDraft(binding, directive, options = {}) {
   const { page } = binding.browser;
@@ -1049,9 +1116,10 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
   binding.formalEntryStarted = true;
 
   // Register both observations before the click so a fast submission cannot race
-  // past them. The single submit confirms the new requirement and then navigates
-  // to its task-scoped page; the confirmation POST is observed in parallel with
-  // that navigation and the selected identity comes only from the navigation.
+  // past them. The served product may navigate to a task-scoped page or, in the
+  // current new-task flow, stay on `/` while the confirmation creates a Task.
+  // A navigation URL or an exact row on the live task board may own identity;
+  // whichever surface exists must agree with this confirmation receipt.
   const navigationPromise = waitForTaskScopedNavigation(binding, timeout);
   const captureConfirmation = typeof page.waitForResponse === 'function';
   const confirmationResponsePromise = captureConfirmation
@@ -1071,9 +1139,18 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
       }))
       .catch((error) => ({ waitError: error }))
     : null;
+  // A rejected/absent confirmation wait is not a submission outcome yet. It may
+  // mean that the explicit brain produced a direct answer or clarification and
+  // never opened a confirmation request. Only a real response can win the race;
+  // the direct-navigation branch later turns an absent confirmation into its
+  // own missing-receipt failure.
+  const confirmationSignalPromise = confirmationResponsePromise
+    ? confirmationResponsePromise.then((capture) => capture?.waitError ? new Promise(() => {}) : capture)
+    : null;
   const canDiagnoseNonNavigation = typeof page.evaluate === 'function';
 
   let navigation = null;
+  let confirmationCapture = null;
   const clarificationLog = [];
   for (let attempt = 0; attempt <= maxClarifications; attempt += 1) {
     try {
@@ -1096,6 +1173,7 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
     try {
       outcome = await Promise.race([
         navigationPromise,
+        ...(confirmationSignalPromise ? [confirmationSignalPromise] : []),
         diagnosis ? diagnosis.promise : new Promise(() => {}),
       ]);
     } finally {
@@ -1122,15 +1200,56 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
     if (outcome && outcome.kind === 'in-page-task') {
       navigationPromise.catch(() => {});
       if (captureConfirmation) {
-        const capture = await confirmationResponsePromise;
-        if (capture?.bodyResult) await capture.bodyResult;
+        confirmationCapture = await confirmationResponsePromise;
+      } else {
+        const resolvedUrl = new URL(outcome.href, binding.serveBaseUrl).href;
+        await page.goto(resolvedUrl, { waitUntil: 'domcontentloaded', timeout });
+        navigation = taskScopedNavigation(page.url(), binding.serveBaseUrl);
+        if (!navigation) {
+          throw new Error(`Homepage in-page task landing href did not resolve to a valid task-scoped navigation: ${resolvedUrl}`);
+        }
+        break;
       }
-      const resolvedUrl = new URL(outcome.href, binding.serveBaseUrl).href;
-      await page.goto(resolvedUrl, { waitUntil: 'domcontentloaded', timeout });
-      navigation = taskScopedNavigation(page.url(), binding.serveBaseUrl);
-      if (!navigation) {
-        throw new Error(`Homepage in-page task landing href did not resolve to a valid task-scoped navigation: ${resolvedUrl}`);
+    }
+    if (outcome && outcome.response) {
+      navigationPromise.catch(() => {});
+      confirmationCapture = outcome;
+    }
+    if (confirmationCapture) {
+      if (confirmationCapture.waitError) {
+        throw new Error(`Homepage accepted the task without its confirmation response: ${confirmationCapture.waitError.message}`);
       }
+      const confirmationResponse = confirmationCapture.response;
+      if (confirmationResponse.status() < 200 || confirmationResponse.status() >= 300) {
+        throw new Error(`Homepage confirmation POST returned non-2xx status=${confirmationResponse.status()}`);
+      }
+      const confirmationRequest = confirmationResponse.request?.() ?? null;
+      binding.confirmationRequest = confirmationRequest ? readRequestJson(confirmationRequest) : null;
+      binding.confirmationRequestUrl = confirmationResponse.url?.() ?? null;
+      binding.confirmationResponseStatus = confirmationResponse.status();
+      const bodyResult = await confirmationCapture.bodyResult;
+      if (bodyResult.error) {
+        throw new Error(`Homepage confirmation response body was unavailable: ${bodyResult.error}`);
+      }
+      let confirmationBody = null;
+      try {
+        confirmationBody = JSON.parse(bodyResult.text);
+      } catch (error) {
+        throw new Error(`Homepage confirmation response body was not JSON: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const requirement = confirmationBody?.requirement;
+      if (!requirement?.requirementId || !requirement?.draftId || !Number.isInteger(requirement?.inputRevision)) {
+        throw new Error(`Homepage confirmation receipt did not identify one submitted requirement: ${JSON.stringify(confirmationBody).slice(0, 1000)}`);
+      }
+      binding.requirementReceipt = requirement;
+      binding.explicitInteractionId = decodeURIComponent(new URL(confirmationResponse.url()).pathname.split('/').at(-2));
+      navigation = taskScopedNavigation(page.url(), binding.serveBaseUrl)
+        ?? await waitForTaskBoardBinding(
+          binding,
+          binding.explicitInteractionId,
+          requirement,
+          Math.min(timeout, 20_000),
+        );
       break;
     }
     // The navigation observer won (or a diagnosis timeout resolved null): await
@@ -1145,8 +1264,8 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
   binding.taskId = navigation.taskId;
   binding.submissionNavigation = navigation;
 
-  let confirmStatus = 'single-submit';
-  if (captureConfirmation) {
+  let confirmStatus = binding.confirmationResponseStatus ?? 'single-submit';
+  if (captureConfirmation && !confirmationCapture) {
     const capture = await confirmationResponsePromise;
     if (capture?.waitError) {
       throw new Error(`Homepage accepted the task without its confirmation response: ${capture.waitError.message}`);
@@ -1161,7 +1280,6 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
     const confirmationRequest = confirmationResponse.request?.() ?? null;
     binding.confirmationRequest = confirmationRequest ? readRequestJson(confirmationRequest) : null;
     binding.confirmationRequestUrl = confirmationResponse.url?.() ?? null;
-    binding.confirmationResponseStatus = confirmationResponse.status();
     confirmStatus = confirmationResponse.status();
     const bodyResult = await capture.bodyResult;
     if (bodyResult.error) {

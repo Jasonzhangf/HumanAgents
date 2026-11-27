@@ -1,0 +1,101 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "id": "initial.one-folder-per-workspace",
+      "ok": true,
+      "detail": "folders=[\"workspace-alpha\",\"workspace-beta\"]"
+    },
+    {
+      "id": "initial.same-workspace-projects-keep-distinct-titles",
+      "ok": true,
+      "detail": "projects=[\"冲突乙名称\",\"冲突甲名称\",\"第二工作区旧名\"]"
+    },
+    {
+      "id": "management.one-row-per-workspace",
+      "ok": true,
+      "detail": "rows=2"
+    },
+    {
+      "id": "management.uses-workspace-alias",
+      "ok": true,
+      "detail": "技术详情 |  | 项目管理 | 关闭 |  | 当前可读取的工作区 |  | 选择一条或多条真实登记，分别填写工作区名称后一次提交。失败项保留下方原因。 |  | 批量编辑工作区名称 |  | 工作区路径是稳定身份。这里只修改工作区名称，不修改各项目标题，也不迁移目录。 |  | 可编辑 2 个工作区。 |  | workspace-alpha | /private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-mcMbR2/workspace-alpha | workspace-beta | /private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-mcMbR2/workspace-beta | 提交选中的名称"
+    },
+    {
+      "id": "management.paths-preserved",
+      "ok": true,
+      "detail": "[\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-mcMbR2/workspace-alpha\",\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-mcMbR2/workspace-beta\"]"
+    },
+    {
+      "id": "batch.mixed-result",
+      "ok": true,
+      "detail": "[\"completed\",\"rejected\"]"
+    },
+    {
+      "id": "batch.failure-reason",
+      "ok": true,
+      "detail": "工作区名称不能为空"
+    },
+    {
+      "id": "batch.workspace-drawer-uses-alias",
+      "ok": true,
+      "detail": "技术详情 |  | 项目管理 | 关闭 |  | 当前可读取的工作区 |  | 选择一条或多条真实登记，分别填写工作区名称后一次提交。失败项保留下方原因。 |  | 批量编辑工作区名称 |  | 工作区路径是稳定身份。这里只修改工作区名称，不修改各项目标题，也不迁移目录。 |  | 已保存 1 个，1 个未保存。 |  | 产品主工作区 | /private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-mcMbR2/workspace-alpha | 已保存 | workspace-beta | /private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-mcMbR2/workspace-beta | 工作区名称不能为空 | 提交选中的名称"
+    },
+    {
+      "id": "batch.project-title-stays-project-display-name",
+      "ok": true,
+      "detail": "title=冲突乙名称 · Jenny"
+    },
+    {
+      "id": "batch.same-workspace-projects-stay-distinct",
+      "ok": true,
+      "detail": "[\"冲突乙名称\",\"冲突甲名称\",\"第二工作区旧名\"]"
+    },
+    {
+      "id": "restart.alias-persisted",
+      "ok": true,
+      "detail": "[\"workspace-beta\",\"产品主工作区\"]"
+    },
+    {
+      "id": "restart.invalid-row-unchanged",
+      "ok": true,
+      "detail": "[\"workspace-beta\",\"产品主工作区\"]"
+    },
+    {
+      "id": "restart.same-workspace-projects-stay-distinct",
+      "ok": true,
+      "detail": "[\"冲突乙名称\",\"冲突甲名称\",\"第二工作区旧名\"]"
+    },
+    {
+      "id": "restart.batch-persisted",
+      "ok": true,
+      "detail": "[\"产品主工作区\",\"第二工作区\"]"
+    },
+    {
+      "id": "restart.batch-keeps-project-titles-distinct",
+      "ok": true,
+      "detail": "[\"冲突乙名称\",\"冲突甲名称\",\"第二工作区旧名\"]"
+    },
+    {
+      "id": "storage.paths-unchanged",
+      "ok": true,
+      "detail": "[\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-mcMbR2/workspace-alpha\",\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-mcMbR2/workspace-alpha\",\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/workspace-management-browser-mcMbR2/workspace-beta\"]"
+    },
+    {
+      "id": "storage.duplicate-registrations-unified",
+      "ok": true,
+      "detail": "[\"产品主工作区\",\"产品主工作区\"]"
+    },
+    {
+      "id": "storage.project-display-names-preserved",
+      "ok": true,
+      "detail": "[\"冲突乙名称\",\"冲突甲名称\",\"第二工作区旧名\"]"
+    }
+  ],
+  "resource": {
+    "servePid": 48496,
+    "serveStopped": true,
+    "browserClosed": true,
+    "tempRemoved": true
+  }
+}

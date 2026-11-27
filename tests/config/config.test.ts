@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { symlinkSync } from 'node:fs';
-import { chmod, mkdtemp, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, join, sep } from 'node:path';
 import test from 'node:test';
 import { ConfigurationError, DEFAULT_UI_DISPLAY_PREFERENCE, applyManualDisplaySelection, compileAgentProviderBindings, declareDefaultProduct, ensureControlLayout, formatPairingCommand, listConfiguredProjects, loadConfiguration, parseToml, readDefaultProductSelection, resolveProductPaths, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, validateInternalConfig, validateProjectOverride, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
 
@@ -714,12 +714,6 @@ test('project catalog uses manifest identity without writing configured project 
   assert.deepEqual(after, before);
   assert.deepEqual(catalog.projects.map(({ projectKey, workspaceCwd, projectRoot, checkpointsRoot }) => ({ projectKey, workspaceCwd, projectRoot, checkpointsRoot })).sort((a, b) => a.projectKey.localeCompare(b.projectKey)), [
     {
-      projectKey: offlineProjectKey,
-      workspaceCwd: offlineWorkspace,
-      projectRoot: join(sessionRoot, offlineProjectKey),
-      checkpointsRoot: join(sessionRoot, offlineProjectKey, 'checkpoints'),
-    },
-    {
       projectKey: onlineProjectKey,
       workspaceCwd: firstWorkspace,
       projectRoot: join(sessionRoot, onlineProjectKey),
@@ -732,6 +726,7 @@ test('project catalog uses manifest identity without writing configured project 
       checkpointsRoot: join(sessionRoot, collisionProjectKey, 'checkpoints'),
     },
   ]);
+  assert.equal(catalog.projects.some((project) => project.projectKey === offlineProjectKey), false);
   assert.equal(catalog.projects.some((project) => project.projectKey === 'impossible-project'), false);
   assert.equal(catalog.failures.length, 2);
   const mismatchFailure = catalog.failures.find((failure) => failure.message.includes('mismatch-project'));
@@ -740,6 +735,60 @@ test('project catalog uses manifest identity without writing configured project 
   assert.equal(impossibleFailure?.code, 'project-identity-mismatch');
   assert.equal(mismatchFailure?.ownerId, 'humanagent.config');
   assert.equal(impossibleFailure?.ownerId, 'humanagent.config');
+});
+
+// Failure basis: historical test registrations remain after their workspaces
+// disappear. Impact: dead projects occupy and mislabel the business sidebar.
+// Cost: isolated manifests only; existence is the contract, not a name guess.
+test('project catalog omits unavailable workspaces and retains existing registrations', async () => {
+  const root = await mkdtemp('/private/tmp/humanagent-config-catalog-filter-');
+  try {
+    const controlRoot = join(root, 'control');
+    const existingTempWorkspace = join(root, 'existing', 'workspace');
+    await mkdir(existingTempWorkspace, { recursive: true });
+    const paths = await resolveRuntimePaths({ controlRoot, workspace: existingTempWorkspace });
+    await ensureControlLayout(paths);
+
+    const sessionRoot = dirname(paths.projectRoot);
+    const rootName = root.split(sep).at(-1)!;
+    const staleFoldersWorkspace = join('/private/var/folders/jm', `catalog-${rootName}`, 'T', `humanagent-e2e-catalog-${rootName}`, 'workspace');
+    const staleTmpWorkspace = join('/private/tmp', `humanagent-e2e-catalog-${rootName}`, 'workspace');
+    const offlineUsersWorkspace = join(homedir(), '.humanagent-catalog-offline', rootName, 'workspace');
+    const removedIntelWorkspace = join('/Volumes/Intel/playground/humanagent', `humanagent-catalog-stale-${rootName}`, 'workspace');
+    const fixtures = [
+      { key: createReadableProjectKey(staleFoldersWorkspace), workspace: staleFoldersWorkspace },
+      { key: createReadableProjectKey(staleTmpWorkspace), workspace: staleTmpWorkspace },
+      { key: createReadableProjectKey(offlineUsersWorkspace), workspace: offlineUsersWorkspace },
+      { key: createReadableProjectKey(removedIntelWorkspace), workspace: removedIntelWorkspace },
+    ];
+    const existingE2eWorkspace = join(root, 'humanagent-e2e', 'workspace');
+    await mkdir(existingE2eWorkspace, { recursive: true });
+    const existingE2eKey = createReadableProjectKey(existingE2eWorkspace);
+    for (const fixture of [{ key: existingE2eKey, workspace: existingE2eWorkspace, displayName: '保留的真实项目', workspaceAlias: '保留的工作区' }, ...fixtures]) {
+      await mkdir(join(sessionRoot, fixture.key), { recursive: true });
+      await writeFile(join(sessionRoot, fixture.key, 'project.json'), JSON.stringify({
+        schemaVersion: 1,
+        projectKey: fixture.key,
+        workspaceCwd: fixture.workspace,
+        ...('displayName' in fixture ? { displayName: fixture.displayName } : {}),
+        ...('workspaceAlias' in fixture ? { workspaceAlias: fixture.workspaceAlias } : {}),
+      }), 'utf8');
+    }
+
+    const catalog = await listConfiguredProjects(paths);
+    const keys = catalog.projects.map((project) => project.projectKey);
+    assert.equal(keys.includes(paths.projectKey), true, 'an existing registered workspace remains visible');
+    assert.equal(keys.includes(existingE2eKey), true, 'a real workspace is not hidden because its path resembles a test fixture');
+    assert.equal(catalog.projects.find((project) => project.projectKey === existingE2eKey)?.displayName, '保留的真实项目');
+    assert.equal(catalog.projects.find((project) => project.projectKey === existingE2eKey)?.workspaceAlias, '保留的工作区');
+    assert.equal(keys.includes(fixtures[0]!.key), false, 'a stale /private/var/folders workspace is omitted');
+    assert.equal(keys.includes(fixtures[1]!.key), false, 'a stale /private/tmp workspace is omitted');
+    assert.equal(keys.includes(fixtures[2]!.key), false, 'a stale non-temp workspace is omitted');
+    assert.equal(keys.includes(fixtures[3]!.key), false, 'a stale /Volumes/Intel workspace is omitted');
+    assert.deepEqual(catalog.failures, []);
+  } finally {
+    await rm(root, { recursive: true });
+  }
 });
 
 test('separates colliding project keys below a non-default session root', async () => {

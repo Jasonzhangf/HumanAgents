@@ -292,6 +292,13 @@
   font-size: 0.78rem;
   overflow-wrap: anywhere;
 }
+.mt-request-metadata {
+  margin: 0;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.mt-request-metadata[data-running="true"] { color: var(--warning); }
 
 .conversation-status-row {
   display: flex;
@@ -309,7 +316,9 @@
 .conversation-status-row[data-running="true"] .conversation-status-mark { display: inline-block; width: 11px; height: 11px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; font-size: 0; animation: conversation-spin 1s linear infinite; }
 @keyframes conversation-spin { to { transform: rotate(360deg); } }
 .mt-send-status { padding: 4px 0; font-size: 13px; }
-.mt-turn:has(.mt-send-status) .mt-bubble:has(.mt-text:empty) { display: none; }
+/* A live send status may carry real tool cards; only hide the empty wrapper
+   when it has no business content. */
+.mt-turn:has(.mt-send-status) .mt-bubble:has(.mt-text:empty):not(:has(.tool-body, .mt-clarification, .mt-draft-next, .dispatch-card)) { display: none; }
 @keyframes conversation-pulse { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) {
   .conversation-status-row[data-running="true"] .conversation-status-mark { animation: none; }
@@ -340,10 +349,7 @@
   background: #f8fcfb;
 }
 
-.mt-turn--error .mt-bubble {
-  border-color: #e7b7b3;
-  background: var(--danger-soft);
-}
+.mt-turn--error > .mt-bubble > .mt-text { color: var(--danger); }
 
 .mt-turn--partial .mt-bubble {
   border-color: #e7cead;
@@ -465,14 +471,20 @@
 }
 
 .tool-body { display: grid; gap: 12px; margin-top: 16px; min-width: 0; }
+.mt-tool-details > summary { cursor: pointer; color: var(--accent); }
+.tool-highlights { margin: 8px 0; padding-inline-start: 1.25rem; overflow-wrap: anywhere; }
 .tool-card { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
 .tool-card p { margin: 8px 0; }
 .tool-path, .tool-error, .tool-read-feedback { overflow-wrap: anywhere; }
+.tool-work-summary, .tool-workdir { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
 .tool-card[data-status="failed"] .tool-state,
 .tool-card[data-status="blocked"] .tool-state,
 .tool-error { color: var(--danger); }
+.tool-card:is([data-status="failed"], [data-status="blocked"]) { border-color: #e7b7b3; }
+.tool-card[data-status="unknown"] .tool-state { color: var(--muted); }
 .tool-card .tool-error { margin: 0 0 4px; font-size: .85rem; line-height: 1.35; }
-.tool-card[data-status="succeeded"] .tool-state { color: var(--success); }
+.tool-kind-chip { display: inline-block; margin-bottom: 6px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .72rem; }
+.tool-card[data-status="succeeded"] { border-color: color-mix(in srgb, var(--success) 42%, var(--line)); }
 .tool-facts { margin-block: 8px; }
 .tool-facts > .detail-disclosure-trigger {
   display: inline-flex;

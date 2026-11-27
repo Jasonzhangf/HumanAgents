@@ -3,12 +3,19 @@ import { renderProductSessionView, disposeProductSessionView, scopedProductToolE
 import { encodeProductLocation } from './product-location.js'
 import { taskDashboardHref } from './runtime-shell.js'
 import { taskBlocker } from './task-blocker.js'
+import { toolPresentations, toolSemantics } from './tool-presentation.js'
 
 export const taskValue = id => typeof id === 'string' ? id : id?.value
-const roleLabel = role => ({ orchestration: '编排 Agent', execution: '执行 Agent', planner: '规划 Agent', reviewer: '审查 Agent', interaction: '交互 Agent' }[role] || '角色未记录')
+const ROLE_LABELS = Object.freeze({ orchestration: '编排 Agent', execution: '执行 Agent', planner: '规划 Agent', reviewer: '审查 Agent', interaction: '交互 Agent' })
+const LIFECYCLE_LABELS = Object.freeze({
+  'model.started': '模型开始处理', 'model.completed': '模型处理结束', 'operation.started': '操作开始',
+  'operation.completed': '操作完成', 'operation.failed': '操作失败',
+})
+const roleLabel = role => ROLE_LABELS[role] || '角色未记录'
+const ACTION_STATUS = Object.freeze({ succeeded: '已完成', failed: '失败', running: '执行中', blocked: '受阻', cancelled: '已取消', unknown: '状态未知' })
 const terminal = new Set(['succeeded', 'completed', 'failed', 'blocked', 'stopped', 'cancelled', 'stale'])
 
-export function workSessionHref(scope) {
+export function workSessionHref(scope, { returnTo } = {}) {
   const taskId = taskValue(scope?.taskId)
   if (!taskId || !scope?.projectKey || !scope?.mode) return undefined
   const taskRef = { scope: 'task', value: taskId }
@@ -18,7 +25,29 @@ export function workSessionHref(scope) {
     focus: { kind: 'interaction', taskRef, scope: taskScope },
     scope: taskScope,
   })
-  return `${taskDashboardHref(taskRef, taskScope)}${location}`
+  const href = `${taskDashboardHref(taskRef, taskScope)}${location}`
+  if (typeof returnTo !== 'string' || returnTo.trim() === '') return href
+  const url = new URL(href, 'http://humanagent.invalid')
+  url.searchParams.set('returnTo', returnTo)
+  return `${url.pathname}?${url.searchParams}${url.hash}`
+}
+
+export function taskWorkSessionReturn(source, scope) {
+  if (scope?.kind !== 'task' || typeof scope.projectKey !== 'string' || scope.projectKey === ''
+    || typeof scope.mode !== 'string' || scope.mode === '') return undefined
+  const projectKey = encodeURIComponent(scope.projectKey)
+  const mode = encodeURIComponent(scope.mode)
+  if (source === 'topic') return {
+    kind: 'topic',
+    label: '返回 Jenny 话题',
+    href: `./?projectKey=${projectKey}&mode=${mode}`,
+  }
+  if (source === 'board') return {
+    kind: 'board',
+    label: '返回任务板',
+    href: `./tasks.html?projectKey=${projectKey}&mode=${mode}`,
+  }
+  return undefined
 }
 
 // Only the task's formal source interaction can join turns; text is never a key.
@@ -74,6 +103,77 @@ export function observationTools(observation) {
   }))
 }
 
+function newestAction(current, candidate) {
+  if (!current) return candidate
+  const left = Date.parse(current.occurredAt)
+  const right = Date.parse(candidate.occurredAt)
+  if (Number.isFinite(left) && Number.isFinite(right)) return right >= left ? candidate : current
+  return right > left ? candidate : current
+}
+
+function typedActions(child) {
+  const events = scopedProductToolEvents({ ...child.session, toolScope: child.scope })
+  return toolPresentations(events).map(row => {
+    const source = row.result ?? row.call
+    const toolId = row.call?.toolId ?? row.result?.toolId
+    return {
+      title: toolSemantics(toolId, row.call?.arguments).title,
+      status: row.result ? (ACTION_STATUS[row.result.status] || '结果状态未提供') : '执行工具等待结果',
+      role: row.call?.execution?.role ?? row.result?.execution?.role,
+      occurredAt: row.result?.occurredAt ?? row.call?.occurredAt,
+      source,
+    }
+  })
+}
+
+export function dispatchSummary(record) {
+  const children = record.children || []
+  const roles = new Set()
+  let latestAction
+  for (const child of children) {
+    for (const node of child.observation?.nodes || []) {
+      if (ROLE_LABELS[node.ownerAgentRole]) roles.add(roleLabel(node.ownerAgentRole))
+    }
+    const typed = typedActions(child)
+    for (const action of typed) {
+      if (ROLE_LABELS[action.role]) roles.add(roleLabel(action.role))
+      latestAction = newestAction(latestAction, action)
+    }
+    if (typed.length === 0) {
+      for (const step of observationTools(child.observation)) {
+        const action = {
+          title: toolSemantics(step.name).title || '工具操作',
+          status: ACTION_STATUS[step.status] || '状态未记录',
+          role: step.role,
+          occurredAt: step.occurredAt,
+        }
+        if (ROLE_LABELS[action.role]) roles.add(roleLabel(action.role))
+        latestAction = newestAction(latestAction, action)
+      }
+    }
+  }
+  const blocker = taskBlocker(record.task)
+  const inputRequest = record.task.inputRequest?.question || record.task.inputRequest?.reason
+  const commits = children.flatMap(child => child.session?.publicOutput?.commits || [])
+    .map(commit => typeof commit?.text === 'string' ? commit.text.trim() : '')
+    .filter(Boolean)
+  const state = dispatchState(record.task, children[0]?.observation,
+    children.some(child => scopedProductToolEvents({ ...child.session, toolScope: child.scope }).length > 0))
+  let result = state
+  if (blocker) result = [blocker.reason, blocker.next].filter(Boolean).join(' · ')
+  else if (inputRequest) result = `等待回答：${inputRequest}`
+  else if (commits.length > 0) result = commits.at(-1)
+  else if (['succeeded', 'completed'].includes(record.task.state)) result = '任务已结束，但没有可读取的已提交结果。'
+  else if (state === '跟踪中') result = '尚无已提交结果，任务仍在执行。'
+  return {
+    goal: record.task.title || '已交办任务',
+    delegatedBy: record.turn?.role === 'jenny' ? 'Jenny' : '交办角色未记录',
+    roles: [...roles],
+    latestAction,
+    result,
+  }
+}
+
 export function renderDispatchCard(turn, task, { onOpen, observation, executionObserved } = {}) {
   const card = element('div', undefined, 'dispatch-card')
   card.dataset.dispatchTaskId = taskValue(task.taskId)
@@ -82,7 +182,7 @@ export function renderDispatchCard(turn, task, { onOpen, observation, executionO
   copy.append(element('strong', task.title || '已交办任务'), element('span', '已投递给 编排 Agent', 'dispatch-state'))
   applyTaskCardResult(copy, task, observation, executionObserved)
   card.dataset.result = copy.dataset.result
-  const detail = element('button', '查看执行链', 'button conversation-status-detail')
+  const detail = element('button', '查看任务详情', 'button conversation-status-detail')
   detail.type = 'button'
   detail.addEventListener('click', () => onOpen?.(detail, task, turn))
   card.append(copy, detail)
@@ -138,6 +238,8 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
     const signature = JSON.stringify([record.task, record.children, record.error?.message])
     if (view.signature === signature) return
     view.signature = signature
+    const drawerBody = host.closest('dialog.shell-layer')?.querySelector(':scope > .shell-layer-body')
+    const scrollTop = drawerBody?.scrollTop
     const disclosureKey = node => JSON.stringify([node.closest('[data-execution-task-id]')?.dataset.executionTaskId,
       node.closest('[data-step-id]')?.dataset.stepId, node.querySelector('summary')?.textContent])
     const focused = host.contains(document.activeElement) ? document.activeElement : undefined
@@ -156,24 +258,36 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
       return node
     }
     host.replaceChildren()
-    applyTaskCardResult(host, record.task, record.children?.[0]?.observation, hasExecution(record))
+    const state = dispatchState(record.task, record.children?.[0]?.observation, hasExecution(record))
+    host.dataset.result = state === '完成' ? 'success' : state === '受阻' ? 'error' : 'neutral'
     if (record.error) host.append(element('p', `暂时无法读取执行步骤${record.error.code ? `（${record.error.code}）` : ''}`, 'dispatch-error'))
+    const summaryFacts = dispatchSummary(record)
+    const summary = element('section', undefined, 'dispatch-summary')
+    summary.append(element('h3', '任务概览'))
+    summary.append(element('p', `目标：${summaryFacts.goal}`))
+    summary.append(element('p', `交办：${summaryFacts.delegatedBy} · 执行：${summaryFacts.roles.join('、') || '执行角色未记录'}`))
+    summary.append(element('p', summaryFacts.latestAction
+      ? `最近动作：${summaryFacts.latestAction.title} · ${summaryFacts.latestAction.status}`
+      : '最近动作：尚无已观测动作'))
+    summary.append(element('p', `结果：${summaryFacts.result}`))
+    host.append(summary)
     for (const child of record.children || []) {
       const section = element('section', undefined, 'dispatch-execution')
       section.dataset.executionTaskId = child.scope.taskId
-      section.append(element('h3', '执行链'))
-      const workSession = workSessionHref(child.scope)
+      const workSession = workSessionHref(child.scope, { returnTo: view.returnTo })
       if (workSession) {
         const link = element('a', '打开工作会话', 'button dispatch-work-session')
         link.href = workSession
         section.append(link)
       }
-      const nodes = element('details')
-      nodes.append(element('summary', '编排节点与状态'))
       const roleStates = new Set((child.observation?.nodes ?? [])
         .map(node => `${roleLabel(node.ownerAgentRole)} · ${node.stateDisplay || '状态未记录'}`))
-      for (const state of roleStates) nodes.append(element('p', state))
-      section.append(nodes)
+      if (roleStates.size > 0) {
+        const nodes = element('details')
+        nodes.append(element('summary', '编排节点与状态'))
+        for (const state of roleStates) nodes.append(element('p', state))
+        section.append(nodes)
+      }
       view.readers ??= new Map()
       const readerKey = JSON.stringify(child.scope)
       if (!view.readers.has(readerKey)) view.readers.set(readerKey, address => api.readScopedToolOutput(address, child.scope))
@@ -188,19 +302,22 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
           row.dataset.stepId = step.stepId
           if (step.turnId) row.dataset.turnId = step.turnId
           row.append(element('strong', `${roleLabel(step.role)} · ${label}`), element('span', `${({ succeeded: '已完成', failed: '失败', running: '执行中', blocked: '受阻', cancelled: '已取消', unknown: '状态未知' })[step.status] || '状态未记录'} · ${formatTime(step.occurredAt)}`))
-          const detail = element('details')
-          detail.append(element('summary', '操作详情'), element('p', `工具：${step.name} · stepId：${step.stepId} · turnId：${step.turnId || '未记录'}`), element('p', '旧读取接口未提供结构化参数或可读取的完整输出。'))
-          row.append(detail); section.append(row)
+          section.append(row)
         }
       }
-      const lifecycle = element('details')
-      lifecycle.append(element('summary', '模型与操作生命周期'))
-      for (const event of child.semantic?.events || []) lifecycle.append(element('p', `${({ 'model.started': '模型开始处理', 'model.completed': '模型处理结束', 'operation.started': '操作开始', 'operation.completed': '操作完成', 'operation.failed': '操作失败' })[event.type] || '执行事件'} · ${formatTime(event.occurredAt)}`))
-      section.append(lifecycle)
-      const transcript = element('details')
-      transcript.append(element('summary', '会话原文与技术记录'))
-      const messages = sessionView(`${child.scope.taskId}:messages`, { messages: child.session?.messages || [] })
-      transcript.append(messages); section.append(transcript)
+      const events = (child.semantic?.events || []).filter(event => Object.hasOwn(LIFECYCLE_LABELS, event.type))
+      if (events.length > 0) {
+        const lifecycle = element('details')
+        lifecycle.append(element('summary', '模型与操作生命周期'))
+        for (const event of events) lifecycle.append(element('p', `${LIFECYCLE_LABELS[event.type]} · ${formatTime(event.occurredAt)}`))
+        section.append(lifecycle)
+      }
+      if ((child.session?.messages || []).length > 0) {
+        const transcript = element('details')
+        transcript.append(element('summary', '会话原文与技术记录'))
+        const messages = sessionView(`${child.scope.taskId}:messages`, { messages: child.session?.messages || [] })
+        transcript.append(messages); section.append(transcript)
+      }
       for (const failure of child.failures) section.append(element('p', `部分执行信息暂不可读${failure.code ? `（${failure.code}）` : ''}`))
       host.append(section)
     }
@@ -209,13 +326,15 @@ export function createDispatchTracking({ api, openDetail, scope, onChange = () =
     for (const node of host.querySelectorAll('details')) if (disclosures.get(disclosureKey(node))) node.open = true
     if (focused?.isConnected) focused.focus({ preventScroll: true })
     else if (focusedDisclosure) [...host.querySelectorAll('details')].find(node => disclosureKey(node) === focusedDisclosure)?.querySelector('summary')?.focus({ preventScroll: true })
+    if (drawerBody?.isConnected && scrollTop !== undefined) drawerBody.scrollTop = scrollTop
   }
   function open(trigger, task, turn) {
     const record = remember(task)
     if (!record) return
     record.turn = turn || record.turn
     const host = element('div', undefined, 'dispatch-detail')
-    const view = { record, host }; opened = view
+    const returnTo = trigger?.closest?.('.entry-task-list-drawer') ? 'board' : 'topic'
+    const view = { record, host, returnTo }; opened = view
     paintDetail(view)
     const composer = document.querySelector('#entry-form textarea[name=rawInput]')
     const focused = document.activeElement?.closest?.('.entry-task-list-drawer') ? composer : document.activeElement

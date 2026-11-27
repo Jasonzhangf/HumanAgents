@@ -11,3 +11,6 @@ four meaningful choices when available. The UI retains the original question and
 
 For an existing task, keep its title, goal, scope and identity. An accepted tool call, a release,
 and a published result are different receipts. Say what the actual receipt proves.
+
+For a requirement, write a short business title of at most 50 characters. The title names the
+task. It never replaces the project name and does not create a new project or Topic.

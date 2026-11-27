@@ -1,0 +1,36 @@
+{
+  "expected": "http://127.0.0.1:63703/task-dashboard.html?task=child-parent-interaction-proof-1&projectKey=dispatch-proof&mode=fake&returnTo=board#/boards/interaction/live?scope=%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22dispatch-proof%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-parent-interaction-proof-1%22%7D%7D&focus=%7B%22kind%22%3A%22interaction%22%2C%22taskRef%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-parent-interaction-proof-1%22%7D%2C%22scope%22%3A%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22dispatch-proof%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-parent-interaction-proof-1%22%7D%7D%7D",
+  "opened": "http://127.0.0.1:63703/task-dashboard.html?task=child-parent-interaction-proof-1&projectKey=dispatch-proof&mode=fake&returnTo=board#/boards/interaction/live?scope=%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22dispatch-proof%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-parent-interaction-proof-1%22%7D%7D&focus=%7B%22kind%22%3A%22interaction%22%2C%22taskRef%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-parent-interaction-proof-1%22%7D%2C%22scope%22%3A%7B%22kind%22%3A%22task%22%2C%22projectKey%22%3A%22dispatch-proof%22%2C%22mode%22%3A%22fake%22%2C%22taskId%22%3A%7B%22scope%22%3A%22task%22%2C%22value%22%3A%22child-parent-interaction-proof-1%22%7D%7D%7D",
+  "decodedLocation": {
+    "kind": "valid",
+    "location": {
+      "board": "interaction",
+      "lane": "live",
+      "focus": {
+        "kind": "interaction",
+        "taskRef": {
+          "scope": "task",
+          "value": "child-parent-interaction-proof-1"
+        },
+        "scope": {
+          "kind": "task",
+          "projectKey": "dispatch-proof",
+          "mode": "fake",
+          "taskId": {
+            "scope": "task",
+            "value": "child-parent-interaction-proof-1"
+          }
+        }
+      },
+      "scope": {
+        "kind": "task",
+        "projectKey": "dispatch-proof",
+        "mode": "fake",
+        "taskId": {
+          "scope": "task",
+          "value": "child-parent-interaction-proof-1"
+        }
+      }
+    }
+  }
+}

@@ -39,6 +39,10 @@ import {
   UI_DISPLAY_PREFERENCE_ROUTE,
   type UiDisplayPreferenceResourceHandler,
 } from './display-preferences.js';
+import {
+  WORKSPACE_MANAGEMENT_ROUTE,
+  type WorkspaceManagementResourceHandler,
+} from './workspace-management.js';
 import type {
   TaskControlCapabilityDeclaration,
   UiTaskGrantControl,
@@ -61,6 +65,7 @@ export interface UiRuntimeServerOptions {
    */
   readonly taskControl?: UiTaskGrantControl;
   readonly displayPreference?: UiDisplayPreferenceResourceHandler;
+  readonly workspaceManagement?: WorkspaceManagementResourceHandler;
   readonly host?: string;
   readonly port?: number;
   readonly restart?: (input: {
@@ -840,6 +845,7 @@ export function createUiRuntimeRequestDispatcher(options: {
   readonly isClosing: () => boolean;
   readonly taskControl?: UiRuntimeServerOptions['taskControl'];
   readonly displayPreference?: UiRuntimeServerOptions['displayPreference'];
+  readonly workspaceManagement?: UiRuntimeServerOptions['workspaceManagement'];
   readonly restart?: UiRuntimeServerOptions['restart'];
   readonly identity?: UiRuntimeServerOptions['identity'];
   readonly schedulerStatus?: UiRuntimeServerOptions['schedulerStatus'];
@@ -860,6 +866,7 @@ export function createUiRuntimeRequestDispatcher(options: {
       options.identity,
       options.schedulerStatus,
       options.displayPreference,
+      options.workspaceManagement,
     ).catch((error) => {
       writeError(response, error);
     });
@@ -883,6 +890,7 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
     isClosing: () => closing,
     ...(options.taskControl === undefined ? {} : { taskControl: options.taskControl }),
     ...(options.displayPreference === undefined ? {} : { displayPreference: options.displayPreference }),
+    ...(options.workspaceManagement === undefined ? {} : { workspaceManagement: options.workspaceManagement }),
     ...(options.restart === undefined ? {} : { restart: options.restart }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
     ...(options.schedulerStatus === undefined ? {} : { schedulerStatus: options.schedulerStatus }),
@@ -968,6 +976,7 @@ async function handleRequest(
   identity?: UiRuntimeServerOptions['identity'],
   schedulerStatus?: UiRuntimeServerOptions['schedulerStatus'],
   displayPreference?: UiRuntimeServerOptions['displayPreference'],
+  workspaceManagement?: UiRuntimeServerOptions['workspaceManagement'],
 ): Promise<void> {
   const method = request.method ?? 'GET';
   try {
@@ -1193,6 +1202,23 @@ async function handleRequest(
       }
       const body = method === 'PUT' ? await readBody(request) : undefined;
       writeJson(response, 200, await displayPreference.handle(method, body));
+      return;
+    }
+    if (
+      path === WORKSPACE_MANAGEMENT_ROUTE
+      && (method === 'GET' || method === 'PUT')
+    ) {
+      if (workspaceManagement === undefined) {
+        throw new UiRuntimeApiError(
+          'workspace-management.unsupported',
+          APP_OWNER,
+          'this runtime was started without a Config-backed workspace management resource',
+          'start the runtime through the supervisor-owned serve entry that assembles Config paths',
+          501,
+        );
+      }
+      const body = method === 'PUT' ? await readBody(request) : undefined;
+      writeJson(response, 200, await workspaceManagement.handle(method, body));
       return;
     }
     if (path === '/api/runtime/status' && method === 'GET') {

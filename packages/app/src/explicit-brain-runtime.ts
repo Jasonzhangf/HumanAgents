@@ -126,6 +126,29 @@ const SKILL_SELECTION_TOOL: ProviderToolDefinition = {
 };
 
 const NONEMPTY_STRING_SCHEMA = { type: 'string', minLength: 1 };
+const TASK_TITLE_MAX_CHARACTERS = 50;
+const TASK_TITLE_SCHEMA = {
+  type: 'string',
+  minLength: 1,
+  description: 'Short business title, at most 50 characters; the runtime truncates longer values. No paths, internal identifiers or the full request text.',
+};
+
+/**
+ * Normalize a model-authored task title at the explicit interpretation
+ * boundary. Collapse whitespace, then cap at 50 Unicode code points. The full
+ * request text stays in normalizedInput/objective and is never truncated.
+ */
+export function normalizeTaskTitle(value: string): string {
+  const collapsed = value.replace(/\s+/gu, ' ').trim();
+  if (!collapsed) {
+    throw new ExplicitBrainOperationalToolError(
+      'unsupported-tool',
+      'requirement proposal title must be a non-empty string',
+    );
+  }
+  return Array.from(collapsed).slice(0, TASK_TITLE_MAX_CHARACTERS).join('');
+}
+
 const TASK_RESULT_READ_TOOL: ProviderToolDefinition = {
   toolId: 'task.read_result',
   description: 'Read an existing task public result in the host-authorized project using only taskId. No filesystem access or new execution. Ambiguous execution requires clarification; unavailable or partial publication is not a completed result.',
@@ -172,7 +195,7 @@ const EXPLICIT_END_TOOL: ProviderToolDefinition = {
             required: ['revision', 'intent', 'title', 'objective', 'deliverable', 'deliveryConditions', 'evidenceRefs', 'blockingGaps'],
             properties: {
               revision: { type: 'integer', minimum: 0 }, intent: { type: 'string', enum: ['create', 'append', 'change'] },
-              title: NONEMPTY_STRING_SCHEMA, objective: NONEMPTY_STRING_SCHEMA, deliverable: NONEMPTY_STRING_SCHEMA,
+              title: TASK_TITLE_SCHEMA, objective: NONEMPTY_STRING_SCHEMA, deliverable: NONEMPTY_STRING_SCHEMA,
               deliveryConditions: STRING_LIST_SCHEMA, evidenceRefs: STRING_LIST_SCHEMA, blockingGaps: STRING_LIST_SCHEMA,
             },
           },
@@ -201,6 +224,8 @@ const INTAKE_OUTPUT_PROTOCOL = [
   'After the required actions, call humanagent_turn_end with one decision. Text alone does not end the turn. If validation fails, correct the paired error in this turn. Three invalid submissions return a recoverable partial.',
   'Use kind=simple for answer, status-query or clarification. Use kind=complex for requirement and include capsule with summary, goal, process, findings and nextStep. Both forms require checkpointRecord.index with action and result.',
   'Use normalizedInput, knownFacts and decisionRefs inside decision. Provide answer for answer and status-query or question and optional options for clarification. Use decision.proposal for a requirement and the current input revision, and match the exact task for append or change.',
+  'For a requirement, proposal.title is a short business title of at most 50 characters. Do not include paths, internal identifiers, or the whole request text; the full request remains in normalizedInput and objective.',
+  'A new independent deliverable in the current project keeps the current main Topic and uses create. If the request needs another Topic or Project, or crosses the current project scope, ask for clarification, preserve the original interaction, task and Topic, and do not claim either new scope exists.',
   `If supplied, decision.taskFlow.definitionVersion is the JSON integer ${TASK_FLOW_DEFINITION_VERSION}. The advertised schema governs the remaining fields.`,
   'Simple end example: {"kind":"simple","decision":{"kind":"answer","normalizedInput":"hello","knownFacts":[],"decisionRefs":[],"answer":"Hello."},"checkpointRecord":{"index":{"action":"answered the question","result":"answered"}}}',
 ].join('\n\n');
@@ -379,7 +404,7 @@ function structuredProposalContract(inputRevision: number): string {
   return JSON.stringify({
     revision: inputRevision,
     intent: 'create | append | change',
-    title: 'non-empty string',
+    title: 'non-empty business string, at most 50 characters',
     objective: 'non-empty string',
     deliverable: 'non-empty string',
     deliveryConditions: ['non-empty string'],
@@ -457,7 +482,7 @@ function parseStructuredRequirementProposal(
   return {
     revision: inputRevision,
     intent: record.intent,
-    title: nonEmptyString(record, 'title'),
+    title: normalizeTaskTitle(nonEmptyString(record, 'title')),
     objective: nonEmptyString(record, 'objective'),
     deliverable: nonEmptyString(record, 'deliverable'),
     deliveryConditions: stringArray(record, 'deliveryConditions'),
@@ -718,13 +743,14 @@ function interpretationFromAcceptedEnd(
 ): ExplicitBrainInterpretation {
   const decision = accepted.decision;
   if (decision.kind !== 'requirement') return decision;
-  const taskDocument = renderBusinessProposal(decision.proposal);
+  const proposal = { ...decision.proposal, title: normalizeTaskTitle(decision.proposal.title) };
+  const taskDocument = renderBusinessProposal(proposal);
   return {
     ...decision,
     normalizedInput: [taskDocument, '需求详情：', decision.normalizedInput].join('\n'),
-    intent: decision.proposal.intent,
+    intent: proposal.intent,
     proposal: taskDocument,
-    structuredProposal: decision.proposal,
+    structuredProposal: proposal,
   };
 }
 

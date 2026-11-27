@@ -53,6 +53,7 @@ export function conversationStatus(facts = {}, { allRequests = false } = {}) {
   const models = new Map()
   const tools = new Map()
   const executions = new Map()
+  const endedExecutions = new Set()
   const finishing = new Map()
   const retries = new Map()
   const finished = terminalStates.has(facts.state) || (facts.steps !== undefined && explicitFinished.has(facts.state))
@@ -121,16 +122,19 @@ export function conversationStatus(facts = {}, { allRequests = false } = {}) {
         retry.statusLabel = e.kind === 'execution.terminal' ? '重试已结束' : '已发出重试请求'
       }
     }
-    if (e.kind === 'execution.started' && !executions.has(executionKey(e))) {
-      executions.set(executionKey(e), add(`${executionKey(e)}:total`, 'total', '本轮总耗时', e.occurredAt, 'active'))
-    }
     const execution = executionKey(e)
+    if (e.kind === 'execution.started' && (!executions.has(execution) || endedExecutions.has(execution))) {
+      executions.set(execution, add(`${execution}:total:${rows.length}`, 'total', '本次执行耗时', e.occurredAt, 'active'))
+      endedExecutions.delete(execution)
+      finishing.delete(execution)
+    }
     if (e.kind === 'execution.settling' && !finishing.has(execution)) {
       finishing.set(execution, add(`${execution}:finishing`, 'task-settling', '正在收尾', e.occurredAt, 'active'))
     }
     if (e.kind === 'execution.terminal' && e.terminalPhase === 'final') {
       close(executions.get(execution), e.occurredAt)
       close(finishing.get(execution), e.occurredAt)
+      endedExecutions.add(execution)
     }
     if (e.kind === 'provider.model') {
       if (e.state === 'dispatching') model(key, e.occurredAt, true)
@@ -221,7 +225,7 @@ export function conversationStatus(facts = {}, { allRequests = false } = {}) {
   const modelRows = new Set(latest ? [latest.sending, latest.wait, latest.response] : [])
   const toolRows = [...tools.values()]
   const visibleTools = new Set(toolRows)
-  const latestTotal = [...executions.values()].at(-1)
+  const latestTotal = rows.findLast(row => row.phase === 'total')
   const latestFinishing = [...finishing.values()].at(-1)
   const latestRetry = [...retries.values()].at(-1)
   const latestError = [...rows].reverse().find((row) => row.phase === 'error')
@@ -244,7 +248,13 @@ export function conversationStatus(facts = {}, { allRequests = false } = {}) {
     const label = { received: '已接收，准备发送请求', matching: '正在整理你的请求', created: '准备执行', admitted: '排队等待执行', settling: '正在核对执行结果', 'awaiting-clarification': '等待你的补充', answered: '已回答', 'status-only': '已回答' }[facts.state] ?? '等待执行回执'
     visible.push({ key: 'state', phase: 'state', label, tone: 'warning', running: false })
   }
-  if (finished) for (const row of visible) row.running = false
+  if (finished) for (const row of visible) {
+    row.running = false
+    if (row.phase === 'total' && row.endedAt === undefined) {
+      row.label = facts.steps === undefined ? '本次执行结束时间未记录' : '本次请求结束时间未记录'
+      row.tone = 'warning'
+    }
+  }
   return visible
 }
 

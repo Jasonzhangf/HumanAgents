@@ -6,6 +6,9 @@ import { createDetailDisclosure } from './detail-disclosure.js'
 import { explainedToolErrorReason } from './task-blocker.js'
 
 const FILE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.search', 'file.list', 'web.search'])
+const TURN_END_TOOLS = new Set(['humanagent.turn.end', 'humanagent_turn_end'])
+const RAW_TEXT_TOOLS = new Set(['bash', 'file.read'])
+const DIFF_TOOLS = new Set(['file.write', 'file.edit'])
 
 // One pure interpretation supplies both the immediate call and loaded result.
 export function toolSemantics(toolId, args, report) {
@@ -30,7 +33,8 @@ export function toolPresentations(events = []) {
     else row.result = event
     rows.set(key, row)
   }
-  return [...rows.values()].map((row) => {
+  return [...rows.values()].filter((row) =>
+    !TURN_END_TOOLS.has(row.call?.toolId) && !TURN_END_TOOLS.has(row.result?.toolId)).map((row) => {
     const result = row.result
     return {
       ...row,
@@ -67,9 +71,6 @@ function visibleText(value) { return value === '' ? '（空字符串）' : value
 
 const STATUS = Object.freeze({ succeeded: '执行成功', failed: '执行失败', blocked: '执行受阻', cancelled: '已取消', unknown: '结果状态未知' })
 const ACTOR = Object.freeze({ orchestration: '编排 Agent', execution: '执行 Agent', reviewer: '审查 Agent', planner: '规划 Agent' })
-const TURN_END_ACTION = Object.freeze({
-  completed: '已提交本轮结果', continue: '已提交后续执行安排', blocked: '已报告执行阻碍', 'input-required': '已提交待答问题',
-})
 const bodies = new WeakMap()
 const bodyPlaceholders = new Set(['尚无结果正文', '等待结果正文'])
 
@@ -81,7 +82,7 @@ function explainsCompletedResult(value) {
   return usefulSummary || usefulLine
 }
 
-function toolCard(row, readOutput, previous) {
+function toolCard(row, readOutput, previous, finished) {
   const card = previous?.node ?? element('section', undefined, 'tool-card')
   previous?.dispose()
   for (const child of [...card.children]) child.remove()
@@ -89,29 +90,31 @@ function toolCard(row, readOutput, previous) {
   let observer
   card.dataset.toolKey = row.key
   const toolId = row.call?.toolId ?? row.result?.toolId
-  const completedTurnEnd = Boolean(row.call && row.result?.status === 'succeeded'
-    && (toolId === 'humanagent.turn.end' || toolId === 'humanagent_turn_end'))
+  const argumentsValue = row.call?.arguments ?? row.result?.arguments
   const execution = row.call?.execution ?? row.result?.execution
+  card.dataset.toolClass = row.call?.toolClass ?? row.result?.toolClass ?? 'execution'
   if (toolId) card.dataset.toolId = toolId
   if (execution?.runtimeId) card.dataset.runtimeId = execution.runtimeId
   const semantic = element('div', undefined, 'tool-semantic')
   let immediateSemantics
   function present(report) {
-    const value = toolSemantics(toolId, row.call?.arguments, report)
+    const value = toolSemantics(toolId, argumentsValue, report)
     if (report === undefined) immediateSemantics = value
     for (const child of [...semantic.children]) child.remove()
-    if (completedTurnEnd) {
-      const outcome = row.call.arguments?.outcome
-      semantic.append(element('strong', Object.hasOwn(TURN_END_ACTION, outcome) ? TURN_END_ACTION[outcome] : '已提交本轮安排', 'tool-title'))
-      return
-    }
     semantic.append(element('strong', value.title, 'tool-title'))
     if (value.subject) semantic.append(element('p', value.subject, 'tool-path'))
+    if (value.workSummary && value.workSummary !== value.subject) semantic.append(element('p', '工作摘要：' + value.workSummary, 'tool-work-summary'))
+    if (value.workdir) semantic.append(element('p', '工作目录：' + value.workdir, 'tool-workdir'))
     if (value.summary && report !== undefined) semantic.append(element('p', value.summary, 'tool-summary'))
-    if (value.lines?.length) {
-      const preview = element('pre', undefined, 'tool-preview')
-      for (const line of value.lines.filter(line => report !== undefined || !['尚无结果正文', '等待结果正文'].includes(line.text))) {
-        const node = element('span', `${line.kind === 'add' ? '+ ' : line.kind === 'remove' ? '- ' : line.kind === 'context' ? '  ' : ''}${line.text}`, 'tool-preview-line')
+    if (!RAW_TEXT_TOOLS.has(toolId) && value.lines?.length) {
+      const diff = DIFF_TOOLS.has(toolId)
+      const lines = value.lines.filter(line => !bodyPlaceholders.has(line.text)
+        && !/^(?:调用参数|工具返回|错误)：/.test(line.text))
+      if (!lines.length) return
+      const preview = diff ? element('pre', undefined, 'tool-preview') : element('ul', undefined, 'tool-highlights')
+      for (const line of diff ? lines : lines.slice(0, 3)) {
+        const prefix = diff ? { add: '+ ', remove: '- ', context: '  ' }[line.kind] ?? '' : ''
+        const node = element(diff ? 'span' : 'li', prefix + line.text, diff ? 'tool-preview-line' : undefined)
         node.dataset.kind = line.kind
         preview.append(node)
       }
@@ -130,27 +133,46 @@ function toolCard(row, readOutput, previous) {
   }
   if (Object.hasOwn(ACTOR, execution?.role)) card.append(element('span', ACTOR[execution.role], 'tool-actor muted'))
   card.append(semantic)
+  if (card.dataset.toolClass === 'internal-helper') card.append(element('span', '内部步骤', 'tool-kind-chip'))
   const state = row.result
-    ? toolId === 'bash' && row.result.status === 'succeeded' ? '工具已返回 · 命令退出情况见结果' : (STATUS[row.result.status] || '结果状态未提供')
-    : '执行工具等待结果'
-  if (!completedTurnEnd && !explainedError) card.append(element('p', row.call ? state : `${state} · 结果关联缺失`, 'tool-state'))
-  card.dataset.status = row.result?.status || 'pending'
+    ? toolId === 'bash' && row.result.status === 'succeeded'
+      ? row.outputTarget ? '工具已返回 · 退出码与输出见结果' : '执行成功'
+      : (STATUS[row.result.status] || '结果状态未提供')
+    : finished ? '结果未记录' : '执行工具等待结果'
+  if (!explainedError) card.append(element('p', row.call ? state : `${state} · 结果关联缺失`, 'tool-state'))
+  const elapsed = element('time', '', 'tool-elapsed')
+  elapsed.hidden = true
+  let elapsedTimer
+  if (!row.result && !finished && typeof window !== 'undefined' && typeof window.setInterval === 'function') {
+    const started = Date.parse(row.call?.occurredAt)
+    if (Number.isFinite(started)) {
+      const paintElapsed = () => {
+        elapsed.textContent = `${Math.max(0, Math.floor((Date.now() - started) / 1000))} 秒`
+        elapsed.hidden = false
+      }
+      paintElapsed()
+      elapsedTimer = window.setInterval(paintElapsed, 1000)
+    }
+  }
+  card.append(elapsed)
+  card.dataset.status = row.result?.status || (finished ? 'unknown' : 'pending')
   const facts = createDetailDisclosure(element, '调用参数与证据', 'tool-facts')
   const details = facts.content
   facts.onFirstOpen(() => {
-    if (toolId === 'bash' && row.call) {
-      const args = row.call.arguments
+    if (toolId === 'bash' && (row.call || argumentsValue)) {
+      const args = argumentsValue
       if (typeof args?.description === 'string') details.append(element('p', args.description, 'tool-description'))
       details.append(element('p', '命令（原文，Bash -c）', 'tool-command-label'))
       details.append(element('pre', typeof args?.command === 'string' ? visibleText(args.command) : '（命令未提供）', 'tool-command'))
       details.append(element('p', `工作目录：${typeof args?.workdir === 'string' && args.workdir.trim() !== '' ? args.workdir : '绑定项目目录（实际路径未提供）'}`, 'tool-path'))
     }
-    if (row.call?.arguments !== undefined) details.append(element('pre', JSON.stringify(row.call.arguments, null, 2), 'tool-arguments'))
+    if (argumentsValue !== undefined) details.append(element('pre', JSON.stringify(argumentsValue, null, 2), 'tool-arguments'))
     details.append(element('pre', JSON.stringify({
       taskId: (row.call ?? row.result).taskId, operationId: (row.call ?? row.result).operationId,
       executionEpoch: (row.call ?? row.result).executionEpoch,
       callId: (row.call ?? row.result).callId, calledAt: row.call?.occurredAt,
       returnedAt: row.result?.occurredAt, outputRef: row.result?.outputRef,
+      outputRefs: row.result?.outputRefs,
       error: row.result?.error,
       execution,
       evidenceRefs: row.result?.evidenceRefs,
@@ -232,11 +254,13 @@ function toolCard(row, readOutput, previous) {
       })
       observer.observe(card)
     }
-    return { node: card, targetKey, stateCache, dispose() { active = false; observer?.disconnect(); rawDetail.dispose(); reportDetail.dispose(); facts.dispose() } }
+    return { node: card, targetKey, stateCache, dispose() { active = false; if (elapsedTimer !== undefined && typeof window !== 'undefined') window.clearInterval(elapsedTimer); observer?.disconnect(); rawDetail.dispose(); reportDetail.dispose(); facts.dispose() } }
   } else if (row.result?.status === 'succeeded' && !explainsCompletedResult(immediateSemantics ?? {})) {
-    card.append(element('p', '结果正文未提供', 'tool-read-feedback'))
+    card.append(element('p', '结果正文未提供；历史记录未保存完整结果正文，无法显示退出码与输出节选。', 'tool-read-feedback'))
+  } else if (row.result?.status === 'failed' && !row.result.error) {
+    card.append(element('p', '执行失败 · 历史记录中没有错误原因。', 'tool-read-feedback'))
   }
-  return { node: card, targetKey, stateCache, dispose() { active = false; observer?.disconnect(); facts.dispose() } }
+  return { node: card, targetKey, stateCache, dispose() { active = false; if (elapsedTimer !== undefined && typeof window !== 'undefined') window.clearInterval(elapsedTimer); observer?.disconnect(); facts.dispose() } }
 }
 
 export function disposeToolBody(host) {
@@ -245,14 +269,14 @@ export function disposeToolBody(host) {
 }
 
 // Keep open results and details through unchanged polling; no execution state.
-export function renderToolBody(host, events, readOutput) {
+export function renderToolBody(host, events, readOutput, { finished = false } = {}) {
   const previous = bodies.get(host) ?? new Map()
   const next = new Map()
   for (const row of toolPresentations(events)) {
     // Journal events are immutable; arguments need no eager JSON copy to poll.
-    const signature = JSON.stringify({ ...row, call: row.call && { ...row.call, arguments: undefined }, result: row.result && { ...row.result, arguments: undefined } })
+    const signature = JSON.stringify([finished, { ...row, call: row.call && { ...row.call, arguments: undefined }, result: row.result && { ...row.result, arguments: undefined } }])
     const old = previous.get(row.key)
-    const item = old?.signature === signature && old.reader === readOutput ? old : { signature, reader: readOutput, ...toolCard(row, readOutput, old) }
+    const item = old?.signature === signature && old.reader === readOutput ? old : { signature, reader: readOutput, ...toolCard(row, readOutput, old, finished) }
     next.set(row.key, item)
     const atPosition = host.children[next.size - 1]
     if (atPosition && atPosition !== item.node) host.insertBefore(item.node, atPosition)

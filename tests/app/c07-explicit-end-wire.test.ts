@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { id, type InteractionParentProviderExecutionIdentityRef, type ProviderBinding } from '../../packages/contracts/src/index.js';
-import { createProviderExplicitBrainInterpreter,
+import { createProviderExplicitBrainInterpreter, normalizeTaskTitle,
   type ExplicitBrainInterpretationInput } from '../../packages/app/src/explicit-brain-runtime.js';
 import { UiRuntimeApiError } from '../../packages/app/src/ui-runtime/errors.js';
 import { ProviderAdapter, ResponsesProviderCodec, V3ProviderHttpTransport, filesystemProviderEvidenceSink } from '../../packages/adapters/provider/src/index.js';
@@ -788,4 +788,50 @@ test('C07 partial resumes the same interaction in a new epoch with failure memor
   assert.match(wires[4].instructions, /上次结束校验失败记忆/);
   assert.equal(snapshot.ownerReconciliations.at(-1)?.fact.effectiveExecutionEpoch, 2);
   assert.ok(checkpoint);
+});
+
+test('explicit task title normalization collapses whitespace and caps at 50 Unicode characters', () => {
+  assert.equal(normalizeTaskTitle('  alpha\n\tbeta  '), 'alpha beta');
+  const fortyNineAndEmoji = '任'.repeat(49) + '🙂';
+  assert.equal(normalizeTaskTitle(fortyNineAndEmoji), fortyNineAndEmoji);
+  assert.equal(normalizeTaskTitle('任'.repeat(50) + '🙂'), '任'.repeat(50));
+  assert.throws(() => normalizeTaskTitle('   '), /non-empty/);
+});
+
+test('C07 actual wire normalizes an overlong model title at interpretation without truncating content', async () => {
+  const longTitle = '  任'.repeat(30) + '\n尾🙂';
+  const body = '完整需求正文必须保留'.repeat(20);
+  const longRequirement = {
+    ...requirement,
+    decision: {
+      ...requirement.decision,
+      normalizedInput: body,
+      proposal: {
+        ...requirement.decision.proposal,
+        title: longTitle,
+        objective: body,
+        deliverable: body,
+      },
+    },
+  };
+  const { result, snapshot, wires } = await runWire([longRequirement]);
+  assert.equal(result.kind, 'requirement');
+  if (result.kind !== 'requirement') throw new Error('expected requirement interpretation');
+  const expectedTitle = Array.from(longTitle.replace(/\s+/gu, ' ').trim()).slice(0, 50).join('');
+  assert.equal(result.structuredProposal.title, expectedTitle);
+  assert.equal(Array.from(result.structuredProposal.title).length, 50);
+  assert.equal(result.structuredProposal.objective, body, 'objective is not truncated');
+  assert.equal(result.structuredProposal.deliverable, body, 'deliverable is not truncated');
+  assert.ok(result.normalizedInput.includes(body), 'full request text stays in normalizedInput');
+  assert.ok(snapshot.endControls?.some((entry) => entry.fact.kind === 'submission'
+    && entry.fact.result.kind === 'accepted'), 'accepted end remains a real durable receipt');
+  const endTool = wires[0].tools.find((tool: any) => tool.name === 'humanagent_turn_end');
+  const titleSchema = endTool.parameters.properties.decision.properties.proposal.properties.title;
+  assert.equal(titleSchema.type, 'string');
+  assert.equal(titleSchema.minLength, 1);
+  assert.equal(titleSchema.maxLength, undefined, 'schema does not reject an overlong model title');
+  assert.match(titleSchema.description, /at most 50 characters/);
+  assert.match(wires[0].instructions, /at most 50 characters/);
+  assert.match(wires[0].instructions,
+    /another Topic or Project.*preserve the original interaction, task and Topic/);
 });

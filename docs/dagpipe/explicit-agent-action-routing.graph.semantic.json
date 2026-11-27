@@ -3,7 +3,7 @@
   "implementationStatus": "UNVERIFIED",
   "labels": {
     "bind_event": "核对事件、角色、项目、Topic 与原任务归属",
-    "choose_next_action": "按事件、当前状态、任务匹配和权限选择一个处置计划",
+    "choose_next_action": "按事件、当前状态、任务匹配和权限选择一个处置计划；短业务 title 最多 50 字，新 Topic/Project 或跨项目缺口如实澄清",
     "apply_selected_action": "由各动作 owner 执行并取得逐项回执",
     "close_event": "记录并返回本轮的真实结果与下一步"
   },

@@ -15,6 +15,7 @@ declare module 'node:fs/promises' {
 }
 
 export * from './ui-preferences.js';
+export * from './workspace-management.js';
 export { resetUiDisplayPreference, saveUiDisplayPreference } from './ui-preference-store.js';
 
 export const CONFIG_SCHEMA_VERSION = 1;
@@ -207,6 +208,8 @@ export interface ProjectSourceManifest {
   readonly schemaVersion: number;
   readonly projectKey: string;
   readonly workspaceCwd: string;
+  readonly displayName?: string;
+  readonly workspaceAlias?: string;
   readonly sources?: {
     readonly localSkill?: ProjectLocalSkillSource;
   };
@@ -215,6 +218,8 @@ export interface ProjectSourceManifest {
 export interface ConfiguredProjectReadSource {
   readonly projectKey: string;
   readonly workspaceCwd: string;
+  readonly displayName?: string;
+  readonly workspaceAlias?: string;
   readonly projectRoot: string;
   readonly checkpointsRoot: string;
 }
@@ -271,6 +276,8 @@ function validateProjectSourceManifestShape(value: unknown, paths: RuntimePaths)
     readonly schemaVersion?: unknown;
     readonly projectKey?: unknown;
     readonly workspaceCwd?: unknown;
+    readonly displayName?: unknown;
+    readonly workspaceAlias?: unknown;
     readonly sources?: unknown;
   };
   if (manifest.schemaVersion !== 1) {
@@ -279,8 +286,17 @@ function validateProjectSourceManifestShape(value: unknown, paths: RuntimePaths)
   if (manifest.projectKey !== paths.projectKey || manifest.workspaceCwd !== paths.workspaceCwd) {
     fail('project-identity-mismatch', `project manifest does not match configured project: ${paths.projectManifest}`);
   }
+  if (manifest.displayName !== undefined && (typeof manifest.displayName !== 'string' || manifest.displayName.trim() === '')) {
+    fail('project-manifest-corrupt', 'project manifest displayName must be a non-empty string', '修复 project.json displayName 后重试');
+  }
+  const displayName = typeof manifest.displayName === 'string' ? manifest.displayName.trim() : undefined;
+  if (manifest.workspaceAlias !== undefined && (typeof manifest.workspaceAlias !== 'string' || manifest.workspaceAlias.trim() === '')) {
+    fail('project-manifest-corrupt', 'project manifest workspaceAlias must be a non-empty string', '修复 project.json workspaceAlias 后重试');
+  }
+  const workspaceAlias = typeof manifest.workspaceAlias === 'string' ? manifest.workspaceAlias.trim() : undefined;
   if (manifest.sources === undefined) {
-    return { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd };
+    return { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd,
+      ...(displayName === undefined ? {} : { displayName }), ...(workspaceAlias === undefined ? {} : { workspaceAlias }) };
   }
   if (typeof manifest.sources !== 'object' || manifest.sources === null || Array.isArray(manifest.sources)) {
     fail('project-source-manifest-invalid', 'project manifest sources must be an object', '修复 project.json sources 后重试');
@@ -291,7 +307,8 @@ function validateProjectSourceManifestShape(value: unknown, paths: RuntimePaths)
     fail('project-source-manifest-invalid', `project manifest contains unsupported source: ${unknownSources[0]}`, '只保留声明的 project source 后重试');
   }
   if (sources.localSkill === undefined) {
-    return { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd, sources: {} };
+    return { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd, sources: {},
+      ...(displayName === undefined ? {} : { displayName }), ...(workspaceAlias === undefined ? {} : { workspaceAlias }) };
   }
   if (typeof sources.localSkill !== 'object' || sources.localSkill === null || Array.isArray(sources.localSkill)) {
     fail('project-source-manifest-invalid', 'project manifest localSkill source must be a single object', '修复 project.json sources.localSkill 后重试');
@@ -312,6 +329,8 @@ function validateProjectSourceManifestShape(value: unknown, paths: RuntimePaths)
     schemaVersion: 1,
     projectKey: paths.projectKey,
     workspaceCwd: paths.workspaceCwd,
+    ...(displayName === undefined ? {} : { displayName }),
+    ...(workspaceAlias === undefined ? {} : { workspaceAlias }),
     sources: { localSkill: { root: localSkill.root, name: localSkill.name } },
   };
 }
@@ -439,9 +458,14 @@ export async function listConfiguredProjects(paths: RuntimePaths): Promise<Confi
     };
     try {
       const manifest = validateProjectSourceManifestShape(parsed, candidatePaths);
+      if (!(await isExistingDirectory(manifest.workspaceCwd))) {
+        continue;
+      }
       projects.push({
         projectKey: manifest.projectKey,
         workspaceCwd: manifest.workspaceCwd,
+        ...(manifest.displayName === undefined ? {} : { displayName: manifest.displayName }),
+        ...(manifest.workspaceAlias === undefined ? {} : { workspaceAlias: manifest.workspaceAlias }),
         projectRoot: projectDir,
         checkpointsRoot: join(projectDir, 'checkpoints'),
       });
@@ -461,6 +485,15 @@ function manifestWorkspaceCwd(value: unknown): string | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const workspaceCwd = (value as { workspaceCwd?: unknown }).workspaceCwd;
   return typeof workspaceCwd === 'string' && workspaceCwd ? workspaceCwd : undefined;
+}
+
+async function isExistingDirectory(path: string): Promise<boolean> {
+  if (!isAbsolute(path)) return false;
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function normalizeProjectDirectory(projectDir: string, sessionRoot: string): string {

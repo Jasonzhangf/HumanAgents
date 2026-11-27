@@ -16,17 +16,6 @@ export function canContinueSubmission(snapshot, processError) {
     || (snapshot?.state === 'awaiting-confirmation' && snapshot.draft?.proposedIntent === 'create')
 }
 
-// The receipt protects the one live turn even before its first snapshot read
-// arrives. Clarification and confirmation also remain with the user.
-export function submissionNeedsResolution(attempt) {
-  if (!attempt?.interactionId) return false
-  const state = attempt.snapshot?.state
-  return state === undefined
-    || state === 'awaiting-clarification'
-    || state === 'awaiting-confirmation'
-    || !intakeFinished.has(state)
-}
-
 function mergeIntakeSteps(recorded = [], live = []) {
   if (!live.length) return recorded
   return [...new Map([...live, ...recorded].map(step => [step.seq, step])).values()].sort((a, b) => a.seq - b.seq)
@@ -51,6 +40,15 @@ export function submissionView(projection, attempts) {
     const official = related.find(turn => turn.statusFacts)
     const snapshot = attempt.snapshot
     const steps = mergeIntakeSteps(snapshot?.steps, attempt.steps)
+    // The durable explicit turn is the owner of its interaction helper facts.
+    // Do not project the same ExplicitInteractionStep again on the local live
+    // receipt. The local receipt still owns execution.started and provider tool
+    // facts, so task execution remains visible while the helper card keeps one
+    // DOM identity.
+    const localSteps = steps
+    const liveTools = attempt.toolEvents ?? []
+    const executionStarted = attempt.executionStarted
+    const executionTerminal = attempt.executionTerminal
     const draftReview = draftReviewFromSnapshot(snapshot)
     if (draftReview) {
       const index = turns.findIndex(turn => belongs(turn) && turn.kind === 'draft')
@@ -75,16 +73,36 @@ export function submissionView(projection, attempts) {
     }
     // Official fact clocks stay with the runtime turn. Only a transport failure
     // overlays them; a successful read removes that overlay.
-    if (finished && !attempt.error) continue
-    const canContinue = !attempt.queued && canContinueSubmission(snapshot, attempt.processError)
+    // A durable turn already rendered by the projection owns its finished
+    // state. A receipt that has not reached the projection still needs its
+    // own confirmation/clarification status so another input cannot hide it.
+    // A confirmed intake turn can already be durable while its task execution
+    // stream is still live. Keep that receipt's execution state visible until
+    // the task terminal event arrives; otherwise the durable projection hides
+    // the started clock and the tool card before the next refresh.
+    if (finished && related.length > 0 && !attempt.error && liveTools.length === 0
+      && !executionStarted && !executionTerminal) continue
+    const canContinue = canContinueSubmission(snapshot, attempt.processError)
     turns.push({ turnId: `local-status:${attempt.key}`, role: 'jenny', kind: 'status', text: '',
-      explicitSteps: steps,
-      localStatus: attempt.queued
-        ? [{ key: 'queued', phase: 'queued', running: false,
-          label: '排队中，等待上一轮处理完成', tone: 'warning' }]
-        : attempt.error ? [{ key: 'read-error', phase: 'error', running: false,
+      explicitSteps: localSteps,
+      ...(liveTools.length ? { toolEvents: liveTools } : {}),
+      ...(snapshot?.state === 'awaiting-clarification' ? { clarification: {
+        question: snapshot.clarifications?.at(-1)?.question || snapshot.reply || '需要澄清',
+        options: snapshot.clarifications?.at(-1)?.options ?? [],
+        submit: attempt.onAnswer,
+      } } : {}),
+      localStatus: attempt.error ? [{ key: 'read-error', phase: 'error', running: false,
           label: id ? '状态读取或处理已中断' : '尚未确认接收，请先核对状态', tone: 'danger', error: attempt.error,
           ...(canContinue ? { statusLabel: '可按原回执继续本次处理' } : {}) }]
+          : executionTerminal ? [{
+            key: 'execution-terminal', phase: 'execution', running: false,
+            label: executionTerminal.terminalPhase === 'final' ? '本轮执行完成' : '执行进入收尾',
+            startedAt: executionStarted?.occurredAt, endedAt: executionTerminal.occurredAt, tone: 'success',
+          }]
+          : executionStarted ? [{
+            key: 'execution-started', phase: 'execution', running: true,
+            label: '任务已开始执行', startedAt: executionStarted.occurredAt, tone: 'warning',
+          }]
           : id && steps.length ? [
             { key: 'accepted', phase: 'accepted', label: '服务已接收', running: false, tone: 'success' },
             ...conversationStatus({ state: snapshot?.state || 'matching', steps, error: snapshot?.error }),
@@ -92,7 +110,7 @@ export function submissionView(projection, attempts) {
             : [{ key: id ? 'accepted' : 'sending', phase: id ? 'accepted' : 'sending',
               label: id ? '服务已接收，等候最新状态' : '发送中', running: !id,
               startedAt: id ? undefined : attempt.startedAt, tone: 'warning' }],
-      onRecover: attempt.queued ? undefined : attempt.onRecover,
+      onRecover: attempt.onRecover,
       onContinue: canContinue ? attempt.onContinue : undefined,
     })
   }

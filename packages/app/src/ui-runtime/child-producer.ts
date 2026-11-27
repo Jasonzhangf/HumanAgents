@@ -591,14 +591,21 @@ type ReviewCallRequest = {
 
 type ChildCallRequest = ExecutionCallRequest | ReviewCallRequest;
 
+class ChildCallArgumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChildCallArgumentError';
+  }
+}
+
 function readBoundedString(value: unknown, label: string, max: number, required: boolean): string {
   if (value === undefined || value === null) {
-    if (required) throw new Error(`child call ${label} is required`);
+    if (required) throw new ChildCallArgumentError(`child call ${label} is required`);
     return '';
   }
-  if (typeof value !== 'string') throw new Error(`child call ${label} must be a string`);
-  if (value.length > max) throw new Error(`child call ${label} exceeds its ${max} character bound`);
-  if (required && value.trim() === '') throw new Error(`child call ${label} is required`);
+  if (typeof value !== 'string') throw new ChildCallArgumentError(`child call ${label} must be a string`);
+  if (value.length > max) throw new ChildCallArgumentError(`child call ${label} exceeds its ${max} character bound`);
+  if (required && value.trim() === '') throw new ChildCallArgumentError(`child call ${label} is required`);
   return value;
 }
 
@@ -610,15 +617,15 @@ function readBoundedStringArray(
   required: boolean,
 ): readonly string[] {
   if (value === undefined || value === null) {
-    if (required) throw new Error(`child call ${label} is required`);
+    if (required) throw new ChildCallArgumentError(`child call ${label} is required`);
     return [];
   }
-  if (!Array.isArray(value)) throw new Error(`child call ${label} must be an array`);
-  if (value.length > maxItems) throw new Error(`child call ${label} exceeds its ${maxItems} item bound`);
-  if (required && value.length === 0) throw new Error(`child call ${label} is required`);
+  if (!Array.isArray(value)) throw new ChildCallArgumentError(`child call ${label} must be an array`);
+  if (value.length > maxItems) throw new ChildCallArgumentError(`child call ${label} exceeds its ${maxItems} item bound`);
+  if (required && value.length === 0) throw new ChildCallArgumentError(`child call ${label} is required`);
   return value.map((entry) => {
-    if (typeof entry !== 'string' || entry.trim() === '') throw new Error(`child call ${label} item must be a non-empty string`);
-    if (entry.length > maxItem) throw new Error(`child call ${label} item exceeds its ${maxItem} character bound`);
+    if (typeof entry !== 'string' || entry.trim() === '') throw new ChildCallArgumentError(`child call ${label} item must be a non-empty string`);
+    if (entry.length > maxItem) throw new ChildCallArgumentError(`child call ${label} item exceeds its ${maxItem} character bound`);
     return entry;
   });
 }
@@ -644,11 +651,11 @@ function parseChildCallRequest(args: BusinessPayload): ChildCallRequest {
   }
   if (kind === 'review') {
     if (args.checkId !== undefined) {
-      throw new Error('a review child call cannot select an inspection check');
+      throw new ChildCallArgumentError('a review child call cannot select an inspection check');
     }
     const reviewKind = args.reviewKind;
     if (typeof reviewKind !== 'string' || !REVIEW_KIND_WHITELIST.includes(reviewKind as ReviewKind)) {
-      throw new Error('child call reviewKind must be a registered review kind');
+      throw new ChildCallArgumentError('child call reviewKind must be a registered review kind');
     }
     return {
       kind,
@@ -658,7 +665,47 @@ function parseChildCallRequest(args: BusinessPayload): ChildCallRequest {
       subjectInvocationId: readBoundedString(args.subjectInvocationId, 'subjectInvocationId', MAX_INVOCATION_REF, true),
     };
   }
-  throw new Error('child call kind must be execution or review');
+  throw new ChildCallArgumentError('child call kind must be execution or review');
+}
+
+/**
+ * Model-authored child.call arguments are a recoverable tool boundary. The
+ * request has not been admitted and no child side effect has started, so pair
+ * the exact call id with a validation result and let the Provider driver give
+ * the model another turn to correct it. Framework and Provider failures stay
+ * outside this helper and continue to throw with their original semantics.
+ */
+function invalidChildCallArguments(
+  request: Parameters<ProviderToolExecutionPort['execute']>[0],
+  message: string,
+): ProviderToolExecutionResult {
+  const evidenceRefs = [scopedEvidence(request.scope, 'child-call-invalid-arguments')];
+  return {
+    output: JSON.stringify({
+      status: 'failed',
+      code: 'tool.argument.invalid',
+      toolId: request.call.toolId,
+      callId: request.call.callId,
+      executed: false,
+      message,
+      recoverable: true,
+    }),
+    outputRefs: [],
+    evidenceRefs,
+    status: 'failed',
+    error: {
+      errorId: `provider-tool-invalid-arguments-${request.call.callId}`,
+      code: 'tool.argument.invalid',
+      category: 'validation',
+      phase: 'tool',
+      message,
+      ownerId: OWNER,
+      retryable: 'retryable',
+      attention: 'foreground',
+      evidenceRefs,
+      nextAction: { kind: 'continue', ref: request.call.toolId },
+    },
+  };
 }
 
 function readInvocationSelector(args: BusinessPayload): string {
@@ -670,7 +717,7 @@ function selectRosterEntry(
   agentId: string,
 ): { readonly agentId: string; readonly roleId: AgentRole } {
   const entry = roster.find((candidate) => candidate.agentId === agentId);
-  if (!entry) throw new Error(`selected child agentId ${agentId} is not in the configured roster`);
+  if (!entry) throw new ChildCallArgumentError(`selected child agentId ${agentId} is not in the configured roster`);
   return entry;
 }
 
@@ -2112,8 +2159,15 @@ export function createAppChildProducer(input: AppChildProducerInput): ProviderTo
     if (request.requestId === undefined || request.requestId.trim() === '') {
       throw new Error('child call requires the accepted Provider requestId');
     }
-    const parsed = parseChildCallRequest(request.call.arguments);
-    const selected = selectRosterEntry(roster, parsed.agentId);
+    let parsed: ChildCallRequest;
+    let selected: { readonly agentId: string; readonly roleId: AgentRole };
+    try {
+      parsed = parseChildCallRequest(request.call.arguments);
+      selected = selectRosterEntry(roster, parsed.agentId);
+    } catch (error) {
+      if (!(error instanceof ChildCallArgumentError)) throw error;
+      return invalidChildCallArguments(request, error.message);
+    }
     const invocationId = appChildInvocationId({
       turnId,
       parentExecution: request.execution,

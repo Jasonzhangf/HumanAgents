@@ -29,6 +29,7 @@
     "progressContract": "提交进度步骤必须来自真实 explicit.step 事件（seq、summary、occurredAt）。interpret 是长请求，UI 必须能在等待期间看到状态推进（received -> matching -> ...）。无真实 step 时保持显式缺失，不猜、不合成步骤或总步数；页面提交观察计时只基于本地单调时钟，总耗时从 banner mount 起算、本步耗时从当前真实 step 到达时刻起算，不补算挂载前时间。",
     "protocolToleranceContract": "Provider 真实流式事件可能省略 item_id。content/reasoning 类事件在 item_id 缺失时应退化为可寻址的稳定占位身份并继续消费，不得让单个非关键事件终止整个 interpret。function-call 类事件沿用既有 requireToolEventIdentity（item_id 或 call_id 至少其一）。",
     "recoveryContract": "interpret 失败保留原错与恢复责任：interaction 必须回到可重试状态，且 UI 必须给出可执行的重试入口，不得要求用户重启。",
+    "interpretContract": "requirement proposal 复用 proposal.title；解释边界把连续空白折叠为单个空格后，按 Unicode 字符截断到最多 50 字。normalizedInput、objective 和完整正文不截断。当前项目主话题内的 create/append/change 继续由 intent 与 matchedTaskId 决定；新 Topic/Project 或跨 scope 请求只走 clarification，不隐式切换身份或项目。",
     "nonGoal": "不改交互状态机语义、不改 explicit brain 路由与分类、不改设计系统、不改 scheduler 巡逻规则、不处理队列区显示无关历史任务。"
   },
   "inputs": [

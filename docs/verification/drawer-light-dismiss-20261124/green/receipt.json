@@ -1,0 +1,208 @@
+{
+  "result": "PASS",
+  "checks": [
+    "desktop rail is 222px",
+    "only public Jenny is nested under members",
+    "no placeholder member tree",
+    "project settings dialog restores after reload",
+    "project settings close button still closes the drawer",
+    "a project appearing in the system read enters the rail without reload or focus loss",
+    "an unchanged call snapshot keeps the open detail and its row",
+    "poll retains collapsed tree",
+    "poll performed",
+    "task board contains task rows",
+    "task drawer does not resize timeline",
+    "desktop right drawer closes from a point outside its rect",
+    "desktop right drawer returns focus to its trigger",
+    "Escape still closes an ordinary drawer and returns focus",
+    "dragging from inside the desktop drawer does not dismiss it",
+    "reload retains board and draft",
+    "reload retains tree",
+    "schedule drawer closes from a desktop point outside its rect",
+    "schedule drawer returns focus to its trigger",
+    "dragging from inside the schedule drawer does not dismiss it",
+    "reload retains schedule selection",
+    "reload retains schedule draft",
+    "reload retains focus",
+    "schedule drawer does not resize timeline",
+    "recurring form remains reachable",
+    "send is inside single-line input frame",
+    "normal send uses existing public intake once",
+    "mobile rail defaults closed",
+    "mobile chat occupies available width",
+    "dragging from inside the mobile bottom drawer does not dismiss it",
+    "mobile bottom drawer closes from a point outside its rect",
+    "mobile bottom drawer returns focus to its trigger",
+    "mobile project navigation closes from a point outside its rect",
+    "mobile project navigation returns focus to its menu trigger",
+    "dragging inside mobile project navigation does not dismiss it",
+    "mobile menu restores after reload",
+    "mobile page has no horizontal overflow",
+    "approval dialogs do not receive ordinary drawer light dismiss",
+    "approval prompt is open before its outside-click probe",
+    "an approval dialog stays open after an outside click",
+    "619px still collapses navigation",
+    "620px restores desktop rail",
+    "the empty catalog replaces its loading state",
+    "the failed catalog replaces its loading state",
+    "long catalog and chat keep the page inside the viewport",
+    "long catalog and chat keep the composer inside the viewport",
+    "long catalog scrolls inside the bounded rail",
+    "long chat scrolls inside the bounded main column",
+    "long catalog rail remains independently scrollable",
+    "long chat remains independently scrollable",
+    "composer stays inside the viewport after chat and rail scroll",
+    "narrow viewport keeps the long-chat composer inside the viewport",
+    "narrow viewport keeps the long chat scrollable",
+    "narrow viewport keeps the project drawer closed",
+    "narrow drawer stays inside the viewport and scrolls its long catalog",
+    "no page errors"
+  ],
+  "drawerDismissalMetrics": {
+    "mode": "green",
+    "desktopRight": {
+      "rect": {
+        "x": 900,
+        "y": 0,
+        "width": 540,
+        "height": 900
+      },
+      "outside": {
+        "x": 8,
+        "y": 8
+      }
+    },
+    "desktopSchedule": {
+      "rect": {
+        "x": 900,
+        "y": 0,
+        "width": 540,
+        "height": 900
+      },
+      "outside": {
+        "x": 200,
+        "y": 8
+      }
+    },
+    "mobileBottom": {
+      "rect": {
+        "x": 0,
+        "y": 185.6875,
+        "width": 390,
+        "height": 658.3125
+      },
+      "outside": {
+        "x": 200,
+        "y": 8
+      }
+    },
+    "mobileNavigation": {
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 280,
+        "height": 844
+      },
+      "outside": {
+        "x": 380,
+        "y": 820
+      }
+    },
+    "approval": {
+      "rect": {
+        "x": 16,
+        "y": 118.15625,
+        "width": 358,
+        "height": 323,
+        "top": 118.15625,
+        "right": 374,
+        "bottom": 441.15625,
+        "left": 16
+      },
+      "outside": {
+        "x": 8,
+        "y": 110.15625
+      }
+    }
+  },
+  "reads": 17,
+  "writes": [
+    {
+      "path": "/api/explicit/inputs",
+      "body": {
+        "sourceRef": "ui:entry",
+        "rawInput": "正常消息验收",
+        "inputRevision": 1,
+        "requestKind": "new-task-preview",
+        "idempotencyKey": "ui-entry:mwviitd0-121ah5v0",
+        "topicRef": "main",
+        "channel": "business"
+      }
+    }
+  ],
+  "longLayoutMetrics": {
+    "viewport": {
+      "width": 1905,
+      "height": 1080
+    },
+    "root": {
+      "top": 0,
+      "bottom": 1080,
+      "height": 1080,
+      "width": 1905
+    },
+    "page": {
+      "top": 0,
+      "bottom": 1080,
+      "height": 1080,
+      "width": 1683
+    },
+    "rail": {
+      "top": 0,
+      "bottom": 1080,
+      "height": 1080,
+      "width": 222
+    },
+    "composer": {
+      "top": 998,
+      "bottom": 1080,
+      "height": 82,
+      "width": 1683
+    },
+    "railScroll": {
+      "clientHeight": 1080,
+      "scrollHeight": 42103
+    },
+    "chatScroll": {
+      "clientHeight": 930,
+      "scrollHeight": 14098
+    }
+  },
+  "narrowLayoutMetrics": {
+    "composer": {
+      "top": 762,
+      "bottom": 844
+    },
+    "chatScroll": {
+      "clientHeight": 659,
+      "scrollHeight": 18118
+    }
+  },
+  "drawerMetrics": {
+    "dialog": {
+      "top": 0,
+      "bottom": 844,
+      "left": 0,
+      "right": 280
+    },
+    "railScroll": {
+      "clientHeight": 844,
+      "scrollHeight": 39723
+    }
+  },
+  "cleanup": {
+    "browserClosed": true,
+    "noListeningServer": true,
+    "productionWrites": false
+  }
+}

@@ -45,7 +45,9 @@
 
 正式集成使用已提交候选。输入变化只使受影响证据失效，不因记录笔记、派单或汇报重跑未变用例。
 
-真实产品 receipt 和截图写入产品配置路径解析器从 `~/.humanagent` 派生的 `runNotesRoot/<attemptId>/`，截图位于 `shots/`。记录实际路径和 attempt 关联；候选 `dist/` 只作临时构建或浏览器产物，不能冒充持久 receipt root。受控代码复现保留在其独占 run 目录，并明确它不是产品 Task receipt。
+Candidate E2E 使用一个固定专用测试根 `<tmp>/humanagent-e2e`。场景布局版本、场景名、尝试 owner 和 attempt id 组成 `v1/<scenario>/<attemptOwner>/<attemptId>/` 子目录；workspace、control root、journal、checkpoint、index 和日志都位于该 attempt 子目录。产品配置解析器只能从该子目录派生路径，不得把临时项目登记到 `~/.humanagent` 的正式项目目录；常规命令或编程调用传入 attempt 外的 control root 时，在解析器和产品写入前直接拒绝。收口时删除整个 attempt 子目录，固定测试根本身保留供下一次同一入口复跑。receipt 和截图是唯一保留的小体积证据，写入显式 evidence root 的 `<attemptId>/`，截图位于 `shots/`；runner 默认使用 `<tmp>/humanagent-e2e-evidence`，验收命令用 `--evidence-root` 指向本次任务证据目录。记录实际路径、owner 和 attempt 关联；候选 `dist/` 只作临时构建或浏览器产物，不能冒充持久 receipt root。受控代码复现保留在其独占 run 目录，并明确它不是产品 Task receipt。
+
+真实产品 receipt 仍由产品的 `runNotesRoot` 记录，但只用于实际产品运行验收。installed-attach 只读观察既有 owner 和 Task，必须使用已存在的浏览器会话（`HUMANAGENT_ATTACH_SESSION`），不得签发 pairing challenge、创建本地 session 或改写正式 control root。
 
 复用当前项目中适用的 runner 或真实浏览器入口，不为记录证据新造一套执行框架。脚本存在、退出 0 或外部 checker 通过，都只证明其实际断言范围。观察或 checker 失败可将 attempt 记为 INCOMPLETE，不得据此改写已经提交的业务终态。
 
@@ -53,15 +55,15 @@
 
 ## 资源收口
 
-开始前登记本次新建或明确归本次所有的 Task、临时 workspace、专用 control root、服务 PID/端口、浏览器资源及日志位置。不得把真实项目 workspace、共享服务、用户浏览器或其他任务的资源列入删除范围。
+开始前登记本次新建或明确归本次所有的 Task、临时 workspace、专用 attempt control root、服务 PID/端口、浏览器资源、日志位置和保留证据目录。不得把真实项目 workspace、共享服务、用户浏览器或其他任务的资源列入删除范围。candidate 的 control root 必须位于本次 attempt 根内；显式注入的外部 control root 保持调用方所有权。
 
 无论成功、失败、超时或取消，都执行适用的收口：
 
 1. 对本轮创建且需要结束的测试 Task，沿正式 task-scoped stop 通道收拢。取消 Provider 请求不等于停止完成。用权威状态核对实际终态、checkpoint 和副作用责任；未 settled 时记录 INCOMPLETE，保留恢复必需资源与唯一 recovery owner。仅阅读既有 Task，不因验收结束而停止它。
 2. 保存必要 receipt 和截图。目标仍在执行时复用既有浏览器 TaskSpace/Page；只关闭本轮独占且不再需要的上下文，不为每次尝试重建浏览器，不关闭共享 daemon 或用户页面。整个目标结束时按浏览器资源 owner 收口。
 3. 任务 settled 且服务不再承担恢复责任后，只通过正式服务入口或本轮记录的精确 PID 停止本轮临时服务。不得批量杀进程、按端口扫描后终止或停止他人服务。
-4. 只删除本轮创建、证据已保存且不再需要的专属临时数据。未 settled 的 Task 保留恢复所需服务、路径和责任。产品 receipt 与必要截图保留为交付证据。代码 worktree 按项目 SESE 生命周期由其 owner 单独收口。
-5. 对已执行的收口核对实际结果：自有临时 PID 已退出、端口关闭、删除路径不存在。仍需保留的资源列出用途、owner 和关闭条件；失败记录原错和下一步，不能只写 cleanup: done。
+4. 只删除本轮创建、证据已保存且不再需要的专属临时数据。candidate settled 后一次删除整个 attempt 运行时根，包括 workspace、attempt control root、journal、checkpoint、index 和日志。未 settled 的 Task 保留恢复所需服务、路径和责任，记录唯一 recovery owner 与下一步。产品 receipt 与必要截图保留为交付证据。代码 worktree 按项目 SESE 生命周期由其 owner 单独收口。
+5. 对已执行的收口核对实际结果：自有临时 PID 已退出、端口关闭、attempt 运行时根、workspace 和 attempt control root 已不存在；保留的 receipt/screenshot 目录存在且仅为小体积证据。仍需保留的资源列出用途、owner 和关闭条件；失败记录原错和下一步，不能只写 cleanup: done。
 
 A0 没有产品 Task，不伪造 task stop 或 checkpoint settle；仍须核验本次 Provider 收拢与适用资源状态。未确认停止完成时不得删除恢复数据或宣称清理成功。
 

@@ -25,10 +25,60 @@ function detailText(detail) {
   if (detail?.kind === 'decision') return [label(decisions, detail.decision), detail.title].filter(Boolean).join(' · ')
 }
 
+export function explicitRequestMetadata(steps = []) {
+  const selections = steps.filter(step => step.tool?.kind === 'select-skills'
+    && step.turnId && step.requestId && step.tool.callId)
+  const started = selections.findLast(step => step.kind === 'tool.started')
+  if (!started) return undefined
+  const finished = selections.findLast(step => step.kind === 'tool.finished'
+    && step.turnId === started.turnId && step.requestId === started.requestId
+    && step.tool.callId === started.tool.callId)
+  const skillsText = finished ? detailText(finished.tool.detail) : undefined
+  return {
+    key: JSON.stringify([started.turnId, started.requestId, started.tool.callId]),
+    label: finished ? `本轮技能：${skillsText || '已选择'}` : '正在加载本轮技能',
+    running: !finished,
+    startedAt: started.occurredAt,
+    ...(finished ? { endedAt: finished.occurredAt } : {}),
+  }
+}
+
+export function explicitStepsWithToolEvents(steps = [], interactionId) {
+  const internalToolIds = {
+    'read-task-result': 'humanagent.internal.read-task-result',
+    'project-snapshot': 'humanagent.internal.project-snapshot',
+    'resume-task': 'humanagent.internal.resume-task',
+  }
+  return steps.flatMap(step => {
+    if (step.kind !== 'tool.started' && step.kind !== 'tool.finished') return []
+    const tool = step.tool
+    const toolId = internalToolIds[tool?.kind]
+    if (!toolId || !tool.callId || !step.turnId || !step.requestId) return []
+    return [{
+      eventId: `explicit-step-${step.seq}`,
+      kind: step.kind === 'tool.started' ? 'provider.tool' : 'provider.tool-result',
+      seq: step.seq,
+      occurredAt: step.occurredAt,
+      callId: tool.callId,
+      turnId: step.turnId,
+      requestId: step.requestId,
+      taskId: { scope: 'interaction', value: interactionId },
+      operationId: step.requestId,
+      executionEpoch: 1,
+      toolId,
+      toolClass: 'internal-helper',
+      arguments: tool.detail,
+      ...(step.kind === 'tool.finished' ? { status: tool.status,
+        ...(tool.errorCode ? { error: { code: tool.errorCode, message: tool.errorCode } } : {}) } : {}),
+    }]
+  })
+}
+
 export function explicitToolRows(steps = [], finished = false) {
   const rows = new Map()
   for (const step of steps) {
     const tool = step.tool
+    if (tool?.kind === 'select-skills' || tool?.kind === 'submit-turn') continue
     const action = explicitToolLabel(tool?.kind)
     if (!step.turnId || !step.requestId || !tool?.callId || !action) continue
     const key = JSON.stringify([step.turnId, step.requestId, tool.callId])
@@ -63,7 +113,8 @@ export function explicitToolRows(steps = [], finished = false) {
 // has advanced, a recorded call without a result is missing evidence.
 export function explicitToolActivityFinished(turn = {}) {
   const state = turn.statusFacts?.state
-  return Boolean(turn.statusFacts?.steps && !['received', 'matching'].includes(state))
+  return turn.kind === 'error' || turn.kind === 'result'
+    || Boolean(turn.statusFacts?.steps && !['received', 'matching'].includes(state))
     || Boolean(turn.localStatus?.some(row => row.error))
 }
 
@@ -88,8 +139,9 @@ export function renderExplicitToolActivity(host, steps, finished, bindings = [])
   activity.replaceChildren(...rows.map(row => {
     const card = element('section', undefined, 'tool-card mt-explicit-tool')
     card.dataset.status = row.result
+    card.dataset.toolClass = 'internal-helper'
     card.setAttribute('aria-label', `${row.label}，${row.status}`)
-    card.append(element('strong', row.label))
+    card.append(element('span', '内部步骤', 'mt-explicit-kind'), element('strong', row.label))
     if (row.explanation) card.append(element('span', row.explanation, 'mt-explicit-explanation'))
     card.append(element('span', row.status, 'muted'))
     if (row.errorCode) card.append(element('span', row.errorCode, 'conversation-status-error'))

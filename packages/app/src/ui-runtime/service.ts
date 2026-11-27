@@ -361,6 +361,7 @@ import {
 import {
   ConfigurationError,
   resolveProjectInput,
+  resolveProjectSourceManifest,
   type ConfiguredProjectCatalog,
   type ConfiguredProjectReadSource,
   type RuntimePaths,
@@ -5299,24 +5300,23 @@ export class UiRuntimeService {
   private async snapshotsWithIdentitySource(): Promise<readonly RuntimeTaskSnapshotInput[]> {
     const snapshots = this.taskListSnapshots();
     const taskIdentity = this.options.taskIdentity;
-    if (taskIdentity === undefined || snapshots.length === 0) {
-      return snapshots;
-    }
     const identities = new Map<string, TaskIdentityRecord>();
-    const enriched = await Promise.all(snapshots.map(async (snapshot): Promise<RuntimeTaskSnapshotInput> => {
-      const identity = await taskIdentity.read({ organId: this.options.organId, taskId: snapshot.taskId });
-      if (identity !== undefined) identities.set(snapshot.taskId.value, identity);
-      return identity === undefined
-        ? snapshot
-        : {
-          ...snapshot,
-          identitySource: identity.source,
-          ...(identity.title === undefined ? {} : { semanticTitle: identity.title }),
-          ...(identity.taskFlow === undefined ? {} : { taskFlow: identity.taskFlow }),
-        };
-    }));
+    const enriched = taskIdentity === undefined
+      ? snapshots
+      : await Promise.all(snapshots.map(async (snapshot): Promise<RuntimeTaskSnapshotInput> => {
+        const identity = await taskIdentity.read({ organId: this.options.organId, taskId: snapshot.taskId });
+        if (identity !== undefined) identities.set(snapshot.taskId.value, identity);
+        return identity === undefined
+          ? snapshot
+          : {
+            ...snapshot,
+            identitySource: identity.source,
+            ...(identity.title === undefined ? {} : { semanticTitle: identity.title }),
+            ...(identity.taskFlow === undefined ? {} : { taskFlow: identity.taskFlow }),
+          };
+      }));
     const withExecutionFacts = await this.withExecutionReadFacts(enriched, identities,
-      await this.subscriptionControl?.list() ?? [], this.boundProjectSource());
+      await this.subscriptionControl?.list() ?? [], this.boundProjectSource(), this.options.checkpointStoreFor);
     return projectParentExecutions(withExecutionFacts);
   }
 
@@ -6291,8 +6291,10 @@ export class UiRuntimeService {
   // Main Topic needs published output and state, not plan/activity reads. Both
   // consumers project the same scoped execution snapshot with public output.
   private async taskDashboardWithPublication(taskId: TaskId, task: RuntimeTaskSnapshot): Promise<RuntimeTaskDashboardView> {
+    const withCheckpoint = await this.withExactTaskCycleCheckpointRead(toRuntimeTaskSnapshotInput(task));
     const publicOutput = await this.authoritativePublicOutputForTask(taskId);
-    return runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()), publicOutput);
+    return runtimeTaskDashboard(withCheckpoint as RuntimeTaskSnapshot, this.mode,
+      runtimeLivenessInput(withCheckpoint as RuntimeTaskSnapshot, this.now().toISOString()), publicOutput);
   }
 
   private async taskAgentActivityFor(
@@ -6720,7 +6722,15 @@ export class UiRuntimeService {
     const declared = catalog.projects.find((project) => project.projectKey === projectKey);
     if (declared !== undefined) return declared;
     const bound = this.boundProjectSource();
-    return bound?.projectKey === projectKey ? bound : undefined;
+    if (bound?.projectKey !== projectKey) return undefined;
+    const paths = this.readResources?.runtimePaths ?? this.options.runtimePaths;
+    if (paths === undefined) return bound;
+    try {
+      const manifest = await resolveProjectSourceManifest(paths);
+      return manifest.displayName === undefined ? bound : { ...bound, displayName: manifest.displayName };
+    } catch {
+      return bound;
+    }
   }
 
   /**
@@ -6798,7 +6808,8 @@ export class UiRuntimeService {
     const { byTaskId, failure: identityFailure } = await this.scopeCommittedIdentities(source, mode);
     const subscriptions = await this.scopeSubscriptions(source, mode, byTaskId);
     const snapshots = await this.withExecutionReadFacts(this.coordinator.taskSnapshots().map((snapshot) =>
-      this.snapshotWithScopeIdentity(snapshot, byTaskId.get(snapshot.taskId.value))), byTaskId, subscriptions.snapshots, source);
+      this.snapshotWithScopeIdentity(snapshot, byTaskId.get(snapshot.taskId.value))), byTaskId, subscriptions.snapshots,
+      source, this.options.checkpointStoreFor);
     const rows = taskRowsOf(snapshots, mode).map((task) => ({
       scope: { kind: 'task' as const, projectKey: source.projectKey, mode, taskId: task.taskId },
       task,
@@ -6833,6 +6844,7 @@ export class UiRuntimeService {
     identities: ReadonlyMap<string, TaskIdentityRecord>,
     subscriptions: readonly SubscriptionSnapshot[],
     liveSource?: ConfiguredProjectReadSource,
+    checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => PublicOutputCheckpointStore = this.options.checkpointStoreFor,
   ): Promise<readonly RuntimeTaskSnapshotInput[]> {
     const lineage = executionLineageByChildId(snapshots, identities, subscriptions);
     return await Promise.all(snapshots.map(async (snapshot) => {
@@ -6840,12 +6852,67 @@ export class UiRuntimeService {
       const target = liveSource === undefined ? undefined
         : await this.verifyControllableTaskTarget(snapshot.taskId, liveSource.projectKey, this.mode);
       const controlTarget = target === undefined ? undefined : { projectKey: target.projectKey, mode: this.options.mode };
+      const withCheckpoint = await this.withExactTaskCycleCheckpointRead(snapshot, checkpointStoreFor);
       return {
-        ...snapshot,
+        ...withCheckpoint,
         ...(relation === undefined ? {} : { executionLineage: relation }),
         ...(controlTarget === undefined ? {} : { controlTarget }),
       };
     }));
+  }
+
+  /**
+   * A cold hydration reads the canonical control journal. Historical execution
+   * checkpoints may instead be in the task's exact per-cycle journal. Read that
+   * same task/cycle and operation epoch back without treating occurrence success
+   * as public publication or crossing into another execution identity.
+   */
+  private async withExactTaskCycleCheckpointRead<T extends RuntimeTaskSnapshotInput>(
+    task: T,
+    checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => PublicOutputCheckpointStore = this.options.checkpointStoreFor,
+  ): Promise<T> {
+    if (task.checkpoint !== undefined) return task;
+    const cycleIdValue = (task as T & RuntimeTaskSnapshotWithCycle).cycleId;
+    if (cycleIdValue === undefined || task.operationId === undefined || task.executionEpoch === undefined) return task;
+    const cycleId = id('cycle', cycleIdValue);
+    const taskScope: ScopeRef = { organId: this.options.organId, taskId: task.taskId, cycleId };
+    const operationScope: ScopeRef = { ...taskScope, operationId: id('operation', task.operationId) };
+    const store = checkpointStoreFor(task.taskId, cycleId);
+    const latest = await store.readLatest(operationScope) ?? await store.readLatest(taskScope);
+    if (latest === null) return task;
+    const scope = latest.checkpoint.scope;
+    const sameTaskCycle = scope.organId.value === taskScope.organId.value
+      && scope.taskId?.value === task.taskId.value
+      && scope.cycleId?.value === cycleId.value;
+    const sameOperation = scope.operationId === undefined || scope.operationId.value === task.operationId;
+    if (!sameTaskCycle || !sameOperation || latest.checkpoint.executionEpoch !== task.executionEpoch) return task;
+
+    const checkpoint: NonNullable<RuntimeTaskSnapshotInput['checkpoint']> = {
+      checkpointId: latest.checkpoint.id.value,
+      seq: latest.checkpoint.seq,
+      outcome: latest.checkpoint.outcome,
+      summary: latest.checkpoint.summary,
+    };
+    const coldRecoveryClaim = task.state === 'blocked'
+      && task.currentState === '进程已重启或缺少终态 checkpoint';
+    if (!coldRecoveryClaim) return { ...task, checkpoint } as T;
+    if (latest.checkpoint.outcome !== 'succeeded') {
+      return {
+        ...task,
+        currentState: runtimeTaskStateLabel(latest.checkpoint.outcome as LifecycleState),
+        nextStep: task.error?.nextAction ?? task.nextStep,
+        checkpoint,
+      } as T;
+    }
+    return {
+      ...task,
+      state: 'succeeded',
+      currentState: runtimeTaskStateLabel('succeeded'),
+      nextStep: '查看任务详情',
+      allowedActions: ['start'],
+      checkpoint,
+      error: undefined,
+    } as T;
   }
 
   private async readDurableInventory(
@@ -6919,7 +6986,10 @@ export class UiRuntimeService {
       const subscriptions = await this.scopeSubscriptions(source, mode, byTaskId);
       if (subscriptions.failure !== undefined) failures.push(subscriptions.failure);
       const snapshots = await this.withExecutionReadFacts(inventory.entries.map((entry) =>
-        this.snapshotWithScopeIdentity(entry.snapshot, byTaskId.get(entry.snapshot.taskId.value))), byTaskId, subscriptions.snapshots);
+        this.snapshotWithScopeIdentity(entry.snapshot, byTaskId.get(entry.snapshot.taskId.value))), byTaskId, subscriptions.snapshots,
+        undefined, (taskId, cycleId) => new FileCheckpointStore(
+          uiRuntimeTaskCheckpointPath(source.checkpointsRoot, mode, taskId, cycleId),
+        ));
       for (const task of taskRowsOf(snapshots, mode)) {
         rows.push({
           scope: { kind: 'task', projectKey: source.projectKey, mode, taskId: task.taskId },
@@ -6939,7 +7009,7 @@ export class UiRuntimeService {
     return {
       surface: 'runtime-project',
       scope: { kind: 'project', projectKey: source.projectKey },
-      label: basename(source.workspaceCwd),
+      label: source.displayName ?? basename(source.workspaceCwd),
       workspaceCwd: source.workspaceCwd,
       observedAt: this.now().toISOString(),
       tasks: rows,
@@ -6958,10 +7028,11 @@ export class UiRuntimeService {
   }
 
   /**
-   * Public system read: every configured project in the current control root.
-   * `taskCount` is the sum of the returned project rows, never the current
-   * instance `listTasks()` total, so a bound project cannot masquerade as the
-   * whole installation.
+   * Public system read: every visible configured project in the current control
+   * root. `taskCount` is the sum of the returned project rows, never the current
+   * instance `listTasks()` total. An explicitly requested bound project remains
+   * available through projectRead, but system inventory does not add it back
+   * after the catalog has excluded it.
    */
   async systemRead(): Promise<RuntimeSystemReadProjection> {
     const catalog = await this.resolveProjectCatalog();
@@ -6973,9 +7044,10 @@ export class UiRuntimeService {
     }));
     const projects: RuntimeProjectReadProjection[] = [];
     const sources = [...catalog.projects];
-    const bound = this.boundProjectSource();
-    if (bound !== undefined && !sources.some((source) => source.projectKey === bound.projectKey)) sources.push(bound);
+    const seenProjectKeys = new Set<string>();
     for (const source of sources) {
+      if (seenProjectKeys.has(source.projectKey)) continue;
+      seenProjectKeys.add(source.projectKey);
       const { rows, failures: projectFailures } = await this.projectReadRows(source);
       projects.push(this.projectProjection(source, rows, projectFailures));
       failures.push(...projectFailures);

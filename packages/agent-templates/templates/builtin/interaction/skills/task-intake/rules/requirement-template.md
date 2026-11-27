@@ -1,6 +1,9 @@
 # Task handoff
 
-- Title: a short business name that distinguishes this task.
+- Title: a short business name that distinguishes this task. Use at most 50
+  characters. Do not put a path, an internal identifier, or the full request
+  text in the title. The runtime truncates a model-authored title at this
+  boundary.
 - Objective: the user's full requested outcome and the scope of the work.
 - Deliverable: what the original requester gets and in what form.
 - Delivery conditions: the checks that prove completion. Preserve constraints and exclusions.

@@ -3,7 +3,7 @@ import { conversationStatus, createConversationStatusClock } from './conversatio
 import * as callUsageFooter from './call-usage-footer.js'
 import { renderToolBody, disposeToolBody } from './tool-presentation.js'
 import { taskForTurn, taskValue, renderDispatchCard } from './dispatch-tracking.js'
-import { explicitToolActivityFinished, renderExplicitToolActivity } from './explicit-tool-activity.js'
+import { explicitRequestMetadata, explicitStepsWithToolEvents, explicitToolActivityFinished } from './explicit-tool-activity.js'
 import { taskBlocker, userFacingErrorReason } from './task-blocker.js'
 import { disposeMainTopicTaskBar, renderMainTopicTaskBar } from './main-topic-task-bar.js'
 
@@ -46,6 +46,7 @@ const KIND_LABELS = Object.freeze({
 
 const topicStates = new WeakMap()
 const answerControls = new WeakMap()
+const clarificationControls = new WeakMap()
 
 function requestKey(turn) {
   return JSON.stringify([turn.taskId?.scope, turn.taskId?.value, turn.requestId, turn.expectedRevision])
@@ -66,7 +67,7 @@ function quoteBlock(text) {
   return quote
 }
 
-export function mainTopicActorLabel(role, agentName = 'Jenny') {
+export function mainTopicActorLabel(role, agentName = '助手') {
   if (role === 'jenny') return agentName
   return ({ user: '你', task: '任务执行链', orchestration: '编排 Agent' })[role] || 'Agent'
 }
@@ -180,7 +181,64 @@ function renderAnswerControls(request, onAnswer, host, topicState) {
   return { form, update }
 }
 
-function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, topicState, bindings) {
+function renderClarification(article, bubble, clarification) {
+  const previous = clarificationControls.get(article)
+  const signature = JSON.stringify([clarification?.question, clarification?.options])
+  if (!clarification) {
+    previous?.form.remove()
+    clarificationControls.delete(article)
+    return
+  }
+  if (previous?.signature === signature) return
+  previous?.form.remove()
+  const form = element('form', undefined, 'mt-clarification')
+  form.setAttribute('aria-label', '补充本次输入')
+  form.append(element('p', clarification.question || '请补充信息'))
+  const input = element('input')
+  input.name = 'clarification-answer'
+  input.required = true
+  input.placeholder = '填写后继续本次输入'
+  const submit = element('button', '继续本次输入', 'button button--sm')
+  submit.type = 'submit'
+  const status = element('p', '', 'muted')
+  status.setAttribute('role', 'status')
+  const answer = async value => {
+    const text = String(value ?? '').trim()
+    if (!text) {
+      status.textContent = '请先填写补充信息。'
+      input.focus()
+      return
+    }
+    submit.disabled = true
+    status.textContent = '正在继续本次输入…'
+    try {
+      await clarification.submit?.(text)
+      status.textContent = '已提交补充信息。'
+    } catch (error) {
+      submit.disabled = false
+      status.textContent = error?.message || '补充信息未提交，请重试。'
+    }
+  }
+  form.addEventListener('submit', event => {
+    event.preventDefault()
+    void answer(input.value)
+  })
+  form.append(input, submit, status)
+  if (clarification.options?.length) {
+    const options = element('div', undefined, 'mt-options')
+    for (const option of clarification.options) {
+      const button = element('button', option, 'mt-option')
+      button.type = 'button'
+      button.addEventListener('click', () => void answer(option))
+      options.append(button)
+    }
+    form.append(options)
+  }
+  bubble.append(form)
+  clarificationControls.set(article, { signature, form })
+}
+
+function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, topicState, bindings, readToolOutput) {
   article.className = turnClass(turn)
   article.dataset.turnId = turn.turnId
   const answered = answeredRequestIds.has(requestKey(turn))
@@ -188,6 +246,15 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
   const previousHeader = article.querySelector('.mt-turn-head')
   if (previousHeader) previousHeader.replaceWith(header)
   else article.append(header)
+  const explicitSteps = turn.explicitSteps ?? turn.statusFacts?.steps
+  const metadata = explicitRequestMetadata(explicitSteps)
+  let requestMetadata = article.querySelector('.mt-request-metadata')
+  if (metadata) {
+    if (!requestMetadata) requestMetadata = element('p', '', 'mt-request-metadata')
+    requestMetadata.dataset.running = String(metadata.running)
+    requestMetadata.textContent = metadata.label
+    header.after(requestMetadata)
+  } else requestMetadata?.remove()
   const previousStatus = article.querySelector('.conversation-status')
   if (turn.statusFacts || turn.localStatus) {
     // Provider tool facts have a dedicated semantic card below. Keeping their
@@ -283,6 +350,7 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
     } else {
       next.append(element('p', draft?.intent === 'create'
         ? '已整理 · 等待投递给编排 Agent'
+      : turn.dispatchError ? `未能投递 · ${turn.dispatchError.message || '请重试'}${turn.dispatchError.nextAction ? ` 下一步：${turn.dispatchError.nextAction}` : ''}`
         : '已整理 · 暂未取得任务投递回执'))
     }
     bubble.append(next)
@@ -303,20 +371,34 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
   } else detailReadError?.remove()
   // A relay question owns the decision, not the task's concurrent tools.
   // Those remain on the task bar and in the task execution drawer.
-  const events = turn.kind === 'input-request' ? undefined : turn.toolEvents
+  const events = turn.kind === 'input-request' ? undefined : [
+    ...(turn.toolEvents ?? []), ...explicitStepsWithToolEvents(explicitSteps, turn.interactionId),
+  ]
   let tools = bubble.querySelector('.tool-body')
+  let toolDetails = bubble.querySelector('.mt-tool-details')
   if (events?.length) {
     if (!tools) {
       tools = element('div', undefined, 'tool-body')
-      bubble.append(tools)
     }
-    renderToolBody(tools, events, api.readToolOutput)
+    const finished = explicitToolActivityFinished(turn)
+    if (finished) {
+      if (!toolDetails) {
+        toolDetails = element('details', undefined, 'mt-tool-details')
+        toolDetails.append(element('summary', '查看执行步骤'))
+        bubble.append(toolDetails)
+      }
+      if (tools.parentElement !== toolDetails) toolDetails.append(tools)
+    } else {
+      if (tools.parentElement !== bubble) bubble.append(tools)
+      toolDetails?.remove()
+    }
+    renderToolBody(tools, events, readToolOutput, { finished })
   } else if (tools) {
     disposeToolBody(tools)
     tools.remove()
+    toolDetails?.remove()
   }
-  renderExplicitToolActivity(bubble, turn.explicitSteps ?? turn.statusFacts?.steps,
-    explicitToolActivityFinished(turn), bindings)
+  renderClarification(article, bubble, turn.clarification)
   let control = answerControls.get(article)
   const key = requestKey(turn)
   if (turn.kind === 'input-request' && turn.requestId && turn.taskId
@@ -445,7 +527,7 @@ export function mainTopicTurnGroups(projection) {
   }
 }
 
-export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved } = {}) {
+export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved, readToolOutput: readToolOutputOption } = {}) {
   projection = { ...projection, turns: ownedMainTopicTurns(projection) }
   if (!(host instanceof HTMLElement)) throw new Error('main topic requires a host element')
   const activeControl = host.contains(document.activeElement) ? document.activeElement : undefined
@@ -468,6 +550,7 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, on
   if (onOpenDispatch !== undefined) topicState.onOpenDispatch = onOpenDispatch
   if (dispatchObservation !== undefined) topicState.dispatchObservation = dispatchObservation
   if (dispatchExecutionObserved !== undefined) topicState.dispatchExecutionObserved = dispatchExecutionObserved
+  if (readToolOutputOption !== undefined) topicState.readToolOutput = readToolOutputOption
   if (topicState.detail && topicState.detail.scope !== scope) topicState.detail = undefined
   const bindings = []
   const previousTurns = new Map(
@@ -534,7 +617,7 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, on
     }
     for (const turn of activeTurns) {
       next.push(updateTurn(previousTurns.get(turn.turnId) || element('article'),
-        turn, projection, onAnswer, host, answeredRequestIds, topicState, bindings))
+        turn, projection, onAnswer, host, answeredRequestIds, topicState, bindings, topicState.readToolOutput ?? api.readToolOutput))
     }
     syncStreamChildren(stream, next)
   }

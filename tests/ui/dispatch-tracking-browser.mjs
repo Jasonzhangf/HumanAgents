@@ -13,7 +13,7 @@ const originalEndpoint = process.env.DISPATCH_ORIGINAL_READ_URL
 const project = { projectKey: 'dispatch-proof', projectName: '交办验收', agentName: 'Jenny', mode: 'fake',
   workspaceCwd: '/isolated/manual-webui-20261123-135730/workspace-2026' }
 const tasks = [], turns = [], interactions = new Map(), controlWrites = []
-let waitingDecision
+let waitingDecision, sessionRevision = 0
 let phase = 'fixture'
 const scope = id => ({ kind: 'task', projectKey: project.projectKey, mode: project.mode, taskId: { scope: 'task', value: id } })
 const ref = id => ({ kind: 'interaction', taskRef: { scope: 'task', value: id }, scope: scope(id) })
@@ -84,14 +84,17 @@ const fixture = async (req, url) => {
     const id = url.searchParams.get('taskId')
     const firstExecution = tasks[0] && `child-${tasks[0].taskId.value}`
     if (id !== firstExecution) return { messages: [], usage: { calls: [] } }
-    return { messages: [], toolEvents: [{
-      kind: 'provider.tool', scope: scope(id), seq: 1, eventId: 'fixture-read-call',
-      operationId: 'fixture-op', executionEpoch: 1, callId: 'fixture-read', toolId: 'file.read',
-      arguments: { path: 'read-before-turn-end.txt' }, occurredAt: '2026-11-23T12:00:00Z',
-    }], usage: { calls: [] } }
+    return { messages: [], detailRevision: sessionRevision,
+      toolEvents: Array.from({ length: 24 }, (_, index) => ({
+        kind: 'provider.tool', scope: scope(id), taskId: scope(id).taskId, seq: index + 1,
+        eventId: `fixture-read-call-${index}`, operationId: `fixture-op-${index}`, executionEpoch: 1,
+        callId: `fixture-read-${index}`, toolId: 'file.read',
+        arguments: { path: index === 0 ? 'read-before-turn-end.txt' : `evidence-${index}.txt` },
+        occurredAt: '2026-11-23T12:00:00Z', execution: { role: 'execution' },
+      })), usage: { calls: [] } }
   }
   if (url.pathname.endsWith('/observation')) return { nodes: [{ nodeId: 'execute', ownerAgentRole: 'execution', stateDisplay: '进行中', toolSteps: [{ stepId: 'step-1', turnId: 'turn-1', name: 'bash', status: 'succeeded', occurredAt: '2026-11-23T12:00:00Z', returned: 'must never be parsed' }] }] }
-  if (url.pathname.endsWith('/semantic')) return { events: [{ type: 'model.started', occurredAt: '2026-11-23T12:00:00Z' }] }
+  if (url.pathname.endsWith('/semantic')) return { events: [{ type: 'model.started', occurredAt: '2026-11-23T12:00:00Z' }, { type: 'internal.debug-only', occurredAt: '2026-11-23T12:00:01Z' }] }
   return {}
 }
 const server = createServer(async (req, res) => {
@@ -144,11 +147,19 @@ try {
   check('Jenny chat shows tracking without embedding the implicit agent tools',
     await page.locator('.mt-turn--dispatch .tool-card').count() === 0)
   const beforeRetry = writes.filter(path => path.endsWith('/confirmation')).length
-  for (const [index, message] of ['重试', '追加要求'].entries()) {
+  for (const [index, message] of ['重试'].entries()) {
     await input.fill(message)
     await page.getByRole('button', { name: '发送给 Jenny', exact: true }).click()
     const draft = page.locator(`[data-turn-id="draft:interaction-proof-${index + 2}"]`)
     const originalLink = draft.getByRole('link', { name: '查看原任务' })
+    try { await originalLink.waitFor({ timeout: 7000 }) }
+    catch (error) {
+      await writeFile(resolve(evidence, `failed-draft-${index + 2}.json`), JSON.stringify({
+        message, turns, interactions: [...interactions], tasks, writes,
+        body: await page.locator('body').innerText(),
+      }, null, 2))
+      throw error
+    }
     const targetUrl = new URL(await originalLink.getAttribute('href'), base)
     check(`existing-task proposal “${message}” opens the original scoped task without creating a task`,
       targetUrl.searchParams.get('task') === tasks[0].taskId.value &&
@@ -156,14 +167,48 @@ try {
       targetUrl.searchParams.get('control') === '1' &&
       writes.filter(path => path.endsWith('/confirmation')).length === beforeRetry)
   }
-  await input.fill('1加1等于几')
-  await page.getByRole('button', { name: '发送给 Jenny', exact: true }).click()
-  await page.getByText('等于 2', { exact: true }).first().waitFor()
-  check('second Jenny conversation works while prior task runs', tasks.length === 1)
-  await input.fill('检查第二个独立项目')
-  await page.getByRole('button', { name: '发送给 Jenny', exact: true }).click()
+  await page.reload()
+  await page.locator('.entry-jenny').waitFor()
+  await page.locator('.dispatch-card').waitFor()
+  const secondTaskId = 'parent-second'
+  tasks.push({ taskId: { scope: 'task', value: secondTaskId }, sourceInteractionId: 'second-interaction',
+    title: '检查第二个独立项目', state: 'running', stateLabel: '执行中',
+    identitySource: { requirementId: 'req-second', draftId: 'draft-second', inputRevision: 1 }, scope: scope(secondTaskId) })
+  turns.push({ turnId: 'draft:second-interaction', interactionId: 'second-interaction', role: 'jenny',
+    kind: 'draft', text: '完整任务文档 second-interaction', quote: '检查第二个独立项目',
+    taskId: { scope: 'task', value: secondTaskId } })
+  await page.reload()
   await page.waitForFunction(() => document.querySelectorAll('.dispatch-card').length === 2)
   check('two running tasks own separate cards', new Set(await page.locator('.dispatch-card').evaluateAll(nodes => nodes.map(node => node.dataset.dispatchTaskId))).size === 2)
+  await page.locator('.jenny-task-bar-toggle').click()
+  await page.locator('.jenny-task-bar-open').click()
+  await page.locator('.dispatch-summary').waitFor()
+  const taskBarWorkSession = new URL(await page.getByRole('link', { name: '打开工作会话', exact: true }).getAttribute('href'), base)
+  check('the Jenny task bar opens the same summary with a topic return target',
+    taskBarWorkSession.searchParams.get('task') === `child-${tasks[0].taskId.value}`
+    && taskBarWorkSession.searchParams.get('returnTo') === 'topic')
+  const topicWrites = writes.length
+  const topicSessionPagePromise = page.context().waitForEvent('page')
+  await page.getByRole('link', { name: '打开工作会话', exact: true }).click({ modifiers: ['Meta'] })
+  const topicSessionPage = await topicSessionPagePromise
+  await topicSessionPage.waitForURL(url => url.pathname === '/task-dashboard.html')
+  const topicSessionUrl = new URL(topicSessionPage.url())
+  check('clicking a task-bar work session opens the same scoped task dashboard',
+    topicSessionUrl.searchParams.get('task') === `child-${tasks[0].taskId.value}`
+    && topicSessionUrl.searchParams.get('projectKey') === project.projectKey
+    && topicSessionUrl.searchParams.get('mode') === project.mode
+    && writes.length === topicWrites)
+  const topicReturn = topicSessionPage.getByRole('link', { name: '返回 Jenny 话题', exact: true })
+  await topicReturn.waitFor()
+  const topicReturnUrl = new URL(await topicReturn.getAttribute('href'), topicSessionUrl)
+  check('a Jenny topic work session returns to the original scoped topic',
+    topicReturnUrl.pathname === '/'
+    && topicReturnUrl.searchParams.get('projectKey') === project.projectKey
+    && topicReturnUrl.searchParams.get('mode') === project.mode)
+  await topicReturn.click()
+  await topicSessionPage.waitForURL(url => url.pathname === '/' && url.searchParams.get('projectKey') === project.projectKey)
+  await topicSessionPage.close()
+  await page.keyboard.press('Escape')
   await input.fill('抽屉关闭后保留这条输入')
   await page.getByRole('button', { name: '任务板', exact: true }).click()
   await page.locator('.dispatch-board-entry').first().click()
@@ -171,14 +216,20 @@ try {
   catch (error) { await writeFile(resolve(evidence, 'failed-detail.txt'), await page.locator('body').innerText()); throw error }
   check('board opens exact formal child tools', await page.locator('[data-execution-task-id]').getAttribute('data-execution-task-id') === `child-${tasks[0].taskId.value}`)
   check('the actual scoped child tool call is visible in the task drawer before completion', tasks[0].state === 'running')
+  const summaryText = await page.locator('.dispatch-summary').innerText()
+  check('one task summary names the goal, roles, latest action and result',
+    summaryText.includes('目标：') && summaryText.includes('交办：') && summaryText.includes('执行：') && summaryText.includes('最近动作：读取文件') && summaryText.includes('结果：'))
+  check('the task drawer does not repeat an execution-chain heading per child',
+    await page.locator('.dispatch-detail').getByRole('heading', { name: '执行链', exact: true }).count() === 0)
   const workSession = page.getByRole('link', { name: '打开工作会话', exact: true })
-  check('the execution chain shows one work-session entry', await workSession.count() === 1)
+  check('the task summary shows one work-session entry', await workSession.count() === 1)
   const workSessionHref = new URL(await workSession.getAttribute('href'), base)
   check('the work-session entry keeps the exact execution task and read scope without inventing an agent instance',
     workSessionHref.pathname === '/task-dashboard.html'
     && workSessionHref.searchParams.get('task') === `child-${tasks[0].taskId.value}`
     && workSessionHref.searchParams.get('projectKey') === project.projectKey
     && workSessionHref.searchParams.get('mode') === 'fake'
+    && workSessionHref.searchParams.get('returnTo') === 'board'
     && ![...workSessionHref.searchParams.keys()].some(key => key.startsWith('agent'))
     && workSessionHref.searchParams.get('control') === null)
   const writesBeforeWorkSession = writes.length
@@ -204,17 +255,45 @@ try {
     && openedLocation.location.scope.mode === project.mode
     && openedLocation.location.scope.taskId.value === `child-${tasks[0].taskId.value}`
     && writes.length === writesBeforeWorkSession)
+  const returnLink = openedSession.getByRole('link', { name: '返回任务板', exact: true })
+  await returnLink.waitFor()
+  const returnHref = new URL(await returnLink.getAttribute('href'), openedUrl)
+  check('work session exposes an explicit scoped return to the original task board',
+    returnHref.pathname === '/tasks.html'
+    && returnHref.searchParams.get('projectKey') === project.projectKey
+    && returnHref.searchParams.get('mode') === project.mode)
+  await returnLink.click()
+  await openedSession.waitForURL(url => url.pathname === '/tasks.html')
+  check('the work-session return action leaves the task dashboard', new URL(openedSession.url()).searchParams.get('projectKey') === project.projectKey)
   await openedSession.close()
   const detailText = await page.locator('.dispatch-detail').innerText()
-  check('drawer shows execution without inventing an acceptance receipt', detailText.includes('跟踪中')
-    && detailText.includes('read-before-turn-end.txt') && !detailText.includes('已接手'))
+  check('drawer shows execution without inventing an acceptance receipt', detailText.includes('尚无已提交结果，任务仍在执行。')
+    && detailText.includes('read-before-turn-end.txt') && !detailText.includes('已接手')
+    && !detailText.includes('internal.debug-only') && !detailText.includes('执行事件'))
   await page.getByText('模型与操作生命周期', { exact: true }).click()
   await page.getByText('模型开始处理', { exact: false }).waitFor()
   await page.getByText('模型与操作生命周期', { exact: true }).focus()
-  await page.evaluate(() => { window.dispatchStableSummary = [...document.querySelectorAll('.dispatch-detail summary')].find(node => node.textContent === '模型与操作生命周期') })
-  await page.waitForTimeout(4400)
-  check('unchanged polling preserves disclosure DOM and keyboard focus', await page.evaluate(() => window.dispatchStableSummary?.isConnected
-    && window.dispatchStableSummary.parentElement.open && document.activeElement === window.dispatchStableSummary))
+  await page.setViewportSize({ width: 390, height: 480 })
+  const drawer = page.locator('dialog.shell-layer[open] > .shell-layer-body')
+  await page.evaluate(() => {
+    window.dispatchDetailMutations = 0
+    new MutationObserver(records => {
+      if (records.some(record => record.type === 'childList')) window.dispatchDetailMutations += 1
+    }).observe(document.querySelector('.dispatch-detail'), { childList: true })
+    const body = document.querySelector('dialog.shell-layer[open] > .shell-layer-body')
+    body.scrollTop = Math.min(120, body.scrollHeight - body.clientHeight)
+  })
+  const scrollTop = await drawer.evaluate(node => node.scrollTop)
+  check('the refresh test has a real scroll position', await drawer.evaluate(node => node.scrollHeight > node.clientHeight && node.scrollTop > 0))
+  sessionRevision += 1
+  await page.waitForFunction(() => window.dispatchDetailMutations > 0, { timeout: 6000 })
+  check('refreshed data preserves drawer scroll, disclosure state and keyboard focus', await page.evaluate(scrollTop => {
+    const body = document.querySelector('dialog.shell-layer[open] > .shell-layer-body')
+    const summary = [...document.querySelectorAll('.dispatch-detail summary')]
+      .find(node => node.textContent === '模型与操作生命周期')
+    return body?.scrollTop === scrollTop && summary?.parentElement.open && document.activeElement === summary
+  }, scrollTop))
+  await page.setViewportSize({ width: 1280, height: 900 })
   await page.screenshot({ path: resolve(evidence, 'isolated-task-chain.png') })
   await page.keyboard.press('Escape')
   check('close retains draft and restores composer focus', await input.inputValue() === '抽屉关闭后保留这条输入' && await input.evaluate(node => document.activeElement === node))
@@ -273,12 +352,73 @@ try {
   check('completed result stays with second task and changes only card border', (await page.locator('.dispatch-card').nth(1).getAttribute('data-result')) === 'success'
     && await page.locator('.dispatch-card').nth(1).getByText('完成', { exact: true }).count() === 0
     && await page.locator('[data-turn-id="result-second"] .mt-turn-head strong').innerText() === '任务执行链')
+  await page.getByRole('button', { name: '任务板', exact: true }).click()
+  await page.locator('.dispatch-board-entry').nth(1).click()
+  await page.locator('.dispatch-detail .dispatch-tool-step').waitFor()
+  check('legacy observation rows omit the empty operation-detail disclosure',
+    await page.locator('.dispatch-detail').getByText('操作详情', { exact: true }).count() === 0
+    && (await page.locator('.dispatch-detail .dispatch-tool-step').innerText()).includes('执行命令'))
+  await page.keyboard.press('Escape')
   const before = writes.length
   await page.getByRole('button', { name: '任务板', exact: true }).click()
   await page.locator('.dispatch-board-entry').first().click()
   await page.locator('.dispatch-detail .tool-card').filter({ hasText: 'read-before-turn-end.txt' }).waitFor()
   check('reopening never dispatches again', writes.length === before)
+  const blockedSummaryText = await page.locator('.dispatch-summary').innerText()
+  await writeFile(resolve(evidence, 'blocked-summary.txt'), blockedSummaryText)
+  check('blocked summary keeps the original recoverable error',
+    blockedSummaryText.includes('模型服务返回了无法识别的响应事件')
+    && blockedSummaryText.includes('确认外部变更结果后执行恢复或停止任务'))
+  await page.setViewportSize({ width: 390, height: 844 })
+  const summaryBox = await page.locator('.dispatch-summary').boundingBox()
+  check('the task summary fits a narrow viewport without page overflow',
+    summaryBox !== null && summaryBox.x >= 0 && summaryBox.x + summaryBox.width <= 390
+    && await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+  await page.screenshot({ path: resolve(evidence, 'narrow-task-chain.png'), fullPage: true })
+  await page.setViewportSize({ width: 1280, height: 900 })
   await page.keyboard.press('Escape')
+  tasks.length = 0
+  turns.length = 0
+  interactions.clear()
+  waitingDecision = undefined
+  const seedTaskId = 'parent-seed'
+  tasks.push({ taskId: { scope: 'task', value: seedTaskId }, sourceInteractionId: 'seed-interaction',
+    title: '既有运行任务', state: 'running', stateLabel: '执行中',
+    identitySource: { requirementId: 'req-seed', draftId: 'draft-seed', inputRevision: 1 }, scope: scope(seedTaskId) })
+  turns.push({ turnId: 'draft:seed-interaction', interactionId: 'seed-interaction', role: 'jenny',
+    kind: 'draft', text: '完整任务文档 seed', quote: '既有运行任务', taskId: { scope: 'task', value: seedTaskId } })
+  const conversationPage = await browser.newPage()
+  await conversationPage.goto(`${base}/?projectKey=${project.projectKey}&mode=fake`)
+  await conversationPage.locator('.dispatch-card').waitFor()
+  const conversationInput = conversationPage.locator('textarea[name=rawInput]')
+  await conversationInput.fill('1加1等于几')
+  await conversationPage.getByRole('button', { name: '发送给 Jenny', exact: true }).click()
+  await conversationPage.getByText('等于 2', { exact: true }).first().waitFor()
+  check('second Jenny conversation works while prior task runs', tasks.length === 1)
+  await conversationInput.fill('检查第二个独立项目')
+  await conversationPage.getByRole('button', { name: '发送给 Jenny', exact: true }).click()
+  await conversationPage.waitForFunction(() => document.querySelectorAll('.dispatch-card').length === 2)
+  check('a new task can run beside the retained earlier task', tasks.length === 2)
+  await conversationPage.close()
+
+  tasks.length = 0
+  turns.length = 0
+  interactions.clear()
+  tasks.push({ taskId: { scope: 'task', value: seedTaskId }, sourceInteractionId: 'seed-interaction',
+    title: '既有运行任务', state: 'running', stateLabel: '执行中',
+    identitySource: { requirementId: 'req-seed', draftId: 'draft-seed', inputRevision: 1 }, scope: scope(seedTaskId) })
+  turns.push({ turnId: 'draft:seed-interaction', interactionId: 'seed-interaction', role: 'jenny',
+    kind: 'draft', text: '完整任务文档 seed', quote: '既有运行任务', taskId: { scope: 'task', value: seedTaskId } })
+  const appendPage = await browser.newPage()
+  await appendPage.goto(`${base}/?projectKey=${project.projectKey}&mode=fake`)
+  const appendInput = appendPage.locator('textarea[name=rawInput]')
+  await appendInput.fill('追加要求')
+  await appendPage.getByRole('button', { name: '发送给 Jenny', exact: true }).click()
+  const appendLink = appendPage.locator('[data-turn-id="draft:interaction-proof-1"]').getByRole('link', { name: '查看原任务' })
+  await appendLink.waitFor()
+  check('an append proposal opens the same retained task without creating another task',
+    new URL(await appendLink.getAttribute('href'), base).searchParams.get('task') === seedTaskId && tasks.length === 1)
+  await appendPage.close()
   if (originalEndpoint) {
     phase = 'live'
     await page.goto(base)

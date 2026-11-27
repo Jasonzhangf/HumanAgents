@@ -1603,12 +1603,50 @@ function inputSectionContent() {
   ]
 }
 
+/**
+ * Enable light dismiss for ordinary drawers while preserving the dialog close lifecycle.
+ * Approval dialogs do not use this helper.
+ */
+export function bindDrawerLightDismiss(dialog) {
+  dialog.setAttribute('closedby', 'any')
+  let press
+  const insideRect = (event) => {
+    const rect = dialog.getBoundingClientRect()
+    return event.clientX >= rect.left && event.clientX <= rect.right
+      && event.clientY >= rect.top && event.clientY <= rect.bottom
+  }
+  dialog.addEventListener('pointerdown', (event) => {
+    if (dialog.open) press = { pointerId: event.pointerId, inside: insideRect(event) }
+  })
+  dialog.addEventListener('pointerup', (event) => {
+    if (!press || press.pointerId !== event.pointerId) return
+    const startedInside = press.inside
+    press = undefined
+    if (dialog.open && !startedInside && !insideRect(event)) dialog.close()
+  })
+  dialog.addEventListener('pointercancel', (event) => {
+    if (press?.pointerId === event.pointerId) press = undefined
+  })
+}
+
+function applyMobileEntryDrawerLayout(dialog) {
+  if (!document.querySelector('.entry-workspace') || !window.matchMedia('(max-width: 900px)').matches) return
+  Object.assign(dialog.style, {
+    inset: 'auto 0 0',
+    width: '100%',
+    height: 'min(78vh, 680px)',
+    maxHeight: 'none',
+    borderRadius: '12px 12px 0 0',
+  })
+}
+
 // One shell-layer frame owns the next-layer surface for both the four-corner configuration
 // panel and a contextual 技术详情 disclosure. Desktop shows it beside the page; mobile shows
 // it as a bottom drawer. Keeping one frame builder means a contextual detail cannot drift from
 // the configuration panel or become a second overlay primitive.
 function createShellLayerFrame({ ariaLabel, eyebrow, titleText = '', titleId }) {
   const layer = element('dialog', undefined, 'shell-layer')
+  bindDrawerLightDismiss(layer)
   layer.setAttribute('aria-label', ariaLabel)
   const head = element('header', undefined, 'shell-layer-head')
   const titleWrap = element('div')
@@ -1680,6 +1718,7 @@ export function openTechnicalDetail({ title = '技术详情', eyebrow = '技术�
     }
   }
   layer.setAttribute('aria-label', eyebrow)
+  applyMobileEntryDrawerLayout(layer)
   eyebrowNode.textContent = eyebrow
   titleNode.textContent = title
   clearNode(body)
@@ -2540,6 +2579,7 @@ export function mountProductShell(root, config = {}) {
     if (trigger instanceof HTMLElement) returnFocus = trigger
     else if (!drawerLayer.open) returnFocus = document.activeElement
     closeOtherShellLayers(drawerLayer)
+    applyMobileEntryDrawerLayout(drawerLayer)
     setDrawerTabState(tab)
     placeActiveHost(tab)
     if (!drawerLayer.open) drawerLayer.showModal()

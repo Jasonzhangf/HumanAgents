@@ -5,6 +5,7 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 .entry-rail { height: 100%; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding: 28px 16px 16px; border-right: 1px solid #dce2d9; }
 .entry-brand { display: flex; align-items: center; gap: 9px; font-size: 20px; font-weight: 700; letter-spacing: -.8px; }
 .entry-mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: #293f32; color: white; font-family: Georgia, serif; }
+.entry-alex { display: grid; gap: 5px; padding-bottom: 12px; border-bottom: 1px solid #dce2d9; }
 .entry-project-head { display: flex; justify-content: space-between; align-items: center; }
 .entry-kicker { margin: 0; font-size: 14px; }
 .entry-tool { padding: 6px 10px; min-height: 30px; font-size: 12px; background: white; border: 1px solid #dce2d9; border-radius: 6px; white-space: nowrap; cursor: pointer; }
@@ -12,6 +13,8 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 .entry-project { min-width: 0; }
 .entry-project summary { cursor: pointer; }
 .entry-project-name { padding: 6px 0; font-size: 14px; font-weight: 650; }
+.entry-workspace-current > summary { border-radius: 6px; background: #e0e9dd; color: #203b2c; }
+.entry-project-current > summary { margin-inline: -6px; padding-inline: 6px; border-radius: 6px; background: #dae7d9; color: #203b2c; }
 .entry-project-directory { margin: 2px 0 0 6px; padding-left: 8px; border-left: 1px solid #cdd6cb; }
 .entry-members { padding-top: 6px; }
 .entry-members > summary { padding: 6px 0; font-size: 14px; font-weight: 650; }
@@ -19,7 +22,7 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 .entry-rail a { text-decoration: none; overflow-wrap: anywhere; }
 .entry-person[aria-current="page"] { background: #dae7d9; color: #203b2c; }
 .entry-jenny { border-left: 3px solid #385e45; }
-.entry-ceo { margin-top: 10px; font-weight: 650; background: white; border: 1px solid #bac8bb; }
+.entry-ceo { font-weight: 650; background: white; border: 1px solid #bac8bb; }
 .entry-read-state { margin: 0; color: #59655c; font-size: 11px; }
 .entry-menu-toggle, .entry-menu-close { display: none; }
 #page-root > .page[data-page-layout="work"] { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; width: 100%; max-width: none; height: 100%; max-height: 100%; min-height: 0; min-width: 0; margin: 0; padding: 0; gap: 0; overflow: hidden; }
@@ -92,6 +95,9 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 .member-roster-detail { min-width: 0; overflow-wrap: anywhere; }
 .member-roster-detail h3 { margin: 18px 0 8px; font-size: 14px; }
 .member-roster-detail p { margin: 8px 0; }
+.member-roster-state { margin: 4px 0 0; padding: 7px 8px; border-radius: 5px; background: #f5f1e7; color: #665b3e; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.member-roster-default-unavailable { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.member-roster-entry-state { flex-basis: 100%; font-size: 11px; color: #665b3e; }
 .member-roster-identifiers { margin-top: 24px; padding-top: 8px; border-top: 1px solid #dce2d9; color: #59655c; font-size: 12px; }
 .member-roster-project-settings { align-content: start; overflow-wrap: anywhere; }
 .entry-workspace-folder{margin-block-end:8px}

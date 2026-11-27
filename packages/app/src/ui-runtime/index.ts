@@ -51,6 +51,7 @@ import { resetUiDisplayPreference } from '../../../config/src/index.js';
 import { FileCheckpointStore, openUiRuntimeOrganJournal, UiRuntimeJournal, uiRuntimeControlJournalPath } from './journal.js';
 import { UiRuntimeApiError } from './errors.js';
 import { bindUiDisplayPreferenceResource } from './display-preferences.js';
+import { bindWorkspaceManagementResource } from './workspace-management.js';
 import { createFakeExecutionPort } from '../fake-execution.js';
 import {
   UiRuntimeService,
@@ -773,6 +774,9 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const displayPreference = options.runtimePaths === undefined
     ? undefined
     : bindUiDisplayPreferenceResource(options.runtimePaths, resetUiDisplayPreference);
+  const workspaceManagement = options.runtimePaths === undefined
+    ? undefined
+    : bindWorkspaceManagementResource(options.runtimePaths);
   // Task-scoped grant control is the single execution authority for a real
   // Task. It reuses the same control Organ Journal, declared capability, clock
   // and standard stop path the rest of this assembly already owns; the server
@@ -799,6 +803,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     port: options.portNumber,
     taskControl,
     ...(displayPreference === undefined ? {} : { displayPreference }),
+    ...(workspaceManagement === undefined ? {} : { workspaceManagement }),
     ...(options.restart === undefined ? {} : { restart: options.restart }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
     schedulerStatus: async () => scheduler === undefined

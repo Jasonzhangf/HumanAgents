@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import { id } from '../../dist/app/contracts/src/index.js'
@@ -11,6 +12,8 @@ import {
   UiRuntimeJournal,
   UiRuntimeService,
 } from '../../dist/app/app/src/ui-runtime/index.js'
+import { createUiRuntimeRequestDispatcher } from '../../dist/app/app/src/ui-runtime/server.js'
+import { AccessControlService } from '../../dist/app/app/src/ui-runtime/access-control.js'
 import { DeterministicMemoryBackend } from '../../dist/app/adapters/memory/src/index.js'
 import { MemoryCoordinator } from '../../dist/app/runtime/src/index.js'
 
@@ -53,6 +56,35 @@ function openService(root) {
   })
 }
 
+async function readMainTopicHttp(root, service) {
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'access.json'),
+    create: true,
+  })
+  const challenge = await accessControl.issuePairingChallenge()
+  const session = await accessControl.consumePairingCode(challenge.code)
+  const cookie = accessControl.sessionCookie(session).split(';')[0]
+  const dispatcher = createUiRuntimeRequestDispatcher({
+    service, accessControl, productRoot: root, uiRoot: join(process.cwd(), 'docs/ui'),
+    isClosing: () => false,
+  })
+  const server = createServer((request, response) => dispatcher.listener(request, response))
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`
+    const response = await fetch(`${origin}/api/main-topic`, { headers: { cookie, origin } })
+    assert.equal(response.status, 200)
+    return response.json()
+  } finally {
+    server.closeAllConnections()
+    await new Promise((resolve) => server.close(resolve))
+    await accessControl.closeCredentialWatch()
+  }
+}
+
 test('main-topic reuses one scoped snapshot and projects first-response facts without token text', async () => {
   const root = await mkdtemp(join(tmpdir(), 'main-topic-read-facts-'))
   try {
@@ -81,6 +113,81 @@ test('main-topic reuses one scoped snapshot and projects first-response facts wi
     const unavailable = await service.readMainTopic()
     assert.equal(unavailable.tasks[0].detailReadError.message, 'controlled snapshot failure')
     assert.equal(unavailable.tasks[0].state, topic.tasks[0].state)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('main-topic closes only an exact successful cold checkpoint and keeps publication separate', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'main-topic-cold-checkpoint-'))
+  try {
+    const service = openService(root)
+    const organId = id('organ', `${projectKey}-organ`)
+    const taskSnapshots = service.coordinator.taskSnapshots.bind(service.coordinator)
+    const taskSnapshot = service.coordinator.taskSnapshot.bind(service.coordinator)
+
+    async function readColdTask(title, checkpointOutcome, checkpointEpoch, snapshotEpoch) {
+      service.coordinator.taskSnapshots = taskSnapshots
+      service.coordinator.taskSnapshot = taskSnapshot
+      const created = service.createTask({ title, directive: 'read an isolated cold execution' })
+      const cycleId = id('cycle', `ui-cycle-${title}`)
+      const operationId = id('operation', `scheduled-operation-${title}`)
+      const scope = { organId, taskId: created.taskId, cycleId }
+      const checkpoint = {
+        id: id('checkpoint', `checkpoint-${title}`), scope, cycleId, seq: 1,
+        previousCheckpointId: null, directiveRevision: 1, executionEpoch: checkpointEpoch,
+        outcome: checkpointOutcome, summary: checkpointOutcome === 'succeeded' ? 'execution succeeded' : 'real blocker',
+        recoveryStateRef: {
+          evidenceId: id('evidence', `recovery-${title}`), kind: 'operation',
+          source: 'cold-checkpoint-readback', locator: `test://recovery/${title}`, scope,
+        },
+        evidenceRefs: [],
+        next: { kind: 'continue', ref: `test://${title}/next` },
+      }
+      const checkpointPath = join(root, 'checkpoints', `${created.taskId.value}-${cycleId.value}.jsonl`)
+      await mkdir(dirname(checkpointPath), { recursive: true })
+      await new FileCheckpointStore(checkpointPath).commit(checkpoint)
+
+      const prior = taskSnapshot(created.taskId)
+      const checkpointEvent = {
+        eventId: `${operationId.value}-checkpoint`, seq: 1, occurredAt: '2026-10-08T00:53:23.851Z',
+        taskId: created.taskId, operationId: operationId.value, executionEpoch: checkpointEpoch,
+        kind: 'checkpoint.committed', state: checkpointOutcome, summary: checkpoint.summary, evidenceRefs: [],
+      }
+      const cold = {
+        ...prior, state: 'blocked', currentState: '进程已重启或缺少终态 checkpoint',
+        nextStep: '确认 Provider 资源已释放后再发起新执行', operationId: operationId.value,
+        executionEpoch: snapshotEpoch, cycleId: cycleId.value, events: [checkpointEvent], recentEvents: [checkpointEvent],
+        ...(checkpointOutcome === 'blocked' ? { error: {
+          code: 'test.real-blocker', ownerId: 'test.resource-owner', message: 'resource is still blocked',
+          nextAction: 'release the declared resource', retryable: false,
+        } } : {}),
+      }
+      service.coordinator.taskSnapshots = () => [cold]
+      service.coordinator.taskSnapshot = () => cold
+      return { taskId: created.taskId, topic: await service.readMainTopic(), dashboard: await service.taskDashboardWithPlan(created.taskId) }
+    }
+
+    const exact = await readColdTask('exact-success', 'succeeded', 1, 1)
+    assert.equal(exact.topic.tasks.find((task) => task.taskId.value === exact.taskId.value).state, 'succeeded')
+    assert.equal(exact.dashboard.state, 'succeeded')
+    assert.equal(exact.dashboard.checkpoint?.checkpointId, 'checkpoint-exact-success')
+    assert.equal(exact.dashboard.output, '')
+    assert.equal(exact.topic.turns.filter((turn) => turn.kind === 'result' && turn.taskId?.value === exact.taskId.value).length, 0)
+    const httpTopic = await readMainTopicHttp(root, service)
+    assert.equal(httpTopic.tasks.find((task) => task.taskId.value === exact.taskId.value).state, 'succeeded')
+    assert.equal(httpTopic.turns.filter((turn) => turn.kind === 'result' && turn.taskId?.value === exact.taskId.value).length, 0)
+
+    const wrongEpoch = await readColdTask('wrong-epoch', 'succeeded', 2, 1)
+    assert.equal(wrongEpoch.topic.tasks.find((task) => task.taskId.value === wrongEpoch.taskId.value).state, 'blocked')
+    assert.equal(wrongEpoch.dashboard.checkpoint, undefined)
+
+    const realBlocker = await readColdTask('real-blocker', 'blocked', 1, 1)
+    assert.equal(realBlocker.topic.tasks.find((task) => task.taskId.value === realBlocker.taskId.value).state, 'blocked')
+    assert.equal(realBlocker.dashboard.state, 'blocked')
+    assert.equal(realBlocker.dashboard.checkpoint?.outcome, 'blocked')
+    assert.equal(realBlocker.dashboard.error?.ownerId, 'test.resource-owner')
+    assert.equal(realBlocker.dashboard.nextStep, 'release the declared resource')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

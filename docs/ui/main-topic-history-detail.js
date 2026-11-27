@@ -1,7 +1,7 @@
 import { api, element } from './runtime-shell.js'
 import { renderToolBody, disposeToolBody } from './tool-presentation.js'
 import { mainTopicActorLabel } from './main-topic.js'
-import { renderExplicitToolActivity } from './explicit-tool-activity.js'
+import { explicitToolActivityFinished, renderExplicitToolActivity } from './explicit-tool-activity.js'
 import { conversationStatus, elapsedSeconds } from './conversation-status.js'
 
 // Membership and ordering come only from the owner's round references.
@@ -50,7 +50,7 @@ export function renderMainTopicHistoryDetail(round, turns, { readOutput = api.re
     if (turn.toolEvents?.length) {
       const tools = element('div', undefined, 'tool-body')
       bubble.append(tools)
-      renderToolBody(tools, turn.toolEvents, readOutput)
+      renderToolBody(tools, turn.toolEvents, readOutput, { finished: explicitToolActivityFinished(turn) })
     }
     article.append(bubble)
     content.append(article)

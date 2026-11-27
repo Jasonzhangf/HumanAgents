@@ -22,6 +22,77 @@ const end = {
   deliveryRefs: ['asset:report'],
 }
 
+// Captured inventory report shape: git-inventory-readonly.ts GitReadonlyInventory,
+// 盘点操作-真实工作区回执.json inner report. Keep metadata references out of cards.
+// Known failure: generic fallback shows {} and raw JSON, hiding scope/gaps.
+// Impact: users can mistake external references or unreadable entries for coverage.
+// Cost: pure semantic regression, no filesystem scan or running instance.
+const inventoryRoot = '/Users/fanzhang/github'
+const inventoryWorktree = (path, scope, allocatedKiB) => ({
+  path, gitDir: '/outside/internal/.git', scope, head: null, branch: null,
+  allocatedKiB, headCommit: null, latestCommitDate: null, dirty: null,
+  untracked: null, includedInLocalMain: null, includedInTrackingMain: null,
+})
+const inventory = {
+  workspaceRoot: inventoryRoot, observedAt: '2026-11-25T16:10:14.510Z',
+  projects: [
+    { path: `${inventoryRoot}/appsdk`, allocatedKiB: 8292660 },
+    { path: `${inventoryRoot}/routecodex`, allocatedKiB: 9855640 },
+    { path: `${inventoryRoot}/predict`, allocatedKiB: 3356172 },
+  ],
+  repositories: [
+    { path: `${inventoryRoot}/appsdk`, gitDir: null, commonDir: null, branch: null, worktrees: [] },
+    { path: `${inventoryRoot}/routecodex`, gitDir: null, commonDir: null, branch: null, worktrees: [
+      inventoryWorktree(`${inventoryRoot}/routecodex`, 'in-root', 9855640),
+      inventoryWorktree('/outside/unrelated-worktree', 'external-reference-only', null),
+    ] },
+  ],
+  gaps: ['symlink', 'cross-device', 'unreadable', 'external-git-pointer', 'git-config-not-read', 'command-failed', 'unsupported-entry']
+    .map((reason) => ({ path: '/outside/unrelated-gap', reason })),
+}
+
+test('workspace inventory explains empty-input start and typed readonly results with bounded coverage and sizes', () => {
+  const started = taskSemantics('workspace.inventory', {})
+  assert.equal(started.title, '只读盘点工作区')
+  assert.equal(started.subject, '当前授权目录')
+  assert.match(text(started), /尚无结果正文/)
+  assert.doesNotMatch(text(started), /调用参数|\{\}|已返回盘点/)
+  const before = JSON.stringify(inventory)
+  const view = taskSemantics('workspace.inventory', {}, inventory)
+  assert.equal(view.subject, inventoryRoot)
+  assert.match(text(view), /3 个项目目录.*2 个仓库.*2 条工作树记录/s)
+  assert.match(text(view), /目录内 1 条.*目录外仅引用 1 条/s)
+  assert.match(text(view), /覆盖缺口 7 项/)
+  for (const reason of ['符号链接', '跨文件系统', '无法读取', '目录外 Git 引用', '未读取 Git 配置', '只读命令失败', '不支持的条目']) assert.ok(text(view).includes(`${reason} 1 项`), reason)
+  assert.match(text(view), /routecodex：9\.40 GiB/)
+  assert.match(text(view), /appsdk：7\.91 GiB/)
+  assert.ok(text(view).indexOf('routecodex：') < text(view).indexOf('appsdk：'))
+  assert.match(text(view), /只读.*不写入或修改/s)
+  assert.doesNotMatch(text(view), /unrelated|internal|headCommit|尚无结果|正文为空|无覆盖缺口|完整覆盖|任务已完成/)
+  assert.equal(JSON.stringify(inventory), before)
+  assert.ok(view.lines.length <= 8)
+  assert.ok(view.lines.every((line) => line.text.length <= 240))
+})
+
+test('workspace inventory distinguishes empty facts, missing report, unknown sizes and coverage gaps', () => {
+  const empty = { workspaceRoot: inventoryRoot, observedAt: inventory.observedAt, projects: [], repositories: [], gaps: [] }
+  assert.match(text(taskSemantics('workspace.inventory', {}, empty)), /0 个项目目录.*0 个仓库.*0 条工作树记录/s)
+  assert.match(text(taskSemantics('workspace.inventory', {}, empty)), /未报告覆盖缺口/)
+  const gapped = taskSemantics('workspace.inventory', {}, { ...empty, gaps: inventory.gaps })
+  assert.match(text(gapped), /覆盖缺口 7 项/)
+  assert.doesNotMatch(text(gapped), /未报告覆盖缺口|完整覆盖|正文为空|无结果/)
+  const unknown = taskSemantics('workspace.inventory', {}, { ...empty, projects: [{ path: `${inventoryRoot}/unknown`, allocatedKiB: null }] })
+  assert.match(text(unknown), /unknown：大小未取得/)
+  assert.doesNotMatch(text(unknown), /unknown：0/)
+  assert.doesNotMatch(text(taskSemantics('workspace.inventory', {}, {})), /已返回盘点|0 个项目|未报告覆盖缺口/)
+  assert.match(text(taskSemantics('workspace.inventory', {}, null)), /结果正文为空/)
+  const many = { ...inventory, projects: Array.from({ length: 40 }, (_, i) => ({ path: `${inventoryRoot}/project-${i}`, allocatedKiB: i })) }
+  const bounded = taskSemantics('workspace.inventory', {}, many)
+  assert.ok(bounded.lines.length <= 8)
+  assert.match(text(bounded), /更多占用见完整报告/)
+  assert.doesNotMatch(text(bounded), /project-0：/)
+})
+
 test('orchestration cards distinguish dispatch, return and adoption without quoting raw instructions', () => {
   const args = { agentId: 'execution-default', purpose: '核对标记文件', instructions: '内部执行约束' }
   const request = taskSemantics('child.call', args)

@@ -16,6 +16,8 @@ declare module 'node:test' {
 declare module 'node:fs/promises' {
   export function mkdtemp(prefix: string): Promise<string>;
   export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
+  export function readFile(path: string, encoding: 'utf8'): Promise<string>;
+  export function rm(path: string, options?: { recursive?: boolean }): Promise<void>;
   export function realpath(path: string): Promise<string>;
   export function stat(path: string): Promise<{ isDirectory(): boolean; mode: number }>;
   export function writeFile(path: string, data: string, encoding?: string): Promise<void>;

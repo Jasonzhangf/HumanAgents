@@ -1,0 +1,39 @@
+{
+  "result": "FAIL",
+  "failure": "desktop right drawer closes from a point outside its rect: {\"desktopTaskDrawerBox\":{\"x\":900,\"y\":0,\"width\":540,\"height\":900},\"desktopDismissState\":{\"open\":true,\"closedby\":null,\"rect\":{\"x\":900,\"y\":0,\"width\":540,\"height\":900,\"top\":0,\"right\":1440,\"bottom\":900,\"left\":900}}}",
+  "checks": [
+    "desktop rail is 222px",
+    "only public Jenny is nested under members",
+    "no placeholder member tree",
+    "project settings dialog restores after reload",
+    "project settings close button still closes the drawer",
+    "a project appearing in the system read enters the rail without reload or focus loss",
+    "an unchanged call snapshot keeps the open detail and its row",
+    "poll retains collapsed tree",
+    "poll performed",
+    "task board contains task rows",
+    "task drawer does not resize timeline"
+  ],
+  "drawerDismissalMetrics": {
+    "mode": "red-disabled-helper",
+    "desktopRight": {
+      "rect": {
+        "x": 900,
+        "y": 0,
+        "width": 540,
+        "height": 900
+      },
+      "outside": {
+        "x": 8,
+        "y": 8
+      }
+    }
+  },
+  "reads": 10,
+  "writes": [],
+  "cleanup": {
+    "browserClosed": true,
+    "noListeningServer": true,
+    "productionWrites": false
+  }
+}

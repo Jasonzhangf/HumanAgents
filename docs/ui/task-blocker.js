@@ -12,6 +12,12 @@ export function explainedToolErrorReason(error) {
   if (error?.code === 'tool.argument.invalid' && error?.message === 'search path escapes the bound workspace') {
     return '路径无效；请改用项目工作区内的相对路径。'
   }
+  if (error?.code === 'tool.argument.invalid' && error.message === 'bash timeoutMs must be an integer from 1 to 120000') {
+    return 'Bash 等待上限必须是 1 到 120,000 毫秒之间的整数。'
+  }
+  if (error?.code === 'tool.result.failure' && error.message === 'tool settled after stop; admitted effects require reconciliation') {
+    return '工具在停止后才返回，运行时需核对这次调用的影响。'
+  }
 }
 
 export function userFacingErrorReason(error) {

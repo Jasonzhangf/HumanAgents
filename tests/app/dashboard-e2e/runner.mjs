@@ -28,9 +28,9 @@
  *
  * Unsupported option combinations are rejected up front: a request for a mode
  * the runner cannot really exercise never silently becomes a new service or a
- * success. Persistent state derives from the product config owner
- * (`resolveRuntimePaths`); the runner never sets a temporary HOME/HUMANAGENT_HOME
- * and never roots a persistent control root inside its ephemeral attempt tmp.
+ * success. Candidate state derives from the product config owner
+ * (`resolveRuntimePaths`) inside one fixed, versioned, owner-scoped E2E test
+ * root; only the small receipt directory lives outside the removed runtime tree.
  *
  * Fail closed: any error, missing evidence, or unverifiable terminal leaves the
  * attempt INCOMPLETE with the first deviation and the raw error recorded in the
@@ -92,6 +92,7 @@ export const USAGE = [
   '  --outcome <success|failure|cancel>                                    default success',
   '  --service-mode <candidate|installed-attach>                           default candidate',
   '  --cli-path <path>                                                     default <repo>/dist/app/app/src/cli.js',
+  '  --evidence-root <path>                                                directory for retained receipts/screenshots (default <tmp>/humanagent-e2e-evidence)',
   '  --help                                                                print this help',
 ].join('\n');
 
@@ -117,6 +118,7 @@ export function parseOptions(argv) {
     outcome: take('--outcome') ?? 'success',
     serviceMode,
     cliPath: take('--cli-path'),
+    evidenceRoot: take('--evidence-root'),
   };
   assertSupportedCombination(options.scenario, options);
   return options;
@@ -272,8 +274,10 @@ export async function runScenario(scenario, options = {}) {
       outcome,
       serviceMode,
       attemptIdSuffix: options.attemptIdSuffix,
+      attemptOwner: options.attemptOwner,
       recoveryOwner: options.recoveryOwner,
       formalWorkspace: options.formalWorkspace ?? process.env.HUMANAGENT_ATTACH_WORKSPACE ?? null,
+      evidenceRoot: options.evidenceRoot ?? null,
       resolvePaths: options.resolvePaths ?? null,
       ...(options.scope ? { scope: options.scope } : {}),
     });
@@ -285,7 +289,10 @@ export async function runScenario(scenario, options = {}) {
       binding.executionEpoch = options.scope.executionEpoch ?? null;
     }
     registerAttemptResources(binding);
-    await resolveAttemptPaths(binding, { resolvePaths: options.resolvePaths, controlRoot: options.controlRoot });
+    await resolveAttemptPaths(binding, {
+      resolvePaths: options.resolvePaths,
+      ...(serviceMode === 'candidate' && options.controlRoot ? { controlRoot: options.controlRoot } : {}),
+    });
     if (serviceMode === 'installed-attach') {
       await resolveFormalAttachPaths(binding, {
         formalWorkspace: options.formalWorkspace,

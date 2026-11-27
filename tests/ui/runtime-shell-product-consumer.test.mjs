@@ -233,6 +233,10 @@ class FakeDocument {
     return new FakeElement(tag)
   }
 
+  querySelector(selector) {
+    return this.body.querySelector(selector)
+  }
+
   querySelectorAll(selector) {
     return this.body.querySelectorAll(selector)
   }
@@ -472,4 +476,16 @@ test('mountPageTemplate keeps its existing contract and disposal', () => {
 
   template.dispose()
   assert.equal(root.children.length, 0)
+})
+
+// Failure basis: an ordinary dialog without native light dismiss ignores an
+// outside click. Impact: users must find the close control on every drawer.
+// Cost: one shared-shell mount in the existing local consumer.
+test('ordinary shell drawers opt into native light dismiss', () => {
+  const root = makeRoot()
+  const product = runtimeShell.mountProductShell(root, { layout: 'collection', title: '抽屉' })
+  product.openDrawer('board')
+  assert.equal(product.hosts.drawer.parentNode.getAttribute('closedby'), 'any')
+
+  product.dispose()
 })

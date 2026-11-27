@@ -35,13 +35,12 @@ test('actual arguments identify each tool before a report exists', () => {
   }
 })
 
-test('read distinguishes empty, absent, and literal markup content', () => {
+test('read reports the actual path and distinguishes empty, absent, and available content', () => {
   assert.match(fileSemantics('file.read', {}, { content: '' }).summary, /本次读取内容为空/)
   assert.match(fileSemantics('file.read', {}, {}).summary, /未提供/)
   assert.match(fileSemantics('file.read', {}, null).summary, /未提供/)
   assert.deepEqual(fileSemantics('file.read', { path: 'wrong' }, { path: 'actual', content: '<img onerror=x>\nnext' }), {
-    title: '读取文件', subject: 'actual', summary: '文件内容预览',
-    lines: [{ kind: 'text', text: '<img onerror=x>' }, { kind: 'text', text: 'next' }],
+    title: '读取文件', subject: 'actual', summary: '已读取文件内容', lines: [],
   })
 })
 
@@ -119,9 +118,10 @@ test('web results preserve title, URL, source and empty snippet distinction', ()
 
 test('large reports have bounded previews; a trimmed pure insertion has exact counts', () => {
   const huge = 'x'.repeat(100_000)
+  const read = fileSemantics('file.read', { path: huge }, { content: 'a\n'.repeat(100_000) })
+  assert.ok(read.subject.length <= 401)
+  assert.deepEqual(read.lines, [])
   for (const card of [
-    fileSemantics('file.read', { path: huge }, { content: huge }),
-    fileSemantics('file.read', {}, { content: 'a\n'.repeat(100_000) }),
     fileSemantics('file.list', {}, { entries: Array.from({ length: 1000 }, (_, i) => ({ path: `file${i}` })) }),
     fileSemantics('file.edit', {}, { before: huge, after: 'changed\n' + huge }),
     fileSemantics('file.edit', {}, { before: 'a\n'.repeat(1000), after: 'b\n'.repeat(1000) }),

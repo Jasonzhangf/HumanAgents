@@ -1,0 +1,66 @@
+{
+  "id": "humanagent-workspace-display-name-management",
+  "version": "1",
+  "meta": {
+    "title": "工作区显示名批量管理",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "requirementsVersion": 35,
+    "terminalContract": {
+      "success": "本次请求的每一项都返回持久化结果；成功的显示名可从 Config manifest 冷读，projectKey 与 workspaceCwd 保持不变；同一 workspaceCwd 的全部登记冷读为同一名称并只呈现一个工作区别名",
+      "rejected": "不存在登记、路径与稳定身份不匹配、路径无效或名称为空的单项返回明确失败，其他项继续处理",
+      "scope": "每次写入逐项核对 projectKey 与 workspaceCwd；不接受路径迁移",
+      "authority": "project.json 是显示名持久事实；前端与 App 不保存第二份管理状态"
+    },
+    "implementationGap": "任务开始时 Config manifest 没有显示名字段，App 没有管理工作区资源，入口只展示只读说明。"
+  },
+  "inputs": [{ "id": "workspace_management_request", "schema": "Object" }],
+  "nodes": [
+    {
+      "id": "read_workspace_registry",
+      "operator": "humanagent-workspace-registry-read",
+      "operator_version": "1",
+      "inputs": ["workspace_management_request"],
+      "output": { "id": "workspace_registry_snapshot", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "validate_workspace_edits",
+      "operator": "humanagent-workspace-display-name-validate",
+      "operator_version": "1",
+      "inputs": ["workspace_registry_snapshot"],
+      "output": { "id": "validated_workspace_edits", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "persist_display_names",
+      "operator": "humanagent-workspace-display-name-save",
+      "operator_version": "1",
+      "inputs": ["validated_workspace_edits"],
+      "output": { "id": "workspace_edit_receipts", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "read_back_display_names",
+      "operator": "humanagent-workspace-display-name-read-back",
+      "operator_version": "1",
+      "inputs": ["workspace_edit_receipts"],
+      "output": { "id": "workspace_management_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "read_workspace_registry", "to": "validate_workspace_edits", "arc_id": "workspace_registry_snapshot" },
+    { "from": "validate_workspace_edits", "to": "persist_display_names", "arc_id": "validated_workspace_edits" },
+    { "from": "persist_display_names", "to": "read_back_display_names", "arc_id": "workspace_edit_receipts" }
+  ],
+  "outputs": ["workspace_management_result"]
+}

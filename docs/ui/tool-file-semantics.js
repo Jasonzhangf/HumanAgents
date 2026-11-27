@@ -118,7 +118,7 @@ export function fileSemantics(toolId, args = {}, report) {
   if (toolId === 'file.read') {
     if (typeof report.content !== 'string') return finish('文件内容未提供')
     if (report.content === '') return finish('本次读取内容为空')
-    return finish('文件内容预览', textLines(report.content, 'text'), report.content.length > DIFF_CHARS)
+    return finish('已读取文件内容')
   }
   if (toolId === 'file.write' || toolId === 'file.edit') {
     const { before, after } = report

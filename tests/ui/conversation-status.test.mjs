@@ -19,6 +19,25 @@ test('terminal without a matching boundary omits duration; foreign execution can
   assert.equal(elapsedSeconds(rows.find((r) => r.phase === 'model-wait'), Date.parse(at(30))), undefined)
   assert.equal(elapsedSeconds({ startedAt: at(1), running: false }, Date.parse(at(30))), undefined)
 })
+test('a confirmed restart of the same execution key creates its own timing range', () => {
+  const events = [
+    event('execution.started', 1),
+    event('execution.started', 2),
+    event('execution.terminal', 6, { terminalPhase: 'final', state: 'blocked' }),
+    event('execution.started', 25),
+  ]
+  const recent = conversationStatus({ state: 'blocked', events }).find(row => row.phase === 'total')
+  assert.equal(recent.startedAt, at(25))
+  assert.equal(elapsedSeconds(recent), undefined, 'a missing final boundary must not borrow elapsed time from an earlier attempt')
+  assert.equal(recent.running, false)
+  assert.equal(recent.tone, 'warning')
+  assert.equal(recent.label, '本次执行结束时间未记录')
+  const finished = conversationStatus({ state: 'succeeded', events: [
+    ...events, event('execution.terminal', 29, { terminalPhase: 'final', state: 'succeeded' }),
+  ] }, { allRequests: true }).filter(row => row.phase === 'total')
+  assert.deepEqual(finished.map(row => elapsedSeconds(row)), [5, 4])
+  assert.notEqual(finished[0].key, finished[1].key)
+})
 test('tool identity includes call, task, operation and epoch; failure and retry are facts', () => {
   const events = [event('provider.tool', 1, { callId: 'a' }), event('provider.tool', 2, { callId: 'b' }), event('provider.tool-result', 3, { callId: 'a', executionEpoch: 2 }), event('provider.tool-result', 4, { callId: 'b', status: 'failed', error: { code: 'tool.failed', message: '读取失败' } })]
   const rows = conversationStatus({ state: 'running', events })

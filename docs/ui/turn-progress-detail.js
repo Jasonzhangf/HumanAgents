@@ -1,6 +1,6 @@
 import { element, formatTime } from './runtime-api.js'
 import { conversationStatus, conversationStatusTime } from './conversation-status.js'
-import { explicitToolActivityFinished, renderExplicitToolActivity } from './explicit-tool-activity.js'
+import { explicitRequestMetadata, explicitStepsWithToolEvents, explicitToolActivityFinished } from './explicit-tool-activity.js'
 import { sanitizeUserVisibleText } from './step-labels.js'
 import { disposeToolBody, renderToolBody } from './tool-presentation.js'
 
@@ -28,15 +28,14 @@ export function renderTurnProgressDetail(turn, { readOutput } = {}) {
   }
   if (list.children.length) content.append(list)
 
-  const explicitHost = element('div', undefined, 'progress-explicit-tools')
-  renderExplicitToolActivity(explicitHost, turn.explicitSteps ?? turn.statusFacts?.steps,
-    explicitToolActivityFinished(turn))
-  if (explicitHost.children.length) content.append(explicitHost)
-
   let toolBody
-  if (turn.toolEvents?.length) {
+  const explicitSteps = turn.explicitSteps ?? turn.statusFacts?.steps
+  const metadata = explicitRequestMetadata(explicitSteps)
+  if (metadata) content.append(element('p', metadata.label, 'progress-request-metadata'))
+  const toolEvents = [...(turn.toolEvents ?? []), ...explicitStepsWithToolEvents(explicitSteps, turn.interactionId)]
+  if (toolEvents.length) {
     toolBody = element('div', undefined, 'tool-body')
-    renderToolBody(toolBody, turn.toolEvents, readOutput)
+    renderToolBody(toolBody, toolEvents, readOutput, { finished: explicitToolActivityFinished(turn) })
     content.append(toolBody)
   }
   if (!content.children.length) content.append(element('p', '尚无实际步骤。', 'empty'))

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { taskForTurn, childExecutionIds, dispatchState, observationTools, createDispatchTracking, executionIdentity, workSessionHref } from '../../docs/ui/dispatch-tracking.js'
+import { taskForTurn, childExecutionIds, dispatchState, observationTools, createDispatchTracking, executionIdentity, workSessionHref, taskWorkSessionReturn, dispatchSummary } from '../../docs/ui/dispatch-tracking.js'
 import { ownedMainTopicTurns } from '../../docs/ui/main-topic.js'
 import { decodeProductLocation } from '../../docs/ui/product-location.js'
 
@@ -36,6 +36,17 @@ test('work session keeps the exact task scope and omits an unverified agent sele
     kind: 'interaction', taskRef: { scope: 'task', value: 'child-a' }, scope: location.location.scope,
   })
   assert.equal(workSessionHref({ kind: 'task', projectKey: 'p', mode: 'fake', taskId: undefined }), undefined)
+  const withReturn = new URL(workSessionHref({ kind: 'task', projectKey: 'p', mode: 'fake', taskId: 'child-a' }, { returnTo: 'board' }), 'http://humanagent.invalid/task-dashboard.html')
+  assert.equal(withReturn.searchParams.get('returnTo'), 'board')
+  assert.equal(withReturn.searchParams.get('task'), 'child-a')
+  assert.equal(withReturn.hash.includes('%22taskId%22'), true)
+})
+
+test('work session return context is explicit and scoped', () => {
+  const scope = { kind: 'task', projectKey: 'p', mode: 'fake', taskId: { scope: 'task', value: 'child-a' } }
+  assert.deepEqual(taskWorkSessionReturn('topic', scope), { kind: 'topic', label: '返回 Jenny 话题', href: './?projectKey=p&mode=fake' })
+  assert.deepEqual(taskWorkSessionReturn('board', scope), { kind: 'board', label: '返回任务板', href: './tasks.html?projectKey=p&mode=fake' })
+  assert.equal(taskWorkSessionReturn('topic', { kind: 'task', projectKey: '', mode: 'fake', taskId: 'a' }), undefined)
 })
 test('task and turn ownership uses exact task or source interaction, never matching text', () => {
   assert.equal(taskForTurn({ interactionId: 'interaction-b', text: '检查项目' }, [task, other]), other)
@@ -96,6 +107,44 @@ test('legacy steps use structured role, name, turn and status; returned is never
   assert.equal(tools[0].role, 'execution')
   assert.equal(tools[0].status, 'succeeded')
   assert.equal(tools[0].returned, undefined)
+})
+test('task summary prefers scoped typed events and keeps absent results explicit', () => {
+  const taskId = { scope: 'task', value: 'child-a' }
+  const scope = { kind: 'task', projectKey: 'p', mode: 'fake', taskId }
+  const call = { kind: 'provider.tool', scope, taskId, operationId: 'op-a', executionEpoch: 1,
+    seq: 1, eventId: 'call-a', callId: 'call-a', toolId: 'file.read', arguments: { path: 'report.md' },
+    occurredAt: '2026-11-23T00:00:00Z', execution: { role: 'execution' } }
+  const result = { ...call, kind: 'provider.tool-result', seq: 2, eventId: 'result-a', status: 'succeeded',
+    occurredAt: '2026-11-23T00:00:01Z', outputRef: 'output-a', outputDigest: 'digest-a' }
+  const record = {
+    task: { title: '检查报告', state: 'running' }, turn: { role: 'jenny' },
+    children: [{
+      scope: { ...scope, taskId: taskId.value },
+      session: { toolEvents: [call, result] },
+      observation: { nodes: [{ ownerAgentRole: 'unknown', toolSteps: [{
+        stepId: 'legacy', name: 'bash', status: 'failed', occurredAt: '2026-11-23T01:00:00Z',
+      }] }] },
+    }],
+  }
+  const summary = dispatchSummary(record)
+  assert.deepEqual(summary.roles, ['执行 Agent'])
+  assert.equal(summary.latestAction.title, '读取文件')
+  assert.equal(summary.latestAction.status, '已完成')
+  assert.equal(summary.result, '尚无已提交结果，任务仍在执行。')
+  assert.equal(dispatchSummary({ ...record, children: [{ ...record.children[0],
+    session: { ...record.children[0].session, publicOutput: { state: 'committed', commits: [{ text: '报告结论' }] } } }] }).result,
+  '报告结论')
+})
+test('task summary exposes the original error and recovery instruction', () => {
+  const summary = dispatchSummary({
+    task: { title: '失败任务', state: 'blocked', nextStep: '确认外部变更结果后执行恢复或停止任务',
+      error: { code: 'unknown.event', message: '模型服务返回了无法识别的响应事件' } },
+    turn: { role: 'jenny' }, children: [],
+  })
+  assert.equal(summary.delegatedBy, 'Jenny')
+  assert.deepEqual(summary.roles, [])
+  assert.equal(summary.latestAction, undefined)
+  assert.equal(summary.result, '模型服务返回了无法识别的响应事件，任务已暂停。 · 确认外部变更结果后执行恢复或停止任务')
 })
 test('tracking retains separate terminal tasks and never performs a dispatch write', async () => {
   const calls = []

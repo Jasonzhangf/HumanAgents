@@ -541,14 +541,23 @@ export async function closeSettledAttempt(binding, settleResult) {
     () => ({ closed: true }),
     (error) => ({ closed: false, reason: `browser close failed: ${error.message}` }),
   );
-  // Persistent roots (control root, journal/checkpoint, run-notes receipts) are
-  // never part of tempRoots. In attached mode only the attempt-owned ephemeral
-  // root is removed; the formal owner's workspace/lease are not registered here.
+  // The runtime root, its attempt-local control root and workspace are all
+  // removed together. The small receipt/screenshot directory sits outside that
+  // root and is retained. In attached mode the formal owner's workspace/lease
+  // are not registered here and are never removed.
   const tempRemoved = await removeTempRoots(binding);
   const port = attached
     ? { closed: null, reason: 'not applicable: attached owner owns the listener' }
     : await verifyPortClosed(binding);
   const allRemoved = tempRemoved.every((entry) => entry.removed);
+  const runtimeRoot = binding.attemptRoot ? await verifyPathRemoved(binding.attemptRoot) : { removed: true };
+  const runtimeOwned = binding.attemptRoot && binding.controlRoot
+    ? pathContains(binding.attemptRoot, binding.controlRoot)
+    : false;
+  const controlRoot = runtimeOwned
+    ? await verifyPathRemoved(binding.controlRoot)
+    : { removed: null, reason: 'not attempt-owned; retained by its caller' };
+  const workspace = binding.workspace ? await verifyPathRemoved(binding.workspace) : { removed: true };
   const cleanup = {
     branch: attached ? 'attached-released' : 'settled',
     taskId: binding.taskId ?? null,
@@ -564,14 +573,21 @@ export async function closeSettledAttempt(binding, settleResult) {
     tempRoots: binding.tempRoots ?? [],
     tempRootsRemoved: allRemoved,
     tempRootResults: tempRemoved,
+    runtimeRootRemoved: runtimeRoot.removed,
+    runtimeRootReason: runtimeRoot.reason ?? null,
+    controlRootRemoved: controlRoot.removed,
+    controlRootReason: controlRoot.reason ?? null,
+    workspaceRemoved: workspace.removed,
+    workspaceReason: workspace.reason ?? null,
     persistentRetained: binding.persistentRoots ?? [],
     recoveryRetained: [],
     settled: true,
   };
   binding.cleanup = cleanup;
   binding.cleaned = attached
-    ? browser.closed && allRemoved
-    : serveExit.stopped && browser.closed && allRemoved && port.closed;
+    ? browser.closed && allRemoved && runtimeRoot.removed && controlRoot.removed !== false && workspace.removed
+    : serveExit.stopped && browser.closed && allRemoved && port.closed
+      && runtimeRoot.removed && controlRoot.removed !== false && workspace.removed;
   return cleanup;
 }
 
@@ -605,7 +621,7 @@ export async function closeNoTaskAttempt(binding, proof) {
   if (browser.closed && serveExit.stopped) {
     tempRemoved = await removeTempRoots(binding, {
       requireAttemptRoot: true,
-      protectedPaths: [binding.controlRoot, binding.runNotesRoot, binding.receiptDir, ...(binding.persistentRoots ?? [])].filter(Boolean),
+      protectedPaths: [binding.receiptDir, ...(binding.persistentRoots ?? [])].filter(Boolean),
     });
   } else {
     tempRemoved = (binding.tempRoots ?? []).map((path) => ({
@@ -616,6 +632,14 @@ export async function closeNoTaskAttempt(binding, proof) {
     }));
   }
   const allRemoved = tempRemoved.every((entry) => entry.removed);
+  const runtimeRoot = binding.attemptRoot ? await verifyPathRemoved(binding.attemptRoot) : { removed: true };
+  const runtimeOwned = binding.attemptRoot && binding.controlRoot
+    ? pathContains(binding.attemptRoot, binding.controlRoot)
+    : false;
+  const controlRoot = runtimeOwned
+    ? await verifyPathRemoved(binding.controlRoot)
+    : { removed: null, reason: 'not attempt-owned; retained by its caller' };
+  const workspace = binding.workspace ? await verifyPathRemoved(binding.workspace) : { removed: true };
   const port = await verifyPortClosed(binding);
   const cleanup = {
     branch: 'no-task-confirmed',
@@ -634,6 +658,12 @@ export async function closeNoTaskAttempt(binding, proof) {
     tempRoots: binding.tempRoots ?? [],
     tempRootsRemoved: allRemoved,
     tempRootResults: tempRemoved,
+    runtimeRootRemoved: runtimeRoot.removed,
+    runtimeRootReason: runtimeRoot.reason ?? null,
+    controlRootRemoved: controlRoot.removed,
+    controlRootReason: controlRoot.reason ?? null,
+    workspaceRemoved: workspace.removed,
+    workspaceReason: workspace.reason ?? null,
     persistentRetained: binding.persistentRoots ?? [],
     recoveryRetained: [],
     released: [
@@ -645,7 +675,8 @@ export async function closeNoTaskAttempt(binding, proof) {
     settled: false,
   };
   binding.cleanup = cleanup;
-  binding.cleaned = browser.closed && serveExit.stopped && port.closed && allRemoved;
+  binding.cleaned = browser.closed && serveExit.stopped && port.closed && allRemoved
+    && runtimeRoot.removed && controlRoot.removed !== false && workspace.removed;
   return cleanup;
 }
 

@@ -48,6 +48,8 @@ import {
   parseOptions,
 } from './runner.mjs';
 import {
+  DASHBOARD_E2E_TEST_ROOT,
+  SCENARIO_LAYOUT_VERSION,
   bindCandidate,
   registerAttemptResources,
   resolveAttemptPaths,
@@ -90,13 +92,16 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..', '..', '..');
 const CONFIG_MODULE = join(REPO, 'dist', 'config', 'config', 'src', 'index.js');
+const TEST_ATTEMPT_OWNER = `contract-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+process.env.E2E_ATTEMPT_OWNER = TEST_ATTEMPT_OWNER;
 
 // The real product owner of control-root/project path derivation.
-const { resolveRuntimePaths } = existsSync(CONFIG_MODULE)
+const { resolveRuntimePaths, loadConfiguration } = existsSync(CONFIG_MODULE)
   ? await import(pathToFileURL(CONFIG_MODULE).href)
-  : { resolveRuntimePaths: null };
+  : { resolveRuntimePaths: null, loadConfiguration: null };
 
 const tempRoots = [];
+const RUN_SCENARIO_ATTEMPT_OWNER = `${TEST_ATTEMPT_OWNER}-run-scenario`;
 async function makeTempRoot(label) {
   const root = await mkdtemp(join(tmpdir(), `i1e-contract-${label}-`));
   tempRoots.push(root);
@@ -134,6 +139,16 @@ async function stopChild(child) {
 
 test.after(async () => {
   for (const root of tempRoots) await rm(root, { recursive: true, force: true }).catch(() => {});
+  for (const scenario of SCENARIOS) {
+    await rm(join(DASHBOARD_E2E_TEST_ROOT, SCENARIO_LAYOUT_VERSION, scenario, TEST_ATTEMPT_OWNER), {
+      recursive: true,
+      force: true,
+    }).catch(() => {});
+    await rm(join(DASHBOARD_E2E_TEST_ROOT, SCENARIO_LAYOUT_VERSION, scenario, RUN_SCENARIO_ATTEMPT_OWNER), {
+      recursive: true,
+      force: true,
+    }).catch(() => {});
+  }
 });
 
 test('option surface is reported and accepted combinations parse', () => {
@@ -145,22 +160,27 @@ test('option surface is reported and accepted combinations parse', () => {
   assert.match(USAGE, /--outcome <success\|failure\|cancel>/);
   assert.match(USAGE, /--service-mode <candidate\|installed-attach>/);
   assert.match(USAGE, /--cli-path <path>/);
+  assert.match(USAGE, /--evidence-root <path>/);
 
   // Documented defaults.
   assert.deepEqual(parseOptions(['--scenario', 'local-file-search']), {
-    scenario: 'local-file-search', entry: 'homepage', outcome: 'success', serviceMode: 'candidate', cliPath: null,
+    scenario: 'local-file-search', entry: 'homepage', outcome: 'success', serviceMode: 'candidate', cliPath: null, evidenceRoot: null,
   });
   assert.deepEqual(parseOptions(['--scenario', 'local-file-search', '--service-mode', 'installed-attach']), {
-    scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'installed-attach', cliPath: null,
+    scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'installed-attach', cliPath: null, evidenceRoot: null,
   });
   // Explicit accepted combinations.
   assert.deepEqual(
     parseOptions(['--scenario', 'local-file-search', '--entry', 'homepage', '--outcome', 'cancel', '--service-mode', 'candidate']),
-    { scenario: 'local-file-search', entry: 'homepage', outcome: 'cancel', serviceMode: 'candidate', cliPath: null },
+    { scenario: 'local-file-search', entry: 'homepage', outcome: 'cancel', serviceMode: 'candidate', cliPath: null, evidenceRoot: null },
   );
   assert.equal(
     parseOptions(['--scenario', 'local-file-search', '--cli-path', '/opt/prefix/humanagent/cli.js']).cliPath,
     '/opt/prefix/humanagent/cli.js',
+  );
+  assert.equal(
+    parseOptions(['--scenario', 'local-file-search', '--evidence-root', '/tmp/evidence']).evidenceRoot,
+    '/tmp/evidence',
   );
   assert.throws(
     () => parseOptions(['--scenario', 'local-file-search', '--cli-path']),
@@ -194,7 +214,7 @@ test('unsupported combinations are rejected, never downgraded', () => {
   // Accepted attach combination with an existing-task entry.
   assert.deepEqual(
     parseOptions(['--scenario', 'local-file-search', '--service-mode', 'installed-attach', '--entry', 'dashboard']),
-    { scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'installed-attach', cliPath: null },
+    { scenario: 'local-file-search', entry: 'dashboard', outcome: 'success', serviceMode: 'installed-attach', cliPath: null, evidenceRoot: null },
   );
   assert.deepEqual(assertSupportedCombination('local-file-search', { entry: 'dashboard', outcome: 'failure', serviceMode: 'candidate' }).outcome, 'failure');
 });
@@ -230,9 +250,8 @@ test('main --help prints the accepted options without running a scenario', async
   assert.match(logs.join('\n'), /Usage: node tests\/app\/dashboard-e2e\/runner\.mjs/);
 });
 
-test('persistent paths derive from the real config resolver, not the attempt tmp', async () => {
+test('candidate binding keeps the control root inside the attempt and evidence outside it', async () => {
   assertResolverAvailable();
-  const controlRoot = await makeTempRoot('control');
   const binding = bindCandidate(REPO, {
     scenario: 'local-file-search',
     entry: 'dashboard',
@@ -240,35 +259,118 @@ test('persistent paths derive from the real config resolver, not the attempt tmp
     serviceMode: 'candidate',
     attemptIdSuffix: 'contract',
   });
-  const paths = await resolveAttemptPaths(binding, { resolvePaths: resolveRuntimePaths, controlRoot });
+  let receivedControlRoot = null;
+  const paths = await resolveAttemptPaths(binding, {
+    resolvePaths: async ({ workspace, controlRoot }) => {
+      receivedControlRoot = controlRoot;
+      return {
+        controlRoot,
+        runNotesRoot: join(controlRoot, 'sessions', 'fixture-project', 'run-notes'),
+        projectRoot: join(controlRoot, 'sessions', 'fixture-project'),
+        workspaceCwd: workspace,
+      };
+    },
+  });
 
   assert.equal(binding.scenario, 'local-file-search');
-  // The ephemeral attempt root only holds the execution workspace.
+  assert.equal(binding.testRoot, join(tmpdir(), 'humanagent-e2e'));
+  assert.equal(
+    binding.attemptRoot,
+    join(binding.testRoot, 'v1', 'local-file-search', binding.attemptOwner, binding.attemptId),
+    'each attempt must be an owner-scoped child of the one fixed test root',
+  );
+  // The default control root is this attempt's own isolated runtime.
+  assert.equal(
+    await realpath(receivedControlRoot),
+    await realpath(join(binding.attemptRoot, 'control')),
+    'the resolver receives the canonical path of this attempt control root',
+  );
   assert.equal(binding.workspace, join(binding.attemptRoot, 'workspace'));
-  // Control root is config-derived and can never live inside the attempt tmp.
   assert.equal(binding.controlRoot, paths.controlRoot);
   assert.equal(binding.runNotesRoot, paths.runNotesRoot);
-  assert.ok(paths.runNotesRoot.startsWith(paths.controlRoot), 'runNotesRoot must sit under the canonical control root');
-  assert.ok(!paths.controlRoot.startsWith(binding.attemptRoot), 'control root must not sit inside the attempt tmp');
-  assert.ok(!binding.workspace.startsWith(paths.controlRoot), 'workspace must not sit under the persistent control root');
-  // Receipts/screenshots root under the config-derived runNotesRoot/<attempt>.
-  assert.equal(binding.receiptDir, join(paths.runNotesRoot, binding.attemptId));
+  const attemptRoot = await realpath(binding.attemptRoot);
+  assert.ok(paths.controlRoot.startsWith(attemptRoot), 'candidate control root must stay inside the attempt root');
+  assert.ok(paths.runNotesRoot.startsWith(paths.controlRoot), 'runNotesRoot must sit under the attempt control root');
+  assert.ok(!(await realpath(binding.workspace)).startsWith(paths.controlRoot), 'workspace must not sit under the attempt control root');
+  // Only the small evidence directory survives cleanup.
+  assert.equal(binding.receiptDir, join(binding.evidenceRoot, binding.attemptId));
   assert.equal(binding.screenshotsDir, join(binding.receiptDir, 'shots'));
-  assert.deepEqual(binding.persistentRoots, [paths.controlRoot, paths.runNotesRoot, binding.receiptDir]);
+  assert.ok(!binding.receiptDir.startsWith(binding.attemptRoot), 'evidence must sit outside the removed runtime root');
+  assert.deepEqual(binding.persistentRoots, [binding.receiptDir]);
 });
 
-test('a resolver that roots the control root inside the attempt tmp fails closed', async () => {
+test('candidate programmatic control roots cannot escape the fixed test root', async () => {
+  const binding = bindCandidate(REPO, { scenario: 'local-file-search', attemptIdSuffix: 'outside-control' });
+  const outsideRoot = await makeTempRoot('candidate-outside-control');
+  let resolverCalls = 0;
+  await assert.rejects(
+    () => resolveAttemptPaths(binding, {
+      controlRoot: outsideRoot,
+      resolvePaths: async ({ workspace, controlRoot }) => {
+        resolverCalls += 1;
+        return {
+          controlRoot,
+          runNotesRoot: join(controlRoot, 'run-notes'),
+          projectRoot: join(controlRoot, 'project'),
+          workspaceCwd: workspace,
+        };
+      },
+    }),
+    /candidate control root must stay inside the fixed test-root attempt/,
+  );
+  assert.equal(resolverCalls, 0, 'the product resolver must not run for a rejected root');
+  assert.equal(binding.controlRoot, null);
+});
+
+test('candidate workspace symlinks cannot escape the fixed test root', async () => {
+  const binding = bindCandidate(REPO, { scenario: 'local-file-search', attemptIdSuffix: 'outside-workspace' });
+  const outsideWorkspace = await makeTempRoot('candidate-outside-workspace');
+  await mkdir(binding.attemptRoot, { recursive: true });
+  await import('node:fs/promises').then(({ symlink }) => symlink(outsideWorkspace, binding.workspace, 'dir'));
+  let resolverCalls = 0;
+  await assert.rejects(
+    () => resolveAttemptPaths(binding, {
+      resolvePaths: async () => {
+        resolverCalls += 1;
+        throw new Error('resolver must not run');
+      },
+    }),
+    /candidate workspace escaped the fixed test-root attempt/,
+  );
+  assert.equal(resolverCalls, 0, 'the product resolver must not receive an escaped workspace');
+});
+
+test('a candidate resolver that escapes the attempt root fails closed', async () => {
   const binding = bindCandidate(REPO, { scenario: 'local-file-search', attemptIdSuffix: 'badroot' });
+  const escapedRoot = await makeTempRoot('escaped-control');
   const badResolver = async ({ workspace }) => ({
-    controlRoot: join(binding.attemptRoot, 'control'),
-    runNotesRoot: join(binding.attemptRoot, 'control', 'run-notes'),
-    projectRoot: join(binding.attemptRoot, 'control', 'project'),
+    controlRoot: escapedRoot,
+    runNotesRoot: join(escapedRoot, 'run-notes'),
+    projectRoot: join(escapedRoot, 'project'),
     workspaceCwd: workspace,
   });
   await assert.rejects(
-    () => resolveAttemptPaths(binding, { resolvePaths: badResolver }),
-    /persistent control root inside the ephemeral attempt tmp/,
+    () => resolveAttemptPaths(binding, { resolvePaths: badResolver, enforceIsolation: true }),
+    /candidate control root escaped the attempt root/,
   );
+});
+
+test('the real config resolver is invoked with an attempt-local control root', async () => {
+  assertResolverAvailable();
+  const binding = bindCandidate(REPO, { scenario: 'local-file-search', attemptIdSuffix: 'real-root' });
+  try {
+    const paths = await resolveAttemptPaths(binding, { resolvePaths: resolveRuntimePaths });
+    assert.equal(typeof loadConfiguration, 'function');
+    const initialized = await loadConfiguration(paths);
+    assert.equal(initialized.paths.controlRoot, paths.controlRoot);
+    const attemptRoot = await realpath(binding.attemptRoot);
+    assert.ok(paths.controlRoot.startsWith(attemptRoot), 'the real resolver must receive the attempt-local control root');
+    assert.ok(paths.projectRoot.startsWith(attemptRoot), 'the temporary project must be registered inside the attempt root');
+    assert.ok(!paths.controlRoot.startsWith(resolve(tmpdir(), '.humanagent')), 'the canonical root must not be selected');
+  } finally {
+    await rm(binding.attemptRoot, { recursive: true, force: true }).catch(() => {});
+    await rm(binding.receiptDir, { recursive: true, force: true }).catch(() => {});
+  }
 });
 
 test('a plain non-Git directory can bind an attempt and register resources', async () => {
@@ -751,7 +853,6 @@ function successRunEvidence(binding, overrides = {}) {
 }
 
 async function runContractMain(label, journalPath, options = {}) {
-  const controlRoot = await makeTempRoot(`${label}-control`);
   const logs = [];
   const originalLog = console.log;
   const originalExitCode = process.exitCode;
@@ -763,7 +864,6 @@ async function runContractMain(label, journalPath, options = {}) {
     result = await main(argv, {
       attemptIdSuffix: label,
       resolvePaths: resolveRuntimePaths,
-      controlRoot,
       scope: options.scope ?? CONTRACT_SCOPE,
       hooks: {
         probeProvider: async () => {},
@@ -1106,7 +1206,10 @@ test('installed-attach resolves explicit formal paths and reads the formal lease
     serviceMode: 'installed-attach',
     attemptIdSuffix: 'formal-attach',
   });
-  await resolveAttemptPaths(attempt, { resolvePaths: resolveRuntimePaths, controlRoot });
+  // Prepare the temporary stand-in for a previously installed formal product.
+  // The attach path itself must not initialize or otherwise write that root.
+  await resolveRuntimePaths({ workspace: formalWorkspace, controlRoot });
+  await resolveAttemptPaths(attempt, { resolvePaths: resolveRuntimePaths });
   await resolveFormalAttachPaths(attempt, {
     formalWorkspace,
     resolvePaths: resolveRuntimePaths,
@@ -1122,9 +1225,10 @@ test('installed-attach resolves explicit formal paths and reads the formal lease
     generation: 1,
   };
   const calls = [];
+  let pairCalls = 0;
   const auth = {
     paired: false,
-    async pair() { this.paired = true; },
+    async pair() { pairCalls += 1; this.paired = true; },
     async fetch(url, init = {}) {
       const target = String(url);
       calls.push({ target, method: String(init.method ?? 'GET').toUpperCase() });
@@ -1163,7 +1267,8 @@ test('installed-attach resolves explicit formal paths and reads the formal lease
   assert.equal(attempt.attachedOwner.pid, process.pid);
   assert.equal(attempt.servePid, null, 'attached owner must never become a stop target');
   assert.equal(attempt.taskId, CONTRACT_TASK.value);
-  assert.equal(auth.paired, true);
+  assert.equal(pairCalls, 0, 'installed-attach must not issue a pairing challenge');
+  assert.equal(auth.paired, false);
   assert.ok(calls.some((call) => call.target.endsWith('/api/liveness')));
   assert.ok(calls.some((call) => call.target.endsWith('/dashboard.html')));
 });
@@ -1385,12 +1490,13 @@ test('retention reports pending recovery acceptance without a receipt', async ()
   assert.equal(accepted.recoveryAcceptanceStatus, 'accepted');
 });
 
-test('candidate settled cleanup targets only the exact recorded PID and keeps persistent roots', async () => {
+test('candidate settled cleanup targets only its PID and removes runtime while keeping evidence', async () => {
   const owned = spawnIdle();
   const unrelated = spawnIdle();
   const attemptRoot = await makeTempRoot('attempt');
-  const controlRoot = await makeTempRoot('persistent-control');
-  const receiptDir = join(controlRoot, 'sessions', 'proj', 'run-notes', 'attempt');
+  const controlRoot = join(attemptRoot, 'control');
+  await mkdir(controlRoot, { recursive: true });
+  const receiptDir = await makeTempRoot('attempt-evidence');
   await mkdir(receiptDir, { recursive: true });
   try {
     const binding = {
@@ -1399,7 +1505,10 @@ test('candidate settled cleanup targets only the exact recorded PID and keeps pe
       servePort: null,
       serveBaseUrl: 'http://127.0.0.1:1',
       tempRoots: [attemptRoot],
-      persistentRoots: [controlRoot, receiptDir],
+      attemptRoot,
+      workspace: join(attemptRoot, 'workspace'),
+      controlRoot,
+      persistentRoots: [receiptDir],
       browser: { close: async () => {} },
       taskId: 'task-contract',
       outcome: 'success',
@@ -1412,11 +1521,11 @@ test('candidate settled cleanup targets only the exact recorded PID and keeps pe
     await sleep(150);
     assert.equal(await isAlive(owned.pid), false, 'the exact recorded owned PID must be stopped');
     assert.equal(await isAlive(unrelated.pid), true, 'an unrelated PID must never be stopped');
-    // Persistent control root + receipt directory are retained, not removed.
-    assert.equal(existsSync(controlRoot), true);
+    // Only the small receipt/evidence directory is retained.
+    assert.equal(existsSync(controlRoot), false);
     assert.equal(existsSync(receiptDir), true);
     assert.equal(existsSync(attemptRoot), false, 'only the ephemeral attempt root is removed');
-    assert.deepEqual(cleanup.persistentRetained, [controlRoot, receiptDir]);
+    assert.deepEqual(cleanup.persistentRetained, [receiptDir]);
     assert.deepEqual(cleanup.recoveryRetained, []);
   } finally {
     await stopChild(owned);
@@ -1734,14 +1843,6 @@ test('a failed startup that stays alive is handed to recovery, never reported st
 });
 
 test('a serve startup failure produces a receipt with the startup branch and no retained live service', async () => {
-  // The persistent control root must not overlap the ephemeral attempt tmp, so
-  // the deterministic resolver roots it in its own temp tree.
-  const persistentRoot = await makeTempRoot('startup-failure-persistent');
-  const resolveToTemp = async () => ({
-    controlRoot: join(persistentRoot, 'control-root'),
-    runNotesRoot: join(persistentRoot, 'run-notes'),
-    projectRoot: join(persistentRoot, 'project'),
-  });
   const child = spawn(process.execPath, ['-e', 'process.exit(1)']);
   await new Promise((done) => child.once('exit', done));
   const { runScenario } = await import('./runner.mjs');
@@ -1750,7 +1851,7 @@ test('a serve startup failure produces a receipt with the startup branch and no 
     outcome: 'success',
     serviceMode: 'candidate',
     attemptIdSuffix: 'startup-failure',
-    resolvePaths: resolveToTemp,
+    resolvePaths: resolveRuntimePaths,
     hooks: {
       probeProvider: async () => {},
       startServeForAttempt: async (binding) => {
@@ -1788,7 +1889,6 @@ test('a serve startup failure produces a receipt with the startup branch and no 
 
 test('runScenario writes a config-rooted receipt and retains resources when it cannot settle', async () => {
   assertResolverAvailable();
-  const controlRoot = await makeTempRoot('run-control');
   const previousRcc = process.env.HUMANAGENT_RCC_BASE_URL;
   // Point the provider probe at a closed loopback port so the attempt fails
   // deterministically without touching a live provider or starting a service.
@@ -1800,9 +1900,9 @@ test('runScenario writes a config-rooted receipt and retains resources when it c
       entry: 'dashboard',
       outcome: 'success',
       serviceMode: 'candidate',
+      attemptOwner: RUN_SCENARIO_ATTEMPT_OWNER,
       attemptIdSuffix: 'run',
       resolvePaths: resolveRuntimePaths,
-      controlRoot,
     });
   } finally {
     if (previousRcc === undefined) delete process.env.HUMANAGENT_RCC_BASE_URL;
@@ -1815,9 +1915,9 @@ test('runScenario writes a config-rooted receipt and retains resources when it c
   assert.equal(result.receipt.serviceMode, 'candidate');
   assert.equal(result.settled, false);
   assert.equal(result.receipt.settlement.settled, false);
-  // Paths came from the real config resolver, not a tmp control root. The
-  // resolver canonicalizes symlinked roots (e.g. /tmp -> /private/tmp).
-  assert.ok(result.receipt.runtime.controlRoot.startsWith(await realpath(controlRoot)));
+  const attemptRoot = dirname(result.receipt.runtime.workspace);
+  assert.equal(result.receipt.runtime.controlRoot, await realpath(join(attemptRoot, 'control')));
+  assert.ok((await realpath(attemptRoot)).startsWith(await realpath(DASHBOARD_E2E_TEST_ROOT)));
   assert.ok(result.receipt.runtime.runNotesRoot.includes('run-notes'));
   // Dropping requestedModel/resolvedModel/binaryPath silently erases which model actually ran and which binary served it.
   for (const field of ['requestedModel', 'resolvedModel', 'binaryPath']) {
@@ -2064,7 +2164,7 @@ test('E2E_CONFIRM_TIMEOUT_MS raises the default confirmation window and an expli
   try {
     delete process.env.E2E_CONFIRM_TIMEOUT_MS;
     await submitDirectiveAndConfirmDraft(makeBinding(), 'submitted task');
-    assert.equal(seen.at(-1), 90_000, 'the default confirmation window stays 90 seconds');
+    assert.equal(seen.at(-1), 180_000, 'the default confirmation window allows the real provider continuation');
 
     process.env.E2E_CONFIRM_TIMEOUT_MS = '600000';
     await submitDirectiveAndConfirmDraft(makeBinding(), 'submitted task');
@@ -2211,7 +2311,6 @@ test('public main/CLI reports requested failure and cancel consistently as INCOM
 
 test('real cancel scenario learns identity, stops once, and reassesses read-only', async () => {
   assertResolverAvailable();
-  const controlRoot = await makeTempRoot('cancel-real-control');
   const owned = spawnIdle();
   const calls = [];
   let bindingRef = null;
@@ -2274,7 +2373,6 @@ test('real cancel scenario learns identity, stops once, and reassesses read-only
       serviceMode: 'candidate',
       attemptIdSuffix: 'cancel-real',
       resolvePaths: resolveRuntimePaths,
-      controlRoot,
       hooks: {
         probeProvider: async () => {},
         startServeForAttempt: async (binding) => {
@@ -2313,7 +2411,6 @@ test('cancel identity failures retain recovery and issue zero stop POSTs', async
   process.env.E2E_IDENTITY_TIMEOUT_MS = '1';
   try {
     for (const variant of ['missing', 'corrupt', 'ambiguous', 'dashboard-conflict']) {
-      const controlRoot = await makeTempRoot(`cancel-identity-${variant}`);
       const owned = spawnIdle();
       const calls = [];
       let bindingRef = null;
@@ -2361,7 +2458,6 @@ test('cancel identity failures retain recovery and issue zero stop POSTs', async
           serviceMode: 'candidate',
           attemptIdSuffix: `cancel-identity-${variant}`,
           resolvePaths: resolveRuntimePaths,
-          controlRoot,
           hooks: {
             probeProvider: async () => {},
             startServeForAttempt: async (binding) => {
@@ -2549,6 +2645,101 @@ test('homepage new-task submit uses one authorization click and binds its requir
   assert.equal(authCalls.length, 0, 'homepage identity comes only from the accepted navigation');
 });
 
+test('homepage confirmed submission binds its exact task from the live task board without navigation', async () => {
+  const base = 'http://127.0.0.1:1';
+  let pageUrl = 'about:blank';
+  const gotoUrls = [];
+  let taskBoardReads = 0;
+  const auth = {
+    async fetch(url) {
+      const target = String(url);
+      assert.equal(target, `${base}/api/tasks`, 'the bound identity must come from the real task board');
+      taskBoardReads += 1;
+      const body = {
+        running: [{
+          taskId: { scope: 'task', value: 'task-newer-unrelated' },
+          sourceInteractionId: 'interaction-newer-unrelated',
+          updatedAt: '2999-01-01T00:00:00.000Z',
+        }],
+        waiting: [{
+          taskId: { scope: 'task', value: 'task-submitted' },
+          sourceInteractionId: 'interaction-homepage',
+          identitySource: {
+            requirementId: 'requirement-submitted',
+            draftId: 'draft-submitted',
+            inputRevision: 1,
+          },
+          updatedAt: '2026-11-24T00:00:00.000Z',
+        }],
+        draft: [],
+        completed: [],
+        stopped: [],
+        failed: [],
+      };
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(body),
+      };
+    },
+  };
+  const page = {
+    url: () => pageUrl,
+    async goto(next) {
+      gotoUrls.push(String(next));
+      pageUrl = String(next);
+      return { ok: () => true, status: () => 200 };
+    },
+    async waitForSelector() {},
+    locator() { return { boundingBox: async () => ({ x: 0, y: 0, width: 480, height: 72 }) }; },
+    async fill() {},
+    async click() {},
+    async waitForURL(predicate, { timeout } = {}) {
+      const deadline = Date.now() + Number(timeout ?? 1000);
+      for (;;) {
+        try {
+          if (predicate(new URL(pageUrl))) return undefined;
+        } catch {
+          // The entry page is not task-scoped; the confirmation response and
+          // exact board row provide the identity for the in-page flow.
+        }
+        if (Date.now() > deadline) throw new Error('fixture navigation timeout');
+        await sleep(10);
+      }
+    },
+    async evaluate() { return null; },
+    async waitForResponse(predicate) {
+      const response = {
+        url: () => `${base}/api/explicit/interactions/interaction-homepage/confirmation`,
+        request: () => ({ method: () => 'POST', postDataJSON: () => ({ draftId: 'draft-submitted', inputRevision: 1 }) }),
+        status: () => 200,
+        text: async () => JSON.stringify({ requirement: {
+          requirementId: 'requirement-submitted',
+          draftId: 'draft-submitted',
+          inputRevision: 1,
+        } }),
+      };
+      assert.equal(predicate(response), true);
+      return response;
+    },
+  };
+  const binding = {
+    entry: 'homepage',
+    serveBaseUrl: base,
+    browser: { page },
+    auth,
+  };
+
+  await submitDirectiveAndConfirmDraft(binding, 'submitted task', { confirmTimeoutMs: 250 });
+
+  assert.equal(binding.taskId, 'task-submitted', 'only the row matching this confirmation receipt may be selected');
+  assert.equal(binding.submissionNavigation.kind, 'task-board');
+  assert.equal(binding.submissionNavigation.pathname, '/');
+  assert.equal(pageUrl, `${base}/`, 'the real product remains on its in-page progress surface');
+  assert.deepEqual(gotoUrls, [`${base}/`], 'binding must not navigate away from the entry page');
+  assert.equal(taskBoardReads, 1);
+});
+
 test('homepage status-only is an immediate non-task result with exact zero-task diagnostics', async () => {
   const clicks = [];
   let pageUrl = 'about:blank';
@@ -2640,7 +2831,6 @@ test('no-task cleanup requires exact zero snapshot, absent project journal and n
 
 test('status-only homepage attempt stays INCOMPLETE but closes exact resources when no task and journal are proven', async () => {
   assertResolverAvailable();
-  const controlRoot = await makeTempRoot('status-only-no-task-control');
   const owned = spawnIdle();
   const authCalls = [];
   let browserClosed = false;
@@ -2700,7 +2890,6 @@ test('status-only homepage attempt stays INCOMPLETE but closes exact resources w
       serviceMode: 'candidate',
       attemptIdSuffix: 'status-only-no-task',
       resolvePaths: resolveRuntimePaths,
-      controlRoot,
       hooks: {
         probeProvider: async () => {},
         startServeForAttempt: async (binding) => {
@@ -2734,7 +2923,6 @@ test('status-only homepage attempt stays INCOMPLETE but closes exact resources w
     assert.ok(result.stageErrors.some((stage) => stage.stage === 'no_task_proof' && stage.ok));
   } finally {
     await stopChild(owned);
-    await rm(controlRoot, { recursive: true, force: true }).catch(() => {});
   }
 });
 
@@ -3350,7 +3538,8 @@ test('installed-attach fails closed on missing formal identity, wrong owner or e
     serviceMode: 'installed-attach',
     attemptIdSuffix: 'neg-attach',
   });
-  await resolveAttemptPaths(attempt, { resolvePaths: resolveRuntimePaths, controlRoot });
+  await resolveRuntimePaths({ workspace: formalWorkspace, controlRoot });
+  await resolveAttemptPaths(attempt, { resolvePaths: resolveRuntimePaths });
   await resolveFormalAttachPaths(attempt, { formalWorkspace, resolvePaths: resolveRuntimePaths, controlRoot });
 
   const liveLease = {
@@ -3608,7 +3797,6 @@ test('invalid or wrong-scope task identities fail closed before any task request
 
   // A wrong-scope identity whose value equals the journal task must still not
   // reach the stop POST: the URL projection fails closed before the request.
-  const controlRoot = await makeTempRoot('invalid-task-stop');
   const owned = spawnIdle();
   const calls = [];
   const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) });
@@ -3620,7 +3808,7 @@ test('invalid or wrong-scope task identities fail closed before any task request
   };
   try {
     const binding = bindCandidate(REPO, { scenario: 'local-file-search', outcome: 'cancel', attemptIdSuffix: 'invalid-task-stop' });
-    await resolveAttemptPaths(binding, { resolvePaths: resolveRuntimePaths, controlRoot });
+    await resolveAttemptPaths(binding, { resolvePaths: resolveRuntimePaths });
     binding.serveBaseUrl = 'http://127.0.0.1:1';
     binding.servePid = owned.pid;
     binding.auth = auth;
@@ -3646,7 +3834,6 @@ test('cleanup stop/settle projects string and typed task identities to the same 
   assertResolverAvailable();
   const task = CONTRACT_TASK.value;
   for (const [label, target] of [['string', task], ['typed', CONTRACT_TASK]]) {
-    const controlRoot = await makeTempRoot(`stop-url-${label}`);
     const owned = spawnIdle();
     const calls = [];
     let stopPosts = 0;
@@ -3665,7 +3852,7 @@ test('cleanup stop/settle projects string and typed task identities to the same 
     };
     try {
       const binding = bindCandidate(REPO, { scenario: 'local-file-search', outcome: 'cancel', attemptIdSuffix: `stop-url-${label}` });
-      await resolveAttemptPaths(binding, { resolvePaths: resolveRuntimePaths, controlRoot });
+      await resolveAttemptPaths(binding, { resolvePaths: resolveRuntimePaths });
       binding.serveBaseUrl = 'http://127.0.0.1:1';
       binding.servePid = owned.pid;
       binding.auth = auth;

@@ -1,0 +1,23 @@
+{
+  "checks": [
+    "Alex has an independent rail section",
+    "five project entries are grouped by workspace path",
+    "one workspace keeps two project blocks",
+    "only the bound project has the default Jenny member row",
+    "the current project and workspace are visibly marked once",
+    "roster 404 remains visible",
+    "configured empty roster is stated explicitly",
+    "uninitialized roster has its own state",
+    "current Jenny link points back to the same document",
+    "clicking current Jenny keeps the same document",
+    "clicking current Jenny focuses the existing composer",
+    "every other project retains its default Jenny with an explicit unavailable state",
+    "other Jenny opens only its own state without navigation",
+    "cross-project URL cannot borrow Jenny or current highlighting",
+    "Alex selection is explicit and does not mark a project current",
+    "narrow rail remains inside the viewport without horizontal overflow",
+    "no page errors"
+  ],
+  "passed": 17,
+  "evidence": "/Volumes/extension/playground/humanagent/sidebar-project-intake-20261124/docs/verification/project-sidebar-20261124"
+}

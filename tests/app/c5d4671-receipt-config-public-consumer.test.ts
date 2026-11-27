@@ -63,8 +63,12 @@ function fixtureParentAssignment(): never {
   return {} as never;
 }
 
-async function dispatchExecutor(roster: readonly { readonly agentId: string; readonly roleId: AgentRole }[]) {
+async function dispatchExecutor(
+  roster: readonly { readonly agentId: string; readonly roleId: AgentRole }[],
+  missingTarget = false,
+) {
   let admitted: { readonly agentId: string; readonly roleId: AgentRole } | undefined;
+  let result: Awaited<ReturnType<ReturnType<typeof createAppChildProducer>['execute']>> | undefined;
   const scope: ScopeRef = { organId: id('organ', 'roster'), taskId: id('task', 'roster'), cycleId: id('cycle', 'roster') };
   const producer = createAppChildProducer({
     manager: {
@@ -115,28 +119,62 @@ async function dispatchExecutor(roster: readonly { readonly agentId: string; rea
     target: 'answer.txt',
   };
   try {
-    await producer.execute({
+    result = await producer.execute({
       execution,
       requestId: 'roster-request',
       call: {
         toolId: APP_CHILD_CALL_TOOL.toolId,
         callId: 'roster-call',
         continuationRef: 'roster-continuation',
-        arguments: argumentsBody as never,
+        arguments: (missingTarget
+          ? Object.fromEntries(Object.entries(argumentsBody).filter(([key]) => key !== 'target'))
+          : argumentsBody) as never,
       },
       scope,
       signal: new AbortController().signal,
     });
-    return { admitted };
+    return { admitted, result };
   } catch (error) {
-    return { error: error instanceof Error ? error : new Error(String(error)), admitted };
+    return { error: error instanceof Error ? error : new Error(String(error)), admitted, result };
   }
 }
 
-test('child.call execution rejects an absent executor with the exact roster error', async () => {
-  const { error } = await dispatchExecutor([{ agentId: 'orchestration-default', roleId: 'orchestration' as AgentRole }]);
-  assert.ok(error, 'missing executor must reject');
-  assert.equal(error!.message, 'selected child agentId executor is not in the configured roster');
+// Real failure: one omitted model field ended the whole task. A direct producer
+// call with no child ports bound proves the validation boundary returns the
+// exact-call typed failure before admission and leaves the next turn available.
+test('child.call missing target returns a model-correctable result without child side effects', async () => {
+  const { error, admitted, result } = await dispatchExecutor(
+    [{ agentId: 'executor', roleId: 'execution' as AgentRole }],
+    true,
+  );
+  assert.equal(error, undefined);
+  assert.equal(admitted, undefined);
+  assert.equal(result?.status, 'failed');
+  assert.equal(result?.error?.code, 'tool.argument.invalid');
+  assert.equal(result?.error?.category, 'validation');
+  assert.equal(result?.error?.retryable, 'retryable');
+  assert.deepEqual(result?.error?.nextAction, { kind: 'continue', ref: APP_CHILD_CALL_TOOL.toolId });
+  const output = JSON.parse(result?.output ?? '{}') as Record<string, unknown>;
+  assert.deepEqual(output, {
+    status: 'failed',
+    code: 'tool.argument.invalid',
+    toolId: APP_CHILD_CALL_TOOL.toolId,
+    callId: 'roster-call',
+    executed: false,
+    message: 'child call target is required',
+    recoverable: true,
+  });
+});
+
+test('child.call execution returns an absent executor as a model-correctable schema error', async () => {
+  const { error, admitted, result } = await dispatchExecutor([
+    { agentId: 'orchestration-default', roleId: 'orchestration' as AgentRole },
+  ]);
+  assert.equal(error, undefined);
+  assert.equal(admitted, undefined);
+  assert.equal(result?.status, 'failed');
+  assert.equal(result?.error?.code, 'tool.argument.invalid');
+  assert.equal(result?.error?.message, 'selected child agentId executor is not in the configured roster');
 });
 
 test('child.call execution resolves an execution-role executor into admission', async () => {

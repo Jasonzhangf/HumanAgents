@@ -1,0 +1,13 @@
+{
+  "graph": "humanagent-workspace-display-name-management",
+  "operator": {
+    "operator": "humanagent-workspace-display-name-management",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "read_workspace_registry": { "ownerPath": "packages/config/src/workspace-management.ts", "ownerRel": "packages/config/src/workspace-management.ts" },
+    "validate_workspace_edits": { "ownerPath": "packages/config/src/workspace-management.ts", "ownerRel": "packages/config/src/workspace-management.ts" },
+    "persist_display_names": { "ownerPath": "packages/config/src/workspace-management.ts", "ownerRel": "packages/config/src/workspace-management.ts" },
+    "read_back_display_names": { "ownerPath": "packages/app/src/ui-runtime/workspace-management.ts", "ownerRel": "packages/app/src/ui-runtime/workspace-management.ts" }
+  }
+}

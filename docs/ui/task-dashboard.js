@@ -96,6 +96,7 @@ import {
   renderPendingDecision,
 } from './product-control-view.js'
 import { taskBlocker } from './task-blocker.js'
+import { taskWorkSessionReturn } from './dispatch-tracking.js'
 
 const readScope = taskReadScopeFromLocation()
 // The board may focus an explicit intake before it has produced any Task.
@@ -127,6 +128,7 @@ const ABSENT_PLAN_CODES = new Set([
   'task-plan-history.current-unknown',
 ])
 let displayMode = 'current'
+const workSessionReturn = explicitScope ? taskWorkSessionReturn(queryParam('returnTo'), explicitScope) : undefined
 
 // The agent-instance selection is URL view state, decoded once through the shared
 // A3 helpers with the canonical task id the parent already bound. A malformed or
@@ -1350,6 +1352,7 @@ const template = TASK_DASHBOARD_TEST_MODE
   scope: explicitScope ?? sessionPageScope,
   breadcrumbs: explicitScope
     ? [
+        ...(workSessionReturn ? [{ label: workSessionReturn.label, href: workSessionReturn.href }] : []),
         { label: '系统', href: './dashboard.html' },
         { label: '项目', href: `./tasks.html?projectKey=${encodeURIComponent(explicitScope.projectKey)}` },
         { label: '任务', href: null },

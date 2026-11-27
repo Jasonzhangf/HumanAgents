@@ -13,6 +13,18 @@ const GOAL_ACTION = { edit: '修改目标', pause: '暂停目标', resume: '恢�
 const TODO_STATE = { pending: '待处理', in_progress: '进行中', completed: '已完成' }
 const END_OUTCOME = { completed: '请求结束本轮', continue: '继续执行', blocked: '本轮报告受阻', 'input-required': '需要用户输入' }
 const RESULT_STATE = { completed: '完成', partial: '部分完成', blocked: '受阻' }
+const TASK_STATE_LABELS = { succeeded: '任务已完成', running: '任务执行中', waiting: '任务正在等待', blocked: '任务受阻', failed: '任务失败', stopped: '任务已停止', cancelled: '任务已取消', queued: '任务已入队' }
+const PUBLICATION_STATE_LABELS = { committed: '正式结果已发布', pending: '正式结果尚待发布', unavailable: '暂无已发布结果', ambiguous: '存在多个执行记录，需要确认', unknown: '结果发布状态未知' }
+const CONTINUATION_LABELS = { released: '已恢复原任务执行', 'in-progress': '原任务正在推进', complete: '原任务已完成', blocked: '原任务待处理' }
+const INVENTORY_GAP = {
+  symlink: '符号链接', 'cross-device': '跨文件系统', unreadable: '无法读取',
+  'external-git-pointer': '目录外 Git 引用', 'git-config-not-read': '未读取 Git 配置',
+  'command-failed': '只读命令失败', 'unsupported-entry': '不支持的条目',
+}
+const inventorySize = (kib) => typeof kib !== 'number' || !Number.isFinite(kib)
+  ? '大小未取得'
+  : kib >= 1024 * 1024 ? `${(kib / (1024 * 1024)).toFixed(2)} GiB`
+    : kib >= 1024 ? `${(kib / 1024).toFixed(2)} MiB` : `${kib} KiB`
 
 /** Pure plugin: report === undefined means no body has been read yet.
  * Lines are a bounded main-card preview; the caller retains the full report.
@@ -32,7 +44,36 @@ export function taskSemantics(toolId, args, report) {
   let summary
   let explained = false
 
-  if (toolId === 'child.call') {
+  if (toolId === 'workspace.inventory') {
+    title = '只读盘点工作区'
+    subject = '当前授权目录'
+    add('只读操作：不写入或修改文件')
+    // GitReadonlyInventory is the inner tool report, not audit wrapper metadata.
+    if (typeof body.workspaceRoot === 'string' && Array.isArray(body.projects)
+      && Array.isArray(body.repositories) && Array.isArray(body.gaps)) {
+      subject = body.workspaceRoot
+      const worktrees = body.repositories.flatMap((repo) => Array.isArray(record(repo).worktrees) ? repo.worktrees : [])
+      const inRoot = worktrees.filter((tree) => record(tree).scope === 'in-root').length
+      const external = worktrees.filter((tree) => record(tree).scope === 'external-reference-only').length
+      summary = `已返回盘点：${body.projects.length} 个项目目录、${body.repositories.length} 个仓库、${worktrees.length} 条工作树记录`
+      add(`工作树：目录内 ${inRoot} 条；目录外仅引用 ${external} 条（未访问）`)
+      if (body.gaps.length) {
+        const counts = new Map()
+        for (const gap of body.gaps) {
+          const label = ownLabel(INVENTORY_GAP, record(gap).reason, '其他未覆盖原因')
+          counts.set(label, (counts.get(label) ?? 0) + 1)
+        }
+        add(`覆盖缺口 ${body.gaps.length} 项：${[...counts].map(([label, count]) => `${label} ${count} 项`).join('；')}`)
+      } else add('未报告覆盖缺口')
+      // Top-level sizes overlap nested repositories/worktrees; do not sum them.
+      const prefix = body.workspaceRoot.endsWith('/') ? body.workspaceRoot : `${body.workspaceRoot}/`
+      const projects = body.projects.filter((item) => typeof record(item).path === 'string' && item.path.startsWith(prefix))
+        .slice().sort((a, b) => (b.allocatedKiB ?? -1) - (a.allocatedKiB ?? -1))
+      for (const project of projects.slice(0, 3)) add(`目录占用 ${project.path.slice(prefix.length)}：${inventorySize(project.allocatedKiB)}`)
+      if (projects.length > 3) add('更多占用见完整报告')
+      explained = true
+    }
+  } else if (toolId === 'child.call') {
     const review = input.kind === 'review' || body.kind === 'review'
     title = review ? '请求审查' : '委派执行'
     const purpose = string(input.purpose)
@@ -100,6 +141,20 @@ export function taskSemantics(toolId, args, report) {
       }
       explained = report !== undefined
     }
+  } else if (toolId === 'humanagent.internal.read-task-result') {
+    title = '读取任务结果'
+    field('任务', input.title)
+    field('状态', ownLabel(TASK_STATE_LABELS, input.taskState, input.taskState))
+    field('发布状态', ownLabel(PUBLICATION_STATE_LABELS, input.publicationState, input.publicationState))
+    explained = Object.keys(input).length > 0
+  } else if (toolId === 'humanagent.internal.project-snapshot') {
+    title = '查看项目进展'
+    explained = Object.keys(input).length > 0
+  } else if (toolId === 'humanagent.internal.resume-task') {
+    title = '继续原任务'
+    field('任务', input.title)
+    field('继续状态', ownLabel(CONTINUATION_LABELS, input.continuation, input.continuation))
+    explained = Object.keys(input).length > 0
   } else if (toolId === 'humanagent.turn.end' || toolId === 'humanagent_turn_end') {
     title = '提交本轮结果与后续安排'
     const turnSummary = record(input.summary)

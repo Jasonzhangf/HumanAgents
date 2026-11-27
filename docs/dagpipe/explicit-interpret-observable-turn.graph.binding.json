@@ -25,10 +25,10 @@
       "designNote": "GET /api/explicit/interactions/<id> 与 interpretExplicitInput 中的状态推进（beginMatching / recordMatch / propose）。状态机本身已真实可用。"
     },
     "interpret_turn": {
-      "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerPath": "packages/app/src/explicit-brain-runtime.ts",
+      "ownerRel": "packages/app/src/explicit-brain-runtime.ts",
       "implementationStatus": "exists-defective",
-      "designNote": "interpretExplicitInput（service.ts:6052）整段同步调用 explicitBrainInterpreter.interpret。缺口：失败后 interaction 停在 matching，无恢复路径，需重启。"
+      "designNote": "服务端 interpretExplicitInput 调用显式解释器；解释器在 explicit-brain-runtime.ts 的 end 参数提交边界复用 proposal.title 并归一化为最多 50 个 Unicode 字符，完整正文不截断。当前项目主话题内用 create/append/change 与 matchedTaskId 表达新 task、追加或变更；新 Topic、新 Project 或跨 scope 只作 clarification。缺口：失败后 interaction 停在 matching，无恢复路径，需重启。"
     },
     "decode_provider_events": {
       "ownerPath": "packages/adapters/provider/src/codecs.ts",

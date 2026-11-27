@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { renderToolBody, disposeToolBody, toolOutputText, toolSemantics } from '../../docs/ui/tool-presentation.js'
+import { explicitToolActivityFinished } from '../../docs/ui/explicit-tool-activity.js'
 
 // Minimal DOM port for this component. No browser, network, model or execution.
 class Node {
@@ -27,6 +28,46 @@ const call = (id, command = 'true') => ({ kind: 'provider.tool', taskId: { scope
 const result = (id, extra = {}) => ({ ...call(id), kind: 'provider.tool-result', seq: 2, status: 'succeeded', outputRef: 'report', outputDigest: 'recorded', ...extra })
 const report = (extra = {}) => ({ exitCode: 0, signal: null, timedOut: false, aborted: false, stdout: { text: '', truncated: false }, stderr: { text: '', truncated: false }, ...extra })
 
+test('shell card shows the action and exit without reproducing raw stdout on the timeline', async () => {
+  const host = new Node('main')
+  const events = [call('script', 'export GIT_OPTIONAL_LOCKS=0\ngit worktree list'), result('script')]
+  const reader = async () => report({ stdout: { text: 'RAW_WORKTREE_TABLE', truncated: false } })
+  renderToolBody(host, events, reader)
+  await find(host, 'tool-read-output').listeners.click()
+  assert.match(text(find(host, 'tool-semantic')), /受控调用/)
+  assert.doesNotMatch(text(find(host, 'tool-semantic')), /RAW_WORKTREE_TABLE/)
+  assert.match(find(host, 'tool-output').textContent, /RAW_WORKTREE_TABLE/)
+})
+
+test('a blocked task keeps each recorded tool outcome and stops timing an unreturned call', () => {
+  const host = new Node('main')
+  const events = [call('ok'), result('ok'), call('failed'),
+    result('failed', { status: 'failed', error: {
+      code: 'tool.argument.invalid', message: 'bash timeoutMs must be an integer from 1 to 120000',
+    } }), call('unreturned')]
+  const timers = new Set()
+  const priorWindow = globalThis.window
+  globalThis.window = {
+    setInterval() { const id = Symbol(); timers.add(id); return id },
+    clearInterval(id) { timers.delete(id) },
+  }
+  events.at(-1).occurredAt = new Date().toISOString()
+  const reader = async () => report()
+  try {
+    renderToolBody(host, events, reader)
+    assert.equal(host.children[2].dataset.status, 'pending')
+    assert.equal(timers.size, 1)
+    renderToolBody(host, events, reader, { finished: explicitToolActivityFinished({ kind: 'error' }) })
+    assert.deepEqual(host.children.map(node => node.dataset.status), ['succeeded', 'failed', 'unknown'])
+    assert.equal(timers.size, 0)
+    assert.match(find(host.children[1], 'tool-error').textContent, /tool\.argument\.invalid · Bash 等待上限/)
+    assert.equal(find(host.children[2], 'tool-state').textContent, '结果未记录')
+  } finally {
+    disposeToolBody(host)
+    globalThis.window = priorWindow
+  }
+})
+
 test('a changed scoped reader cannot retain another scope report for the same event identity', async () => {
   const host = new Node('main')
   const events = [call('a'), result('a')]
@@ -44,7 +85,7 @@ test('a changed scoped reader cannot retain another scope report for the same ev
 
 // Real relay output repeated the question, internal action and impact in both
 // the task card and the question UI. Keep the completed control call compact.
-test('a completed turn end keeps its control contents behind call evidence', () => {
+test('a completed turn end stays lifecycle-only and creates no tool card', () => {
   const host = new Node('main')
   const toolId = 'humanagent_turn_end'
   const args = { outcome: 'input-required', inputRequest: { question: '选择预发环境？' }, summary: {
@@ -54,10 +95,8 @@ test('a completed turn end keeps its control contents behind call evidence', () 
     { ...call('end'), toolId, arguments: args },
     { ...result('end'), toolId, outputRef: undefined, outputDigest: undefined },
   ])
-  assert.match(text(host), /已提交待答问题/)
-  assert.doesNotMatch(text(host), /选择预发环境|内部执行记录|执行成功/)
-  open(find(host, 'tool-facts'))
-  assert.match(text(find(host, 'tool-arguments')), /选择预发环境|内部执行记录/)
+  assert.equal(host.children.length, 0)
+  assert.doesNotMatch(text(host), /已提交待答问题|选择预发环境|内部执行记录|执行成功/)
 })
 
 // Failure mode: the card stays generic after a real report, or a viewport read
@@ -92,7 +131,8 @@ test('plugins provide immediate subjects and update the same card from one visib
     finish(report({ stdout: { text: '<script>literal</script>\n', truncated: false } }))
     await click
     assert.equal(host.children[0], card)
-    assert.ok(text(find(card, 'tool-semantic')).includes('<script>literal</script>'))
+    assert.doesNotMatch(text(find(card, 'tool-semantic')), /<script>literal<\/script>/)
+    assert.match(find(card, 'tool-output').textContent, /<script>literal<\/script>/)
     assert.equal(text(find(host.children[1], 'tool-semantic')).includes('literal'), false)
     assert.equal(find(card, 'tool-output').hidden, false, 'explicit click expands full output')
     renderToolBody(host, events, reader)
@@ -230,7 +270,9 @@ test('command syntax stays literal, cwd is explicit, unknown tools stay generic'
   assert.match(text(host), /绑定项目目录（实际路径未提供）/)
   renderToolBody(host, [{ ...call('b'), toolId: 'exec_command', arguments: { argv: ['echo', 'a | b'] } }], () => {})
   assert.equal(find(host, 'tool-command'), undefined)
-  assert.match(text(host), /a \| b/)
+  assert.doesNotMatch(text(find(host, 'tool-semantic')), /a \| b/)
+  open(find(host, 'tool-facts'))
+  assert.match(text(find(host, 'tool-facts')), /a \| b/)
 })
 
 // Failure mode: the observed workspace refusal renders its raw English and a

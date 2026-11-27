@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { explicitToolActivityFinished, explicitToolRows } from '../../docs/ui/explicit-tool-activity.js'
+import { explicitRequestMetadata, explicitStepsWithToolEvents, explicitToolActivityFinished, explicitToolRows } from '../../docs/ui/explicit-tool-activity.js'
 import { renderTurnProgressDetail } from '../../docs/ui/turn-progress-detail.js'
 
 const at = (second) => new Date(Date.UTC(2026, 10, 23, 0, 0, second)).toISOString()
@@ -31,6 +31,21 @@ test('project snapshots are rendered as scoped project reads in the live tool ca
   assert.equal(row?.label, '查看项目进展')
   assert.equal(row.status, '等待工具返回')
   assert.equal(row.running, true)
+})
+
+test('skill selection stays request metadata and internal reads become typed semantic tool events', () => {
+  const selection = step('tool.started', 1, 'request', 'skills', { kind: 'select-skills' })
+  const selected = step('tool.finished', 2, 'request', 'skills', { kind: 'select-skills', status: 'succeeded', detail: { kind: 'skills', skills: ['task-intake'] } })
+  const read = step('tool.started', 3, 'request', 'read', { kind: 'read-task-result', detail: { kind: 'task-result', title: '预算任务', taskState: 'running', publicationState: 'pending' } })
+  const end = step('tool.started', 4, 'request', 'end', { kind: 'submit-turn' })
+  assert.deepEqual(explicitToolRows([selection, selected, read, end], false).map(row => row.label), ['读取任务结果'])
+  assert.equal(explicitRequestMetadata([selection])?.label, '正在加载本轮技能')
+  assert.match(explicitRequestMetadata([selection, selected])?.label, /任务接单/)
+  const [call] = explicitStepsWithToolEvents([read], 'interaction-1')
+  assert.equal(call.kind, 'provider.tool')
+  assert.equal(call.toolId, 'humanagent.internal.read-task-result')
+  assert.deepEqual(call.taskId, { scope: 'interaction', value: 'interaction-1' })
+  assert.equal(explicitStepsWithToolEvents([end], 'interaction-1').length, 0)
 })
 
 test('continuation distinguishes the runtime blocker from a published result and a real release', () => {

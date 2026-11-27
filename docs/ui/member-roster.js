@@ -21,7 +21,8 @@ export function memberSessionLabel(state) {
 // neither entry polling nor an older project's completion can replace another.
 export function createProjectRosterReader(api) {
   const reads = new Map()
-  return { read(projectKey) {
+  return { read(projectKey, { retry = false } = {}) {
+    if (retry) reads.delete(projectKey)
     if (!reads.has(projectKey)) reads.set(projectKey, Promise.resolve().then(() => api.projectRoster(projectKey)).then((read) => {
       if (read.projectKey !== projectKey) throw new Error('成员名册项目范围不匹配')
       return read
@@ -44,7 +45,7 @@ function roleBadge(roleId) {
 export function memberRosterDetail(member, projectLabel, projectKey, mainTopic) {
   const content = element('div', undefined, 'member-roster-detail')
   content.append(element('p', `项目：${projectLabel}`), roleBadge(member.roleId))
-  if (mainTopic) content.append(element('p', 'manager · 项目负责人'), element('p', '主入口：当前服务主会话'))
+  if (mainTopic) content.append(element('p', '项目负责人'), element('p', '主入口：当前服务主会话'))
   content.append(element('h3', '已绑定会话'))
   if (!member.sessions.length) content.append(element('p', mainTopic ? '当前服务提供主会话；暂无其他会话绑定。' : '尚未绑定会话。', 'muted'))
   for (const session of member.sessions) {
@@ -59,15 +60,29 @@ export function memberRosterDetail(member, projectLabel, projectKey, mainTopic) 
   return content
 }
 
-export function mountMemberRoster({ projectKey, projectLabel, reader, mainTopic, onReadIssue = () => {} }) {
+export function mountMemberRoster({ projectKey, projectLabel, reader, mainTopic, onReadIssue = () => {}, onCurrentActivate }) {
   const root = element('div', undefined, 'member-roster')
   root.dataset.projectKey = projectKey
   const topic = mainTopic?.projectKey === projectKey ? mainTopic : null
-  function render(members) {
+  function render(members, issue) {
     root.replaceChildren()
-    const mainMember = topic && members.find((member) => member.roleId === 'interaction' && member.memberName === topic.agentName)
+    const mainMember = topic?.agentId && members.find((member) => member.agentId === topic.agentId)
     const displayed = topic ? [mainMember ?? { memberName: topic.agentName, roleId: 'manager', sessions: [] },
       ...members.filter((member) => member !== mainMember)] : members
+    if (!topic) {
+      const unavailable = element('button', undefined, 'entry-person member-roster-default-unavailable')
+      unavailable.type = 'button'
+      unavailable.append(element('span', 'Jenny'), roleBadge('manager'),
+        element('span', '会话入口尚未接入', 'member-roster-entry-state'))
+      unavailable.addEventListener('click', () => {
+        const content = element('div', undefined, 'member-roster-detail')
+        content.append(element('p', `项目：${projectLabel}`),
+          element('p', '此项目的默认 Jenny 会话入口尚未接入当前服务。'),
+          element('p', '当前仅能查看此项目的登记与名册状态，无法在此打开历史或发送消息。'))
+        openTechnicalDetail({ title: `${projectLabel} · Jenny`, eyebrow: '会话状态', content, trigger: unavailable })
+      })
+      root.append(unavailable)
+    }
     for (const member of displayed) {
       const isMain = topic && member === displayed[0]
       const openDetail = (trigger) => openTechnicalDetail({ title: member.memberName,
@@ -77,7 +92,13 @@ export function mountMemberRoster({ projectKey, projectLabel, reader, mainTopic,
         const link = element('a', undefined, 'entry-person entry-jenny member-roster-main')
         link.href = topic.href
         link.append(element('span', member.memberName), roleBadge('manager'))
-        if (topic.current) link.setAttribute('aria-current', 'page')
+        if (topic.current) {
+          link.setAttribute('aria-current', 'page')
+          link.addEventListener('click', (event) => {
+            event.preventDefault()
+            onCurrentActivate?.(link)
+          })
+        }
         const detail = element('button', '成员详情', 'member-roster-detail-trigger')
         detail.type = 'button'
         detail.setAttribute('aria-label', `${member.memberName} 成员详情`)
@@ -95,15 +116,27 @@ export function mountMemberRoster({ projectKey, projectLabel, reader, mainTopic,
       button.addEventListener('click', () => openDetail(button))
       root.append(button)
     }
+    if (issue) root.append(element('p', issue, 'member-roster-state'))
   }
-  render([])
-  void reader.read(projectKey).then((read) => {
-    render(read.members)
-    onReadIssue(read.rosterState === 'not-initialized' ? '项目名册尚未初始化。' : null)
-  }).catch((error) => {
-    const detail = `成员名册读取失败${error.status ? `（HTTP ${error.status}）` : ''}：${error.message}`
-    render([])
-    onReadIssue(detail)
-  })
+  function readRoster(retry = false) {
+    render([], '正在读取成员名册…')
+    return reader.read(projectKey, { retry }).then((read) => {
+      const empty = read.members.length === 0
+      const state = read.rosterState === 'not-initialized'
+        ? '成员名册尚未初始化。'
+        : empty ? '暂无历史成员。' : null
+      render(read.members, state)
+      onReadIssue(null)
+    }).catch((error) => {
+      const detail = `成员名册读取失败${error.status ? `（HTTP ${error.status}）` : ''}：${error.message}`
+      render([], detail)
+      onReadIssue(detail)
+      const retry = element('button', '重试读取名册', 'member-roster-detail-trigger')
+      retry.type = 'button'
+      retry.addEventListener('click', () => { void readRoster(true) })
+      root.append(retry)
+    })
+  }
+  void readRoster()
   return root
 }

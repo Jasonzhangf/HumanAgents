@@ -14,7 +14,7 @@
     "choose_next_action": {
       "ownerPath": "packages/app/src/explicit-brain-runtime.ts",
       "ownerRel": "packages/app/src/explicit-brain-runtime.ts",
-      "designNote": "沿既有显式语义轮次推理。App 注入授权的项目快照、当前任务和历史读取能力，验证作用域与本次用户动作授权。运行时控制授权来自可信入口。"
+      "designNote": "沿既有显式语义轮次推理。App 注入授权的项目快照、当前任务和历史读取能力，验证作用域与本次用户动作授权。proposal.title 在解释边界折叠空白并截断到 50 个 Unicode 字符；原始正文保持完整。当前项目主话题内的独立新交付按 create 成为新 task，已有目标或范围变化按 append/change 匹配确切 task；新 Topic、新 Project 或跨项目请求在无已授权入口时只作澄清，保留原 task 与原 Topic。运行时控制授权来自可信入口。"
     },
     "apply_selected_action": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",

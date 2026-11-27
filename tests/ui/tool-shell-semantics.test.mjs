@@ -10,6 +10,60 @@ const report = (stdout = '', extra = {}) => ({ exitCode: 0, signal: null, timedO
 const card = (command, result) => shellSemantics('bash', { command }, result)
 const text = (value) => JSON.stringify(value)
 
+// Audit receipt: loop keywords and array entries became fictitious commands.
+// Impact: misleading primary action. Cheap exact-shape tests execute no shell.
+test('compound scripts use the supplied action instead of interpreting shell grammar', () => {
+  const description = 'Collect git metadata (branch, last commit, worktrees, branches) per repo'
+  for (const command of [
+    'cd "$HOME/github" && for repo in *; do if [ -d "$repo/.git" ]; then git -C "$repo" status; fi; done',
+    'echo paths; paths=(\n/repo/one\n/repo/two\n); for p in "${paths[@]}"; do ls "$p"; done',
+    'repos="one two"; for p in $repos; do git -C "$p" log -1; done',
+    'branch=$(git branch --show-current); printf "%s" "$branch"',
+    'branch=`git branch --show-current`; echo "$branch"',
+    '$(cat command.txt)',
+    'git status; while read -r p; do echo "$p"; done',
+    'export GIT_OPTIONAL_LOCKS=0\ncd /workspace/repos\nfind . -name .git | head -60',
+  ]) {
+    const args = { command, description, workdir: '/workspace/repos' }
+    const before = JSON.stringify(args)
+    assert.deepEqual(shellSemantics('bash', args), {
+      title: description,
+      subject: '复合脚本，具体步骤见调用参数与证据',
+      workdir: '/workspace/repos',
+      summary: '尚无结果正文',
+      lines: [],
+    }, command)
+    assert.equal(JSON.stringify(args), before)
+  }
+})
+
+test('historical scripts without description have bounded honest intent and actual result', () => {
+  const args = { command: 'paths=(\n/repo/one\n/repo/two\n); for p in "${paths[@]}"; do cat "$p"; done', workdir: '/actual/root' }
+  assert.deepEqual(shellSemantics('bash', args, report('actual output', { exitCode: 7 })), {
+    title: '执行脚本',
+    subject: '复合脚本，具体步骤见调用参数与证据',
+    workdir: '/actual/root',
+    summary: '命令序列整体退出码：7；各步骤结果不能由整体退出码确认；部分参数或命令未能静态解析',
+    lines: [{ kind: 'text', text: 'actual output' }],
+  })
+  const long = shellSemantics('bash', { ...args, description: 'x'.repeat(1000), workdir: 'p'.repeat(1000) })
+  assert.equal(long.title, 'x'.repeat(240) + '…')
+  assert.equal(long.workdir, 'p'.repeat(240) + '…')
+  assert.equal(shellSemantics('bash', { ...args, description: '  ' }).title, '执行脚本')
+})
+
+test('a description does not replace understood simple command and pipeline details', () => {
+  const args = { command: 'rg -n TODO src | head -20', description: 'Review outstanding work', workdir: '/workspace/project' }
+  assert.deepEqual(shellSemantics('bash', args, report('src/a.ts:1:TODO')), {
+    title: '搜索文件内容',
+    subject: '在 src 搜索 TODO → 取前 20 行',
+    workSummary: 'Review outstanding work',
+    workdir: '/workspace/project',
+    summary: '管道整体退出码：0；各步骤结果不能由整体退出码确认',
+    lines: [{ kind: 'text', text: 'src/a.ts:1:TODO' }],
+  })
+})
+
 test('search shows actual hits; reading distinguishes whole file and excerpts', () => {
   const hits = card('rg -n TODO src', report('src/a.ts:12:TODO fix\n'))
   assert.match(hits.title, /搜索/)
@@ -23,7 +77,7 @@ test('search shows actual hits; reading distinguishes whole file and excerpts', 
   assert.match(card('tail -20 app.log', report('last')).title, /文件末尾节选/)
 })
 
-test('quoted metacharacters are literal, dynamic and compound syntax stay conservative', () => {
+test('quoted metacharacters stay literal and complex syntax keeps a safe executable fallback', () => {
   for (const value of ['a|b', 'a>b', 'a;b', 'a&&b', '$(date)', '`date`']) {
     const view = card(`rg -n '${value}' 'src file'`, report('literal'))
     assert.match(view.title, /搜索/)
@@ -35,9 +89,23 @@ test('quoted metacharacters are literal, dynamic and compound syntax stay conser
   assert.match(quoted.title, /搜索/)
   assert.ok(quoted.subject.includes('a|b > c; d'))
   assert.doesNotMatch(text(quoted), /管道|重定向/)
-  for (const command of ['rg "$PATTERN" src', 'cat $(find .)', 'cat `pwd`', 'cat *.txt', 'cat <(echo hi)', 'cat a; rm b', "cat 'unclosed"]) {
-    assert.equal(card(command).title, '执行命令', command)
+  for (const [command, title] of [
+    ['rg "$PATTERN" src', /搜索/],
+    ['cat $(find .)', /读取文件/],
+    ['cat `pwd`', /读取文件/],
+    ['cat *.txt', /读取文件/],
+    ['cat <(echo hi)', /读取文件/],
+    ["cat 'unclosed", /读取文件/],
+  ]) {
+    const view = card(command)
+    assert.match(view.title, title, command)
+    assert.ok(view.subject, command)
+    assert.notEqual(view.title, '执行命令', command)
   }
+  const sequence = card('cat a; rm b')
+  assert.match(sequence.title, /读取文件/)
+  assert.match(sequence.subject, /读取 a.*删除 b/)
+  assert.doesNotMatch(sequence.summary, /删除成功|读取成功/)
 })
 
 test('pipeline and output redirection describe intent without verified writes or per-action success', () => {
@@ -74,10 +142,18 @@ test('static options describe search intent, lists, input and writes without arg
   ]) assert.equal(card(command, report()).subject, subject, command)
   assert.match(card('rg --files src', report('src/a.ts')).title, /文件名/)
   assert.doesNotMatch(card('rg --files src', report('src/a.ts')).summary, /搜索命中/)
-  for (const command of ['rg --unknown value TODO src', 'grep -f patterns src', 'cat a || cat b', 'git status &&', 'cat a 2> err']) {
-    assert.equal(card(command).title, '执行命令', command)
-    assert.equal(card(command).subject, undefined, command)
+  for (const [command, title] of [
+    ['rg --unknown value TODO src', /搜索/],
+    ['grep -f patterns src', /搜索/],
+    ['cat a || cat b', /读取文件/],
+    ['git status &&', /状态/],
+  ]) {
+    const view = card(command)
+    assert.match(view.title, title, command)
+    assert.ok(view.subject, command)
   }
+  assert.match(card('cat a 2> err').subject, /读取 a/)
+  assert.doesNotMatch(JSON.stringify(card('cat a 2> err')), /输出到 err/)
   const sequence = card('git status && pnpm test', report('actual only', { exitCode: 7 }))
   assert.match(sequence.summary, /整体.*退出码：7/)
   assert.match(sequence.summary, /各步骤/)
@@ -119,6 +195,39 @@ test('pending, missing, empty, failed and interrupted reports retain their real 
   assert.match(failed.summary, /退出码：7/)
   assert.ok(failed.lines.some((line) => line.text.includes('denied')))
   assert.match(card('cat a', report('', { exitCode: null, timedOut: true, aborted: true, signal: 'SIGTERM' })).summary, /超时.*取消.*SIGTERM/)
+})
+
+// Real Journal call call_00_9siGcxN7by370SJ3I51q4840 paired with a succeeded
+// result that has empty outputRefs. Failure mode: the generic card hid both the
+// command intent and the fact that the result body is unavailable.
+test('a real semicolon, echo and fd-redirect command keeps a truthful work summary', () => {
+  const command = 'pwd; ls -a "$(pwd)" | head -50; echo \'---\'; ls -a /Users/fanzhang/.humanagent 2>/dev/null | head -30'
+  const view = shellSemantics('bash', {
+    command,
+    description: '确认工作区根目录与 .humanagent 目录',
+    workdir: '/workspace/project',
+  }, report())
+  assert.match(view.title, /工作目录/)
+  assert.match(view.subject, /显示当前工作目录/)
+  assert.match(view.subject, /参数无法完整解析|后续.*未展开/)
+  assert.equal(view.workSummary, '确认工作区根目录与 .humanagent 目录')
+  assert.equal(view.workdir, '/workspace/project')
+  assert.match(view.summary, /命令序列整体退出码：0/)
+  assert.match(view.summary, /各步骤结果不能由整体退出码确认/)
+  assert.doesNotMatch(JSON.stringify(view), /\/workspace\/project.*\/workspace\/project\/icon|展开为/)
+})
+
+test('newlines and safe descriptor redirection are parsed without verified side effects', () => {
+  const command = 'ls -la /tmp/ha-accept-root.md 2>/dev/null\necho "---"\nls -la /tmp | head -50'
+  const view = card(command, report())
+  assert.match(view.title, /列出/)
+  assert.match(view.subject, /\/tmp\/ha-accept-root\.md/)
+  assert.match(view.subject, /输出文本/)
+  assert.match(view.subject, /\/tmp.*前 50 行/)
+  assert.match(view.summary, /命令序列整体退出码：0/)
+  assert.match(view.summary, /各步骤结果不能由整体退出码确认/)
+  assert.doesNotMatch(view.subject, /2>\/dev\/null/)
+  assert.doesNotMatch(view.summary, /写入成功|执行成功/)
 })
 
 test('preview is bounded, literal, and leaves full report untouched', () => {

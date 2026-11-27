@@ -28,11 +28,11 @@ export function createAttemptAuth(binding) {
   const repoPath = binding.repoPath ?? DEFAULT_REPO_PATH;
   const cli = resolve(repoPath, 'dist/app/app/src/cli.js');
   const auth = {
-    cookie: null,
+    cookie: binding.existingSessionCookie ?? null,
     mutationOriginHeaders: {},
     pairPid: null,
     pairExitCode: null,
-    paired: false,
+    paired: Boolean(binding.existingSessionCookie),
     fetch(input, init = {}) {
       const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url, binding.serveBaseUrl);
       const method = String(init.method ?? 'GET').toUpperCase();
@@ -58,6 +58,7 @@ export function createAttemptAuth(binding) {
       return body;
     },
     async pair() {
+      if (auth.paired && auth.cookie) return { expiresAt: null };
       const pair = spawn(process.execPath, [
         cli,
         'pair',

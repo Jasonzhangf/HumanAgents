@@ -6,7 +6,7 @@
     "designStatus": "CANDIDATE",
     "implementationStatus": "UNVERIFIED",
     "entry": "一个已经记录的显式事件。当前用户输入、对原问题的答复、原任务的新回执或受配置授权的调度事件都由各自入口规范成同一对象。事件附角色、项目与 Topic 作用域、原始引用和权限来源。",
-    "exclusiveSelection": "先判可信事件类型和允许操作，再查授权项目快照、原任务及适用历史。选择一个处置计划。查状态并要求续办时，读状态是动作准备，结果由确切任务的最新状态决定。单一 Board 事件允许计划包含互不依赖的多项动作，返回逐项结果。重复、过期、歧义或跨域明确返回原因。",
+    "exclusiveSelection": "先判可信事件类型和允许操作，再查授权项目快照、原任务及适用历史。选择一个处置计划。查状态并要求续办时，读状态是动作准备，结果由确切任务的最新状态决定。单一 Board 事件允许计划包含互不依赖的多项动作，返回逐项结果。重复、过期、歧义或跨域明确返回原因。当前项目主话题内的独立新交付按 create 成为新 task；已有目标、范围或处理方式变化按 append/change 匹配确切 task。新 Topic、新 Project 或跨项目请求在无已授权入口时只作澄清，保留原 task 与原 Topic，不冒充创建。",
     "externalWait": "等待用户、执行回执、退避或外部核实都是本轮的终点结果。新事件带原引用和当前版本重新进入本图。已有任务保持同一任务及适用的原 operation；不用图内回边模拟推理、重试或轮询。",
     "close": "一轮返回一个公开回执，可包含逐项动作结果。任务与决策事实来自原 owner，专属会话和有权用户的收件箱投影复用同一事实。显示问题、进度或工具的实际语义。有效对话轮次沿 C07 规则进入 checkpoint；失败探索记录从上一个 checkpoint 继续。",
     "relatedGraphs": ["humanagent-explicit-semantic-turn", "humanagent-explicit-requirement", "humanagent-explicit-interpret-observable-turn"]
