@@ -1881,6 +1881,28 @@ export async function main(args: readonly string[]): Promise<void> {
         config: { internal: configuration.internal, user: configuration.effective },
         projects: conversationProjects,
       });
+      const projectInteractionAgentId = conversationDescriptors.find((descriptor) => descriptor.scope.kind === 'project')?.agentId
+        ?? configuration.effective.project?.defaultAgent;
+      const projectExplicitBrainHelperProviderPreparer = (selection: {
+        readonly roleId: import('../../config/src/index.js').AgentRole;
+        readonly configuredAgentId?: string;
+      }) => prepareExplicitBrainHelper({
+        ...selection,
+        ...(selection.configuredAgentId === undefined && selection.roleId === 'interaction' && projectInteractionAgentId !== undefined
+          ? { configuredAgentId: projectInteractionAgentId }
+          : {}),
+      });
+      const prepareProjectSelectedAgentProvider = <
+        TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+      >(selection: {
+        readonly roleId: import('../../config/src/index.js').AgentRole;
+        readonly configuredAgentId?: string;
+      }) => prepareSelectedAgentProvider<TIdentity>({
+        ...selection,
+        ...(selection.configuredAgentId === undefined && selection.roleId === 'interaction' && projectInteractionAgentId !== undefined
+          ? { configuredAgentId: projectInteractionAgentId }
+          : {}),
+      });
       let projectRuntimeForConversation: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
       const scopedConversationBackend = new ScopedConversationBackend({
         descriptors: conversationDescriptors,
@@ -2121,7 +2143,7 @@ export async function main(args: readonly string[]): Promise<void> {
               },
               runtimeComposition: {
                 ...(mode === 'fake' ? {} : {
-                  prepareAgentProvider: prepareSelectedAgentProvider,
+                  prepareAgentProvider: prepareProjectSelectedAgentProvider,
                   prepareTaskAgentProvider,
                 }),
                 ...(orchestrationPorts === undefined ? {} : {
@@ -2129,7 +2151,7 @@ export async function main(args: readonly string[]): Promise<void> {
                 }),
               },
               ...(mode === 'fake' ? {} : {
-                explicitBrainHelperProviderPreparer: prepareExplicitBrainHelper,
+                explicitBrainHelperProviderPreparer: projectExplicitBrainHelperProviderPreparer,
               }),
               host,
               portNumber,

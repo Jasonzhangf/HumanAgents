@@ -660,7 +660,17 @@ async function* parseSse(
   onSilence?: () => void,
 ): AsyncIterable<SseFrame> {
   const decoder = new TextDecoder();
-  const iterator = withSilenceWatchdog(body, silenceBudgetMs, onSilence)[Symbol.asyncIterator]();
+  let lastProgressAt = performance.now();
+  let currentBudgetMs = typeof silenceBudgetMs === 'function' ? silenceBudgetMs() : silenceBudgetMs;
+  const effectiveBudgetMs = (): number => {
+    const target = typeof silenceBudgetMs === 'function' ? silenceBudgetMs() : silenceBudgetMs;
+    if (target !== currentBudgetMs) {
+      currentBudgetMs = target;
+      lastProgressAt = performance.now();
+    }
+    return Math.max(0, currentBudgetMs - (performance.now() - lastProgressAt));
+  };
+  const iterator = withSilenceWatchdog(body, effectiveBudgetMs, onSilence)[Symbol.asyncIterator]();
   let buffer = '';
   let event: string | undefined;
   let data: string[] = [];
@@ -686,8 +696,14 @@ async function* parseSse(
         if (line.endsWith('\r')) line = line.slice(0, -1);
         if (line === '') {
           const frame = emit();
-          if (frame) yield frame;
+          if (frame) {
+            lastProgressAt = performance.now();
+            yield frame;
+          }
         } else if (!line.startsWith(':')) {
+          // Only real SSE fields count as stream progress; `: keepalive` comments
+          // must not reset the no-progress deadline infinitely on a dead upstream.
+          lastProgressAt = performance.now();
           const separator = line.indexOf(':');
           const field = separator < 0 ? line : line.slice(0, separator);
           let value = separator < 0 ? '' : line.slice(separator + 1);
@@ -699,6 +715,11 @@ async function* parseSse(
           }
         }
         boundary = buffer.indexOf('\n');
+      }
+      const targetBudget = typeof silenceBudgetMs === 'function' ? silenceBudgetMs() : silenceBudgetMs;
+      if (targetBudget === currentBudgetMs && performance.now() - lastProgressAt >= currentBudgetMs) {
+        onSilence?.();
+        throw new StreamSilenceError(currentBudgetMs);
       }
     }
     buffer += decoder.decode();
@@ -720,7 +741,7 @@ async function* parseSse(
  * override. The `http` source (direct OpenAI-style endpoint) keeps the original
  * top-level `instructions` because that transport does not re-classify it.
  */
-type ResponsesWireMessageOut = { type: 'message'; role: 'user' | 'assistant' | 'system'; content: Array<{ type: 'input_text'; text: string }> };
+type ResponsesWireMessageOut = { type: 'message'; role: 'user' | 'assistant' | 'system'; content: Array<{ type: 'input_text' | 'output_text'; text: string }> };
 type ResponsesWireItemOut =
   | ResponsesWireMessageOut
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
@@ -728,7 +749,11 @@ type ResponsesWireItemOut =
 
 function responsesPayload(request: ResponsesWireRequest, source: ProviderTransportSource = 'rcc'): Record<string, unknown> {
   const wireInput: ResponsesWireItemOut[] = request.input.map((item) => item.type === 'message'
-    ? { type: 'message' as const, role: item.role, content: [{ type: 'input_text' as const, text: item.content }] }
+    ? {
+        type: 'message' as const,
+        role: item.role,
+        content: [{ type: item.role === 'assistant' ? 'output_text' as const : 'input_text' as const, text: item.content }],
+      }
     : item.type === 'function_call'
       ? { type: 'function_call' as const, call_id: item.call_id, name: item.name, arguments: item.arguments }
       : { type: 'function_call_output' as const, call_id: item.call_id, output: item.output });

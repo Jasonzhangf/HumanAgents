@@ -1810,6 +1810,18 @@ export function createProviderExplicitBrainInterpreter(input: {
         settleAttempted = true;
         const closure = await driver.settle({ runtimeId, executionEpoch });
         if (closure.state !== 'succeeded') {
+          const settlementErr = driver.settlement()?.error;
+          if (settlementErr !== undefined) {
+            const nextAction = typeof settlementErr.nextAction === 'string'
+              ? settlementErr.nextAction
+              : `${settlementErr.nextAction.kind}${settlementErr.nextAction.ref ? `:${settlementErr.nextAction.ref}` : ''}`;
+            throw new AppLifecycleError(
+              settlementErr.code,
+              settlementErr.message,
+              nextAction,
+              settlementErr.ownerId,
+            );
+          }
           throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
         }
         const settledEnd = endResult as ExplicitEndSubmission | undefined;

@@ -6554,6 +6554,9 @@ export class RuntimeTaskCoordinator {
             };
             break;
           }
+          if (closure.state === 'waiting') {
+            break;
+          }
           const policy = classifyErrorPolicy({
             layer: 'background',
             attempt: attemptNumber,
@@ -6614,6 +6617,9 @@ export class RuntimeTaskCoordinator {
               ? await activeTurn.runProducer(() => runDispatch(currentAssignment))
               : await runDispatch(currentAssignment);
             continue;
+          }
+          if (attemptNumber === 1 && remediation === undefined && !committedSideEffects) {
+            break;
           }
           // 尝试上限耗尽、已提交副作用或不可重试：显式失败，保留首次原因与证据。
           const finalReason = firstFailureReason ?? problem?.reason ?? `执行在 ${maxAttempts} 次尝试后未通过`;

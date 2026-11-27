@@ -2748,3 +2748,66 @@ test('RCC v3 completes single-round message requests after round-one message don
   assert.equal(turnEndObserved.some((event) => event.kind === 'tool'), true);
   assert.equal(turnEndObserved.at(-1)?.terminalState, 'waiting');
 });
+
+test('responsesPayload encodes prior assistant messages as output_text and user messages as input_text', async () => {
+  let capturedBody: { input?: Array<{ type: string; role?: string; content?: Array<{ type: string; text: string }> }> } | undefined;
+  const built = adapter(async (_url, init) => {
+    capturedBody = JSON.parse(String(init.body));
+    return response(chunks([
+      frame('response.created', { response: { id: 'resp-multi-turn' } }),
+      frame('response.completed', { response: { id: 'resp-multi-turn' } }),
+    ]));
+  }, binding, new ResponsesProviderCodec(), 'rcc');
+  const requestContext: ProviderRequestContext = {
+    units: [
+      { kind: 'message', role: 'user', text: 'first question' },
+      { kind: 'message', role: 'assistant', text: 'prior assistant answer' },
+      { kind: 'message', role: 'user', text: 'second question' },
+    ],
+  };
+  await built.adapter.start({
+    ...startInput(),
+    requestContext,
+  });
+  for await (const _event of built.adapter.observe(execution)) {
+    // drain
+  }
+  assert.ok(capturedBody?.input);
+  const assistantItem = capturedBody.input.find((item) => item.type === 'message' && item.role === 'assistant');
+  assert.deepEqual(assistantItem, {
+    type: 'message',
+    role: 'assistant',
+    content: [{ type: 'output_text', text: 'prior assistant answer' }],
+  });
+  const firstUserItem = capturedBody.input.find((item) => item.type === 'message' && item.role === 'user');
+  assert.equal(firstUserItem?.content?.[0]?.type, 'input_text');
+});
+
+test('RCC v3 observe ends a stream emitting only SSE keepalive comments within noProgressBudgetMs', async () => {
+  const encoder = new TextEncoder();
+  const body: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      while (true) {
+        yield encoder.encode(': keepalive\n\n');
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+    },
+  };
+  const built = transportHarness({ noProgressBudgetMs: 60 });
+  seedActive(built.transport, body);
+  const guard = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => reject(new Error('keepalive-only stream hung past budget')), 3_000);
+  });
+  await Promise.race([guard, assert.rejects(async () => {
+    for await (const event of built.transport.observe(execution)) void event;
+  }, (error: unknown) => {
+    assert.equal(error instanceof ProviderAdapterError, true);
+    const failure = (error as ProviderAdapterError).providerError;
+    assert.equal(failure.code, 'stream.no-progress');
+    assert.equal(failure.category, 'timeout');
+    return true;
+  })]);
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.error?.code, 'stream.no-progress');
+});

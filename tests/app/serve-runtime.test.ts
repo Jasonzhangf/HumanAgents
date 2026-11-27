@@ -775,11 +775,17 @@ test('confirmed requirement preserves non-success provider closures through orch
       });
 
       const taskId = await waitForRuntimeTask(runtime);
-      await waitForTaskState(() => runtime.service.taskDashboard(taskId).checkpoint?.outcome ?? '', terminalState);
-      await waitForTaskState(() => runtime.service.taskDashboard(taskId).state, terminalState);
+      const expectedClosureState = terminalState === 'waiting' ? 'waiting' : 'blocked';
+      const expectedAssignmentStatus = terminalState === 'waiting'
+        ? 'retryable'
+        : terminalState === 'blocked'
+          ? 'blocked'
+          : 'escalated';
+      await waitForTaskState(() => runtime.service.taskDashboard(taskId).checkpoint?.outcome ?? '', expectedClosureState);
+      await waitForTaskState(() => runtime.service.taskDashboard(taskId).state, expectedClosureState);
       const dashboard = runtime.service.taskDashboard(taskId);
-      assert.equal(dashboard.checkpoint?.outcome, terminalState);
-      assert.equal(runtime.service.taskAssembly(taskId).orchestration.graph.snapshot().assignments[0]?.status, terminalState === 'blocked' ? 'blocked' : 'escalated');
+      assert.equal(dashboard.checkpoint?.outcome, expectedClosureState);
+      assert.equal(runtime.service.taskAssembly(taskId).orchestration.graph.snapshot().assignments.at(-1)?.status, expectedAssignmentStatus);
     } finally {
       await runtime.server.close();
       await runtimeComposition.dispose();

@@ -60,6 +60,7 @@ import {
   type AgentProviderComposition,
 } from '../../packages/app/src/agent-driver-composition.js';
 import { createIndependentTurnPlanner } from '../../packages/app/src/ui-runtime/turn-planner.js';
+import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
 import { deriveClosedTurnPlannerDuty } from '../../packages/runtime/src/orchestration/closed-turn-planner-call.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import {
@@ -2396,6 +2397,217 @@ test('the closed-turn Planner rejects a node phaseId that conflicts with the pha
     (error: unknown) => error instanceof Error
       && error.message === 'task plan node n1 phaseId does not match phase membership',
   );
+});
+
+test('createIndependentTurnPlanner retries transient RCC errors and fails fast on exhausted 429', async () => {
+  const binding: ProviderBinding = {
+    bindingId: 'binding-planner-retry',
+    providerId: 'rcc',
+    protocol: 'responses',
+    endpointRef: 'rcc:127.0.0.1:4444',
+    modelRef: 'model-planner-retry',
+    configDigest: 'sha256:planner-retry-config',
+    capabilityDigest: 'sha256:planner-retry-cap',
+  };
+  const taskId = id('task', 'task-planner-retry');
+  const operationId = id('operation', 'op-planner-retry');
+  const cycleId = id('cycle', 'cycle-planner-retry');
+  const checkpointId = id('checkpoint', 'cp-planner-retry');
+  const plannerScope: ScopeRef = { organId, taskId, cycleId, operationId };
+  const plannerEvidence = (name: string): EvidenceRef => ({
+    evidenceId: id('evidence', `planner-retry-${name}`),
+    kind: 'operation',
+    source: 'humanagent.test.planner-retry',
+    locator: `test://planner-retry/${name}`,
+    scope: plannerScope,
+  });
+  const checkpoint: Checkpoint = {
+    id: checkpointId,
+    scope: plannerScope,
+    cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'succeeded',
+    summary: 'The reply turn closed.',
+    recoveryStateRef: plannerEvidence('recovery'),
+    evidenceRefs: [plannerEvidence('checkpoint')],
+    next: { kind: 'continue', ref: 'planner:retry' },
+  };
+  const checkpointCommitRef = { commitId: 'planner-retry-cp-commit', journalSeq: 1, recordDigest: `sha256:${'1'.repeat(64)}` };
+  const closure: TurnClosureReference = {
+    identity: {
+      turnId: 'turn-retry',
+      workAssignmentRef: 'planner-retry-assignment',
+      taskRef: taskId,
+      scopeRef: plannerScope,
+      cycleRef: cycleId,
+      inputRevision: 1,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      runtimeBindingRef: 'planner-retry-runtime',
+      permissionRevision: 'planner-retry-permission',
+    },
+    checkpointId,
+    closureRef: 'planner-retry-closure',
+    summary: {
+      goal: { text: 'Retry transient error', evidenceRefs: [plannerEvidence('goal')] },
+      actions: { text: 'No tools.', evidenceRefs: [plannerEvidence('actions')] },
+      result: { text: 'Done.', evidenceRefs: [plannerEvidence('result')] },
+      expectedNextStep: { text: 'Stop.', evidenceRefs: [plannerEvidence('next')] },
+    },
+    recoveryStateRef: plannerEvidence('closure-recovery'),
+    closedAt: '2026-10-25T09:44:00.000Z',
+  };
+  const task: Task = {
+    id: taskId,
+    organId,
+    title: 'planner retry test',
+    directive: 'Retry transient error',
+    directiveRevision: 1,
+    state: 'settling',
+    memoryScope: 'task',
+  };
+  const identity: TaskIdentityRecord = {
+    scope: { organId, taskId },
+    title: 'planner retry test',
+    source: {
+      requirementId: `requirement:direct-task-create:${taskId.value}@1`,
+      inputRevision: 1,
+      draftId: `draft:direct-task-create:${taskId.value}@1`,
+      draftRevisionVersion: 1,
+      draftRevisionHash: `sha256:${'a'.repeat(64)}`,
+      confirmationRef: `confirmation:direct-task-create:${taskId.value}@1`,
+    },
+    journalCommitRef: 'jsonl:task-identity:planner-retry',
+  };
+  const plannerIncarnation: TaskRuntimeIncarnation = {
+    runtimeId: 'planner-retry-runtime',
+    generation: 1,
+    agentInstanceId: 'planner-retry-instance',
+    roleId: 'orchestration',
+    taskId,
+    assignmentId: 'planner-retry-assignment',
+    executionEpoch: 1,
+  };
+  const plannerInput = {
+    task,
+    closure,
+    refinedResults: [],
+    priorPlan: null,
+    identity,
+    allocation: { operationId, cycleId, executionEpoch: plannerIncarnation.executionEpoch },
+  };
+  const duty = deriveClosedTurnPlannerDuty(plannerInput, checkpointCommitRef);
+  const preparedCall = {
+    duty,
+    invocationId: 'planner-retry-invocation',
+    execution: { runtimeId: plannerIncarnation.runtimeId, taskId, operationId, organId, cycleId, executionEpoch: plannerIncarnation.executionEpoch } satisfies ProviderExecutionIdentityRef,
+    scope: plannerScope,
+    assignmentId: plannerIncarnation.assignmentId,
+    incarnation: plannerIncarnation,
+    lease: {
+      leaseId: 'planner-retry-lease',
+      runtimeId: plannerIncarnation.runtimeId,
+      generation: plannerIncarnation.generation,
+      incarnation: plannerIncarnation,
+      executionEpoch: plannerIncarnation.executionEpoch,
+      ownerId: 'planner-retry-pool',
+      assignmentId: plannerIncarnation.assignmentId,
+      capabilities: ['provider.execution'],
+    },
+    decision: {
+      action: 'spawn' as const,
+      ownerId: 'planner-retry-pool',
+      condition: 'orchestration.runtime.capacity',
+      nextAction: { kind: 'continue' as const, ref: plannerIncarnation.runtimeId },
+      reason: 'planner retry capacity is available',
+      runtimeId: plannerIncarnation.runtimeId,
+    },
+    grantCommitRef: { commitId: 'planner-retry-grant-commit', journalSeq: 2, recordDigest: `sha256:${'2'.repeat(64)}` },
+    admissionCommitRef: { commitId: 'planner-retry-admission-commit', journalSeq: 3, recordDigest: `sha256:${'3'.repeat(64)}` },
+    checkpoint: { checkpoint, previous: null, commitRef: checkpointCommitRef },
+    preparationCommitRef: { commitId: 'planner-retry-prep-commit', journalSeq: 4, recordDigest: `sha256:${'4'.repeat(64)}` },
+  };
+  const validSnapshot: TaskPlanSnapshot = {
+    title: 'Planner retry verified',
+    summary: 'Verified after transient upstream error.',
+    completeness: { scope: 'whole-task', status: 'complete' },
+    acceptanceCriteria: [{ criterionId: 'ac-1', description: 'Return OK.' }],
+    nodes: [{ nodeId: 'n1', kind: 'verification', title: 'Confirm OK', intent: 'Confirm OK.', definition: { expectedReply: 'OK' } }],
+    phases: [],
+    relations: [],
+  };
+
+  class TransientThenSuccessPort extends FakeReplayExecutionRuntimePort {
+    startCount = 0;
+    private mode: 'transient' | 'exhausted';
+    constructor(mode: 'transient' | 'exhausted') {
+      super({
+        binding,
+        replay: [
+          { kind: 'output', state: 'output', summary: JSON.stringify({ decision: 'complete', snapshot: validSnapshot, reasonText: 'done' }) },
+          { kind: 'terminal', state: 'succeeded', summary: 'succeeded', terminalState: 'succeeded' },
+        ],
+        stepDelayMs: 1,
+      });
+      this.mode = mode;
+    }
+    override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+      this.startCount += 1;
+      if (this.mode === 'exhausted') {
+        throw new ProviderAdapterError({
+          code: 'http.429',
+          category: 'transport',
+          phase: 'start',
+          message: '所有候选账号对模型 model-planner-retry 均已限额或禁用',
+          scope: plannerScope,
+        });
+      }
+      if (this.startCount === 1) {
+        throw new ProviderAdapterError({
+          code: 'http.503',
+          category: 'transport',
+          phase: 'start',
+          message: 'transient upstream 503',
+          scope: plannerScope,
+        });
+      }
+      return super.start(input);
+    }
+  }
+
+  const transientPort = new TransientThenSuccessPort('transient');
+  const transientPlanner = createIndependentTurnPlanner({
+    prepareAgentProvider: async (selection): Promise<AgentProviderComposition> => ({
+      roleId: selection.roleId,
+      provider: { source: 'rcc', provider: 'rcc', binding: binding.bindingId, protocol: 'responses', model: binding.modelRef, route: 'default', baseUrl: 'http://127.0.0.1:4444' },
+      source: 'rcc',
+      binding,
+      port: transientPort,
+    }),
+    now: () => new Date('2026-10-25T09:44:00.000Z'),
+    retryDelaysMs: [1],
+  });
+  const okResult = await transientPlanner.plan({ ...plannerInput, preparedCall });
+  assert.equal(okResult.decision, 'complete');
+  assert.equal(transientPort.startCount, 2);
+
+  const exhaustedPort = new TransientThenSuccessPort('exhausted');
+  const exhaustedPlanner = createIndependentTurnPlanner({
+    prepareAgentProvider: async (selection): Promise<AgentProviderComposition> => ({
+      roleId: selection.roleId,
+      provider: { source: 'rcc', provider: 'rcc', binding: binding.bindingId, protocol: 'responses', model: binding.modelRef, route: 'default', baseUrl: 'http://127.0.0.1:4444' },
+      source: 'rcc',
+      binding,
+      port: exhaustedPort,
+    }),
+    now: () => new Date('2026-10-25T09:44:00.000Z'),
+    retryDelaysMs: [1],
+  });
+  await assert.rejects(() => exhaustedPlanner.plan({ ...plannerInput, preparedCall }));
+  assert.equal(exhaustedPort.startCount, 1, 'exhausted 429 must fail fast without retrying');
 });
 
 /**

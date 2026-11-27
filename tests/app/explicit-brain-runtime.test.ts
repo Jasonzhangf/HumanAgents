@@ -8378,3 +8378,111 @@ test('provider explicit brain interpreter preserves clarification options when p
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('provider explicit brain preserves settlement error details instead of masking with unsupported-tool', async () => {
+  const root = join(parentFixtureRoot, `settlement-error-${randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const binding: ProviderBinding = {
+    bindingId: 'binding-settlement-error', providerId: 'provider-settlement-error', protocol: 'responses',
+    endpointRef: 'recorded://settlement-error', modelRef: 'model-settlement-error',
+    configDigest: 'sha256:settlement-error-config', capabilityDigest: 'sha256:settlement-error-capability',
+  };
+  const journal = new JsonlOrganJournal(join(root, 'parent.jsonl'));
+  const parentJournal = new JsonlInteractionParentTurnJournal(journal);
+  const helperJournal = new JsonlInteractionHelperJournal(journal);
+  const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets')));
+  const rawContent = providerRawContentReader(evidence);
+  try {
+    const encoder = new TextEncoder();
+    const transport = new V3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
+      binding,
+      baseUrl: 'http://recorded.test',
+      source: 'http',
+      evidence,
+      fetch: async (_url, init) => ({
+        status: 200,
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        body: (async function* () {
+          const wire = JSON.parse(String(init?.body ?? '{}'));
+          const toolNames = Array.isArray(wire?.tools)
+            ? wire.tools.map((tool: any) => tool?.name).filter((name: unknown): name is string => typeof name === 'string')
+            : [];
+          if (toolNames.length === 1 && toolNames[0] === 'interaction_select_skills') {
+            yield encoder.encode([
+              { type: 'response.created', response: { id: 'recorded-skills' } },
+              {
+                type: 'response.output_item.done',
+                output_index: 0,
+                item: {
+                  type: 'function_call',
+                  id: 'recorded-skill-selection-item',
+                  call_id: 'recorded-skill-selection',
+                  name: 'interaction_select_skills',
+                  arguments: JSON.stringify({ skillIds: ['task-intake'] }),
+                },
+              },
+              { type: 'response.completed', response: { id: 'recorded-skills' } },
+            ].map((value) => `data: ${JSON.stringify(value)}\n\n`).join(''));
+            return;
+          }
+          yield encoder.encode([
+            { type: 'response.created', response: { id: 'resp-settlement-error' } },
+            {
+              type: 'response.failed',
+              response: {
+                id: 'resp-settlement-error',
+                status: 'failed',
+                error: {
+                  code: 'upstream_error',
+                  message: '模型服务暂时不可用，请稍后重试。',
+                },
+              },
+            },
+          ].map((value) => `data: ${JSON.stringify(value)}\n\n`).join(''));
+        })(),
+        text: async () => '',
+      }),
+    });
+    const port = new ProviderAdapter({
+      binding,
+      routeRef: 'recorded',
+      codec: new ResponsesProviderCodec(),
+      transport,
+      evidence,
+    });
+    const interpreter = createProviderExplicitBrainInterpreter({
+      organId: id('organ', 'explicit-test'),
+      interactionScopeId: 'runtime:settlement-error',
+      parentJournal,
+      checkpointJournal: helperJournal,
+      helperJournal,
+      turnHelperJournal: helperJournal,
+      rawEvidence: evidence,
+      rawContent,
+      clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding,
+      templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      port,
+    });
+
+    await assert.rejects(
+      () => interpreter.interpret({
+        interactionId: 'interaction-settlement-error',
+        inputRevision: 1,
+        sourceRef: 'ui:settlement-error',
+        rawInput: '请检查工作区状态',
+        clarifications: [],
+        taskCandidates: [],
+      }),
+      (error: unknown) => {
+        if (!(error instanceof Error)) return false;
+        assert.match(error.message, /模型服务暂时不可用/);
+        assert.equal(error.message.includes('interaction agent ended in failed'), false);
+        return true;
+      },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

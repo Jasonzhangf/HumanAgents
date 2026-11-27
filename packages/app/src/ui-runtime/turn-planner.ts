@@ -7,6 +7,7 @@ import {
   type BusinessPayload,
   type EvidenceRef,
   type PlannerAlignmentDecision,
+  type ProviderError,
   type ProviderSettlement,
   type Task,
   type TaskFlowBinding,
@@ -91,6 +92,48 @@ export interface IndependentTurnPlannerDeps {
     readonly configuredAgentId?: string;
   }) => Promise<AgentProviderComposition>;
   readonly now?: () => Date;
+  readonly maxTransientRetries?: number;
+  readonly retryDelaysMs?: readonly number[];
+}
+
+const DEFAULT_PLANNER_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
+const DEFAULT_PLANNER_MAX_TRANSIENT_RETRIES = 10;
+
+function isAllAccountsExhausted429(message: string): boolean {
+  return /所有候选账号对模型.*均已限额或禁用/.test(message);
+}
+
+function extractProviderError(cause: unknown): ProviderError | undefined {
+  if (cause === null || typeof cause !== 'object') return undefined;
+  if ('providerError' in cause) {
+    const err = (cause as { readonly providerError?: ProviderError }).providerError;
+    if (err) return err;
+  }
+  if (cause instanceof AggregateError && cause.errors.length > 0) {
+    return extractProviderError(cause.errors[0]);
+  }
+  return undefined;
+}
+
+function isRetryablePlannerProviderError(
+  error: ProviderError | undefined,
+  fromSettlement: boolean,
+  source: AgentProviderComposition['source'],
+): boolean {
+  if (!error) return false;
+  if (isAllAccountsExhausted429(error.message)) return false;
+  if (error.category === 'transport' || error.category === 'timeout') return true;
+  if (/^http\.5\d\d$/.test(error.code)) return true;
+  if (error.code === 'http.429') return true;
+  if (fromSettlement && source === 'rcc') {
+    if (error.code === 'unknown_parameter' || error.code === 'server_error' || error.code === 'rate_limit_exceeded'
+      || error.code === 'upstream_error' || error.code === 'provider.failed') {
+      return true;
+    }
+    return /rate_limit|server_error|upstream_error|overloaded|unavailable|暂时不可用|请稍后重试|too_many_requests|too many requests|429|50[0-9]|52[0-9]/i
+      .test(`${error.code} ${error.message}`);
+  }
+  return false;
 }
 
 interface PlannerModelResponse {
@@ -410,7 +453,7 @@ async function invokePlannerModel(
       if (event.terminalState !== undefined) break;
     }
   } catch (error) {
-    if (started) {
+    if (started && driver.hasAcquiredExecution()) {
       try {
         await driver.settle({ runtimeId, executionEpoch: execution.executionEpoch });
       } catch (settleError) {
@@ -562,6 +605,8 @@ function assemblePublication(
  */
 export function createIndependentTurnPlanner(deps: IndependentTurnPlannerDeps): IndependentTurnPlannerPort {
   const now = deps.now ?? (() => new Date());
+  const maxTransientRetries = Math.max(0, deps.maxTransientRetries ?? DEFAULT_PLANNER_MAX_TRANSIENT_RETRIES);
+  const retryDelaysMs = deps.retryDelaysMs ?? DEFAULT_PLANNER_RETRY_DELAYS_MS;
   async function invoke<R>(
     input: Parameters<typeof invokePlannerModel>[0],
     accept: (text: string) => R,
@@ -572,15 +617,35 @@ export function createIndependentTurnPlanner(deps: IndependentTurnPlannerDeps): 
     });
     let result: R;
     const runOnce = async (modelInput: Parameters<typeof invokePlannerModel>[0]): Promise<R> => {
-      const { text, settlement } = await invokePlannerModel(modelInput, composition);
-      if (settlement.state !== 'succeeded') {
-        throw new IndependentTurnPlannerError(
-          'planner.settlement.failed',
-          `independent Planner Provider settled ${settlement.state}`,
-          'resume planning with its recovery owner; a non-succeeded settlement must not fabricate success',
-        );
+      for (let attempt = 0; ; attempt += 1) {
+        let modelResult: { readonly text: string; readonly settlement: ProviderSettlement };
+        try {
+          modelResult = await invokePlannerModel(modelInput, composition);
+        } catch (cause) {
+          const providerErr = extractProviderError(cause);
+          if (attempt < maxTransientRetries && isRetryablePlannerProviderError(providerErr, false, composition.source)) {
+            const delayMs = retryDelaysMs[Math.min(attempt, retryDelaysMs.length - 1)] ?? 0;
+            if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            continue;
+          }
+          throw cause;
+        }
+        const { text, settlement } = modelResult;
+        if (settlement.state !== 'succeeded') {
+          if (attempt < maxTransientRetries && isRetryablePlannerProviderError(settlement.error, true, composition.source)) {
+            const delayMs = retryDelaysMs[Math.min(attempt, retryDelaysMs.length - 1)] ?? 0;
+            if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            continue;
+          }
+          const detail = settlement.error ? ` (${settlement.error.code}: ${settlement.error.message})` : '';
+          throw new IndependentTurnPlannerError(
+            'planner.settlement.failed',
+            `independent Planner Provider settled ${settlement.state}${detail}`,
+            'resume planning with its recovery owner; a non-succeeded settlement must not fabricate success',
+          );
+        }
+        return accept(text);
       }
-      return accept(text);
     };
     try {
       try {
