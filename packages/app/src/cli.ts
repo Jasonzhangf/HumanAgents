@@ -2640,9 +2640,11 @@ export async function resolveLegacyExplicitOwner(
   if (existsSync(legacyOwnerPath)) {
     try {
       const parsedOwner = JSON.parse(await readFile(legacyOwnerPath, 'utf8')) as { projectKey?: unknown };
+      if (parsedOwner.projectKey === null) return undefined;
       if (typeof parsedOwner.projectKey === 'string' && parsedOwner.projectKey.length > 0) {
         return parsedOwner.projectKey;
       }
+      return undefined;
     } catch {
       return undefined;
     }
@@ -2694,26 +2696,25 @@ export async function ensureCanonicalProjectInteractionRoot(
     const ownerProjectKey = 'resolvedLegacyOwner' in options
       ? options.resolvedLegacyOwner
       : await resolveLegacyExplicitOwner(targetPaths);
-    if (typeof ownerProjectKey === 'string' && ownerProjectKey.length > 0) {
-      if (!existsSync(legacyOwnerPath)) {
-        await mkdir(dirname(legacyOwnerPath), { recursive: true });
+    const resolvedOwner = typeof ownerProjectKey === 'string' && ownerProjectKey.length > 0 ? ownerProjectKey : null;
+    if (!existsSync(legacyOwnerPath)) {
+      await mkdir(dirname(legacyOwnerPath), { recursive: true });
+      try {
+        const handle = await open(legacyOwnerPath, 'wx');
         try {
-          const handle = await open(legacyOwnerPath, 'wx');
-          try {
-            await handle.writeFile(`${JSON.stringify({ projectKey: ownerProjectKey })}\n`, 'utf8');
-          } finally {
-            await handle.close();
-          }
-        } catch {
-          // Owner file already created concurrently.
+          await handle.writeFile(`${JSON.stringify({ projectKey: resolvedOwner })}\n`, 'utf8');
+        } finally {
+          await handle.close();
         }
+      } catch {
+        // Owner file already created concurrently.
       }
-      if (ownerProjectKey === targetPaths.projectKey) {
-        const staged = `${targetJournal}.migrating-${process.pid}`;
-        const cloneFlag = (fsConstants as { readonly COPYFILE_FICLONE?: number }).COPYFILE_FICLONE ?? 0;
-        await copyFile(legacyMainJournal, staged, cloneFlag);
-        await rename(staged, targetJournal);
-      }
+    }
+    if (resolvedOwner === targetPaths.projectKey) {
+      const staged = `${targetJournal}.migrating-${process.pid}`;
+      const cloneFlag = (fsConstants as { readonly COPYFILE_FICLONE?: number }).COPYFILE_FICLONE ?? 0;
+      await copyFile(legacyMainJournal, staged, cloneFlag);
+      await rename(staged, targetJournal);
     }
   }
   return interactionRoot;

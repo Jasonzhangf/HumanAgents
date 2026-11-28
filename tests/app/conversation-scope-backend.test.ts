@@ -693,7 +693,14 @@ test('canonical project interaction root refuses unverified legacy seed when own
     )
     const rootB = await ensureCanonicalProjectInteractionRoot(projectBPaths, { resolvedLegacyOwner: preLeaseOwner })
     await assert.rejects(() => readFile(join(rootB, 'sessions', 'explicit-brain.jsonl'), 'utf8'))
-    await assert.rejects(() => readFile(join(mainRoot, 'legacy-explicit-owner.json'), 'utf8'))
+    const unresolvedRecord = JSON.parse(await readFile(join(mainRoot, 'legacy-explicit-owner.json'), 'utf8')) as { projectKey?: unknown }
+    assert.equal(unresolvedRecord.projectKey, null)
+
+    // Stopping and restarting B with B's retained lease on disk must keep the unresolved decision.
+    const restartOwner = await resolveLegacyExplicitOwner(projectBPaths)
+    assert.equal(restartOwner, undefined)
+    const rootBRestart = await ensureCanonicalProjectInteractionRoot(projectBPaths, { resolvedLegacyOwner: restartOwner ?? null })
+    await assert.rejects(() => readFile(join(rootBRestart, 'sessions', 'explicit-brain.jsonl'), 'utf8'))
   } finally {
     await rm(controlRoot, { recursive: true, force: true })
   }
