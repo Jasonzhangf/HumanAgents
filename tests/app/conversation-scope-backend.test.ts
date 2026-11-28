@@ -498,6 +498,14 @@ test('HTTP opted-in scope recovery delegates exact task and operation to the exi
     },
     resumeExecution: async (...args: unknown[]) => { calls.push([name, 'resume', ...args]); return receipt },
     recoverTask: async (...args: unknown[]) => { calls.push([name, 'recover', ...args]); return recovered },
+    stop: async (...args: unknown[]) => { calls.push([name, 'stop', ...args]); return { state: 'stopping', operationId: operationId.value } },
+    removeMainTopicHistory: async (input: unknown) => {
+      calls.push([name, 'remove-history', input])
+      return {
+        removedRoundKeys: ['interaction:r1'],
+        projection: { surface: 'main-topic', projectKey: name, projectName: name, workspaceCwd: `/tmp/${name}`, mode: 'fake', turns: [], rounds: [], tasks: [] },
+      }
+    },
   })
   const alex = authority('alex')
   const project = authority('project-a')
@@ -547,6 +555,16 @@ test('HTTP opted-in scope recovery delegates exact task and operation to the exi
     assert.deepEqual(calls.pop(), ['default', 'resume', taskId, { operationId }])
     assert.equal((await post('recover', '', {})).status, 200)
     assert.deepEqual(calls.pop(), ['default', 'recover', taskId, {}])
+
+    const stopped = await post('stop', '?scope=alex', {})
+    assert.equal(stopped.status, 202)
+    assert.deepEqual(calls.pop(), ['alex', 'stop', taskId])
+    assert.equal((await post('stop', '?scope=alex', {}, 'other-task')).status, 404)
+
+    const removedAlex = await memoryCall(dispatcher, '/api/main-topic/history/remove?scope=alex', 'POST', JSON.stringify({ roundKey: 'interaction:r1' }))
+    assert.equal(removedAlex.status, 200)
+    assert.equal((removedAlex.body as { readonly projection?: { readonly agentName?: string } }).projection?.agentName, 'Alex')
+    assert.deepEqual(calls.pop(), ['alex', 'remove-history', { roundKey: 'interaction:r1' }])
   } finally {
     await dispatcher.sseRegistry.closeAll('server.shutdown')
   }

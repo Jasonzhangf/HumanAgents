@@ -4,6 +4,7 @@ import { shellSemantics } from './tool-shell-semantics.js'
 import { taskSemantics } from './tool-task-semantics.js'
 import { createDetailDisclosure } from './detail-disclosure.js'
 import { explainedToolErrorReason } from './task-blocker.js'
+import { isSupersededEvent, supersededEventSet } from './conversation-status.js'
 
 const FILE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.search', 'file.list', 'web.search'])
 const TURN_END_TOOLS = new Set(['humanagent.turn.end', 'humanagent_turn_end'])
@@ -269,10 +270,17 @@ export function disposeToolBody(host) {
 }
 
 // Keep open results and details through unchanged polling; no execution state.
-export function renderToolBody(host, events, readOutput, { finished = false } = {}) {
+export function renderToolBody(host, events, readOutput, { finished = false, hideTransientErrors = false, taskState, statusEvents } = {}) {
   const previous = bodies.get(host) ?? new Map()
   const next = new Map()
-  for (const row of toolPresentations(events)) {
+  const timeline = Array.isArray(statusEvents) && statusEvents.length > 0 ? statusEvents : events
+  const superseded = hideTransientErrors ? supersededEventSet(timeline, taskState) : null
+  const rows = toolPresentations(events).filter((row) => {
+    if (!superseded || !row.result) return true
+    const hasFailure = row.result.status === 'failed' || row.result.error !== undefined
+    return !(hasFailure && isSupersededEvent(superseded, row.result))
+  })
+  for (const row of rows) {
     // Journal events are immutable; arguments need no eager JSON copy to poll.
     const signature = JSON.stringify([finished, { ...row, call: row.call && { ...row.call, arguments: undefined }, result: row.result && { ...row.result, arguments: undefined } }])
     const old = previous.get(row.key)

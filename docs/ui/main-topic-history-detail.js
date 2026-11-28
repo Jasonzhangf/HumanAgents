@@ -29,7 +29,7 @@ export function renderMainTopicHistoryDetail(round, turns, { readOutput = api.re
     if (turn.detailReadError) bubble.append(element('p', turn.detailReadError.message, 'conversation-status-error'))
     const statusRows = turn.statusFacts === undefined
       ? []
-      : conversationStatus(turn.statusFacts).filter((row) => row.phase !== 'tool')
+      : conversationStatus(turn.statusFacts, { allRequests: true }).filter((row) => row.phase !== 'tool')
     if (statusRows.length) {
       const status = element('div', undefined, 'conversation-status')
       status.setAttribute('aria-label', '模型响应阶段与计时')

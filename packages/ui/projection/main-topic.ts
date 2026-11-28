@@ -1,4 +1,4 @@
-import type { ExplicitTurnPartialResult, RequirementIntent, TaskId, TaskInputRequest } from '../../contracts/src/index.js'
+import type { ExplicitTurnPartialResult, OperationId, RequirementIntent, TaskId, TaskInputRequest } from '../../contracts/src/index.js'
 import type { RuntimeSseEvent, ExplicitInteractionStepProjection } from '../contracts/runtime.js'
 
 export interface ConversationStatusFacts {
@@ -60,6 +60,9 @@ export interface MainTopicTaskInput {
   readonly detailReadError?: { readonly message: string }
   readonly events?: readonly (RuntimeSseEvent & { readonly requestId?: string; readonly turnId?: string })[]
   readonly taskId: TaskId
+  readonly controlTaskId?: TaskId
+  readonly operationId?: OperationId
+  readonly allowedActions?: readonly string[]
   readonly parentTaskId?: TaskId
   readonly title: string
   readonly state: string
@@ -105,6 +108,9 @@ export interface MainTopicTurn {
 export interface MainTopicTaskView {
   readonly detailReadError?: MainTopicTaskInput['detailReadError']
   readonly taskId: TaskId
+  readonly controlTaskId?: TaskId
+  readonly operationId?: OperationId
+  readonly allowedActions?: readonly string[]
   readonly title: string
   readonly state: string
   readonly stateLabel: string
@@ -124,6 +130,7 @@ export interface MainTopicConversationRound {
   readonly interactionId?: string
   readonly taskId?: TaskId
   readonly lane: 'history' | 'active' | 'unknown'
+  readonly removable?: boolean
   readonly userText?: string
   readonly summary?: {
     readonly text: string
@@ -158,11 +165,14 @@ export interface MainTopicProjectionInput {
   readonly mode: 'fake' | 'rcc'
   readonly interactions: readonly MainTopicInteractionInput[]
   readonly tasks: readonly MainTopicTaskInput[]
+  readonly hiddenRoundKeys?: readonly string[]
 }
 
 const ACTIVE_TASK_STATES = new Set(['created', 'admitted', 'running', 'settling', 'waiting'])
 const FAILED_TASK_STATES = new Set(['failed', 'blocked', 'stopped', 'cancelled', 'stale'])
+const REMOVABLE_TASK_STATES = new Set(['succeeded', 'completed', 'stopped', 'cancelled', 'failed'])
 const CLOSED_INTERACTION_STATES = new Set(['answered', 'status-only', 'closed', 'completed', 'succeeded'])
+const REMOVABLE_INTERACTION_STATES = new Set([...CLOSED_INTERACTION_STATES, 'rejected'])
 
 function excerpt(text: string): string {
   const normalized = text.trim().replace(/\s+/g, ' ')
@@ -379,6 +389,9 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
   const tasks = visibleTaskInputs.map((task): MainTopicTaskView => ({
     ...(task.detailReadError === undefined ? {} : { detailReadError: task.detailReadError }),
     taskId: task.taskId,
+    ...(task.controlTaskId === undefined ? {} : { controlTaskId: task.controlTaskId }),
+    ...(task.operationId === undefined ? {} : { operationId: task.operationId }),
+    ...(task.allowedActions === undefined ? {} : { allowedActions: task.allowedActions }),
     title: task.title,
     state: task.state,
     stateLabel: task.state === 'waiting' && task.inputRequest !== undefined
@@ -472,11 +485,15 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
     const lane = task !== undefined
       ? task.state === 'succeeded' ? 'history' : ACTIVE_TASK_STATES.has(task.state) || FAILED_TASK_STATES.has(task.state) ? 'active' : 'unknown'
       : CLOSED_INTERACTION_STATES.has(interaction.state) ? 'history' : 'active'
+    const removable = task !== undefined
+      ? REMOVABLE_TASK_STATES.has(task.state)
+      : REMOVABLE_INTERACTION_STATES.has(interaction.state)
     rounds.push({
       roundKey: `interaction:${interaction.interactionId}`,
       interactionId: interaction.interactionId,
       ...(task === undefined ? {} : { taskId: task.taskId }),
       lane,
+      removable,
       userText: interaction.rawInput,
       ...(summary === undefined ? {} : { summary }),
       messageRefs: group.map((turn) => turn.turnId),
@@ -495,6 +512,7 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
       roundKey: `task:${task.taskId.value}`,
       taskId: task.taskId,
       lane: task.state === 'succeeded' ? 'history' : ACTIVE_TASK_STATES.has(task.state) || FAILED_TASK_STATES.has(task.state) ? 'active' : 'unknown',
+      removable: REMOVABLE_TASK_STATES.has(task.state),
       ...(summary === undefined ? {} : { summary }),
       messageRefs: group.map((turn) => turn.turnId),
     })
@@ -522,17 +540,41 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
     } }
   }
 
+  const requestedHidden = new Set(input.hiddenRoundKeys ?? [])
+  const activeHidden = new Set(
+    rounds.filter((round) => round.removable === true && requestedHidden.has(round.roundKey))
+      .map((round) => round.roundKey),
+  )
+  const visibleRounds = activeHidden.size === 0 ? rounds : rounds.filter((round) => !activeHidden.has(round.roundKey))
+  const visibleTurnIds = new Set(visibleRounds.flatMap((round) => round.messageRefs))
+  const hiddenTurnIds = new Set(
+    rounds.filter((round) => activeHidden.has(round.roundKey)).flatMap((round) => round.messageRefs),
+  )
+  const visibleTurns = activeHidden.size === 0
+    ? turns
+    : turns.filter((turn) => visibleTurnIds.has(turn.turnId) || !hiddenTurnIds.has(turn.turnId))
+  const visibleRoundTaskIds = new Set(
+    visibleRounds.map((round) => round.taskId?.value).filter((value): value is string => value !== undefined),
+  )
+  const hiddenOnlyTaskIds = new Set(
+    rounds.filter((round) => activeHidden.has(round.roundKey) && round.taskId !== undefined && !visibleRoundTaskIds.has(round.taskId.value))
+      .map((round) => round.taskId!.value),
+  )
+  const visibleTasks = hiddenOnlyTaskIds.size === 0
+    ? tasks
+    : tasks.filter((task) => !hiddenOnlyTaskIds.has(task.taskId.value))
+
   const waiting = visibleTaskInputs
-    .filter((task) => task.inputRequest !== undefined)
+    .filter((task) => task.inputRequest !== undefined && !hiddenOnlyTaskIds.has(task.taskId.value))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
   const sourceQuestion = waiting?.sourceInteractionId === undefined
     ? undefined
     : input.interactions.find((interaction) => interaction.interactionId === waiting.sourceInteractionId)?.rawInput
   const active = visibleTaskInputs
-    .filter((task) => ACTIVE_TASK_STATES.has(task.state))
+    .filter((task) => ACTIVE_TASK_STATES.has(task.state) && !hiddenOnlyTaskIds.has(task.taskId.value))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
-  const activeView = active === undefined ? undefined : tasks.find((task) => task.taskId.value === active.taskId.value)
-  const waitingView = waiting === undefined ? undefined : tasks.find((task) => task.taskId.value === waiting.taskId.value)
+  const activeView = active === undefined ? undefined : visibleTasks.find((task) => task.taskId.value === active.taskId.value)
+  const waitingView = waiting === undefined ? undefined : visibleTasks.find((task) => task.taskId.value === waiting.taskId.value)
 
   return {
     surface: 'main-topic',
@@ -542,9 +584,9 @@ export function projectMainTopic(input: MainTopicProjectionInput): MainTopicProj
     agentName: 'Jenny',
     topicName: '主话题',
     mode: input.mode,
-    turns,
-    rounds,
-    tasks,
+    turns: visibleTurns,
+    rounds: visibleRounds,
+    tasks: visibleTasks,
     ...(waitingView?.error === undefined && waiting !== undefined
       ? {
         openInputRequest: {

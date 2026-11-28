@@ -1,6 +1,52 @@
 // Public read facts in, presentation out. The clock never creates a phase.
 const terminalStates = new Set(['succeeded', 'failed', 'blocked', 'stopped', 'cancelled', 'stale'])
+const successStates = new Set(['succeeded', 'completed', 'answered', 'status-only'])
+const activeProgressModelStates = new Set(['dispatching', 'dispatched', 'waiting', 'settled'])
 const explicitFinished = new Set(['answered', 'status-only', 'confirmed', 'dispatched', 'rejected'])
+
+function isHealthyProgressionEvent(event, taskState) {
+  if (!event) return false
+  if (event.kind === 'execution.started') return true
+  if (event.kind === 'provider.model') return activeProgressModelStates.has(event.state)
+  if (event.kind === 'provider.output' || event.kind === 'provider.tool') return true
+  if (event.kind === 'provider.tool-result') return event.status === 'succeeded'
+  if (event.kind === 'execution.terminal') return event.state === 'succeeded' || successStates.has(taskState)
+  return false
+}
+
+function supersededEventKey(event) {
+  return `${event?.seq ?? ''}:${event?.executionEpoch ?? ''}:${event?.kind ?? ''}:${event?.callId ?? ''}`
+}
+
+export function isSupersededEvent(superseded, event) {
+  if (!superseded || !event) return false
+  return superseded.events.has(event) || (event.seq !== undefined && superseded.keys.has(supersededEventKey(event)))
+}
+
+export function supersededEventSet(events = [], taskState) {
+  const supersededEvents = new Set()
+  const supersededKeys = new Set()
+  const add = (event) => {
+    supersededEvents.add(event)
+    if (event?.seq !== undefined) supersededKeys.add(supersededEventKey(event))
+  }
+  if (successStates.has(taskState)) {
+    for (const event of events) add(event)
+    return { events: supersededEvents, keys: supersededKeys }
+  }
+  let seenHealthyAfter = false
+  let maxEpochAfter = 0
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    const epoch = Number.isSafeInteger(event?.executionEpoch) ? event.executionEpoch : 0
+    if (seenHealthyAfter || (epoch > 0 && maxEpochAfter > epoch)) {
+      add(event)
+    }
+    if (isHealthyProgressionEvent(event, taskState)) seenHealthyAfter = true
+    if (epoch > maxEpochAfter) maxEpochAfter = epoch
+  }
+  return { events: supersededEvents, keys: supersededKeys }
+}
 const validTime = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value))
 const executionKey = (e) => JSON.stringify([e.taskId?.scope, e.taskId?.value, e.operationId, e.executionEpoch])
 const requestKey = (e) => e.requestId ? `${executionKey(e)}:${JSON.stringify([e.turnId, e.requestId])}` : executionKey(e)
@@ -111,8 +157,10 @@ export function conversationStatus(facts = {}, { allRequests = false } = {}) {
     // A settled request with no first-response fact cannot supply wait duration.
     if (group?.wait) group.wait.running = false
   }
+  const events = facts.events ?? []
+  const superseded = allRequests ? null : supersededEventSet(events, facts.state)
   // Task/operation/epoch and explicit request/turn are separate identity domains.
-  for (const e of facts.events ?? []) {
+  for (const e of events) {
     const key = requestKey(e)
     const group = models.get(key)
     if (['provider.model', 'provider.output', 'execution.terminal'].includes(e.kind)) {
@@ -176,18 +224,22 @@ export function conversationStatus(facts = {}, { allRequests = false } = {}) {
       close(group?.sending, e.occurredAt)
       close(group?.wait, e.occurredAt)
       close(group?.response, e.occurredAt)
-      const row = add(`${key}:error:${e.seq}`, 'error', '请求失败', undefined, 'danger')
-      row.error = e.error
-      row.running = false
+      if (!isSupersededEvent(superseded, e)) {
+        const row = add(`${key}:error:${e.seq}`, 'error', '请求失败', undefined, 'danger')
+        row.error = e.error
+        row.running = false
+      }
     }
     if (e.kind === 'execution.retry' && (e.state === undefined || e.state === 'retrying')) {
-      const timed = validTime(e.retryDeadlineAt) && validTime(e.occurredAt)
-      const attempt = Number.isSafeInteger(e.attemptNumber) ? `第 ${e.attemptNumber} 次尝试` : undefined
-      const row = add(`${key}:retry:${e.seq}`, 'retry', attempt || e.summary || '正在重试当前任务', timed ? e.occurredAt : undefined)
-      row.running = timed && !finished
-      if (timed) row.retryDeadlineAt = e.retryDeadlineAt
-      row.error = e.error
-      retries.set(executionKey(e), row)
+      if (!isSupersededEvent(superseded, e)) {
+        const timed = validTime(e.retryDeadlineAt) && validTime(e.occurredAt)
+        const attempt = Number.isSafeInteger(e.attemptNumber) ? `第 ${e.attemptNumber} 次尝试` : undefined
+        const row = add(`${key}:retry:${e.seq}`, 'retry', attempt || e.summary || '正在重试当前任务', timed ? e.occurredAt : undefined)
+        row.running = timed && !finished
+        if (timed) row.retryDeadlineAt = e.retryDeadlineAt
+        row.error = e.error
+        retries.set(executionKey(e), row)
+      }
     } else if (e.kind === 'execution.retry' && e.state === 'blocked') {
       const row = retries.get(executionKey(e))
       if (row) {

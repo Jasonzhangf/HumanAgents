@@ -211,3 +211,27 @@ test('provider.error closes the active sending row as well as wait and response'
   assert.equal(sending.endedAt, at(2))
   assert.equal(rows.some((row) => row.phase === 'error'), true)
 })
+
+test('recovered execution hides prior transient errors and retries from main view while allRequests keeps them', () => {
+  const events = [
+    event('execution.started', 1),
+    event('provider.model', 2, { state: 'dispatching', requestId: 'r1' }),
+    event('provider.error', 3, { requestId: 'r1', error: { code: 'http.429', message: 'rate limited' } }),
+    event('execution.retry', 4, { state: 'retrying', attemptNumber: 1, summary: '第 1 次尝试（HTTP 429）', error: { code: 'http.429', message: 'rate limited' } }),
+    event('provider.model', 5, { state: 'dispatched', requestId: 'r2' }),
+    event('provider.output', 7, { requestId: 'r2' }),
+  ]
+  const runningMain = conversationStatus({ state: 'running', events })
+  assert.equal(runningMain.some((row) => row.phase === 'error'), false, 'superseded provider.error must hide once next request dispatches')
+  assert.equal(runningMain.some((row) => row.phase === 'retry'), false, 'superseded retry row must hide once execution resumes')
+
+  const succeededMain = conversationStatus({
+    state: 'succeeded',
+    events: [...events, event('execution.terminal', 9, { state: 'succeeded', terminalPhase: 'final' })],
+  })
+  assert.equal(succeededMain.some((row) => row.phase === 'error' || row.phase === 'retry'), false)
+
+  const detail = conversationStatus({ state: 'running', events }, { allRequests: true })
+  assert.equal(detail.some((row) => row.phase === 'error' && row.error?.code === 'http.429'), true)
+  assert.equal(detail.some((row) => row.phase === 'retry' && row.error?.code === 'http.429'), true)
+})

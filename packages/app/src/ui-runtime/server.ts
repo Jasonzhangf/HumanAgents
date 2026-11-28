@@ -1055,10 +1055,15 @@ async function handleRequest(
     const path = url.pathname;
     // Recovery opts into conversation routing only with an explicit selector.
     // Bare task control retains the existing bound project service.
-    const scopedTaskRecovery = /^\/api\/tasks\/[^/]+\/(resume|recover)$/.test(path)
-      && (url.searchParams.has('scope') || url.searchParams.has('projectKey'));
+    const scopedTaskRecovery = (
+      (/^\/api\/tasks\/[^/]+\/(resume|recover)$/.test(path)
+        && (url.searchParams.has('scope') || url.searchParams.has('projectKey')))
+      || (/^\/api\/tasks\/[^/]+\/stop$/.test(path)
+        && (url.searchParams.has('scope') || (url.searchParams.has('projectKey') && !url.searchParams.has('mode'))))
+    );
     const hasScopeParams = url.searchParams.has('scope') || url.searchParams.has('projectKey');
     const conversationScopedRoute = path === '/api/main-topic'
+      || path === '/api/main-topic/history/remove'
       || (hasScopeParams && (
         path === '/api/tasks'
         || scopedTaskRecovery
@@ -1110,6 +1115,7 @@ async function handleRequest(
     }
     const scopedMethodSupported = requestedScope === undefined || (
       (path === '/api/main-topic' && method === 'GET')
+      || (path === '/api/main-topic/history/remove' && method === 'POST')
       || (path === '/api/tasks' && method === 'GET')
       || (scopedTaskRecovery && method === 'POST')
       || (/^\/api\/executions\/[^/]+\/events$/.test(path) && method === 'GET')
@@ -1609,6 +1615,31 @@ async function handleRequest(
     }
     if (path === '/api/main-topic' && method === 'GET') {
       writeJson(response, 200, await service.readMainTopic());
+      return;
+    }
+    if (path === '/api/main-topic/history/remove' && method === 'POST') {
+      const body = await readBody(request);
+      const action = optionalString(body, 'action');
+      const roundKey = optionalString(body, 'roundKey');
+      let payload: { readonly roundKey: string } | { readonly action: 'clear-history' };
+      if (action === 'clear-history' && roundKey === undefined) {
+        payload = { action: 'clear-history' };
+      } else if (action === undefined && roundKey !== undefined) {
+        payload = { roundKey };
+      } else {
+        throw new UiRuntimeApiError(
+          'request.invalid-field',
+          APP_OWNER,
+          'history removal requires roundKey or action=clear-history',
+          'send { "roundKey": "<round-key>" } or { "action": "clear-history" }',
+          400,
+        );
+      }
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        writeScopedValue(response, 200, await scopedConversationBackend.removeMainTopicHistory(requestedScope, payload));
+      } else {
+        writeJson(response, 200, await service.removeMainTopicHistory(payload));
+      }
       return;
     }
     if (path === '/api/tasks' && method === 'POST') {
@@ -2326,6 +2357,10 @@ async function handleRequest(
     const taskStop = /^\/api\/tasks\/([^/]+)\/stop$/.exec(path);
     if (taskStop && method === 'POST') {
       const taskId = id('task', decodeURIComponent(taskStop[1]!));
+      if (requestedScope !== undefined && scopedConversationBackend !== undefined) {
+        writeJson(response, 202, await scopedConversationBackend.stopTask(requestedScope, taskId));
+        return;
+      }
       const scope = optionalTaskControlScope(url);
       const targetScope = scope === undefined
         ? undefined

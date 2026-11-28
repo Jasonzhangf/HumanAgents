@@ -46,6 +46,8 @@ export interface ScopedConversationSession {
   readonly listTasks?: () => ReturnType<UiRuntimeService['listTasks']>;
   readonly resumeExecution?: UiRuntimeService['resumeExecution'];
   readonly recoverTask?: UiRuntimeService['recoverTask'];
+  readonly stop?: UiRuntimeService['stop'];
+  readonly removeMainTopicHistory?: UiRuntimeService['removeMainTopicHistory'];
   readonly operationTask?: (operationId: import('../../contracts/src/index.js').OperationId) => import('../../contracts/src/index.js').TaskId;
   readonly subscribeExecution?: (
     operationId: import('../../contracts/src/index.js').OperationId,
@@ -243,6 +245,36 @@ export class ScopedConversationBackend {
     return session.recoverTask(taskId, options);
   }
 
+  async stopTask(
+    scope: ConversationScope,
+    taskId: Parameters<UiRuntimeService['stop']>[0],
+  ): ReturnType<UiRuntimeService['stop']> {
+    const { session } = await this.session(scope);
+    await this.requireTaskOwnership(scope, taskId);
+    if (session.stop === undefined) throw new ScopedConversationBackendError('scope.operation-unavailable', 'task stop is not available for this scope');
+    return session.stop(taskId);
+  }
+
+  async removeMainTopicHistory(
+    scope: ConversationScope,
+    input: Parameters<UiRuntimeService['removeMainTopicHistory']>[0],
+  ): Promise<ScopedConversationResponse<{ readonly removedRoundKeys: readonly string[]; readonly projection: ScopedMainTopicProjection }>> {
+    const descriptor = this.descriptors.get(conversationScopeKey(scope));
+    if (descriptor === undefined) throw new ScopedConversationBackendError('scope.unknown', `conversation scope is not registered: ${conversationScopeKey(scope)}`);
+    const { session, state } = await this.session(scope);
+    if (session.removeMainTopicHistory === undefined) throw new ScopedConversationBackendError('scope.operation-unavailable', 'conversation history removal is not available for this scope');
+    const result = await session.removeMainTopicHistory(input);
+    const legacy = this.legacyMetadata(scope, state);
+    return {
+      ...descriptorFields(descriptor),
+      value: {
+        removedRoundKeys: result.removedRoundKeys,
+        projection: scopeMainTopic(result.projection, descriptor),
+      },
+      ...legacy,
+    };
+  }
+
   async subscribeExecution(
     scope: ConversationScope,
     operationId: import('../../contracts/src/index.js').OperationId,
@@ -302,7 +334,12 @@ export class ScopedConversationBackend {
     const list = session.listTasks();
     const ids = new Set<string>();
     for (const group of [list.running, list.waiting, list.completed, list.stopped, list.draft, list.failed]) {
-      for (const row of group) ids.add(row.taskId.value);
+      for (const row of group) {
+        ids.add(row.taskId.value);
+        for (const execution of (row as { readonly executions?: readonly { readonly taskId: { readonly value: string } }[] }).executions ?? []) {
+          ids.add(execution.taskId.value);
+        }
+      }
     }
     return ids;
   }
@@ -566,6 +603,7 @@ class FileScopedConversationStore {
 export function scopedSessionFromUiRuntime(service: UiRuntimeService): ScopedConversationSession {
   return {
     readMainTopic: () => service.readMainTopic(),
+    removeMainTopicHistory: (input) => service.removeMainTopicHistory(input),
     receiveInput: (input) => service.receiveExplicitInput({
       sourceRef: input.sourceRef,
       rawInput: input.rawInput,
@@ -583,6 +621,7 @@ export function scopedSessionFromUiRuntime(service: UiRuntimeService): ScopedCon
     listTasks: () => service.listTasks(),
     resumeExecution: (taskId, input) => service.resumeExecution(taskId, input),
     recoverTask: (taskId, options) => service.recoverTask(taskId, options),
+    stop: (taskId) => service.stop(taskId),
     operationTask: (operationId) => service.operationTask(operationId),
     subscribeExecution: (operationId, lastEventId, listener) => service.subscribeReplay(operationId, lastEventId, listener),
     subscribeTaskEvents: (taskId, lastEventId, listener) => service.subscribeTaskEvents(taskId, lastEventId, listener),

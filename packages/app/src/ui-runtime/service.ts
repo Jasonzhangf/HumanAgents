@@ -3346,6 +3346,7 @@ export class UiRuntimeService {
   private readonly explicitBrainRuntime?: ExplicitBrainRuntime;
   private readonly explicitBrainInterpreter: ExplicitBrainServiceInterpreter;
   private readonly explicitBrainTraceRecords: import('../../../contracts/src/index.js').DecisionTraceRecord[] = [];
+  private readonly hiddenMainTopicRoundKeys = new Set<string>();
   private readonly explicitBrainTraceJournal: DecisionTraceJournal;
   private dispatchTail: Promise<void> = Promise.resolve();
   private implicitConsumerEnabled = false;
@@ -5272,10 +5273,13 @@ export class UiRuntimeService {
     });
     const taskFacts = await Promise.all(snapshots.map(async (snapshot) => {
       let execution: RuntimeTaskSnapshot | undefined;
+      let controlTaskId: TaskId | undefined;
       let dashboard: ReturnType<typeof projectRuntimeTaskDashboard>;
       let detailReadError: { message: string } | undefined;
       try {
-        execution = await this.taskSnapshotWithParentExecution(snapshot.taskId);
+        const resolved = await this.taskSnapshotWithParentExecutionTarget(snapshot.taskId);
+        execution = resolved.task;
+        controlTaskId = resolved.executionTaskId;
         dashboard = await this.taskDashboardWithPublication(snapshot.taskId, execution);
       } catch (error) {
         dashboard = projectRuntimeTaskDashboard(snapshot, this.mode);
@@ -5313,8 +5317,15 @@ export class UiRuntimeService {
         ...(event.retryDelayMs === undefined ? {} : { retryDelayMs: event.retryDelayMs }),
         ...(event.terminalPhase === undefined ? {} : { terminalPhase: event.terminalPhase }),
       }));
+      const rawOperationId = execution?.operationId ?? snapshot.operationId;
+      const operationId = typeof rawOperationId === 'string' && rawOperationId.length > 0
+        ? id('operation', rawOperationId)
+        : undefined;
       return {
         taskId: snapshot.taskId,
+        ...(controlTaskId === undefined ? {} : { controlTaskId }),
+        ...(operationId === undefined ? {} : { operationId }),
+        allowedActions: dashboard.allowedActions,
         ...(snapshot.executionLineage === undefined ? {} : { parentTaskId: snapshot.executionLineage.parentTaskId }),
         title: dashboard.taskTitle,
         state: dashboard.state,
@@ -5339,7 +5350,52 @@ export class UiRuntimeService {
       mode: this.mode,
       interactions: interactionFacts,
       tasks: taskFacts,
+      hiddenRoundKeys: [...this.hiddenMainTopicRoundKeys],
     });
+  }
+
+  /**
+   * Hide finished conversation rounds from `/api/main-topic` without mutating
+   * Organ Journal, checkpoints, or underlying runtime tasks. Active or blocked
+   * rounds must be stopped or completed first.
+   */
+  async removeMainTopicHistory(
+    input: { readonly roundKey: string } | { readonly action: 'clear-history' },
+  ): Promise<{ readonly removedRoundKeys: readonly string[]; readonly projection: MainTopicProjection }> {
+    const current = await this.readMainTopic();
+    const removedRoundKeys: string[] = [];
+    if ('action' in input && input.action === 'clear-history') {
+      for (const round of current.rounds) {
+        if (round.removable !== true) continue;
+        this.hiddenMainTopicRoundKeys.add(round.roundKey);
+        removedRoundKeys.push(round.roundKey);
+      }
+      if (removedRoundKeys.length > 0) this.persistExplicitBrainState();
+      return { removedRoundKeys, projection: await this.readMainTopic() };
+    }
+    const roundKey = 'roundKey' in input ? input.roundKey : '';
+    const round = current.rounds.find((candidate) => candidate.roundKey === roundKey);
+    if (round === undefined) {
+      throw new UiRuntimeApiError(
+        'main-topic.round-not-found',
+        APP_OWNER,
+        `conversation round not found: ${roundKey}`,
+        'refresh the conversation and select an existing round',
+        404,
+      );
+    }
+    if (round.removable !== true) {
+      throw new UiRuntimeApiError(
+        'main-topic.round-active',
+        APP_OWNER,
+        `conversation round ${roundKey} is still active or awaiting resolution`,
+        'stop or complete the active task before removing it from conversation history',
+        409,
+      );
+    }
+    this.hiddenMainTopicRoundKeys.add(round.roundKey);
+    this.persistExplicitBrainState();
+    return { removedRoundKeys: [round.roundKey], projection: await this.readMainTopic() };
   }
 
   private async snapshotsWithIdentitySource(): Promise<readonly RuntimeTaskSnapshotInput[]> {
@@ -8493,6 +8549,12 @@ export class UiRuntimeService {
         readonly finalSubmissions?: readonly PersistedFinalSubmitReceipt[];
       }).finalSubmissions ?? [],
     );
+    this.hiddenMainTopicRoundKeys.clear();
+    for (const roundKey of (restored as RuntimeExplicitBrainJournalState & {
+      readonly hiddenRoundKeys?: readonly string[];
+    }).hiddenRoundKeys ?? []) {
+      if (typeof roundKey === 'string' && roundKey.length > 0) this.hiddenMainTopicRoundKeys.add(roundKey);
+    }
     this.explicitBrainTraceRecords.length = 0;
     this.explicitBrainTraceRecords.push(...(restored.decisionTraces ?? []).map((record) => structuredClone(record)));
     this.dispatchLedger.clear();
@@ -10654,6 +10716,7 @@ export class UiRuntimeService {
   private persistExplicitBrainState(): void {
     const state: RuntimeExplicitBrainJournalState & {
       readonly finalSubmissions?: readonly PersistedFinalSubmitReceipt[];
+      readonly hiddenRoundKeys?: readonly string[];
     } = {
       intake: this.explicitIntake.exportState(),
       inbox: this.requirementInbox.exportState(),
@@ -10662,6 +10725,7 @@ export class UiRuntimeService {
       requirementAdmissions: [...this.requirementAdmissions.values()].map((admission) => structuredClone(admission)),
       submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
       finalSubmissions: this.requirementSubmissions.finalReceipts(),
+      hiddenRoundKeys: [...this.hiddenMainTopicRoundKeys],
       decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
       taskInputRevisions: this.coordinator.exportTaskInputRevisions().map((entry) => structuredClone(entry)),
     };

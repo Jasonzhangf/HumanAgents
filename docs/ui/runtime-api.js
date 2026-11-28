@@ -302,6 +302,7 @@ export function createRuntimeApi(options = {}) {
   async function request(path, init = {}) {
     const pathname = path.split('?')[0]
     if (pathname === '/api/main-topic'
+      || pathname === '/api/main-topic/history/remove'
       || pathname === '/api/tasks'
       || pathname.startsWith('/api/explicit/')
       || /^\/api\/tasks\/[^/]+\/operations\/[^/]+\/executions\/\d+\/events\/\d+\/tool-output$/.test(pathname)) {
@@ -387,6 +388,22 @@ export function createRuntimeApi(options = {}) {
       },
     ),
     readMainTopic: () => request('/api/main-topic'),
+    removeMainTopicHistory: (payload) => request('/api/main-topic/history/remove', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    recoverConversationTask: (taskId, body = {}) => request(
+      conversationPath(`/api/tasks/${encodeURIComponent(taskId)}/recover`),
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+    resumeConversationTask: (taskId, operationId) => request(
+      conversationPath(`/api/tasks/${encodeURIComponent(taskId)}/resume`),
+      { method: 'POST', body: JSON.stringify({ operationId }) },
+    ),
+    stopConversationTask: (taskId) => request(
+      conversationPath(`/api/tasks/${encodeURIComponent(taskId)}/stop`),
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
     explicitEventsUrl: (interactionId) => `${baseUrl}${conversationPath(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/events`)}`,
     // Formal intervention surface. The UI labels these actions 批准/拒绝, but
     // only the existing grant/revoke/stop routes exist; no approve/reject

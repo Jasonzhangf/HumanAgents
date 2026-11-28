@@ -1521,3 +1521,53 @@ test('I2 runtime projections preserve optional task read scope and reject mismat
     );
   }
 });
+
+test('main topic marks removable rounds, filters hidden history without dropping active work, and exposes task control targets', () => {
+  const succeededId = id('task', 'task-removable-succeeded');
+  const blockedChildId = id('task', 'task-blocked-child');
+  const blockedParentId = id('task', 'task-blocked-parent');
+  const projection = projectMainTopic({
+    projectKey: 'main-topic-history',
+    projectName: 'History',
+    workspaceCwd: '/tmp/history',
+    mode: 'rcc',
+    hiddenRoundKeys: ['interaction:i-answer', 'interaction:i-blocked'],
+    interactions: [
+      { interactionId: 'i-answer', rawInput: '1+1?', occurredAt: '2026-11-27T10:00:00.000Z', state: 'answered', reply: '2' },
+      { interactionId: 'i-done', rawInput: 'summarize', occurredAt: '2026-11-27T10:01:00.000Z', state: 'confirmed', taskId: succeededId },
+      { interactionId: 'i-blocked', rawInput: 'audit', occurredAt: '2026-11-27T10:02:00.000Z', state: 'confirmed', taskId: blockedParentId },
+    ],
+    tasks: [
+      { taskId: succeededId, title: 'done', state: 'succeeded', stateLabel: '已完成', currentNode: '', nextStep: '', output: 'ok', updatedAt: '2026-11-27T10:01:30.000Z', sourceInteractionId: 'i-done' },
+      {
+        taskId: blockedParentId,
+        controlTaskId: blockedChildId,
+        operationId: { scope: 'operation', value: 'op-blocked' },
+        allowedActions: ['recover', 'stop'],
+        title: 'audit',
+        state: 'blocked',
+        stateLabel: '受阻',
+        currentNode: '',
+        nextStep: '恢复或停止',
+        output: '',
+        updatedAt: '2026-11-27T10:02:30.000Z',
+        sourceInteractionId: 'i-blocked',
+        error: { code: 'cold-execution.provider-settlement-unverified', message: 'blocked' },
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    projection.rounds.map((round) => ({ roundKey: round.roundKey, removable: round.removable })),
+    [
+      { roundKey: 'interaction:i-done', removable: true },
+      { roundKey: 'interaction:i-blocked', removable: false },
+    ],
+    'answered hidden round is omitted, while blocked round stays visible and non-removable',
+  );
+  assert.equal(projection.turns.some((turn) => turn.interactionId === 'i-answer'), false);
+  const blockedTaskView = projection.tasks.find((task) => task.taskId.value === blockedParentId.value);
+  assert.equal(blockedTaskView?.controlTaskId?.value, blockedChildId.value);
+  assert.equal(blockedTaskView?.operationId?.value, 'op-blocked');
+  assert.deepEqual(blockedTaskView?.allowedActions, ['recover', 'stop']);
+});

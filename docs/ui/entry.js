@@ -549,6 +549,40 @@ function paintSubmission() {
     onOpenDetail: (trigger, turn) => openMainTopicProgressDetail(trigger, turn, latestMainTopic),
     onOpenHistoryDetail: openMainTopicHistoryDetail,
     onOpenDispatch: dispatchTracking.open,
+    onRemoveHistory: async (payload) => {
+      const result = await api.removeMainTopicHistory(payload)
+      const removed = new Set(result?.removedRoundKeys || [])
+      if (removed.size > 0) {
+        for (let index = submissionAttempts.length - 1; index >= 0; index -= 1) {
+          const id = submissionAttempts[index]?.interactionId
+          if (id && removed.has(`interaction:${id}`)) submissionAttempts.splice(index, 1)
+        }
+        const savedReceipts = Array.isArray(window.history.state?.entryReceipts)
+          ? window.history.state.entryReceipts.filter((item) => item?.interactionId && !removed.has(`interaction:${item.interactionId}`))
+          : undefined
+        if (savedReceipts) {
+          const single = window.history.state?.entryReceipt
+          const keepSingle = single?.interactionId && !removed.has(`interaction:${single.interactionId}`) ? single : undefined
+          try {
+            window.history.replaceState({ ...window.history.state, entryReceipt: keepSingle, entryReceipts: savedReceipts }, '', window.location.href)
+          } catch {}
+        }
+      }
+      await refreshMainTopic()
+      return result
+    },
+    onTaskAction: async (action, task) => {
+      const targetId = task?.controlTaskId?.value || task?.taskId?.value
+      if (!targetId) return
+      if (action === 'recover') {
+        await api.recoverConversationTask(targetId)
+      } else if (action === 'resume') {
+        await api.resumeConversationTask(targetId, task.operationId?.value)
+      } else if (action === 'stop') {
+        await api.stopConversationTask(targetId)
+      }
+      await refreshMainTopic()
+    },
     dispatchObservation: dispatchTracking.observation,
     dispatchExecutionObserved: dispatchTracking.executionObserved,
     readToolOutput: api.readToolOutput,

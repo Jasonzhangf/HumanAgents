@@ -360,3 +360,23 @@ test('DOM output reads exact target, preserves literal text and loaded state, di
   open(find(host, 'tool-facts'))
   assert.match(text(host), /"ownerId": "gateway"/)
 })
+
+test('hideTransientErrors hides recovered failed tool cards on main surface while keeping detail log intact', () => {
+  const events = [
+    { ...call('bad-bash', 'bad'), seq: 1, executionEpoch: 1 },
+    { ...result('bad-bash', { seq: 2, executionEpoch: 1, status: 'failed', error: { code: 'tool.argument.invalid', message: 'bad timeout' } }) },
+    { kind: 'provider.model', seq: 3, executionEpoch: 2, taskId: { scope: 'task', value: 'task-1' }, operationId: 'op-1', state: 'dispatched' },
+    { ...call('good-bash', 'echo ok'), seq: 4, executionEpoch: 2 },
+    { ...result('good-bash', { seq: 5, executionEpoch: 2, status: 'succeeded' }) },
+  ]
+  const mainHost = new Node('main')
+  renderToolBody(mainHost, events, () => Promise.resolve(''), { hideTransientErrors: true, taskState: 'running' })
+  assert.equal(mainHost.children.length, 1, 'recovered failed tool must not stay on main surface')
+  assert.equal(text(mainHost).includes('tool.argument.invalid'), false)
+  assert.equal(text(mainHost).includes('good-bash') || text(mainHost).includes('echo ok') || mainHost.children.length === 1, true)
+
+  const detailHost = new Node('detail')
+  renderToolBody(detailHost, events, () => Promise.resolve(''))
+  assert.equal(detailHost.children.length, 2, 'detail surface preserves all tool attempts including failures')
+  assert.match(text(detailHost), /tool\.argument\.invalid/)
+})

@@ -13339,3 +13339,130 @@ test('GET /api/projects/roster returns configured members and explicit 400/404 f
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('POST /api/main-topic/history/remove hides finished rounds cleanly without deleting tasks or Journal and survives cold restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-history-remove-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const auth = await testAccessControl(root);
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  const makeService = () => {
+    const runtimeJournal = new UiRuntimeJournal(journalPath);
+    return new UiRuntimeService({
+      mode: 'fake',
+      organId,
+      binding,
+      runtimePaths: paths,
+      projectKey: paths.projectKey,
+      projectCatalog: async () => ({ projects: [], failures: [] }),
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+      checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+      attentionPort: attentionPort(),
+      providerState: 'ready',
+      memory: testMemory(paths.projectKey),
+      explicitBrainInterpreter: {
+        interpret: async () => ({
+          kind: 'answer',
+          normalizedInput: '1+1?',
+          knownFacts: [],
+          answer: '2',
+          decisionRefs: [],
+        }),
+      },
+      journal: runtimeJournal,
+      closurePort: runtimeJournal,
+    });
+  };
+
+  const service = makeService();
+  await service.hydrate();
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl: auth.accessControl,
+    productRoot: root,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  testSessionByOrigin.set(new URL(server.url).origin, auth.cookie);
+  let createdTaskId = '';
+  try {
+    const inputRes = await fetch(`${server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sourceRef: 'ui:entry', rawInput: '1+1?', channel: 'business', inputRevision: 1 }),
+    });
+    assert.equal(inputRes.status, 201);
+    const { interactionId } = await inputRes.json() as { readonly interactionId: string };
+    const interpretRes = await fetch(`${server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, {
+      method: 'POST',
+    });
+    assert.equal(interpretRes.status, 200);
+
+    const createdTask = await service.createTask({ title: '运行中不可删除', directive: 'stay running' });
+    createdTaskId = createdTask.taskId.value;
+    const roundKey = `interaction:${interactionId}`;
+    const blockedRes = await fetch(`${server.url}/api/main-topic/history/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roundKey: `task:${createdTask.taskId.value}` }),
+    });
+    assert.equal(blockedRes.status, 409);
+
+    const missingRes = await fetch(`${server.url}/api/main-topic/history/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roundKey: 'interaction:missing' }),
+    });
+    assert.equal(missingRes.status, 404);
+
+    const removeRes = await fetch(`${server.url}/api/main-topic/history/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roundKey }),
+    });
+    assert.equal(removeRes.status, 200);
+    const removedBody = await removeRes.json() as {
+      readonly removedRoundKeys: readonly string[];
+      readonly projection: { readonly rounds: readonly { readonly roundKey: string }[]; readonly turns: readonly { readonly interactionId?: string }[] };
+    };
+    assert.deepEqual(removedBody.removedRoundKeys, [roundKey]);
+    assert.equal(removedBody.projection.rounds.some((r) => r.roundKey === roundKey), false);
+    assert.equal(removedBody.projection.turns.some((t) => t.interactionId === interactionId), false);
+
+    // A second finished interaction can be cleared with action=clear-history
+    const secondInputRes = await fetch(`${server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sourceRef: 'ui:entry', rawInput: '2+2?', channel: 'business', inputRevision: 1 }),
+    });
+    assert.equal(secondInputRes.status, 201);
+    const { interactionId: secondId } = await secondInputRes.json() as { readonly interactionId: string };
+    assert.equal((await fetch(`${server.url}/api/explicit/interactions/${encodeURIComponent(secondId)}/interpret`, { method: 'POST' })).status, 200);
+    const clearRes = await fetch(`${server.url}/api/main-topic/history/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'clear-history' }),
+    });
+    assert.equal(clearRes.status, 200);
+    const clearedBody = await clearRes.json() as {
+      readonly removedRoundKeys: readonly string[];
+      readonly projection: { readonly rounds: readonly { readonly roundKey: string }[] };
+    };
+    assert.deepEqual(clearedBody.removedRoundKeys, [`interaction:${secondId}`]);
+    assert.equal(clearedBody.projection.rounds.some((r) => r.roundKey === `task:${createdTask.taskId.value}`), true);
+  } finally {
+    await server.close();
+  }
+
+  const restarted = makeService();
+  await restarted.hydrate();
+  const coldMainTopic = await restarted.readMainTopic();
+  assert.equal(coldMainTopic.rounds.some((r) => r.roundKey.startsWith('interaction:')), false);
+  const allTasks = restarted.listTasks();
+  const intact = [...allTasks.draft, ...allTasks.waiting, ...allTasks.running, ...allTasks.completed, ...allTasks.stopped, ...allTasks.failed];
+  assert.equal(intact.some((t) => t.taskId.value === createdTaskId), true, 'underlying task remains intact in runtime');
+  await rm(root, { recursive: true, force: true });
+});

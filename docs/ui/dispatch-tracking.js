@@ -65,8 +65,8 @@ export function childExecutionIds(read, scope) {
 }
 
 export function dispatchState(task, observation, executionObserved = false) {
-  if (task.error || ['failed', 'blocked'].includes(task.state)) return '受阻'
   if (['succeeded', 'completed'].includes(task.state)) return '完成'
+  if (task.error || ['failed', 'blocked'].includes(task.state)) return '受阻'
   if (['stopped', 'cancelled'].includes(task.state)) return '已停止'
   if (task.inputRequest) return '有新消息'
   const observed = executionObserved || observationTools(observation).length > 0

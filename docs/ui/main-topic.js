@@ -72,7 +72,7 @@ export function mainTopicActorLabel(role, agentName = '助手') {
   return ({ user: '你', task: '任务执行链', orchestration: '编排 Agent' })[role] || 'Agent'
 }
 
-function turnHeader(turn, label, answered) {
+function turnHeader(turn, label, answered, removableRound, onRemoveHistory) {
   const header = element('header', undefined, 'mt-turn-head')
   const kindLabel = turn.kind === 'input-request'
     ? (answered ? '已回答' : '等待你的回答')
@@ -84,7 +84,67 @@ function turnHeader(turn, label, answered) {
   if (typeof turn.occurredAt === 'string' && turn.occurredAt.trim() !== '') {
     header.append(element('time', formatTime(turn.occurredAt), 'mt-turn-time'))
   }
+  if (removableRound && typeof onRemoveHistory === 'function') {
+    const removeButton = element('button', '移除记录', 'mt-history-remove')
+    removeButton.type = 'button'
+    removeButton.dataset.removeRoundKey = removableRound.roundKey
+    removeButton.setAttribute('aria-label', '从当前会话移除此轮记录')
+    removeButton.onclick = async () => {
+      removeButton.disabled = true
+      try {
+        await onRemoveHistory({ roundKey: removableRound.roundKey })
+      } finally {
+        if (removeButton.isConnected) removeButton.disabled = false
+      }
+    }
+    header.append(removeButton)
+  }
   return header
+}
+
+function renderTaskActionControls(task, onTaskAction) {
+  if (!task || typeof onTaskAction !== 'function') return undefined
+  if (['succeeded', 'completed'].includes(task.state)) return undefined
+  const allowed = Array.isArray(task.allowedActions) ? task.allowedActions : []
+  const actions = []
+  if (allowed.includes('recover')) actions.push({ action: 'recover', label: '恢复继续', primary: true })
+  else if (allowed.includes('resume') && task.operationId?.value) actions.push({ action: 'resume', label: '继续执行', primary: true })
+  if (allowed.includes('stop') && ['running', 'waiting', 'settling', 'blocked', 'failed', 'admitted', 'created'].includes(task.state)) {
+    actions.push({ action: 'stop', label: '停止任务', primary: false })
+  }
+  if (actions.length === 0) return undefined
+  const bar = element('div', undefined, 'mt-task-actions')
+  bar.dataset.taskId = taskValue(task.taskId) || ''
+  const feedback = element('span', '', 'mt-task-action-status muted')
+  feedback.hidden = true
+  const buttons = []
+  for (const item of actions) {
+    const button = element('button', item.label, item.primary ? 'button button--primary mt-task-action' : 'button mt-task-action')
+    button.type = 'button'
+    button.dataset.taskAction = item.action
+    button.onclick = async () => {
+      for (const candidate of buttons) candidate.disabled = true
+      feedback.hidden = false
+      feedback.dataset.tone = 'warning'
+      feedback.textContent = item.action === 'stop' ? '正在停止任务…' : '正在恢复执行…'
+      try {
+        await onTaskAction(item.action, task)
+        if (feedback.isConnected) feedback.hidden = true
+      } catch (error) {
+        if (feedback.isConnected) {
+          feedback.hidden = false
+          feedback.dataset.tone = 'danger'
+          feedback.textContent = error?.message || String(error)
+        }
+      } finally {
+        for (const candidate of buttons) if (candidate.isConnected) candidate.disabled = false
+      }
+    }
+    buttons.push(button)
+    bar.append(button)
+  }
+  bar.append(feedback)
+  return bar
 }
 
 function renderAnswerControls(request, onAnswer, host, topicState) {
@@ -238,11 +298,11 @@ function renderClarification(article, bubble, clarification) {
   clarificationControls.set(article, { signature, form })
 }
 
-function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, topicState, bindings, readToolOutput) {
+function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, topicState, bindings, readToolOutput, actionTask, removableRound) {
   article.className = turnClass(turn)
   article.dataset.turnId = turn.turnId
   const answered = answeredRequestIds.has(requestKey(turn))
-  const header = turnHeader(turn, project.agentName, answered)
+  const header = turnHeader(turn, project.agentName, answered, removableRound, topicState.onRemoveHistory)
   const previousHeader = article.querySelector('.mt-turn-head')
   if (previousHeader) previousHeader.replaceWith(header)
   else article.append(header)
@@ -376,12 +436,24 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
   ]
   let tools = bubble.querySelector('.tool-body')
   let toolDetails = bubble.querySelector('.mt-tool-details')
+  const toolTask = turn.dispatchTask ?? (turn.taskId ? project.tasks?.find(task => taskValue(task.taskId) === taskValue(turn.taskId)) : undefined)
+  const currentTaskState = toolTask?.state ?? turn.statusFacts?.state
   if (events?.length) {
     if (!tools) {
       tools = element('div', undefined, 'tool-body')
     }
     const finished = explicitToolActivityFinished(turn)
-    if (finished) {
+    renderToolBody(tools, events, readToolOutput, {
+      finished,
+      hideTransientErrors: true,
+      taskState: currentTaskState,
+      statusEvents: turn.statusFacts?.events,
+    })
+    if (tools.hidden || tools.children.length === 0) {
+      disposeToolBody(tools)
+      tools.remove()
+      toolDetails?.remove()
+    } else if (finished) {
       if (!toolDetails) {
         toolDetails = element('details', undefined, 'mt-tool-details')
         toolDetails.append(element('summary', '查看执行步骤'))
@@ -392,12 +464,14 @@ function updateTurn(article, turn, project, onAnswer, host, answeredRequestIds, 
       if (tools.parentElement !== bubble) bubble.append(tools)
       toolDetails?.remove()
     }
-    renderToolBody(tools, events, readToolOutput, { finished })
   } else if (tools) {
     disposeToolBody(tools)
     tools.remove()
     toolDetails?.remove()
   }
+  bubble.querySelector('.mt-task-actions')?.remove()
+  const actionControls = renderTaskActionControls(actionTask, topicState.onTaskAction)
+  if (actionControls) bubble.append(actionControls)
   renderClarification(article, bubble, turn.clarification)
   let control = answerControls.get(article)
   const key = requestKey(turn)
@@ -486,6 +560,29 @@ function renderHistoryRound(round, turns, topicState, scope, previous) {
     topicState.detail = { scope, roundKey: round.roundKey, trigger: button }
     topicState.onOpenHistoryDetail?.(button, round, turns)
   }
+  const previousActions = row.querySelector('.mt-history-round-actions')
+  if (round.removable && typeof topicState.onRemoveHistory === 'function') {
+    const actions = previousActions || element('div', undefined, 'mt-history-round-actions')
+    let removeButton = actions.querySelector('.mt-history-remove')
+    if (!removeButton) {
+      removeButton = element('button', '移除', 'mt-history-remove')
+      removeButton.type = 'button'
+      actions.append(removeButton)
+    }
+    removeButton.dataset.removeRoundKey = round.roundKey
+    removeButton.setAttribute('aria-label', '从当前会话移除此轮历史')
+    removeButton.onclick = async () => {
+      removeButton.disabled = true
+      try {
+        await topicState.onRemoveHistory?.({ roundKey: round.roundKey })
+      } finally {
+        if (removeButton.isConnected) removeButton.disabled = false
+      }
+    }
+    if (!previousActions) row.append(actions)
+  } else {
+    previousActions?.remove()
+  }
   return row
 }
 
@@ -527,7 +624,7 @@ export function mainTopicTurnGroups(projection) {
   }
 }
 
-export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, dispatchObservation, dispatchExecutionObserved, readToolOutput: readToolOutputOption } = {}) {
+export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, onOpenDetail, onOpenHistoryDetail, onOpenDispatch, onRemoveHistory, onTaskAction, dispatchObservation, dispatchExecutionObserved, readToolOutput: readToolOutputOption } = {}) {
   projection = { ...projection, turns: ownedMainTopicTurns(projection) }
   if (!(host instanceof HTMLElement)) throw new Error('main topic requires a host element')
   const activeControl = host.contains(document.activeElement) ? document.activeElement : undefined
@@ -548,6 +645,8 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, on
   if (onOpenDecision !== undefined) topicState.onOpenDecision = onOpenDecision
   if (onOpenHistoryDetail !== undefined) topicState.onOpenHistoryDetail = onOpenHistoryDetail
   if (onOpenDispatch !== undefined) topicState.onOpenDispatch = onOpenDispatch
+  if (onRemoveHistory !== undefined) topicState.onRemoveHistory = onRemoveHistory
+  if (onTaskAction !== undefined) topicState.onTaskAction = onTaskAction
   if (dispatchObservation !== undefined) topicState.dispatchObservation = dispatchObservation
   if (dispatchExecutionObserved !== undefined) topicState.dispatchExecutionObserved = dispatchExecutionObserved
   if (readToolOutputOption !== undefined) topicState.readToolOutput = readToolOutputOption
@@ -575,6 +674,23 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, on
   const identity = element('div', undefined, 'mt-identity')
   identity.append(element('h2', '主会话', 'mt-agent'))
   head.append(identity)
+  const hasRemovableHistory = (projection.rounds || []).some((round) => round.removable === true)
+  if (hasRemovableHistory && typeof topicState.onRemoveHistory === 'function') {
+    const headActions = element('div', undefined, 'mt-head-actions')
+    const clearButton = element('button', '清空历史', 'button mt-history-clear')
+    clearButton.type = 'button'
+    clearButton.dataset.clearMainTopicHistory = 'true'
+    clearButton.onclick = async () => {
+      clearButton.disabled = true
+      try {
+        await topicState.onRemoveHistory?.({ action: 'clear-history' })
+      } finally {
+        if (clearButton.isConnected) clearButton.disabled = false
+      }
+    }
+    headActions.append(clearButton)
+    head.append(headActions)
+  }
   const previousHead = section.querySelector('.mt-head')
   if (previousHead) previousHead.replaceWith(head)
   else section.prepend(head)
@@ -615,9 +731,25 @@ export function renderMainTopic(host, projection, { onAnswer, onOpenDecision, on
       divider.setAttribute('aria-hidden', 'true')
       next.push(divider)
     }
+    const tasksById = new Map((projection.tasks || []).map((task) => [taskValue(task.taskId), task]))
+    const lastActionTurnIdByTask = new Map()
     for (const turn of activeTurns) {
+      const id = taskValue(turn.dispatchTask?.taskId ?? turn.taskId)
+      if (id && tasksById.has(id)) lastActionTurnIdByTask.set(id, turn.turnId)
+    }
+    const removableRoundByLastTurnId = new Map()
+    for (const round of projection.rounds || []) {
+      if (round.lane === 'history' || round.removable !== true) continue
+      const visibleRefs = (round.messageRefs || []).filter((ref) => activeTurns.some((turn) => turn.turnId === ref))
+      const lastRef = visibleRefs.at(-1)
+      if (lastRef) removableRoundByLastTurnId.set(lastRef, round)
+    }
+    for (const turn of activeTurns) {
+      const id = taskValue(turn.dispatchTask?.taskId ?? turn.taskId)
+      const actionTask = id && lastActionTurnIdByTask.get(id) === turn.turnId ? tasksById.get(id) : undefined
+      const removableRound = removableRoundByLastTurnId.get(turn.turnId)
       next.push(updateTurn(previousTurns.get(turn.turnId) || element('article'),
-        turn, projection, onAnswer, host, answeredRequestIds, topicState, bindings, topicState.readToolOutput ?? api.readToolOutput))
+        turn, projection, onAnswer, host, answeredRequestIds, topicState, bindings, topicState.readToolOutput ?? api.readToolOutput, actionTask, removableRound))
     }
     syncStreamChildren(stream, next)
   }

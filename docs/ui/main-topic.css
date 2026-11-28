@@ -140,6 +140,52 @@
   font-size: 1.35rem;
 }
 
+.mt-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mt-history-clear,
+.mt-history-remove {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.mt-history-clear:hover,
+.mt-history-remove:hover {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+  color: var(--danger);
+}
+
+.mt-history-round-actions {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: -10px;
+}
+
+.mt-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mt-task-action-status {
+  font-size: 0.8rem;
+}
+
+.mt-task-action-status[data-tone="danger"] {
+  color: var(--danger);
+}
+
 .mt-active {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
