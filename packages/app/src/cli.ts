@@ -1788,7 +1788,7 @@ export async function main(args: readonly string[]): Promise<void> {
       console.log(JSON.stringify({ event: 'restart.accepted', ...handoff.receipt }, null, 2));
       return handoff.receipt;
     };
-    const preLeaseLegacyOwner = await resolveLegacyExplicitOwner(paths);
+    const preLeaseLegacyOwner: string | null = (await resolveLegacyExplicitOwner(paths)) ?? null;
     const launch = await runSupervisorServeStartup(paths, async () => {
       // A continuation invocation never reaches this factory, so it opens no
       // credential, writes no product file, opens no listener and installs no
@@ -2682,7 +2682,7 @@ export async function resolveLegacyExplicitOwner(
 
 export async function ensureCanonicalProjectInteractionRoot(
   targetPaths: Pick<RuntimePaths, 'projectKey' | 'projectRoot' | 'mainRoot' | 'mainSessionsRoot'>,
-  options: { readonly resolvedLegacyOwner?: string } = {},
+  options: { readonly resolvedLegacyOwner?: string | null } = {},
 ): Promise<string> {
   const interactionRoot = join(targetPaths.projectRoot, 'explicit-interaction');
   const targetSessionsDir = join(interactionRoot, 'sessions');
@@ -2691,8 +2691,10 @@ export async function ensureCanonicalProjectInteractionRoot(
   const legacyMainJournal = join(targetPaths.mainSessionsRoot, 'explicit-brain.jsonl');
   if (!existsSync(targetJournal) && existsSync(legacyMainJournal)) {
     const legacyOwnerPath = join(targetPaths.mainRoot, 'legacy-explicit-owner.json');
-    const ownerProjectKey = options.resolvedLegacyOwner ?? await resolveLegacyExplicitOwner(targetPaths);
-    if (ownerProjectKey !== undefined) {
+    const ownerProjectKey = 'resolvedLegacyOwner' in options
+      ? options.resolvedLegacyOwner
+      : await resolveLegacyExplicitOwner(targetPaths);
+    if (typeof ownerProjectKey === 'string' && ownerProjectKey.length > 0) {
       if (!existsSync(legacyOwnerPath)) {
         await mkdir(dirname(legacyOwnerPath), { recursive: true });
         try {

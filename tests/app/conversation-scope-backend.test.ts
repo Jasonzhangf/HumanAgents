@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { ensureCanonicalProjectInteractionRoot } from '../../packages/app/src/cli.js'
+import { ensureCanonicalProjectInteractionRoot, resolveLegacyExplicitOwner } from '../../packages/app/src/cli.js'
 import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js'
 import { FakeReplayExecutionRuntimePort, FileCheckpointStore, UiRuntimeJournal, UiRuntimeService } from '../../packages/app/src/ui-runtime/index.js'
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js'
@@ -683,7 +683,15 @@ test('canonical project interaction root refuses unverified legacy seed when own
     }
     await mkdir(projectAPaths.projectRoot, { recursive: true })
     await mkdir(projectBPaths.projectRoot, { recursive: true })
-    const rootB = await ensureCanonicalProjectInteractionRoot(projectBPaths)
+    const preLeaseOwner = await resolveLegacyExplicitOwner(projectBPaths)
+    assert.equal(preLeaseOwner, undefined)
+    await mkdir(join(projectBPaths.projectRoot, 'daemon'), { recursive: true })
+    await writeFile(
+      join(projectBPaths.projectRoot, 'daemon', 'lease.json'),
+      JSON.stringify({ acquiredAt: '2026-11-28T10:00:00.000Z' }),
+      'utf8',
+    )
+    const rootB = await ensureCanonicalProjectInteractionRoot(projectBPaths, { resolvedLegacyOwner: preLeaseOwner })
     await assert.rejects(() => readFile(join(rootB, 'sessions', 'explicit-brain.jsonl'), 'utf8'))
     await assert.rejects(() => readFile(join(mainRoot, 'legacy-explicit-owner.json'), 'utf8'))
   } finally {
