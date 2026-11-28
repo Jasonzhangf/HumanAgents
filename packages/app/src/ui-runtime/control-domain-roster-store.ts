@@ -112,39 +112,73 @@ function isLockHolderDead(rawToken: string): boolean {
   }
 }
 
-function tryReclaimDeadLock(lockPath: string, holderToken: string, statsMtimeMs: number): boolean {
-  if (Date.now() - statsMtimeMs <= STALE_LOCK_AGE_MS || !isLockHolderDead(holderToken)) {
-    return false;
+const MAX_RECLAIM_DEPTH = 8;
+
+function reclaimDeadLockChain(
+  pathToRemove: string,
+  expectedToken: string,
+  requireAged: boolean,
+  depth = 0,
+): boolean {
+  if (depth >= MAX_RECLAIM_DEPTH) return false;
+  let stats: { readonly mtimeMs: number };
+  let actualToken: string;
+  try {
+    stats = statSync(pathToRemove);
+    actualToken = readFileSync(pathToRemove, 'utf8');
+  } catch (error) {
+    if (isErrnoWithCode(error, 'ENOENT')) return false;
+    throw error;
   }
-  const claimHash = createHash('sha256').update(holderToken).digest('hex').slice(0, 16);
-  const reclaimPath = `${lockPath}.reclaim.${claimHash}`;
+  if (actualToken !== expectedToken) return false;
+  if (requireAged && Date.now() - stats.mtimeMs <= STALE_LOCK_AGE_MS) return false;
+  if (!isLockHolderDead(expectedToken)) return false;
+
+  const claimHash = createHash('sha256').update(`${pathToRemove}:${expectedToken}`).digest('hex').slice(0, 16);
+  const reclaimPath = `${pathToRemove}.reclaim.${claimHash}`;
   const reclaimToken = `${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}\n`;
-  let claimFd: number;
+  let claimFd: number | undefined;
   try {
     claimFd = openSync(reclaimPath, 'wx', 0o600);
   } catch (error) {
     if (isErrnoWithCode(error, 'EEXIST')) {
+      try {
+        const blockingClaimToken = readFileSync(reclaimPath, 'utf8');
+        if (blockingClaimToken && isLockHolderDead(blockingClaimToken)) {
+          if (reclaimDeadLockChain(reclaimPath, blockingClaimToken, false, depth + 1)) {
+            return reclaimDeadLockChain(pathToRemove, expectedToken, requireAged, depth + 1);
+          }
+        }
+      } catch (readErr) {
+        if (isErrnoWithCode(readErr, 'ENOENT')) {
+          return reclaimDeadLockChain(pathToRemove, expectedToken, requireAged, depth + 1);
+        }
+      }
       return false;
     }
     throw error;
   }
   try {
     writeSync(claimFd, reclaimToken);
-  } finally {
     closeSync(claimFd);
+    claimFd = undefined;
+  } catch (writeErr) {
+    if (claimFd !== undefined) {
+      try { closeSync(claimFd); } catch {}
+    }
+    try { rmSync(reclaimPath, { force: true }); } catch {}
+    throw writeErr;
   }
   try {
-    let currentHolder: string;
+    let rechecked: string;
     try {
-      currentHolder = readFileSync(lockPath, 'utf8');
+      rechecked = readFileSync(pathToRemove, 'utf8');
     } catch (error) {
       if (isErrnoWithCode(error, 'ENOENT')) return false;
       throw error;
     }
-    if (currentHolder !== holderToken) {
-      return false;
-    }
-    rmSync(lockPath, { force: true });
+    if (rechecked !== expectedToken) return false;
+    rmSync(pathToRemove, { force: true });
     return true;
   } finally {
     try {
@@ -160,22 +194,16 @@ function withFileLock<T>(lockPath: string, run: () => T): T {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   const lockToken = `${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}\n`;
   while (true) {
+    let fd: number | undefined;
     try {
-      const fd = openSync(lockPath, 'wx', 0o600);
-      try {
-        writeSync(fd, lockToken);
-      } finally {
-        closeSync(fd);
-      }
-      break;
+      fd = openSync(lockPath, 'wx', 0o600);
     } catch (error) {
       if (!isErrnoWithCode(error, 'EEXIST')) {
         throw error;
       }
       try {
-        const stats = statSync(lockPath);
         const holderToken = readFileSync(lockPath, 'utf8');
-        if (tryReclaimDeadLock(lockPath, holderToken, stats.mtimeMs)) {
+        if (reclaimDeadLockChain(lockPath, holderToken, true)) {
           continue;
         }
       } catch (statError) {
@@ -185,7 +213,20 @@ function withFileLock<T>(lockPath: string, run: () => T): T {
         throw new Error(`control-domain roster lock contention timeout: ${lockPath}`);
       }
       sleepSyncMs(LOCK_WAIT_STEP_MS);
+      continue;
     }
+    try {
+      writeSync(fd, lockToken);
+      closeSync(fd);
+      fd = undefined;
+    } catch (writeErr) {
+      if (fd !== undefined) {
+        try { closeSync(fd); } catch {}
+      }
+      try { rmSync(lockPath, { force: true }); } catch {}
+      throw writeErr;
+    }
+    break;
   }
   try {
     return run();

@@ -132,6 +132,7 @@ declare module 'node:fs/promises' {
   export function rename(oldPath: string, newPath: string): Promise<void>;
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   export function truncate(path: string, length: number): Promise<void>;
+  export function utimes(path: string, atime: Date | number, mtime: Date | number): Promise<void>;
   export function writeFile(path: string, data: string, encoding?: string): Promise<void>;
   export function realpath(path: string): Promise<string>;
 }

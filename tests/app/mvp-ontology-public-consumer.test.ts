@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -476,6 +477,22 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     });
     assert.equal(spawningShrinkDecision.action, 'wait');
     assert.equal(spawningShrinkDecision.condition, 'orchestration.runtime.max');
+
+    // 10. Recover aged dead lock when its reclaim claim is also abandoned by a dead reclaimer
+    const lockPath = join(root, '.control-domain-roster.lock');
+    const deadHolderToken = '999997:1:abandoned-lock\n';
+    await writeFile(lockPath, deadHolderToken, 'utf8');
+    const oldTime = new Date(Date.now() - 30_000);
+    await utimes(lockPath, oldTime, oldTime);
+    const claimHash = createHash('sha256').update(`${lockPath}:${deadHolderToken}`).digest('hex').slice(0, 16);
+    const abandonedClaimPath = `${lockPath}.reclaim.${claimHash}`;
+    await writeFile(abandonedClaimPath, '999998:2:abandoned-claim\n', 'utf8');
+    const recoveredLimit = fileStore.update((draft) => {
+      (draft as { implicitOrchestrationMaxRuntimes?: number }).implicitOrchestrationMaxRuntimes = 7;
+      return draft.implicitOrchestrationMaxRuntimes;
+    });
+    assert.equal(recoveredLimit, 7);
+    assert.equal(fileStore.readSnapshot().implicitOrchestrationMaxRuntimes, 7);
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });
