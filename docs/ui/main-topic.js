@@ -103,7 +103,7 @@ function turnHeader(turn, label, answered, removableRound, onRemoveHistory) {
 }
 
 function renderTaskActionControls(task, onTaskAction) {
-  if (!task || typeof onTaskAction !== 'function') return undefined
+  if (!task || !taskValue(task.controlTaskId) || typeof onTaskAction !== 'function') return undefined
   if (['succeeded', 'completed'].includes(task.state)) return undefined
   const allowed = Array.isArray(task.allowedActions) ? task.allowedActions : []
   const actions = []

@@ -572,7 +572,7 @@ function paintSubmission() {
       return result
     },
     onTaskAction: async (action, task) => {
-      const targetId = task?.controlTaskId?.value || task?.taskId?.value
+      const targetId = task?.controlTaskId?.value
       if (!targetId) return
       if (action === 'recover') {
         await api.recoverConversationTask(targetId)

@@ -5318,14 +5318,14 @@ export class UiRuntimeService {
         ...(event.terminalPhase === undefined ? {} : { terminalPhase: event.terminalPhase }),
       }));
       const rawOperationId = execution?.operationId ?? snapshot.operationId;
-      const operationId = typeof rawOperationId === 'string' && rawOperationId.length > 0
+      const operationId = controlTaskId !== undefined && typeof rawOperationId === 'string' && rawOperationId.length > 0
         ? id('operation', rawOperationId)
         : undefined;
       return {
         taskId: snapshot.taskId,
         ...(controlTaskId === undefined ? {} : { controlTaskId }),
         ...(operationId === undefined ? {} : { operationId }),
-        allowedActions: dashboard.allowedActions,
+        allowedActions: controlTaskId === undefined ? [] : dashboard.allowedActions,
         ...(snapshot.executionLineage === undefined ? {} : { parentTaskId: snapshot.executionLineage.parentTaskId }),
         title: dashboard.taskTitle,
         state: dashboard.state,
@@ -5364,13 +5364,23 @@ export class UiRuntimeService {
   ): Promise<{ readonly removedRoundKeys: readonly string[]; readonly projection: MainTopicProjection }> {
     const current = await this.readMainTopic();
     const removedRoundKeys: string[] = [];
+    const persistWithRollback = (keys: readonly string[]): void => {
+      const previous = new Set(this.hiddenMainTopicRoundKeys);
+      for (const key of keys) this.hiddenMainTopicRoundKeys.add(key);
+      try {
+        this.persistExplicitBrainState();
+      } catch (error) {
+        this.hiddenMainTopicRoundKeys.clear();
+        for (const key of previous) this.hiddenMainTopicRoundKeys.add(key);
+        throw error;
+      }
+    };
     if ('action' in input && input.action === 'clear-history') {
       for (const round of current.rounds) {
         if (round.removable !== true) continue;
-        this.hiddenMainTopicRoundKeys.add(round.roundKey);
         removedRoundKeys.push(round.roundKey);
       }
-      if (removedRoundKeys.length > 0) this.persistExplicitBrainState();
+      if (removedRoundKeys.length > 0) persistWithRollback(removedRoundKeys);
       return { removedRoundKeys, projection: await this.readMainTopic() };
     }
     const roundKey = 'roundKey' in input ? input.roundKey : '';
@@ -5393,8 +5403,7 @@ export class UiRuntimeService {
         409,
       );
     }
-    this.hiddenMainTopicRoundKeys.add(round.roundKey);
-    this.persistExplicitBrainState();
+    persistWithRollback([round.roundKey]);
     return { removedRoundKeys: [round.roundKey], projection: await this.readMainTopic() };
   }
 

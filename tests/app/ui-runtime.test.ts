@@ -4789,6 +4789,11 @@ test('parent dashboard reports multiple child executions without choosing a resu
     assert.equal(parentView.resumeIssue?.code, 'task.execution.ambiguous');
     assert.match(parentView.resumeIssue?.nextAction ?? '', /选择要继续的执行/);
     assert.deepEqual(resumeSelections, siblingTargets, 'only the exact child pages may resolve write targets');
+    const topicView = await service.readMainTopic();
+    const ambiguousTopicTask = topicView.tasks.find((item) => item.taskId.value === parent.taskId.value);
+    assert.equal(ambiguousTopicTask?.controlTaskId, undefined, 'ambiguous multi-child parent must not expose controlTaskId');
+    assert.equal(ambiguousTopicTask?.operationId, undefined, 'ambiguous multi-child parent must not expose operationId');
+    assert.deepEqual(ambiguousTopicTask?.allowedActions ?? [], [], 'ambiguous multi-child parent must withhold inline actions');
     assert.deepEqual(prepared.replay(), before, 'reading any dashboard must not write');
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -13453,6 +13458,39 @@ test('POST /api/main-topic/history/remove hides finished rounds cleanly without 
     };
     assert.deepEqual(clearedBody.removedRoundKeys, [`interaction:${secondId}`]);
     assert.equal(clearedBody.projection.rounds.some((r) => r.roundKey === `task:${createdTask.taskId.value}`), true);
+
+    // P2 rollback check: failed journal persist must keep round visible in memory.
+    const rollbackInput = await fetch(`${server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sourceRef: 'ui:entry', rawInput: '3+3?', channel: 'business', inputRevision: 1 }),
+    });
+    assert.equal(rollbackInput.status, 201);
+    const { interactionId: thirdId } = await rollbackInput.json() as { readonly interactionId: string };
+    assert.equal((await fetch(`${server.url}/api/explicit/interactions/${encodeURIComponent(thirdId)}/interpret`, { method: 'POST' })).status, 200);
+    const serviceJournal = (service as unknown as {
+      readonly options: { readonly journal?: { append(record: unknown): void } };
+    }).options.journal!;
+    const originalAppend = serviceJournal.append.bind(serviceJournal);
+    serviceJournal.append = () => { throw new Error('disk full during history remove'); };
+    try {
+      const failedRemove = await fetch(`${server.url}/api/main-topic/history/remove`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ roundKey: `interaction:${thirdId}` }),
+      });
+      assert.equal(failedRemove.status, 500);
+      const afterFailed = await service.readMainTopic();
+      assert.equal(afterFailed.rounds.some((r) => r.roundKey === `interaction:${thirdId}`), true, 'failed persist must roll back hiddenRoundKeys');
+    } finally {
+      serviceJournal.append = originalAppend;
+    }
+    const retryRemove = await fetch(`${server.url}/api/main-topic/history/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roundKey: `interaction:${thirdId}` }),
+    });
+    assert.equal(retryRemove.status, 200);
   } finally {
     await server.close();
   }
