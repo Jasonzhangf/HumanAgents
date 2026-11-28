@@ -1398,7 +1398,11 @@ export class RccV3ProviderTransport<
           openUnits.clear();
           if (type === 'error' || type.endsWith('.failed')) {
             const { code: providerCode, message: providerMessage } = extractStreamErrorFields(record, type);
-            active.terminalError = this.providerError(active.evidenceScope, 'observe', providerCode, providerMessage, 'provider');
+            const termErr = this.providerError(active.evidenceScope, 'observe', providerCode, providerMessage, 'provider');
+            if (streamAttempt > 0 && streamAttempt >= this.transientStreamRetries) {
+              markTransportRetriesExhausted(termErr);
+            }
+            active.terminalError = termErr;
             active.terminalState = 'failed';
           } else if (active.protocol === 'responses' && type === 'response.completed' && active.responsesToolCallsPending) {
             active.terminalState = 'waiting';
@@ -1651,8 +1655,9 @@ export class RccV3ProviderTransport<
         active.terminalState = 'failed';
       }
       failed = true;
-      if (streamAttempt > 0 && streamAttempt >= this.transientStreamRetries && thrown instanceof ProviderAdapterError) {
-        (thrown as { transportRetriesExhausted?: boolean }).transportRetriesExhausted = true;
+      if (streamAttempt > 0 && streamAttempt >= this.transientStreamRetries) {
+        if (thrown !== null && typeof thrown === 'object') markTransportRetriesExhausted(thrown);
+        if (active.terminalError) markTransportRetriesExhausted(active.terminalError);
       }
       throw thrown;
     } finally {
@@ -1963,7 +1968,8 @@ export class RccV3ProviderTransport<
 
   private async persistError(scope: ScopeRef, error: ProviderError): Promise<ProviderError> {
     const ref = await this.writeEvidence(scope, 'settle-error', { ...error, evidenceRefs: error.evidenceRefs });
-    return { ...error, evidenceRefs: [...error.evidenceRefs, ref] };
+    const persisted = { ...error, evidenceRefs: [...error.evidenceRefs, ref] };
+    return hasTransportRetriesExhausted(error) ? markTransportRetriesExhausted(persisted) : persisted;
   }
 
   private assertBinding(binding: ProviderBinding): void {
@@ -2110,6 +2116,16 @@ export function createRccV3ProviderTransport<
 
 const DEFAULT_TRANSIENT_STREAM_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
 const TRANSIENT_WIRE_ERROR_TYPES = new Set(['server_error', 'rate_limit_exceeded', 'upstream_error']);
+const TRANSPORT_RETRIES_EXHAUSTED = Symbol.for('humanagent.transportRetriesExhausted');
+
+function markTransportRetriesExhausted<T extends object>(target: T): T {
+  Object.defineProperty(target, TRANSPORT_RETRIES_EXHAUSTED, { value: true, enumerable: false, configurable: true });
+  return target;
+}
+
+function hasTransportRetriesExhausted(target: object): boolean {
+  return (target as Record<symbol, unknown>)[TRANSPORT_RETRIES_EXHAUSTED] === true;
+}
 
 function extractStreamErrorFields(
   record: Record<string, unknown>,

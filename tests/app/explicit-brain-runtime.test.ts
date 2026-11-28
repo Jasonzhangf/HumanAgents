@@ -8721,6 +8721,70 @@ test('provider explicit brain retries transient RCC SSE errors across drain reco
       taskCandidates: [],
     }));
     assert.equal(persistent503Requests, 3, 'persistent 503 must stay bounded to maxTransientRetries + 1 total start attempts');
+
+    // Persistent SSE server_error exhausted at transport level must NOT re-multiply in outer explicit loop.
+    let persistentSseRequests = 0;
+    const encoder = new TextEncoder();
+    const boundedSseInterpreter = createProviderExplicitBrainInterpreter({
+      organId: id('organ', 'ui-explicit-rcc-bounded-sse'),
+      interactionScopeId: 'scope:rcc-bounded-sse',
+      parentJournal,
+      checkpointJournal: helperJournal,
+      helperJournal,
+      turnHelperJournal: helperJournal,
+      rawEvidence: evidence,
+      rawContent,
+      clock: { now: () => new Date().toISOString() },
+      helperFactory: async () => { throw new Error('unexpected helper dispatch'); },
+      binding,
+      templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+      lease,
+      maxTransientRetries: 2,
+      transientRetryDelaysMs: [1],
+      prepareAgentProvider: async () => ({
+        roleId: 'interaction' as const,
+        provider: { source: 'rcc', provider: 'rcc', binding: 'rcc-entry', protocol: 'responses', model: binding.modelRef, route: 'rcc-bounded-sse', baseUrl: 'http://rcc-bounded-sse.test' } as const,
+        source: 'rcc' as const,
+        binding,
+        port: new ProviderAdapter({
+          binding,
+          routeRef: 'rcc-bounded-sse',
+          codec: new ResponsesProviderCodec(),
+          evidence,
+          transport: new V3ProviderHttpTransport<InteractionParentProviderExecutionIdentityRef>({
+            binding,
+            baseUrl: 'http://rcc-bounded-sse.test',
+            source: 'rcc',
+            transientStreamRetries: 2,
+            transientStreamRetryDelaysMs: [1],
+            evidence,
+            fetch: async () => {
+              persistentSseRequests += 1;
+              return {
+                status: 200,
+                headers: new Headers({ 'content-type': 'text/event-stream' }),
+                body: new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    controller.enqueue(encoder.encode('event: error\ndata: {"code":"400","error":{"code":"400","type":"server_error","message":"upstream 400: server_error trailer"}}\n\n'));
+                    controller.close();
+                  },
+                }),
+                text: async () => '',
+              };
+            },
+          }),
+        }),
+      }),
+    });
+    await assert.rejects(() => boundedSseInterpreter.interpret({
+      interactionId: 'interaction-rcc-bounded-sse',
+      inputRevision: 1,
+      sourceRef: 'ui:rcc-bounded-sse',
+      rawInput: '1+1?',
+      clarifications: [],
+      taskCandidates: [],
+    }));
+    assert.equal(persistentSseRequests, 3, 'persistent SSE server_error must stay bounded to transport retry count + 1 without outer multiplication');
   } finally {
     await lease.release();
     await rm(root, { recursive: true, force: true });

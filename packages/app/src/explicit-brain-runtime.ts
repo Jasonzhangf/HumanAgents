@@ -1819,12 +1819,16 @@ export function createProviderExplicitBrainInterpreter(input: {
             const nextAction = typeof settlementErr.nextAction === 'string'
               ? settlementErr.nextAction
               : `${settlementErr.nextAction.kind}${settlementErr.nextAction.ref ? `:${settlementErr.nextAction.ref}` : ''}`;
-            throw new AppLifecycleError(
+            const appError = new AppLifecycleError(
               settlementErr.code,
               settlementErr.message,
               nextAction,
               settlementErr.ownerId,
             );
+            if ((settlementErr as unknown as Record<symbol, unknown>)[TRANSPORT_RETRIES_EXHAUSTED] === true) {
+              Object.defineProperty(appError, TRANSPORT_RETRIES_EXHAUSTED, { value: true, enumerable: false, configurable: true });
+            }
+            throw appError;
           }
           throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
         }
@@ -2083,6 +2087,7 @@ export function createProviderExplicitBrainInterpreter(input: {
 
 const DEFAULT_EXPLICIT_MAX_TRANSIENT_RETRIES = 10;
 const DEFAULT_EXPLICIT_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 8000];
+const TRANSPORT_RETRIES_EXHAUSTED = Symbol.for('humanagent.transportRetriesExhausted');
 
 function extractExplicitFailure(cause: unknown): {
   readonly code: string;
@@ -2095,7 +2100,7 @@ function extractExplicitFailure(cause: unknown): {
   if (cause instanceof AggregateError && cause.errors.length > 0) {
     return extractExplicitFailure(cause.errors[0]);
   }
-  const transportRetriesExhausted = (cause as { readonly transportRetriesExhausted?: unknown }).transportRetriesExhausted === true;
+  const transportRetriesExhausted = (cause as Record<symbol, unknown>)[TRANSPORT_RETRIES_EXHAUSTED] === true;
   if ('providerError' in cause) {
     const err = (cause as { readonly providerError?: { readonly code?: unknown; readonly message?: unknown; readonly category?: unknown; readonly retryable?: unknown } }).providerError;
     if (err && typeof err.code === 'string' && typeof err.message === 'string') {

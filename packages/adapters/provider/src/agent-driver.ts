@@ -875,7 +875,14 @@ export class ProviderAgentDriver<
   }
 
   settlement(): ProviderSettlement<TIdentity> | undefined {
-    return this.providerSettlement ? structuredClone(this.providerSettlement) : undefined;
+    if (!this.providerSettlement) return undefined;
+    const cloned = structuredClone(this.providerSettlement);
+    const exhaustedSym = Symbol.for('humanagent.transportRetriesExhausted');
+    const origErr = this.providerSettlement.error as unknown as Record<symbol, unknown> | undefined;
+    if (cloned.error && origErr?.[exhaustedSym] === true) {
+      Object.defineProperty(cloned.error, exhaustedSym, { value: true, enumerable: false, configurable: true });
+    }
+    return cloned;
   }
 
   /**
