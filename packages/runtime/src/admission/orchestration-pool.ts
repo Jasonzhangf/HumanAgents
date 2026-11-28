@@ -56,12 +56,19 @@ export function decideOrchestrationRuntimePool(input: {
     };
   }
 
-  const reusable = input.pool.runtimes.find(
-    (runtime) =>
-      runtime.state === 'idle' &&
-      runtime.currentBindings < runtime.maxBindings &&
-      hasCapabilities(runtime, input.requiredCapabilities),
-  );
+  const activeRuntimes = input.pool.runtimes.filter(
+    (runtime) => runtime.state === 'running' || runtime.currentBindings > 0,
+  ).length;
+  const hasActiveCapacity = activeRuntimes < input.pool.maxRuntimes;
+
+  const reusable = hasActiveCapacity
+    ? input.pool.runtimes.find(
+      (runtime) =>
+        runtime.state === 'idle' &&
+        runtime.currentBindings < runtime.maxBindings &&
+        hasCapabilities(runtime, input.requiredCapabilities),
+    )
+    : undefined;
   if (reusable) {
     return {
       action: 'reuse',
@@ -89,12 +96,14 @@ export function decideOrchestrationRuntimePool(input: {
   // occupies a slot. Recycling it frees that slot so the factory can start a
   // runtime with the capabilities this lease actually needs. Busy or capable
   // runtimes keep their existing reuse/wait/blocked outcomes.
-  const recyclable = input.pool.runtimes.find(
-    (runtime) =>
-      runtime.state === 'idle'
-      && runtime.currentBindings < runtime.maxBindings
-      && !hasCapabilities(runtime, input.requiredCapabilities),
-  );
+  const recyclable = hasActiveCapacity
+    ? input.pool.runtimes.find(
+      (runtime) =>
+        runtime.state === 'idle'
+        && runtime.currentBindings < runtime.maxBindings
+        && !hasCapabilities(runtime, input.requiredCapabilities),
+    )
+    : undefined;
   if (recyclable) {
     return {
       action: 'recycle',

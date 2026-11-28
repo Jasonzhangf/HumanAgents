@@ -3335,11 +3335,21 @@ export class UiRuntimeService {
     return ids;
   }
 
-  private effectiveExecutionConcurrencyLimit(): number | undefined {
+  private syncPersistedConcurrencyLimit(): number | undefined {
     const persisted = this.controlRosterStore.readSnapshot().implicitOrchestrationMaxRuntimes;
+    if (persisted === undefined) return undefined;
+    const changed = persisted !== this.implicitOrchestrationLimit || !this.implicitConcurrencyCustomized;
+    this.implicitOrchestrationLimit = persisted;
+    this.implicitConcurrencyCustomized = true;
+    if (changed) {
+      this.options.onImplicitOrchestrationLimitChange?.(persisted);
+    }
+    return persisted;
+  }
+
+  private effectiveExecutionConcurrencyLimit(): number | undefined {
+    const persisted = this.syncPersistedConcurrencyLimit();
     if (persisted !== undefined) {
-      this.implicitOrchestrationLimit = persisted;
-      this.implicitConcurrencyCustomized = true;
       return persisted;
     }
     if (this.implicitConcurrencyCustomized || this.options.implicitOrchestrationMaxRuntimes !== undefined) {
@@ -3349,11 +3359,7 @@ export class UiRuntimeService {
   }
 
   getImplicitOrchestrationLimit(): number {
-    const persisted = this.controlRosterStore.readSnapshot().implicitOrchestrationMaxRuntimes;
-    if (persisted !== undefined) {
-      this.implicitOrchestrationLimit = persisted;
-      this.implicitConcurrencyCustomized = true;
-    }
+    this.syncPersistedConcurrencyLimit();
     return this.implicitOrchestrationLimit;
   }
 
@@ -7622,8 +7628,7 @@ export class UiRuntimeService {
     const roster = source.projectKey === boundProject ? this.options.agentRoster : undefined;
     const storeSnapshot = this.controlRosterStore.readSnapshot();
     const storedMembers = storeSnapshot.projects[source.projectKey] ?? [];
-    const dynamicWorkers = storedMembers.filter((member) => member.role !== 'manager' && member.name !== RESERVED_MANAGER_NAME);
-    if ((!roster || roster.length === 0) && dynamicWorkers.length === 0) {
+    if ((!roster || roster.length === 0) && storedMembers.length === 0) {
       return { ok: true, value: { machine: this.machineName, projectKey: source.projectKey, rosterState: 'not-initialized', members: [] } };
     }
     const baseMembers = this.mergedRosterMembers(source.projectKey, storedMembers).map((member) => ({

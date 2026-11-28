@@ -6,6 +6,7 @@ import test from 'node:test';
 import { id, type ProviderBinding } from '../../packages/contracts/src/index.js';
 import { FakeReplayExecutionRuntimePort, startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
 import { createFileControlDomainRosterStore } from '../../packages/app/src/ui-runtime/control-domain-roster-store.js';
+import { decideOrchestrationRuntimePool } from '../../packages/runtime/src/admission/orchestration-pool.js';
 import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
@@ -87,7 +88,13 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     accessControl,
     explicitBrainInterpreter: { interpret: async () => { throw new Error('unused'); } },
   };
-  let runtime = await startUiRuntime(runtimeOptions);
+  let primaryObservedPoolLimit: number | undefined;
+  let runtime = await startUiRuntime({
+    ...runtimeOptions,
+    onImplicitOrchestrationLimitChange: (limit) => {
+      primaryObservedPoolLimit = limit;
+    },
+  });
 
   try {
     let baseUrl = runtime.server.url;
@@ -229,7 +236,7 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
       body: JSON.stringify({ projectKey: 'projB', role: 'executor' }),
     });
     assert.equal(projBCreated.status, 201);
-    const projBBody = await projBCreated.json() as { member: { name: string } };
+    const projBBody = await projBCreated.json() as { member: { memberId: string; name: string } };
     assert.equal(projBBody.member.name, 'Carol');
 
     // Configured agentRoster member visible in projectRoster also resolves via address resolver
@@ -387,6 +394,19 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
         (runtime.service as unknown as { effectiveExecutionConcurrencyLimit(): number | undefined }).effectiveExecutionConcurrencyLimit(),
         9,
       );
+      assert.equal(primaryObservedPoolLimit, 9);
+      // Removing David and Carol from projB leaves persisted Jenny-only roster visible in projectRoster('projB')
+      secondRuntime.service.removeProjectMember({ projectKey: 'projB', memberId: projBMember.memberId });
+      secondRuntime.service.removeProjectMember({ projectKey: 'projB', memberId: projBBody.member.memberId });
+      const managerOnlyRoster = await runtime.service.projectRoster('projB');
+      assert.equal(managerOnlyRoster.ok, true);
+      if (managerOnlyRoster.ok) {
+        assert.deepEqual(
+          managerOnlyRoster.value.members.map((m) => m.memberName),
+          ['Jenny'],
+        );
+      }
+      // Re-add Carol? Already present in projB? Wait: Carol was added on line 226 before David, remove Carol temporarily?
       // Restore 12 for cold-restart assertion below
       secondRuntime.service.setImplicitOrchestrationLimit(12);
     } finally {
@@ -413,7 +433,7 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     );
     assert.equal(coldMembersBody.members[1]?.systemPrompt, 'sys-alice-edited');
 
-    // 8. Corrupt control-domain-roster.json fails loudly without wiping stored projects
+    // 8. Corrupt JSON syntax AND structurally malformed member entries fail loudly without wiping stored projects
     const storePath = join(root, 'control-domain-roster.json');
     const savedBefore = await readFile(storePath, 'utf8');
     await writeFile(storePath, '{not-valid-json', 'utf8');
@@ -422,8 +442,27 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     assert.throws(() => fileStore.update((draft) => {
       (draft as { implicitOrchestrationMaxRuntimes?: number }).implicitOrchestrationMaxRuntimes = 3;
     }));
+    await writeFile(storePath, JSON.stringify({ schemaVersion: 1, projects: { projA: [{ memberId: 'broken-only-id' }] } }), 'utf8');
+    assert.throws(() => fileStore.readSnapshot(), /malformed member fields/);
+    assert.throws(() => fileStore.update((draft) => {
+      (draft as { implicitOrchestrationMaxRuntimes?: number }).implicitOrchestrationMaxRuntimes = 3;
+    }), /malformed member fields/);
     await writeFile(storePath, savedBefore, 'utf8');
     assert.equal(fileStore.readSnapshot().projects.projA?.length, 3);
+
+    // 9. Lowering maxRuntimes blocks reuse of existing idle runtimes while active count >= maxRuntimes
+    const shrinkDecision = decideOrchestrationRuntimePool({
+      requiredCapabilities: ['execute'],
+      pool: {
+        maxRuntimes: 1,
+        runtimes: [
+          { runtimeId: 'r1', state: 'running', capabilities: ['execute'], currentBindings: 1, maxBindings: 1 },
+          { runtimeId: 'r2', state: 'idle', capabilities: ['execute'], currentBindings: 0, maxBindings: 1 },
+        ],
+      },
+    });
+    assert.equal(shrinkDecision.action, 'wait');
+    assert.equal(shrinkDecision.condition, 'orchestration.runtime.max');
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });
