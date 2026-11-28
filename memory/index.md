@@ -277,6 +277,10 @@ _Empty._
 - tags: `compatibility`, `dsh`, `mvp`
 - details: [L3/mvp-not-dsh.md](L3/mvp-not-dsh.md)
 
+### MVP Ontology 代码顺序接入计划（2026-11-27）
+- tags: `code-alignment`, `mvp`, `ontology`, `plan`
+- details: [L3/mvp-ontology-code-alignment-plan-20261127.md](L3/mvp-ontology-code-alignment-plan-20261127.md)
+
 ### HumanAgent WebUI V1 定稿原型
 - tags: `mvp-ui-v1`, `webui`
 - details: [L3/mvp-ui-v1-final-reference.md](L3/mvp-ui-v1-final-reference.md)

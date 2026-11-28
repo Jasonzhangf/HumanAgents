@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
-import { ConfigurationError, DEFAULT_UI_DISPLAY_PREFERENCE, applyManualDisplaySelection, compileAgentProviderBindings, declareDefaultProduct, ensureControlLayout, formatPairingCommand, listConfiguredProjects, loadConfiguration, parseToml, readDefaultProductSelection, resolveProductPaths, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, validateInternalConfig, validateProjectOverride, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
+import { ConfigurationError, DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES, DEFAULT_UI_DISPLAY_PREFERENCE, MemberRosterError, WORKER_NAME_POOL, allocateWorkerName, applyManualDisplaySelection, compileAgentProviderBindings, createMemberFromTemplate, declareDefaultProduct, effectiveImplicitOrchestrationMaxRuntimes, ensureControlLayout, formatPairingCommand, listConfiguredProjects, loadConfiguration, parseToml, readDefaultProductSelection, resolveProductPaths, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, validateInternalConfig, validateProjectOverride, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
 
 const minimalInteractionAgent = () => ({
   agentId: 'interaction-default',
@@ -1775,4 +1775,55 @@ test('rejects invalid preferences without writing and does not persist explicit 
   const resolved = validateUiDisplayPreference({ schemaVersion: 1, mode: 'follow-last' });
   assert.equal(resolveUiDisplayMode(applyManualDisplaySelection(resolved, 'actions')), 'actions');
   assert.equal(await readFile(configPath, 'utf8'), before);
+});
+
+test('implicit orchestration concurrency defaults to 8, is configurable, and rejects non-positive limits', () => {
+  assert.equal(DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES, 8);
+  assert.equal(effectiveImplicitOrchestrationMaxRuntimes(), 8);
+  const custom = validateUserConfig({
+    schemaVersion: 1,
+    agents: [minimalInteractionAgent()],
+    execution: { implicitOrchestrationMaxRuntimes: 12 },
+  });
+  assert.equal(effectiveImplicitOrchestrationMaxRuntimes(custom), 12);
+  assert.throws(
+    () => validateUserConfig({
+      schemaVersion: 1,
+      agents: [minimalInteractionAgent()],
+      execution: { implicitOrchestrationMaxRuntimes: 0 },
+    }),
+    /must be positive/,
+  );
+  assert.throws(
+    () => validateProjectOverride({ execution: { implicitOrchestrationMaxRuntimes: 0 } }),
+    /must be positive/,
+  );
+});
+
+test('worker name pool has 50 names excluding Jenny and template creation copies prompts independently', () => {
+  assert.equal(WORKER_NAME_POOL.length, 50);
+  assert.equal(WORKER_NAME_POOL.includes('Jenny'), false);
+  const template = {
+    role: 'executor' as const,
+    systemPrompt: 'system-base',
+    rolePrompt: 'role-exec',
+    provider: 'rcc',
+    model: 'gpt-5',
+  };
+  const first = createMemberFromTemplate({ existingMembers: [], template, memberId: 'm-1' });
+  assert.equal(first.name, WORKER_NAME_POOL[0]);
+  assert.equal(first.systemPrompt, 'system-base');
+  assert.equal(first.rolePrompt, 'role-exec');
+
+  assert.throws(
+    () => createMemberFromTemplate({ existingMembers: [first], template, name: first.name, memberId: 'm-2' }),
+    /member name already exists/,
+  );
+  assert.throws(
+    () => createMemberFromTemplate({ existingMembers: [first], template, name: 'Jenny', memberId: 'm-3' }),
+    /reserved for the project manager/,
+  );
+
+  const reused = allocateWorkerName(new Set());
+  assert.equal(reused, WORKER_NAME_POOL[0]);
 });
