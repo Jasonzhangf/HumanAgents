@@ -7,11 +7,16 @@ import {
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
 import {
+  AddressingError,
   CapabilityCallError,
   CapabilityRegistry,
   CapabilityRegistryError,
   FeedbackHub,
   FeedbackPublicationError,
+  dispatchByRole,
+  formatCanonicalAgentAddress,
+  resolveAgentAddress,
+  type CanonicalAddressEntry,
   type CapabilityCallRequest,
   type CapabilityRegistration,
 } from '../../../packages/runtime/src/communication/index.js';
@@ -392,4 +397,52 @@ test('feedback publication does not reconstruct control truth from payload', asy
       && error.reason === 'control-truth-in-payload',
   );
   assert.equal(journal.appendCalls, 0);
+});
+
+test('canonical addressing resolves Alex, project Jenny, and project.member while isolating cross-project and disconnected remotes', () => {
+  assert.equal(formatCanonicalAgentAddress({ machine: 'mac1', name: 'CEO' }), 'mac1.CEO');
+  assert.equal(formatCanonicalAgentAddress({ machine: 'mac1', project: 'projA', name: 'Grace' }), 'mac1.projA.Grace');
+
+  const entries: CanonicalAddressEntry[] = [
+    { canonicalAddress: 'mac1.CEO', machine: 'mac1', name: 'CEO', role: 'ceo' },
+    { canonicalAddress: 'mac1.projA.Jenny', machine: 'mac1', project: 'projA', name: 'Jenny', role: 'manager' },
+    { canonicalAddress: 'mac1.projA.Grace', machine: 'mac1', project: 'projA', name: 'Grace', role: 'reviewer' },
+    { canonicalAddress: 'mac1.projB.Kate', machine: 'mac1', project: 'projB', name: 'Kate', role: 'executor' },
+    { canonicalAddress: 'mac2.projA.Grace', machine: 'mac2', project: 'projA', name: 'Grace', role: 'reviewer' },
+  ];
+  const connected = new Set(['mac1']);
+
+  assert.equal(resolveAgentAddress({ token: 'Alex', currentMachine: 'mac1', entries, connectedMachines: connected }).canonicalAddress, 'mac1.CEO');
+  assert.equal(resolveAgentAddress({ token: 'projA', currentMachine: 'mac1', entries, connectedMachines: connected }).canonicalAddress, 'mac1.projA.Jenny');
+  assert.equal(resolveAgentAddress({ token: 'projA.Grace', currentMachine: 'mac1', entries, connectedMachines: connected }).canonicalAddress, 'mac1.projA.Grace');
+
+  // Cross-project misdelivery forbidden
+  assert.throws(
+    () => resolveAgentAddress({ token: 'Kate', currentMachine: 'mac1', currentProject: 'projA', entries, connectedMachines: connected }),
+    (error: unknown) => error instanceof AddressingError && error.code === 'addressing.cross-project-forbidden',
+  );
+
+  // Disconnected remote never falls back to local same-name member
+  assert.throws(
+    () => resolveAgentAddress({ token: 'mac2.projA.Grace', currentMachine: 'mac1', currentProject: 'projA', entries, connectedMachines: connected }),
+    (error: unknown) => error instanceof AddressingError && error.code === 'addressing.remote-disconnected',
+  );
+
+  // Duplicate CEO rejected
+  assert.throws(
+    () => resolveAgentAddress({
+      token: 'Alex',
+      currentMachine: 'mac1',
+      entries: [...entries, { canonicalAddress: 'mac2.CEO', machine: 'mac2', name: 'CEO', role: 'ceo' }],
+    }),
+    (error: unknown) => error instanceof AddressingError && error.code === 'addressing.duplicate-ceo',
+  );
+
+  // Role dispatch matches role or falls back to Jenny; missing explicit target fails
+  assert.equal(dispatchByRole({ currentMachine: 'mac1', currentProject: 'projA', entries, role: 'reviewer' }).target.canonicalAddress, 'mac1.projA.Grace');
+  assert.equal(dispatchByRole({ currentMachine: 'mac1', currentProject: 'projA', entries, role: 'tester' }).reason, 'jenny-fallback');
+  assert.throws(
+    () => dispatchByRole({ currentMachine: 'mac1', currentProject: 'projA', entries, explicitTarget: 'projA.Unknown' }),
+    (error: unknown) => error instanceof AddressingError && error.code === 'addressing.missing',
+  );
 });

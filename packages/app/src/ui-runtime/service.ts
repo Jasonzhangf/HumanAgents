@@ -2,6 +2,21 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES,
+  MemberRosterError,
+  RESERVED_MANAGER_NAME,
+  createMemberFromTemplate,
+  type MemberRoleTemplate,
+  type ProjectMemberRecord,
+} from '../../../config/src/index.js';
+import {
+  AddressingError,
+  dispatchByRole,
+  formatCanonicalAgentAddress,
+  resolveAgentAddress,
+  type CanonicalAddressEntry,
+} from '../../../runtime/src/communication/index.js';
 import type { ProviderTransportSource } from '../../../adapters/provider/src/index.js';
 import { providerRawContentReader } from '../../../adapters/provider/src/evidence.js';
 import {
@@ -613,6 +628,8 @@ export interface UiRuntimeServiceOptions {
   readonly mode: 'fake' | 'rcc';
   readonly agentRoster?: readonly Pick<import('../../../config/src/index.js').AgentConfig, 'agentId' | 'roleId' | 'managementRole'>[];
   readonly maxConcurrentTasks?: number;
+  readonly implicitOrchestrationMaxRuntimes?: number;
+  readonly machineName?: string;
   readonly organId: OrganId;
   readonly principalOwner?: string;
   readonly binding: ProviderBinding;
@@ -3233,6 +3250,139 @@ function checkpointAssetForSelector(
 
 export class UiRuntimeService {
   private readResources?: { readonly runtimePaths: RuntimePaths; readonly projectCatalog: () => Promise<ConfiguredProjectCatalog> };
+  private implicitOrchestrationLimit: number;
+  private readonly machineName: string;
+  private readonly projectMembers: ProjectMemberRecord[];
+
+  getImplicitOrchestrationLimit(): number {
+    return this.implicitOrchestrationLimit;
+  }
+
+  setImplicitOrchestrationLimit(limit: number): number {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new UiRuntimeApiError(
+        'settings.concurrency.invalid',
+        APP_OWNER,
+        'implicitOrchestrationMaxRuntimes must be a positive safe integer',
+        'provide an integer >= 1',
+        400,
+      );
+    }
+    this.implicitOrchestrationLimit = limit;
+    return this.implicitOrchestrationLimit;
+  }
+
+  private canonicalAddressEntries(): readonly CanonicalAddressEntry[] {
+    const project = this.options.projectKey ?? 'default';
+    return [
+      {
+        canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, name: 'CEO' }),
+        machine: this.machineName,
+        name: 'CEO',
+        role: 'ceo',
+      },
+      ...this.projectMembers.map((member) => ({
+        canonicalAddress: formatCanonicalAgentAddress({
+          machine: this.machineName,
+          project,
+          name: member.name,
+        }),
+        machine: this.machineName,
+        project,
+        name: member.name,
+        role: member.role,
+      })),
+    ];
+  }
+
+  listProjectMembers(): {
+    readonly machine: string;
+    readonly project: string;
+    readonly members: readonly ProjectMemberRecord[];
+  } {
+    return {
+      machine: this.machineName,
+      project: this.options.projectKey ?? 'default',
+      members: this.projectMembers.map((member) => ({ ...member })),
+    };
+  }
+
+  addProjectMember(input: {
+    readonly template: MemberRoleTemplate;
+    readonly name?: string;
+    readonly memberId?: string;
+    readonly provider?: string;
+    readonly model?: string;
+  }): ProjectMemberRecord {
+    try {
+      const created = createMemberFromTemplate({
+        existingMembers: this.projectMembers,
+        template: input.template,
+        ...(input.name === undefined ? {} : { name: input.name }),
+        memberId: input.memberId?.trim() || `member-${randomUUID()}`,
+        ...(input.provider === undefined ? {} : { provider: input.provider }),
+        ...(input.model === undefined ? {} : { model: input.model }),
+      });
+      this.projectMembers.push(created);
+      return { ...created };
+    } catch (error) {
+      if (error instanceof MemberRosterError) {
+        const status = error.code === 'member.duplicate-name' ? 409 : 400;
+        throw new UiRuntimeApiError(error.code, APP_OWNER, error.message, 'choose an available member name and valid template', status);
+      }
+      throw error;
+    }
+  }
+
+  resolveCanonicalAddress(input: {
+    readonly token: string;
+    readonly connectedMachines?: readonly string[];
+  }): CanonicalAddressEntry {
+    try {
+      return resolveAgentAddress({
+        token: input.token,
+        currentMachine: this.machineName,
+        currentProject: this.options.projectKey ?? 'default',
+        entries: this.canonicalAddressEntries(),
+        connectedMachines: new Set([this.machineName, ...(input.connectedMachines ?? [])]),
+      });
+    } catch (error) {
+      if (error instanceof AddressingError) {
+        const status = error.code === 'addressing.missing'
+          ? 404
+          : error.code === 'addressing.remote-disconnected'
+            ? 503
+            : error.code === 'addressing.ambiguous' || error.code === 'addressing.duplicate-ceo' || error.code === 'addressing.cross-project-forbidden'
+              ? 409
+              : 400;
+        throw new UiRuntimeApiError(error.code, APP_OWNER, error.message, 'provide a valid canonical or unambiguous local address', status);
+      }
+      throw error;
+    }
+  }
+
+  dispatchMemberByRole(input: {
+    readonly role?: CanonicalAddressEntry['role'];
+    readonly explicitTarget?: string;
+    readonly connectedMachines?: readonly string[];
+  }): { readonly target: CanonicalAddressEntry; readonly reason: 'explicit' | 'role-match' | 'jenny-fallback' } {
+    try {
+      return dispatchByRole({
+        currentMachine: this.machineName,
+        currentProject: this.options.projectKey ?? 'default',
+        entries: this.canonicalAddressEntries(),
+        ...(input.role === undefined ? {} : { role: input.role }),
+        ...(input.explicitTarget === undefined ? {} : { explicitTarget: input.explicitTarget }),
+        connectedMachines: new Set([this.machineName, ...(input.connectedMachines ?? [])]),
+      });
+    } catch (error) {
+      if (error instanceof AddressingError) {
+        const status = error.code === 'addressing.missing' ? 404 : error.code === 'addressing.remote-disconnected' ? 503 : 400;
+        throw new UiRuntimeApiError(error.code, APP_OWNER, error.message, 'specify an existing member or valid role', status);
+      }
+      throw error;
+    }
+  }
 
   bindReadResources(input: { readonly runtimePaths: RuntimePaths; readonly projectCatalog: () => Promise<ConfiguredProjectCatalog> }): void {
     this.readResources = input;
@@ -3368,6 +3518,17 @@ export class UiRuntimeService {
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
     this.memory = options.memory;
+    this.implicitOrchestrationLimit = options.implicitOrchestrationMaxRuntimes ?? DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES;
+    this.machineName = options.machineName?.trim() || 'local';
+    this.projectMembers = [
+      {
+        memberId: `manager-${this.machineName}-${options.projectKey ?? 'default'}`,
+        name: RESERVED_MANAGER_NAME,
+        role: 'manager',
+        systemPrompt: 'HumanAgent project manager system boundary',
+        rolePrompt: 'Jenny project manager',
+      },
+    ];
     this.subscriptionControl = options.subscriptionControl;
     this.explicitBrainInterpreter = options.explicitBrainInterpreter;
     this.explicitBrainTraceJournal = new DecisionTraceJournal({
@@ -10457,7 +10618,10 @@ export class UiRuntimeService {
     const runningTasks = tasks.filter((task) => this.isTaskOccupyingExecutionSlot(task));
     return admitRequirement({
       envelope,
-      queue: defaultAdmissionQueueConfig(queue, this.options.maxConcurrentTasks),
+      queue: defaultAdmissionQueueConfig(
+        queue,
+        this.options.maxConcurrentTasks ?? (queue === 'execution' ? this.implicitOrchestrationLimit : undefined),
+      ),
       registeredQueues: ADMISSION_QUEUE_KINDS,
       queueLoad: {
         // An append/change to an already-running task does not occupy a new

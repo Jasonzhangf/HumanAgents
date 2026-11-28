@@ -10,6 +10,28 @@
     "enabled": [],
     "manifest": ".appsdk/contracts/development-scenarios.manifest.json"
   },
+  "guidance": {
+    "enforcement": "warning",
+    "compiled_manifest": ".appsdk/contracts/guidance/compiled-guidance.json",
+    "rule_sources": [
+      {
+        "source_id": "appsdk-project-governance",
+        "kind": "skill",
+        "path": ".appsdk/skills/appsdk-project-governance/SKILL.md",
+        "contract_path": ".appsdk/skills/appsdk-project-governance/appsdk-guidance.json",
+        "required": true,
+        "precedence": 1
+      },
+      {
+        "source_id": "humanagent-mvp-ontology",
+        "kind": "skill",
+        "path": ".agents/skills/humanagent-mvp-ontology/SKILL.md",
+        "contract_path": ".agents/skills/humanagent-mvp-ontology/appsdk-guidance.json",
+        "required": true,
+        "precedence": 2
+      }
+    ]
+  },
   "governance": {
     "active_kind": "immutable_consumable_library",
     "active_root": "active/lib/**",

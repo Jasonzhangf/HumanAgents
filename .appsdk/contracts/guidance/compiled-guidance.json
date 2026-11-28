@@ -1,0 +1,1907 @@
+{
+  "enforcement": "warning",
+  "harness": "appsdk-development-process-control",
+  "ontology": {
+    "behaviors": [
+      {
+        "effects": [
+          "The compiler writes the compiled manifest only for an approved and fully bound clause."
+        ],
+        "id": "ontology-clause-approval",
+        "input": [
+          "ontology clause declaration",
+          "exact user approval",
+          "governance edge or gate binding"
+        ],
+        "must_have": [
+          "approval.state approved",
+          "approval.source",
+          "approval.text",
+          "governance.edge",
+          "governance.gate_kind",
+          "governance.check",
+          "governance.allow_case",
+          "governance.deny_case",
+          "governance.observation"
+        ],
+        "must_not_have": [
+          "candidate approval state",
+          "missing governance field"
+        ],
+        "name": "Ontology clause approval before gate binding",
+        "output": [
+          "approved clause compiled into the manifest",
+          "structured rejection error"
+        ],
+        "owner": "AppSDK guidance compiler",
+        "perception": "appsdk guide compile JSON output",
+        "precondition": [
+          "A guidance rule claims ontology governance with forbidden severity."
+        ],
+        "source": [
+          "Codex conversation 2026-11-11",
+          "docs/design/appsdk-ontology-governance.md"
+        ],
+        "transition": {
+          "from": "candidate",
+          "to": "approved-and-bound"
+        }
+      },
+      {
+        "effects": [
+          "Safe addressing tool contract"
+        ],
+        "id": "explicit-agent-addressing-tools",
+        "input": [
+          "Addressing tool call."
+        ],
+        "must_have": [
+          "Resolve target via canonical addressing owner",
+          "Return structured error when target is missing or ambiguous"
+        ],
+        "must_not_have": [
+          "Guess or silently substitute a different target"
+        ],
+        "name": "C05 · Agent 寻址工具模块",
+        "output": [
+          "Safe addressing tool contract"
+        ],
+        "owner": "packages/runtime",
+        "perception": "Public observation via packages/runtime",
+        "precondition": [
+          "Explicit agent resolves target member or project."
+        ],
+        "source": [
+          "memory/L3/explicit-agent-context-tools-c05.md"
+        ],
+        "transition": {
+          "from": "Addressing tool invoked",
+          "to": "Canonical target returned or structured error surfaced"
+        }
+      },
+      {
+        "effects": [
+          "Deterministic routing receipt"
+        ],
+        "id": "role-based-dispatch-fallback",
+        "input": [
+          "Dispatch target resolution."
+        ],
+        "must_have": [
+          "Assign to matching role member in project roster",
+          "Fall back to project Jenny when no role matches",
+          "Return explicit error on unknown named address"
+        ],
+        "must_not_have": [
+          "Silently reroute an explicit unknown address to another member or project"
+        ],
+        "name": "自动分派的默认决定",
+        "output": [
+          "Deterministic routing receipt"
+        ],
+        "owner": "packages/runtime",
+        "perception": "Public observation via packages/runtime",
+        "precondition": [
+          "Explicit intake or orchestrator dispatches work."
+        ],
+        "source": [
+          "memory/L3/mvp-v1-04-dispatch.md"
+        ],
+        "transition": {
+          "from": "Requirement ready for dispatch",
+          "to": "Assigned to matching member, Jenny fallback, or explicit error"
+        }
+      },
+      {
+        "effects": [
+          "Template and peer configs remain immutable"
+        ],
+        "id": "dual-prompt-member-creation",
+        "input": [
+          "Member create or update."
+        ],
+        "must_have": [
+          "Copy system and role prompts independently",
+          "Reject duplicate member name preserving existing member"
+        ],
+        "must_not_have": [
+          "Mutate shared template or other members when editing one member",
+          "Overwrite existing member on name collision"
+        ],
+        "name": "按模板新增成员",
+        "output": [
+          "Template and peer configs remain immutable"
+        ],
+        "owner": "packages/config",
+        "perception": "Public observation via packages/config",
+        "precondition": [
+          "Creating or editing a project member from a role template."
+        ],
+        "source": [
+          "memory/L3/mvp-v1-16-template.md"
+        ],
+        "transition": {
+          "from": "Role template selected",
+          "to": "Independent member config saved or duplicate rejected"
+        }
+      },
+      {
+        "effects": [
+          "Checkpoint stores single-turn summary only",
+          "Expandable history stores inspectable turn detail for on-demand model lookup"
+        ],
+        "id": "checkpoint-single-turn-summary-and-detail",
+        "input": [
+          "Single-turn closure or turn-end tool invocation."
+        ],
+        "must_have": [
+          "Allow simple-QA option to merge directly as a simple Checkpoint without filling complex summary forms",
+          "For complex turns, write short summary into Checkpoint and full details into expandable history readable on demand by the model"
+        ],
+        "must_not_have": [
+          "Force simple Q&A to fill complex multi-section summary forms",
+          "Omit expandable detail on complex turns or pack raw full tool history into main Checkpoint summary"
+        ],
+        "name": "Ontology: Single-turn Checkpoint summary/detail split with simple-QA fast path",
+        "output": [
+          "Checkpoint stores single-turn summary only",
+          "Expandable history stores inspectable turn detail for on-demand model lookup"
+        ],
+        "owner": "packages/runtime",
+        "perception": "Public turn-end closure receipt and expandable history store",
+        "precondition": [
+          "A single reasoning turn finishes and triggers the turn-end Checkpoint summary gate."
+        ],
+        "source": [
+          "memory/L3/explicit-agent-context-tools-c07.md",
+          "packages/contracts/src/standard-turn-end.ts"
+        ],
+        "transition": {
+          "from": "Single reasoning turn completing",
+          "to": "Simple Checkpoint merged (simple-QA) or summary Checkpoint + expandable history detail committed (complex)"
+        }
+      }
+    ],
+    "clauses": [
+      {
+        "allowed_actions": [
+          "Keep the clause advisory until exact user approval and gate binding are present.",
+          "Compile an approved clause only when the bound gate defines legal, illegal, and observation cases."
+        ],
+        "approval": {
+          "source": "Codex conversation 2026-11-11",
+          "state": "approved",
+          "text": "这个 ontology 规则要变成全局治理规则，你检查下还要做什么依赖迁移吗？理论上 appsdk 不升级版本号应该可以？"
+        },
+        "axis": "behavior",
+        "axis_id": "ontology-clause-approval",
+        "clause_id": "ontology-approval-before-gate",
+        "effects": [
+          "The guidance compiler rejects candidate or unbound ontology clauses.",
+          "The guidance compiler accepts approved clauses with executable gate evidence."
+        ],
+        "evidence": [
+          "GUIDANCE_ONTOLOGY_CLAUSE_APPROVED_AND_BOUND",
+          "rust/tests/cli_smoke/part_13.rs"
+        ],
+        "forbidden_actions": [
+          "Treat a candidate or unbound clause as mandatory.",
+          "Bind a gate before exact user approval."
+        ],
+        "governance": {
+          "allow_case": "An approved clause references a declared forbidden rule and includes every gate field.",
+          "check": "GUIDANCE_ONTOLOGY_CLAUSE_APPROVED_AND_BOUND",
+          "deny_case": "A candidate clause, missing approval source or text, missing gate field, or unresolved rule reference.",
+          "edge": "guidance rules -> appsdk guide compile",
+          "gate_kind": "precondition",
+          "observation": "appsdk guide compile exits nonzero with a JSON error for the deny case and exits zero for the allow case."
+        },
+        "owner": "AppSDK guidance compiler",
+        "rule_id": "ontology-approval-before-gate",
+        "scenario": "A proposed rule or ontology clause is about to become mandatory governance.",
+        "scope": "AppSDK guidance rules and ontology clauses that claim mandatory enforcement.",
+        "state_after": "approved-and-bound",
+        "state_before": "candidate",
+        "trigger": "The clause is declared with forbidden severity and references ontology governance."
+      },
+      {
+        "allowed_actions": [
+          "Resolve target via canonical addressing owner",
+          "Return structured error when target is missing or ambiguous"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "state": "approved",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "axis": "behavior",
+        "axis_id": "explicit-agent-addressing-tools",
+        "clause_id": "clause-explicit-agent-addressing-tools",
+        "effects": [
+          "Safe addressing tool contract"
+        ],
+        "evidence": [
+          "memory/L3/explicit-agent-context-tools-c05.md"
+        ],
+        "forbidden_actions": [
+          "Guess or silently substitute a different target"
+        ],
+        "governance": {
+          "allow_case": "Resolve target via canonical addressing owner",
+          "check": "Verify Provide explicit-agent addressing tools obeying local addressing rules and explicit error reporting.",
+          "deny_case": "Guess or silently substitute a different target",
+          "edge": "explicit-addressing-tool",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/runtime"
+        },
+        "owner": "packages/runtime",
+        "rule_id": "explicit-agent-context-tools-c05",
+        "scenario": "Explicit agent resolves target member or project.",
+        "scope": "humanagent/explicit-context-tools",
+        "state_after": "Canonical target returned or structured error surfaced",
+        "state_before": "Addressing tool invoked",
+        "trigger": "Addressing tool call."
+      },
+      {
+        "allowed_actions": [
+          "Route projectless conversation to Alex",
+          "Route project conversation to that project's single Jenny manager"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "state": "approved",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "axis": "object",
+        "axis_id": "explicit-entry-identity",
+        "clause_id": "clause-explicit-entry-identity",
+        "effects": [
+          "Identity, cwd, and task scope isolated per owner"
+        ],
+        "evidence": [
+          "memory/L3/mvp-v1-02-identity.md"
+        ],
+        "forbidden_actions": [
+          "Create multiple managers for one project",
+          "Mix Alex and project Jenny cwd/task scope"
+        ],
+        "governance": {
+          "allow_case": "Route projectless conversation to Alex",
+          "check": "Verify Distinguish projectless Alex from per-project Jenny; each project has exactly one manager.",
+          "deny_case": "Create multiple managers for one project",
+          "edge": "explicit-identity-binding",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/config"
+        },
+        "owner": "packages/config",
+        "rule_id": "mvp-v1-02-identity",
+        "scenario": "Initiating or routing an explicit conversation.",
+        "scope": "humanagent/explicit-identity",
+        "state_after": "Session bound to Alex or single project Jenny",
+        "state_before": "User opens explicit entry",
+        "trigger": "Explicit session or project entry opened."
+      },
+      {
+        "allowed_actions": [
+          "Load member-specific prompts, provider, and model",
+          "Bind parallel outputs and tasks to member address"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "state": "approved",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "axis": "object",
+        "axis_id": "project-member-config",
+        "clause_id": "clause-project-member-config",
+        "effects": [
+          "Member isolation preserved"
+        ],
+        "evidence": [
+          "memory/L3/mvp-v1-03-member.md"
+        ],
+        "forbidden_actions": [
+          "Leak one member's prompt/provider/model or output into another member"
+        ],
+        "governance": {
+          "allow_case": "Load member-specific prompts, provider, and model",
+          "check": "Verify Persist per-member prompt, provider, and model configuration; isolate parallel member outputs to their address.",
+          "deny_case": "Leak one member's prompt/provider/model or output into another member",
+          "edge": "member-config-isolation",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/config"
+        },
+        "owner": "packages/config",
+        "rule_id": "mvp-v1-03-member",
+        "scenario": "Configuring or running a named project member.",
+        "scope": "humanagent/member-config",
+        "state_after": "Runtime executes with member's own config and address",
+        "state_before": "Member configured in project",
+        "trigger": "Member config saved or request dispatched."
+      },
+      {
+        "allowed_actions": [
+          "Assign to matching role member in project roster",
+          "Fall back to project Jenny when no role matches",
+          "Return explicit error on unknown named address"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "state": "approved",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "axis": "behavior",
+        "axis_id": "role-based-dispatch-fallback",
+        "clause_id": "clause-role-based-dispatch-fallback",
+        "effects": [
+          "Deterministic routing receipt"
+        ],
+        "evidence": [
+          "memory/L3/mvp-v1-04-dispatch.md"
+        ],
+        "forbidden_actions": [
+          "Silently reroute an explicit unknown address to another member or project"
+        ],
+        "governance": {
+          "allow_case": "Assign to matching role member in project roster",
+          "check": "Verify Dispatch from real project roster by role; fall back to Jenny when no role matches; error explicitly on missing named address.",
+          "deny_case": "Silently reroute an explicit unknown address to another member or project",
+          "edge": "roster-dispatch-resolution",
+          "gate_kind": "relation",
+          "observation": "Public observation via packages/runtime"
+        },
+        "owner": "packages/runtime",
+        "rule_id": "mvp-v1-04-dispatch",
+        "scenario": "Explicit intake or orchestrator dispatches work.",
+        "scope": "humanagent/member-dispatch",
+        "state_after": "Assigned to matching member, Jenny fallback, or explicit error",
+        "state_before": "Requirement ready for dispatch",
+        "trigger": "Dispatch target resolution."
+      },
+      {
+        "allowed_actions": [
+          "Expose real runtime IDs linking explicit, implicit orchestration, and memory nodes",
+          "Enforce default 8-slot limit on implicit orchestration runtimes only (downstream roles counted separately) and apply Settings updates live without restart",
+          "Continue Task mainline if memory agent fails"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "state": "approved",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "axis": "relation",
+        "axis_id": "task-runtime-memory-links",
+        "clause_id": "clause-task-runtime-memory-links",
+        "effects": [
+          "Traceable Task-to-runtime-to-memory topology",
+          "Live-configurable implicit orchestration concurrency cap"
+        ],
+        "evidence": [
+          "memory/L3/mvp-v1-08-runtime.md"
+        ],
+        "forbidden_actions": [
+          "Count downstream worker roles against the 8 implicit orchestration slots or hardcode the limit as unconfigurable",
+          "Block MVP Task delivery on memory agent failure"
+        ],
+        "governance": {
+          "allow_case": "Settings updates implicit orchestration slot limit live without restart; memory failure leaves Task delivery unblocked",
+          "check": "Verify implicit orchestration concurrency uses live-configurable default 8-slot pool excluding downstream roles, and memory failure does not block Task delivery.",
+          "deny_case": "Downstream roles consume implicit orchestration slots or memory failure blocks MVP Task delivery",
+          "edge": "task-runtime-observation",
+          "gate_kind": "relation",
+          "observation": "Public observation via packages/runtime"
+        },
+        "owner": "packages/runtime",
+        "rule_id": "mvp-v1-08-runtime",
+        "scenario": "Inspecting Task execution graph, allocating implicit orchestration slots, or running memory curation.",
+        "scope": "humanagent/task-runtime-graph",
+        "state_after": "Read-only graph reflects real runtime IDs; implicit slot limit updated live; Task mainline isolated from memory failure",
+        "state_before": "Task active with implicit orchestration slot budget and memory nodes",
+        "trigger": "Task relationship inspection, implicit orchestration slot allocation, config update, or memory trigger."
+      },
+      {
+        "allowed_actions": [
+          "Copy system and role prompts independently",
+          "Reject duplicate member name preserving existing member"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "state": "approved",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "axis": "behavior",
+        "axis_id": "dual-prompt-member-creation",
+        "clause_id": "clause-dual-prompt-member-creation",
+        "effects": [
+          "Template and peer configs remain immutable"
+        ],
+        "evidence": [
+          "memory/L3/mvp-v1-16-template.md"
+        ],
+        "forbidden_actions": [
+          "Mutate shared template or other members when editing one member",
+          "Overwrite existing member on name collision"
+        ],
+        "governance": {
+          "allow_case": "Copy system and role prompts independently",
+          "check": "Verify Copy system prompt and role prompt independently when creating a member; edits never mutate templates or peers; reject duplicate names.",
+          "deny_case": "Mutate shared template or other members when editing one member",
+          "edge": "member-template-copy",
+          "gate_kind": "effect",
+          "observation": "Public observation via packages/config"
+        },
+        "owner": "packages/config",
+        "rule_id": "mvp-v1-16-template",
+        "scenario": "Creating or editing a project member from a role template.",
+        "scope": "humanagent/member-template",
+        "state_after": "Independent member config saved or duplicate rejected",
+        "state_before": "Role template selected",
+        "trigger": "Member create or update."
+      },
+      {
+        "allowed_actions": [
+          "Resolve Alex, project, or project.member within current host",
+          "Reject missing or ambiguous address with explicit error"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "state": "approved",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "axis": "object",
+        "axis_id": "local-member-addressing",
+        "clause_id": "clause-local-member-addressing",
+        "effects": [
+          "Zero cross-project misdelivery"
+        ],
+        "evidence": [
+          "memory/L3/mvp-v1-17-address.md"
+        ],
+        "forbidden_actions": [
+          "Cross-project misdelivery on missing local member"
+        ],
+        "governance": {
+          "allow_case": "Resolve Alex, project, or project.member within current host",
+          "check": "Verify Resolve local addresses unambiguously: Alex, project->Jenny, project.member->member; reject missing or ambiguous addresses.",
+          "deny_case": "Cross-project misdelivery on missing local member",
+          "edge": "local-address-resolution",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/runtime"
+        },
+        "owner": "packages/runtime",
+        "rule_id": "mvp-v1-17-address",
+        "scenario": "Resolving a recipient address for messaging or dispatch.",
+        "scope": "humanagent/addressing",
+        "state_after": "Resolved target identity or explicit addressing error",
+        "state_before": "Unresolved address token",
+        "trigger": "Address lookup."
+      },
+      {
+        "allowed_actions": [
+          "Display machine->project->member hierarchy with real connection state",
+          "Refuse local fallback for disconnected remote targets"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "state": "approved",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "axis": "object",
+        "axis_id": "machine-project-member-tree",
+        "clause_id": "clause-machine-project-member-tree",
+        "effects": [
+          "Remote identity separation preserved"
+        ],
+        "evidence": [
+          "memory/L3/mvp-v1-20-remote.md"
+        ],
+        "forbidden_actions": [
+          "Route disconnected remote address to same-named local member"
+        ],
+        "governance": {
+          "allow_case": "Display machine->project->member hierarchy with real connection state",
+          "check": "Verify Represent machine.project and machine.project.member hierarchy in UI tree and show real disconnected status without misrouting locally.",
+          "deny_case": "Route disconnected remote address to same-named local member",
+          "edge": "remote-address-isolation",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/ui"
+        },
+        "owner": "packages/ui",
+        "rule_id": "mvp-v1-20-remote",
+        "scenario": "Rendering remote machines/projects or addressing remote targets.",
+        "scope": "humanagent/remote-addressing",
+        "state_after": "Tree renders real state; remote misrouting prevented",
+        "state_before": "Multi-machine roster configured",
+        "trigger": "Project tree render or remote address check."
+      },
+      {
+        "allowed_actions": [
+          "Allow simple-QA option to merge directly as a simple Checkpoint without filling complex summary forms",
+          "For complex turns, write short summary into Checkpoint and full details into expandable history readable on demand by the model"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T23:15:34-08:00)",
+          "state": "approved",
+          "text": "每个 checkpoint 只做单轮（概要+详情，详情入可展开历史）；每轮上下文=checkpoints+未完成完整turn，结束后变为checkpoint+用户时间线输入；拦截时提供简单问答选项，直接作为简单checkpoint并入无需填表"
+        },
+        "axis": "behavior",
+        "axis_id": "checkpoint-single-turn-summary-and-detail",
+        "clause_id": "clause-checkpoint-single-turn-summary-and-detail",
+        "effects": [
+          "Checkpoint stores single-turn summary only",
+          "Expandable history stores inspectable turn detail for on-demand model lookup"
+        ],
+        "evidence": [
+          "memory/L3/explicit-agent-context-tools-c07.md",
+          "packages/contracts/src/standard-turn-end.ts"
+        ],
+        "forbidden_actions": [
+          "Force simple Q&A to fill complex multi-section summary forms",
+          "Omit expandable detail on complex turns or pack raw full tool history into main Checkpoint summary"
+        ],
+        "governance": {
+          "allow_case": "Simple Q&A merges as a simple Checkpoint without extra forms; complex turn writes summary to Checkpoint and details to expandable history",
+          "check": "Verify closure gate offers simple-QA fast Checkpoint merge and enforces summary + expandable detail split for complex turns.",
+          "deny_case": "Complex turn omits expandable detail or simple Q&A is blocked by mandatory multi-field form",
+          "edge": "single-turn-checkpoint-closure",
+          "gate_kind": "effect",
+          "observation": "Public turn-end closure receipt and expandable history store"
+        },
+        "owner": "packages/runtime",
+        "rule_id": "checkpoint-single-turn-summary-and-detail",
+        "scenario": "A single reasoning turn finishes and triggers the turn-end Checkpoint summary gate.",
+        "scope": "humanagent/turn-checkpoint-closure",
+        "state_after": "Simple Checkpoint merged (simple-QA) or summary Checkpoint + expandable history detail committed (complex)",
+        "state_before": "Single reasoning turn completing",
+        "trigger": "Single-turn closure or turn-end tool invocation."
+      },
+      {
+        "allowed_actions": [
+          "Assemble committed Checkpoints + current incomplete full Turn with tool history during active reasoning",
+          "Converge completed Turn into Checkpoint + user timeline input when the turn ends"
+        ],
+        "approval": {
+          "source": "current conversation user approval (2026-11-27T23:15:34-08:00)",
+          "state": "approved",
+          "text": "每个 checkpoint 只做单轮（概要+详情，详情入可展开历史）；每轮上下文=checkpoints+未完成完整turn，结束后变为checkpoint+用户时间线输入；拦截时提供简单问答选项，直接作为简单checkpoint并入无需填表"
+        },
+        "axis": "relation",
+        "axis_id": "turn-context-checkpoint-plus-live-turn",
+        "clause_id": "clause-turn-context-checkpoint-plus-live-turn",
+        "effects": [
+          "Bounded active context window across turns while preserving expandable detail"
+        ],
+        "evidence": [
+          "packages/contracts/src/active-turn-context.ts",
+          "memory/L3/phase-one-non-ui-design-20261122.md"
+        ],
+        "forbidden_actions": [
+          "Keep raw completed-turn tool-call streams in active context across turns instead of converging to Checkpoint + timeline input"
+        ],
+        "governance": {
+          "allow_case": "Active turn reads Checkpoints + current tool calls; after finish next turn sees new Checkpoint + user timeline input",
+          "check": "Verify active turn context pairs Checkpoints with incomplete full Turn and converges upon completion to Checkpoint + user timeline input.",
+          "deny_case": "Finished turn retains full raw tool stream in main prompt window across subsequent turns",
+          "edge": "turn-context-assembly-and-convergence",
+          "gate_kind": "transition",
+          "observation": "Active turn context assembly snapshot and post-turn Checkpoint state"
+        },
+        "owner": "packages/runtime",
+        "rule_id": "turn-context-checkpoint-plus-live-turn",
+        "scenario": "Assembling context for an active reasoning turn and transitioning after turn completion.",
+        "scope": "humanagent/session-turn-context",
+        "state_after": "Completed Turn converged into Checkpoint + user timeline input for next turn",
+        "state_before": "Active turn with prior Checkpoints + live incomplete Turn",
+        "trigger": "Turn context assembly or post-turn context compaction."
+      }
+    ],
+    "objects": [
+      {
+        "attributes": [
+          "clause_id",
+          "rule_id",
+          "axis",
+          "axis_id",
+          "approval",
+          "governance"
+        ],
+        "definition": "A rule clause that binds one guidance rule to approved ontology semantics and an executable governance gate.",
+        "id": "ontology-clause",
+        "identity": "Same clause_id within one guidance manifest source.",
+        "must_have": [
+          "exact user approval",
+          "declared governance edge or gate",
+          "legal case",
+          "illegal case",
+          "observation path"
+        ],
+        "must_not_have": [
+          "candidate approval state",
+          "missing governance field",
+          "unmatched rule reference"
+        ],
+        "name": "Ontology rule clause",
+        "owner": "AppSDK guidance compiler",
+        "perception": "appsdk guide compile JSON output and the compiled guidance manifest",
+        "source": [
+          "docs/design/appsdk-ontology-governance.md"
+        ]
+      },
+      {
+        "attributes": [
+          "rule_id",
+          "severity",
+          "description",
+          "ontology_clause"
+        ],
+        "definition": "A rule declared in a guidance manifest with a severity and an optional ontology governance reference.",
+        "id": "guidance-rule",
+        "identity": "Same rule_id within one guidance manifest source.",
+        "must_have": [
+          "unique rule_id",
+          "declared severity"
+        ],
+        "must_not_have": [
+          "duplicate rule_id"
+        ],
+        "name": "Guidance rule",
+        "owner": "AppSDK guidance compiler",
+        "perception": "appsdk guide compile JSON output and the compiled guidance manifest",
+        "source": [
+          "docs/design/appsdk-ontology-governance.md"
+        ]
+      },
+      {
+        "attributes": [
+          "role",
+          "name",
+          "prompts",
+          "provider",
+          "model"
+        ],
+        "definition": "A named agent belonging to a HumanAgent project with independent config and canonical address.",
+        "id": "humanagent-project-member",
+        "identity": "Canonical address machine.project.name",
+        "must_have": [
+          "canonical machine.project.name address"
+        ],
+        "must_not_have": [
+          "cross-member prompt or output leakage"
+        ],
+        "name": "Project Member",
+        "owner": "packages/config",
+        "perception": "Project roster and member config",
+        "source": [
+          "memory/L3/mvp-v1-03-member.md"
+        ]
+      },
+      {
+        "attributes": [
+          "runtimeId",
+          "kind",
+          "slotBudget"
+        ],
+        "definition": "An explicit, implicit orchestration, or memory runtime instance associated with a Task.",
+        "id": "humanagent-runtime-node",
+        "identity": "RuntimeId bound to Task and scope",
+        "must_have": [
+          "real runtimeId",
+          "isolated failure boundary for memory agent"
+        ],
+        "must_not_have": [
+          "memory failure blocking MVP delivery"
+        ],
+        "name": "Runtime Node",
+        "owner": "packages/runtime",
+        "perception": "Task relationship graph and runtime status",
+        "source": [
+          "memory/L3/mvp-v1-08-runtime.md"
+        ]
+      },
+      {
+        "attributes": [
+          "Explicit session or project entry opened.",
+          "User opens explicit entry",
+          "Session bound to Alex or single project Jenny"
+        ],
+        "definition": "Distinguish projectless Alex from per-project Jenny; each project has exactly one manager.",
+        "id": "explicit-entry-identity",
+        "identity": "humanagent/explicit-identity",
+        "must_have": [
+          "Route projectless conversation to Alex",
+          "Route project conversation to that project's single Jenny manager"
+        ],
+        "must_not_have": [
+          "Create multiple managers for one project",
+          "Mix Alex and project Jenny cwd/task scope"
+        ],
+        "name": "唯一显式入口与身份",
+        "owner": "packages/config",
+        "perception": "Public observation via packages/config",
+        "source": [
+          "memory/L3/mvp-v1-02-identity.md"
+        ]
+      },
+      {
+        "attributes": [
+          "Member config saved or request dispatched.",
+          "Member configured in project",
+          "Runtime executes with member's own config and address"
+        ],
+        "definition": "Persist per-member prompt, provider, and model configuration; isolate parallel member outputs to their address.",
+        "id": "project-member-config",
+        "identity": "humanagent/member-config",
+        "must_have": [
+          "Load member-specific prompts, provider, and model",
+          "Bind parallel outputs and tasks to member address"
+        ],
+        "must_not_have": [
+          "Leak one member's prompt/provider/model or output into another member"
+        ],
+        "name": "成员配置与寻址",
+        "owner": "packages/config",
+        "perception": "Public observation via packages/config",
+        "source": [
+          "memory/L3/mvp-v1-03-member.md"
+        ]
+      },
+      {
+        "attributes": [
+          "Address lookup.",
+          "Unresolved address token",
+          "Resolved target identity or explicit addressing error"
+        ],
+        "definition": "Resolve local addresses unambiguously: Alex, project->Jenny, project.member->member; reject missing or ambiguous addresses.",
+        "id": "local-member-addressing",
+        "identity": "humanagent/addressing",
+        "must_have": [
+          "Resolve Alex, project, or project.member within current host",
+          "Reject missing or ambiguous address with explicit error"
+        ],
+        "must_not_have": [
+          "Cross-project misdelivery on missing local member"
+        ],
+        "name": "项目地址与人员地址",
+        "owner": "packages/runtime",
+        "perception": "Public observation via packages/runtime",
+        "source": [
+          "memory/L3/mvp-v1-17-address.md"
+        ]
+      },
+      {
+        "attributes": [
+          "Project tree render or remote address check.",
+          "Multi-machine roster configured",
+          "Tree renders real state; remote misrouting prevented"
+        ],
+        "definition": "Represent machine.project and machine.project.member hierarchy in UI tree and show real disconnected status without misrouting locally.",
+        "id": "machine-project-member-tree",
+        "identity": "humanagent/remote-addressing",
+        "must_have": [
+          "Display machine->project->member hierarchy with real connection state",
+          "Refuse local fallback for disconnected remote targets"
+        ],
+        "must_not_have": [
+          "Route disconnected remote address to same-named local member"
+        ],
+        "name": "跨机器寻址与项目展开",
+        "owner": "packages/ui",
+        "perception": "Public observation via packages/ui",
+        "source": [
+          "memory/L3/mvp-v1-20-remote.md"
+        ]
+      }
+    ],
+    "relations": [
+      {
+        "cardinality": "one-to-one",
+        "direction": "directed",
+        "from": "ontology-clause",
+        "id": "ontology-clause-governs-rule",
+        "kind": "governs",
+        "must_have": [
+          "the forbidden rule references exactly its bound clause",
+          "the clause references exactly its governing rule"
+        ],
+        "must_not_have": [
+          "a clause referenced by another rule",
+          "a rule referenced by another clause",
+          "an orphan clause or rule"
+        ],
+        "name": "Ontology clause governs rule",
+        "perception": "appsdk guide compile JSON output and the compiled guidance manifest",
+        "source": [
+          "docs/design/appsdk-ontology-governance.md"
+        ],
+        "to": "guidance-rule"
+      },
+      {
+        "cardinality": "one-to-many",
+        "direction": "directed",
+        "from": "humanagent-project-member",
+        "id": "task-runtime-memory-links",
+        "kind": "governs",
+        "must_have": [
+          "Expose real runtime IDs linking explicit, implicit orchestration, and memory nodes",
+          "Enforce default 8-slot limit on implicit orchestration runtimes only (downstream roles counted separately) and apply Settings updates live without restart",
+          "Continue Task mainline if memory agent fails"
+        ],
+        "must_not_have": [
+          "Count downstream worker roles against the 8 implicit orchestration slots or hardcode the limit as unconfigurable",
+          "Block MVP Task delivery on memory agent failure"
+        ],
+        "name": "任务关系与记忆 Agent",
+        "perception": "Public observation via packages/runtime",
+        "source": [
+          "memory/L3/mvp-v1-08-runtime.md"
+        ],
+        "to": "humanagent-runtime-node"
+      },
+      {
+        "cardinality": "one-to-many",
+        "direction": "directed",
+        "from": "humanagent-project-member",
+        "id": "turn-context-checkpoint-plus-live-turn",
+        "kind": "governs",
+        "must_have": [
+          "Assemble committed Checkpoints + current incomplete full Turn with tool history during active reasoning",
+          "Converge completed Turn into Checkpoint + user timeline input when the turn ends"
+        ],
+        "must_not_have": [
+          "Keep raw completed-turn tool-call streams in active context across turns instead of converging to Checkpoint + timeline input"
+        ],
+        "name": "Ontology: Per-turn context is Checkpoints plus live incomplete Turn, converging to Checkpoint plus timeline input",
+        "perception": "Active turn context assembly snapshot and post-turn Checkpoint state",
+        "source": [
+          "packages/contracts/src/active-turn-context.ts",
+          "memory/L3/phase-one-non-ui-design-20261122.md"
+        ],
+        "to": "humanagent-runtime-node"
+      }
+    ],
+    "schema_version": 1
+  },
+  "rules": [
+    {
+      "description": "Read only rule sources declared by the project contract.",
+      "rule_id": "use-declared-sources",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Execute only the projected node and adjacent workflow edges.",
+      "rule_id": "adjacent-transition",
+      "severity": "forbidden"
+    },
+    {
+      "description": "A passing required step must bind evidence.",
+      "rule_id": "evidence-required",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Revise the plan after project, goal, source, scope, owner, or rule-context drift.",
+      "rule_id": "context-drift",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Do not overwrite or delete plan revisions and execution events.",
+      "rule_id": "append-only-history",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Do not claim lifecycle completion before canonical AppSDK gates pass.",
+      "rule_id": "lifecycle-truth",
+      "severity": "forbidden"
+    },
+    {
+      "description": "New or changed control and configuration behavior must use declared typed control resources, error chains, or project configuration sources, never payloads, metadata, debug logs, or implicit context.",
+      "rule_id": "changed-scope-control-truth",
+      "severity": "forbidden"
+    },
+    {
+      "description": "New or changed behavior must retain one semantic owner and one implementation, with no duplicate path, fallback, or temporary bypass.",
+      "rule_id": "changed-scope-single-owner",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Preserve fixed operation/hook/gate boundaries only where the project declares them. Missing required capabilities fail explicitly; never mock success.",
+      "rule_id": "changed-scope-configured-orchestration",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Compare deletion, reuse and direct implementation by actual complexity. Optional simplification does not block; concrete quality, safety or ownership regressions remain forbidden.",
+      "rule_id": "changed-scope-ablation-and-sharing",
+      "severity": "advisory"
+    },
+    {
+      "description": "Report untouched historical violations as recommendations; do not block the change unless they enter changed scope or affect safety, ownership, evidence truth, or required delivery.",
+      "rule_id": "historical-architecture-debt",
+      "severity": "advisory"
+    },
+    {
+      "description": "Locate feature and debug work in the declared function and verification maps before implementation.",
+      "rule_id": "project-context-binding",
+      "severity": "warning"
+    },
+    {
+      "description": "During debug exploration, append observations, hypotheses, and evidence to the active run notes before resolution.",
+      "rule_id": "debug-notes-required",
+      "severity": "warning"
+    },
+    {
+      "description": "Update function ownership and verification gates in the same change when the implementation changes them.",
+      "rule_id": "map-gate-update",
+      "severity": "advisory"
+    },
+    {
+      "description": "Record requirement, architecture, and detailed-design closure before feature implementation.",
+      "rule_id": "recommended-design",
+      "severity": "warning"
+    },
+    {
+      "description": "A rule or ontology clause becomes mandatory only after exact user approval and binding to an executable governance edge or gate.",
+      "ontology_clause": "ontology-approval-before-gate",
+      "rule_id": "ontology-approval-before-gate",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Check prior verified successes and failures before repeating exploration.",
+      "rule_id": "prior-record-search",
+      "severity": "advisory"
+    },
+    {
+      "description": "Provide explicit-agent addressing tools obeying local addressing rules and explicit error reporting.",
+      "ontology_clause": "clause-explicit-agent-addressing-tools",
+      "rule_id": "explicit-agent-context-tools-c05",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Distinguish projectless Alex from per-project Jenny; each project has exactly one manager.",
+      "ontology_clause": "clause-explicit-entry-identity",
+      "rule_id": "mvp-v1-02-identity",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Persist per-member prompt, provider, and model configuration; isolate parallel member outputs to their address.",
+      "ontology_clause": "clause-project-member-config",
+      "rule_id": "mvp-v1-03-member",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Dispatch from real project roster by role; fall back to Jenny when no role matches; error explicitly on missing named address.",
+      "ontology_clause": "clause-role-based-dispatch-fallback",
+      "rule_id": "mvp-v1-04-dispatch",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Link Task explicit, implicit orchestration (default 8 configurable slots, downstream roles excluded), and memory runtimes with real IDs; memory failure never blocks Task delivery.",
+      "ontology_clause": "clause-task-runtime-memory-links",
+      "rule_id": "mvp-v1-08-runtime",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Copy system prompt and role prompt independently when creating a member; edits never mutate templates or peers; reject duplicate names.",
+      "ontology_clause": "clause-dual-prompt-member-creation",
+      "rule_id": "mvp-v1-16-template",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Resolve local addresses unambiguously: Alex, project->Jenny, project.member->member; reject missing or ambiguous addresses.",
+      "ontology_clause": "clause-local-member-addressing",
+      "rule_id": "mvp-v1-17-address",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Represent machine.project and machine.project.member hierarchy in UI tree and show real disconnected status without misrouting locally.",
+      "ontology_clause": "clause-machine-project-member-tree",
+      "rule_id": "mvp-v1-20-remote",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Each Checkpoint covers one turn: complex turns emit summary (in Checkpoint) + on-demand expandable detail; gate provides a simple-QA option that merges directly as a simple Checkpoint without full forms.",
+      "ontology_clause": "clause-checkpoint-single-turn-summary-and-detail",
+      "rule_id": "checkpoint-single-turn-summary-and-detail",
+      "severity": "forbidden"
+    },
+    {
+      "description": "Active turn context = committed Checkpoints + current incomplete full Turn (tool-call history); on turn completion, converge to Checkpoint + user timeline input.",
+      "ontology_clause": "clause-turn-context-checkpoint-plus-live-turn",
+      "rule_id": "turn-context-checkpoint-plus-live-turn",
+      "severity": "forbidden"
+    }
+  ],
+  "schema_version": 1,
+  "sources": [
+    {
+      "contract_path": ".appsdk/skills/appsdk-project-governance/appsdk-guidance.json",
+      "kind": "skill",
+      "path": ".appsdk/skills/appsdk-project-governance/SKILL.md",
+      "precedence": 1,
+      "present": true,
+      "required": true,
+      "source_id": "appsdk-project-governance"
+    },
+    {
+      "contract_path": ".agents/skills/humanagent-mvp-ontology/appsdk-guidance.json",
+      "kind": "skill",
+      "path": ".agents/skills/humanagent-mvp-ontology/SKILL.md",
+      "precedence": 2,
+      "present": true,
+      "required": true,
+      "source_id": "humanagent-mvp-ontology"
+    }
+  ],
+  "workflows": [
+    {
+      "domain": "bootstrap",
+      "edges": [
+        {
+          "from": "prepare",
+          "to": "initialize"
+        },
+        {
+          "from": "initialize",
+          "to": "baseline_verify"
+        }
+      ],
+      "entry_node": "prepare",
+      "nodes": [
+        {
+          "evidence": [
+            "preparation-record"
+          ],
+          "instruction": "Run prepare and confirm scope, roots, boundaries, and acceptance.",
+          "node_id": "prepare",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "initialized-layout"
+          ],
+          "instruction": "Run idempotent initialization for the confirmed project root.",
+          "node_id": "initialize",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "verify-result"
+          ],
+          "instruction": "Verify the initialized governance baseline.",
+          "node_id": "baseline_verify",
+          "owner": "project"
+        }
+      ],
+      "objective": "Enter AppSDK governance without destroying existing project truth."
+    },
+    {
+      "domain": "migration",
+      "edges": [
+        {
+          "from": "inspect_legacy",
+          "to": "choose_route"
+        },
+        {
+          "from": "choose_route",
+          "to": "apply_route"
+        },
+        {
+          "from": "apply_route",
+          "to": "migration_verify"
+        }
+      ],
+      "entry_node": "inspect_legacy",
+      "nodes": [
+        {
+          "evidence": [
+            "legacy-inventory"
+          ],
+          "instruction": "Inventory old governance truth and disposable runtime state.",
+          "node_id": "inspect_legacy",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "migration-route"
+          ],
+          "instruction": "Choose preserve-and-migrate or the explicitly authorized clean-epoch reset for each named control-plane owner.",
+          "node_id": "choose_route",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "migration-record"
+          ],
+          "instruction": "Execute only the migration/reset transactions selected in the authorized plan through their own owners. AppSDK migration does not require a Collab reset or global daemon maintenance; never substitute one transaction for another.",
+          "node_id": "apply_route",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "verify-result"
+          ],
+          "instruction": "Verify the resulting single governance truth.",
+          "node_id": "migration_verify",
+          "owner": "project"
+        }
+      ],
+      "objective": "Reconcile or reset legacy governance through an explicit, auditable route."
+    },
+    {
+      "domain": "governance-preflight",
+      "edges": [
+        {
+          "from": "goal_scope",
+          "to": "architecture_maps"
+        },
+        {
+          "from": "architecture_maps",
+          "to": "owner_worktree"
+        },
+        {
+          "from": "owner_worktree",
+          "to": "preflight_verify"
+        }
+      ],
+      "entry_node": "goal_scope",
+      "nodes": [
+        {
+          "evidence": [
+            "goal-record"
+          ],
+          "instruction": "Confirm objective, scope, acceptance, non-goals, and owner.",
+          "node_id": "goal_scope",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "map-check"
+          ],
+          "instruction": "Bind resource, function, mainline, verification, and module maps.",
+          "node_id": "architecture_maps",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "worktree-record"
+          ],
+          "instruction": "Create the clean owner worktree from latest origin/main.",
+          "node_id": "owner_worktree",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "verify-result"
+          ],
+          "instruction": "Run the applicable AppSDK and project preflight checks.",
+          "node_id": "preflight_verify",
+          "owner": "project"
+        }
+      ],
+      "objective": "Bind goal, module, owner, maps, worktree, and required gates before code work."
+    },
+    {
+      "domain": "rule-governance",
+      "edges": [
+        {
+          "from": "rule_inventory",
+          "to": "ontology_model"
+        },
+        {
+          "from": "ontology_model",
+          "to": "clause_approval"
+        },
+        {
+          "from": "clause_approval",
+          "to": "gate_binding"
+        },
+        {
+          "from": "gate_binding",
+          "to": "red_test"
+        },
+        {
+          "from": "red_test",
+          "to": "implementation"
+        },
+        {
+          "from": "implementation",
+          "to": "public_entry_verification"
+        }
+      ],
+      "entry_node": "rule_inventory",
+      "nodes": [
+        {
+          "evidence": [
+            "rule-inventory",
+            "fact-separation"
+          ],
+          "instruction": "Inventory the affected rules, code paths, DAGs, memories, and project facts; separate rule candidates from non-rule facts.",
+          "node_id": "rule_inventory",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "ontology-model"
+          ],
+          "instruction": "Model the affected Object, Behavior, and Relation semantics, including required and forbidden attributes, transitions, and relations.",
+          "node_id": "ontology_model",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "ontology-approval-record"
+          ],
+          "instruction": "Obtain exact user approval for each rule clause that changes enforcement; do not treat approval of the overall model or flow as approval of individual clauses.",
+          "node_id": "clause_approval",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "governance-edge-binding",
+            "legal-case",
+            "illegal-case",
+            "observation-path"
+          ],
+          "instruction": "Bind every approved clause to an executable governance edge or gate with one legal case, one illegal case, and a real observation path.",
+          "node_id": "gate_binding",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "red-test"
+          ],
+          "instruction": "Add the red test before changing the unique owner's code.",
+          "node_id": "red_test",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "source-diff"
+          ],
+          "instruction": "Modify only the unique owner's code.",
+          "node_id": "implementation",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "blackbox-evidence"
+          ],
+          "instruction": "Run the real public entrypoint and record the result.",
+          "node_id": "public_entry_verification",
+          "owner": "project"
+        }
+      ],
+      "objective": "Turn approved rule intent into executable governance without treating requirements, notes, or proposals as enforcement."
+    },
+    {
+      "domain": "develop",
+      "edges": [
+        {
+          "from": "requirements",
+          "to": "map_check"
+        },
+        {
+          "from": "map_check",
+          "to": "architecture"
+        },
+        {
+          "from": "map_check",
+          "to": "implementation"
+        },
+        {
+          "from": "architecture",
+          "to": "detailed_design"
+        },
+        {
+          "from": "architecture",
+          "to": "implementation"
+        },
+        {
+          "from": "detailed_design",
+          "to": "implementation"
+        },
+        {
+          "from": "implementation",
+          "to": "validation"
+        },
+        {
+          "from": "validation",
+          "to": "map_update"
+        },
+        {
+          "from": "map_update",
+          "to": "review"
+        },
+        {
+          "from": "review",
+          "to": "integration"
+        },
+        {
+          "from": "integration",
+          "to": "cleanup"
+        }
+      ],
+      "entry_node": "requirements",
+      "nodes": [
+        {
+          "evidence": [
+            "requirements"
+          ],
+          "instruction": "First check the affected existing DAG for completeness, closure and SESE, then collect observations and use the independent Plan contract. Resolve scope and acceptance from existing user decisions; ask only material unresolved questions.",
+          "node_id": "requirements",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "function-map-binding",
+            "verification-map-binding"
+          ],
+          "instruction": "Read the declared function and verification maps, bind the owner, allowed and forbidden paths, required gates, and prior records, and note any map entry that the change must add.",
+          "node_id": "map_check",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "architecture-design"
+          ],
+          "instruction": "For a new project or meaningful cross-module or semantic change, close top-down modules, resources, boundaries, and mainline flow; otherwise record why existing architecture is sufficient.",
+          "node_id": "architecture",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "detailed-design"
+          ],
+          "instruction": "When the change introduces non-trivial behavior, close calls, data, errors, and verification mapping before implementation.",
+          "node_id": "detailed_design",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "source-diff",
+            "worktree-record"
+          ],
+          "instruction": "After the accepted graph and affected gate are correct and the regression fails for the intended behavior, implement the smallest change through the unique owner in a clean external worktree. Later validation does not replace the red-test precondition.",
+          "node_id": "implementation",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "validation-record"
+          ],
+          "instruction": "Run focused tests and mapped gates, then add build, install, restart, and same-entry replay only when the change affects those surfaces.",
+          "node_id": "validation",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "function-map-binding",
+            "verification-map-binding"
+          ],
+          "instruction": "Update declared function ownership, paths, call edges, and verification gates when the validated change altered them.",
+          "node_id": "map_update",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "architecture-conformance",
+            "review-record"
+          ],
+          "instruction": "Review the validated change against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.",
+          "node_id": "review",
+          "owner": "project",
+          "reminders": [
+            {
+              "blocking": false,
+              "command": "project-memory review --run <run-id>",
+              "kind": "memory_review"
+            }
+          ]
+        },
+        {
+          "evidence": [
+            "mainline-receipt"
+          ],
+          "instruction": "Integrate on latest main.",
+          "node_id": "integration",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "cleanup-record"
+          ],
+          "instruction": "Record actual retained resources and owner or verified authorized removal. Delivery can complete with retention; do not claim Collab resource close before its cleanup requirements pass.",
+          "node_id": "cleanup",
+          "owner": "project"
+        }
+      ],
+      "objective": "Develop features through project context, proportionate design, proportionate validation, and verified cleanup."
+    },
+    {
+      "domain": "debug",
+      "edges": [
+        {
+          "from": "orient",
+          "to": "explore"
+        },
+        {
+          "from": "explore",
+          "to": "resolve"
+        },
+        {
+          "from": "resolve",
+          "to": "validation"
+        },
+        {
+          "from": "validation",
+          "to": "review"
+        },
+        {
+          "from": "review",
+          "to": "integration"
+        },
+        {
+          "from": "integration",
+          "to": "cleanup"
+        }
+      ],
+      "entry_node": "orient",
+      "nodes": [
+        {
+          "evidence": [
+            "orientation-record",
+            "function-map-binding",
+            "verification-map-binding"
+          ],
+          "instruction": "First check the affected existing DAG for completeness, closure and SESE. Read applicable project rules, requirements, maps and run notes; bind the failure to the unique owner and gates, reusing valid evidence.",
+          "node_id": "orient",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "exploration-record",
+            "debug-notes"
+          ],
+          "instruction": "Append observations, one active hypothesis, confirmation and falsification signals, and evidence to run notes; reproduce when feasible and locate the first semantic divergence.",
+          "node_id": "explore",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "resolution-record",
+            "red-green-test"
+          ],
+          "instruction": "Use causal observations and independent Plan to correct the graph, then the affected gate, then obtain a failing same-entry regression before fixing the unique owner. Preserve the original failure; never change the contract or assertion to fit broken code.",
+          "node_id": "resolve",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "validation-record"
+          ],
+          "instruction": "Run focused tests and mapped gates, then choose build, install, restart, and original-input replay according to runtime impact.",
+          "node_id": "validation",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "architecture-conformance",
+            "review-record"
+          ],
+          "instruction": "Review the validated fix against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.",
+          "node_id": "review",
+          "owner": "project",
+          "reminders": [
+            {
+              "blocking": false,
+              "command": "project-memory review --run <run-id>",
+              "kind": "memory_review"
+            }
+          ]
+        },
+        {
+          "evidence": [
+            "mainline-receipt"
+          ],
+          "instruction": "Integrate on latest main.",
+          "node_id": "integration",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "cleanup-record"
+          ],
+          "instruction": "Record evidence and actual retained resources or verified authorized removal; delivery and resource closure are separate.",
+          "node_id": "cleanup",
+          "owner": "project"
+        }
+      ],
+      "objective": "Orient to project truth, record evidence while exploring, and resolve through the unique mapped owner."
+    },
+    {
+      "domain": "review",
+      "edges": [],
+      "entry_node": "architecture_review",
+      "nodes": [
+        {
+          "evidence": [
+            "architecture-conformance",
+            "review-record"
+          ],
+          "instruction": "Run the user-selected or configured review route on the completed milestone. Block concrete quality, safety, contract and material structural regressions; optional simplifications are advisory.",
+          "node_id": "architecture_review",
+          "owner": "project",
+          "reminders": [
+            {
+              "blocking": false,
+              "command": "project-memory review --run <run-id>",
+              "kind": "memory_review"
+            }
+          ]
+        }
+      ],
+      "objective": "Review a completed milestone against quality, safety, contract, and structural truth."
+    },
+    {
+      "domain": "delivery",
+      "edges": [
+        {
+          "from": "whitebox",
+          "to": "build"
+        },
+        {
+          "from": "build",
+          "to": "install"
+        },
+        {
+          "from": "build",
+          "to": "restart"
+        },
+        {
+          "from": "build",
+          "to": "blackbox"
+        },
+        {
+          "from": "install",
+          "to": "restart"
+        },
+        {
+          "from": "install",
+          "to": "blackbox"
+        },
+        {
+          "from": "restart",
+          "to": "blackbox"
+        },
+        {
+          "from": "blackbox",
+          "to": "bind_validation"
+        }
+      ],
+      "entry_node": "whitebox",
+      "nodes": [
+        {
+          "evidence": [
+            "whitebox-evidence"
+          ],
+          "instruction": "Run project-owned internal validation.",
+          "node_id": "whitebox",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "artifact"
+          ],
+          "instruction": "Build the exact candidate artifact.",
+          "node_id": "build",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "install-receipt"
+          ],
+          "instruction": "Install the exact artifact into the declared environment.",
+          "node_id": "install",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "restart-receipt"
+          ],
+          "instruction": "When activation is required, use the declared lifecycle owner and supported entry. The user manages global Collab daemon activation; agents never start, stop or restart it. AppSDK/Collab maintenance never controls tmux lifecycle.",
+          "node_id": "restart",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "blackbox-evidence"
+          ],
+          "instruction": "Replay through the public deployed entrypoint.",
+          "node_id": "blackbox",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "pre-review-validation"
+          ],
+          "instruction": "Bind whitebox, artifact, deployment, and blackbox evidence.",
+          "node_id": "bind_validation",
+          "owner": "project"
+        }
+      ],
+      "objective": "Prove the candidate through its real deployed entrypoint."
+    },
+    {
+      "domain": "communication-recovery",
+      "edges": [
+        {
+          "from": "preserve_error",
+          "to": "inspect_state"
+        },
+        {
+          "from": "inspect_state",
+          "to": "recover_route"
+        },
+        {
+          "from": "recover_route",
+          "to": "verify_route"
+        },
+        {
+          "from": "verify_route",
+          "to": "replay_native"
+        },
+        {
+          "from": "replay_native",
+          "to": "consume_receipt"
+        }
+      ],
+      "entry_node": "preserve_error",
+      "nodes": [
+        {
+          "evidence": [
+            "communication-failure-record"
+          ],
+          "instruction": "Persist the exact error, durable IDs, source commit, installed binary, daemon PID/socket, and current task/bug binding; do not classify ACK, notification acceptance, health, or timeout as delivery.",
+          "node_id": "preserve_error",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "communication-state"
+          ],
+          "instruction": "Run `collab context` once and read the returned identity, route, daemon, task, inbox, and authority state. If the daemon is explicitly down or context returns a runtime error, preserve the exact error and stop; daemon maintenance is human-authorized.",
+          "node_id": "inspect_state",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "recovery-receipt"
+          ],
+          "instruction": "If context returns `required_fields`, supply only those real facts once with `collab context --provide '<JSON>'`. The supplement may contain only requested `session_id`, `thread_id`, `endpoint`, or `namespace` facts; it never supplies a worker, approval, token, route, or binding. The daemon owns identity creation, selection, recovery, registration, route publication, and lease restoration. Do not choose or hunt a worker and do not run a separate recovery command.",
+          "node_id": "recover_route",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "recovered-route"
+          ],
+          "instruction": "Use the snapshot returned by context or its one factual supplement. Continue only when it is registered and the target route is live; otherwise preserve the exact failure and stop.",
+          "node_id": "verify_route",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "native-target-result"
+          ],
+          "instruction": "Replay the same native target through the installed binary and record the target result item; queue acceptance or a daemon health response alone is insufficient.",
+          "node_id": "replay_native",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "durable-receipt",
+            "issue-update"
+          ],
+          "instruction": "Consume the durable receipt for the target result through the canonical receive/consume operation; read-only inspection alone does not close. Update the bound bug or feature record and close only when the result and receipt evidence are present.",
+          "node_id": "consume_receipt",
+          "owner": "project"
+        }
+      ],
+      "objective": "Restore communication after an exact route, identity, daemon, or transport failure and prove the original native path again."
+    },
+    {
+      "domain": "integration",
+      "edges": [
+        {
+          "from": "refresh_main",
+          "to": "integration_verify"
+        },
+        {
+          "from": "integration_verify",
+          "to": "merge_push"
+        },
+        {
+          "from": "merge_push",
+          "to": "remote_receipt"
+        }
+      ],
+      "entry_node": "refresh_main",
+      "nodes": [
+        {
+          "evidence": [
+            "main-base"
+          ],
+          "instruction": "Fetch latest origin/main and refresh the integration base.",
+          "node_id": "refresh_main",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "integration-record"
+          ],
+          "instruction": "Verify the exact integrated tree and affected gates.",
+          "node_id": "integration_verify",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "merge-record"
+          ],
+          "instruction": "Merge and push through the protected mainline route.",
+          "node_id": "merge_push",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "mainline-receipt"
+          ],
+          "instruction": "Observe the remote main ref and bind its receipt.",
+          "node_id": "remote_receipt",
+          "owner": "project"
+        }
+      ],
+      "objective": "Merge only an exact candidate verified against latest main."
+    },
+    {
+      "domain": "promotion",
+      "edges": [
+        {
+          "from": "regression",
+          "to": "compile"
+        },
+        {
+          "from": "compile",
+          "to": "publish"
+        }
+      ],
+      "entry_node": "regression",
+      "nodes": [
+        {
+          "evidence": [
+            "regression-report"
+          ],
+          "instruction": "Run and bind the required merged-source regression suite.",
+          "node_id": "regression",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "compiled-artifact"
+          ],
+          "instruction": "Compile the canonical merged project artifact.",
+          "node_id": "compile",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "promotion-record"
+          ],
+          "instruction": "Publish the immutable Active artifact.",
+          "node_id": "publish",
+          "owner": "project"
+        }
+      ],
+      "objective": "Turn a verified mainline source into immutable consumable output."
+    },
+    {
+      "domain": "freeze",
+      "edges": [
+        {
+          "from": "archive",
+          "to": "freeze_record"
+        },
+        {
+          "from": "freeze_record",
+          "to": "freeze_verify"
+        }
+      ],
+      "entry_node": "archive",
+      "nodes": [
+        {
+          "evidence": [
+            "protected-archive"
+          ],
+          "instruction": "Create the canonical Protected archive.",
+          "node_id": "archive",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "freeze-record"
+          ],
+          "instruction": "Bind source, artifact, API, regression, and promotion truth.",
+          "node_id": "freeze_record",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "verify-result"
+          ],
+          "instruction": "Verify Active and Protected immutability.",
+          "node_id": "freeze_verify",
+          "owner": "project"
+        }
+      ],
+      "objective": "Protect the exact published source, contracts, and artifact."
+    },
+    {
+      "domain": "cleanup",
+      "edges": [
+        {
+          "from": "cleanup_record",
+          "to": "remove_worktree"
+        },
+        {
+          "from": "remove_worktree",
+          "to": "release_claim"
+        }
+      ],
+      "entry_node": "cleanup_record",
+      "nodes": [
+        {
+          "evidence": [
+            "cleanup-record"
+          ],
+          "instruction": "Record retained evidence and disposable state.",
+          "node_id": "cleanup_record",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "worktree-removal"
+          ],
+          "instruction": "Remove the merged clean owner worktree and branch.",
+          "node_id": "remove_worktree",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "claim-release"
+          ],
+          "instruction": "Release the task claim after worktree cleanup.",
+          "node_id": "release_claim",
+          "owner": "project"
+        }
+      ],
+      "objective": "Release only resources whose delivery and retention evidence is complete."
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 {
   "binary_ref": "project-sdk",
-  "bundle_digest": "sha256:875817854ec1455ea39381e5e591c2b68729930678edd95a6aed22314ee915f4",
-  "bundle_manifest_digest": "sha256:47142ab097093bab968410f4d296009e643fa7fc87acca4c24f8dd2f50a9d40b",
+  "bundle_digest": "sha256:5a2e505385a2f23e77990303ffed885ae38a66a1d84e391fa275267c148cc6c7",
+  "bundle_manifest_digest": "sha256:083f7edcfcb76cbf96b89a3350ff3621821b459ced91535527fb63b9d37e12dc",
   "bundle_resources": {
     "contracts": [
       "contracts/sdk-bundle.manifest.json",
@@ -109,7 +109,8 @@
       "docs/architecture/development-process-control-harness.md",
       "docs/architecture/appsdk-governance-architecture.md",
       "docs/design/project-memory.md",
-      "docs/design/appsdk-global-registry.md"
+      "docs/design/appsdk-global-registry.md",
+      "docs/design/appsdk-ontology-governance.md"
     ],
     "rules": [
       "skills/appsdk-project-governance/SKILL.md"
@@ -124,6 +125,7 @@
       "skills/appsdk-project-governance/references/development-debug.md",
       "skills/appsdk-project-governance/references/goal-prompt.md",
       "skills/appsdk-project-governance/references/init-prompts.md",
+      "skills/appsdk-project-governance/references/ontology-governance.md",
       "skills/appsdk-project-governance/references/process-control-harness.md",
       "skills/appsdk-project-governance/references/review-delivery.md",
       "skills/appsdk-project-governance/references/authoritative-review-template.md",
@@ -136,6 +138,11 @@
   "compiler_digest": "sha256:3c6ad1d17528c52ef2f06e44867be59b77f7b51b3d26e3eec5b406bb1ae70f74",
   "contract_schema": 1,
   "digest": "sha256:3c6ad1d17528c52ef2f06e44867be59b77f7b51b3d26e3eec5b406bb1ae70f74",
+  "previous_bundle_digest": "sha256:875817854ec1455ea39381e5e591c2b68729930678edd95a6aed22314ee915f4",
+  "previous_bundle_digests": [
+    "sha256:875817854ec1455ea39381e5e591c2b68729930678edd95a6aed22314ee915f4",
+    "sha256:e06157bc542e2bc14a585aad52b1f954bad3524a0362cc9a9866d81674121861"
+  ],
   "sdk": "appsdk",
   "version": "0.1.0015"
 }

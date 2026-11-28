@@ -112,9 +112,6 @@ export {
   prepareAgentProvider,
   providerBindingFromConfig,
   selectAgentProvider,
-  ensureDshSettings,
-  resolveDshHome,
-  verifyDshPatches,
 } from './agent-driver-composition.js';
 export type { AgentProviderComposition, AgentProviderPortFactory, AgentProviderPortFactoryInput, AgentProviderSelectionInput, ComposedAgentDriver, DshCompositionInput } from './agent-driver-composition.js';
 export { admitAgentProvider } from './agent-provider-admission.js';

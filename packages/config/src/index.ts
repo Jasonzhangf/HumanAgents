@@ -119,6 +119,14 @@ export interface EffectiveAgentProviderBinding {
   readonly provider?: ProviderConfig;
 }
 
+export const DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES = 8;
+
+export function effectiveImplicitOrchestrationMaxRuntimes(config?: UserConfig | Partial<UserConfig>): number {
+  return config?.execution?.implicitOrchestrationMaxRuntimes ?? DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES;
+}
+
+export * from './member-roster.js';
+
 export interface UserConfig {
   readonly schemaVersion: number;
   readonly agents: readonly AgentConfig[];
@@ -138,6 +146,7 @@ export interface UserConfig {
   };
   readonly execution?: {
     readonly maxConcurrentTasks?: number;
+    readonly implicitOrchestrationMaxRuntimes?: number;
     readonly stopTimeoutMs?: number;
     readonly dsh?: DshExecutionConfig;
     readonly providerRetry?: ProviderRetryExecutionConfig;
@@ -859,7 +868,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');
   const ui = value.ui === undefined ? undefined : asRecord(value.ui, 'ui');
   if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired', 'workspace'], 'user project config');
-  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs', 'dsh', 'providerRetry', 'opencode', 'antigravity', 'dshAcp'], 'user execution config');
+  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'implicitOrchestrationMaxRuntimes', 'stopTimeoutMs', 'dsh', 'providerRetry', 'opencode', 'antigravity', 'dshAcp'], 'user execution config');
   if (ui) rejectUnknownKeys(ui, ['display'], 'user ui config');
   let display: UiDisplayPreference;
   try {
@@ -869,11 +878,13 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
     throw error;
   }
   const maxConcurrentTasks = execution?.maxConcurrentTasks as unknown;
+  const implicitOrchestrationMaxRuntimes = execution?.implicitOrchestrationMaxRuntimes as unknown;
   const stopTimeoutMs = execution?.stopTimeoutMs as unknown;
   const providerRetry = execution?.providerRetry === undefined
     ? undefined
     : validateProviderRetryExecution(execution.providerRetry, 'execution.providerRetry');
   if (maxConcurrentTasks !== undefined && (typeof maxConcurrentTasks !== 'number' || !Number.isSafeInteger(maxConcurrentTasks) || maxConcurrentTasks < 1)) fail('config-invalid', 'execution.maxConcurrentTasks must be positive');
+  if (implicitOrchestrationMaxRuntimes !== undefined && (typeof implicitOrchestrationMaxRuntimes !== 'number' || !Number.isSafeInteger(implicitOrchestrationMaxRuntimes) || implicitOrchestrationMaxRuntimes < 1)) fail('config-invalid', 'execution.implicitOrchestrationMaxRuntimes must be positive');
   if (stopTimeoutMs !== undefined && (typeof stopTimeoutMs !== 'number' || !Number.isSafeInteger(stopTimeoutMs) || stopTimeoutMs < 1)) fail('config-invalid', 'execution.stopTimeoutMs must be positive');
   return {
     schemaVersion: CONFIG_SCHEMA_VERSION,
@@ -887,6 +898,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
     ...(memory === undefined ? {} : { memory }),
     ...(execution === undefined ? {} : { execution: {
       ...(maxConcurrentTasks === undefined ? {} : { maxConcurrentTasks: maxConcurrentTasks as number }),
+      ...(implicitOrchestrationMaxRuntimes === undefined ? {} : { implicitOrchestrationMaxRuntimes: implicitOrchestrationMaxRuntimes as number }),
       ...(stopTimeoutMs === undefined ? {} : { stopTimeoutMs: stopTimeoutMs as number }),
       ...(execution.dsh === undefined ? {} : { dsh: validateDshExecution(execution.dsh, 'execution.dsh') }),
       ...(providerRetry === undefined ? {} : { providerRetry }),
@@ -906,10 +918,12 @@ export function validateProjectOverride(value: Record<string, unknown>): Partial
   const memory = value.memory === undefined ? undefined : validateMemoryConfig(value.memory);
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');
   if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired'], 'project project config');
-  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs'], 'project execution config');
+  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'implicitOrchestrationMaxRuntimes', 'stopTimeoutMs'], 'project execution config');
   const maxConcurrentTasks = execution?.maxConcurrentTasks as unknown;
+  const implicitOrchestrationMaxRuntimes = execution?.implicitOrchestrationMaxRuntimes as unknown;
   const stopTimeoutMs = execution?.stopTimeoutMs as unknown;
   if (maxConcurrentTasks !== undefined && (typeof maxConcurrentTasks !== 'number' || !Number.isSafeInteger(maxConcurrentTasks) || maxConcurrentTasks < 1)) fail('config-invalid', 'project execution.maxConcurrentTasks must be positive');
+  if (implicitOrchestrationMaxRuntimes !== undefined && (typeof implicitOrchestrationMaxRuntimes !== 'number' || !Number.isSafeInteger(implicitOrchestrationMaxRuntimes) || implicitOrchestrationMaxRuntimes < 1)) fail('config-invalid', 'project execution.implicitOrchestrationMaxRuntimes must be positive');
   if (stopTimeoutMs !== undefined && (typeof stopTimeoutMs !== 'number' || !Number.isSafeInteger(stopTimeoutMs) || stopTimeoutMs < 1)) fail('config-invalid', 'project execution.stopTimeoutMs must be positive');
   return {
     ...(project === undefined ? {} : { project: {
@@ -919,6 +933,7 @@ export function validateProjectOverride(value: Record<string, unknown>): Partial
     ...(memory === undefined ? {} : { memory }),
     ...(execution === undefined ? {} : { execution: {
       ...(maxConcurrentTasks === undefined ? {} : { maxConcurrentTasks: maxConcurrentTasks as number }),
+      ...(implicitOrchestrationMaxRuntimes === undefined ? {} : { implicitOrchestrationMaxRuntimes: implicitOrchestrationMaxRuntimes as number }),
       ...(stopTimeoutMs === undefined ? {} : { stopTimeoutMs: stopTimeoutMs as number }),
     }}),
   };
@@ -933,6 +948,12 @@ function validateProjectPolicy(user: UserConfig, override: Partial<UserConfig>):
     const userMax = user.execution?.maxConcurrentTasks;
     if (userMax === undefined || projectExecution.maxConcurrentTasks > userMax) {
       fail('config-policy', 'project maxConcurrentTasks cannot exceed the user limit');
+    }
+  }
+  if (projectExecution?.implicitOrchestrationMaxRuntimes !== undefined) {
+    const userImplicitMax = user.execution?.implicitOrchestrationMaxRuntimes ?? DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES;
+    if (projectExecution.implicitOrchestrationMaxRuntimes > userImplicitMax) {
+      fail('config-policy', 'project implicitOrchestrationMaxRuntimes cannot exceed the user limit');
     }
   }
   if (projectExecution?.stopTimeoutMs !== undefined) {

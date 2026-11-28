@@ -1,0 +1,6 @@
+<!-- project-memory:v1 {"category":"plan","created_at":"2026-11-22T15:17:52.237627+00:00","entry_kind":"rule","id":"mvp-v1-01-project","importance":0,"memory_level":3,"review_evidence":[],"review_status":"unreviewed","rule_control":{"approval":{"state":"candidate"},"clause":{"allowed_actions":["同一工作区的两个项目各用自己的根目录"],"axis":"relation","axis_id":"project","clause_id":"mvp-v1-01-project","effects":["同一工作区的两个项目各用自己的根目录"],"evidence":["memory/assets/mvp-ui-v1/聊天界面审阅.html","memory/assets/mvp-ui-v1/ontology-confirmation.md"],"forbidden_actions":["切换后沿用上一项目 cwd"],"governance":{"allow_case":"同一工作区的两个项目各用自己的根目录","check":"mvp-v1-01-project@1","deny_case":"切换后沿用上一项目 cwd","edge":"project/select-cwd","gate_kind":"semantic","observation":"新建两个项目后检查各自会话入口、运行请求 cwd。 拟绑定，待实测。"},"owner":"packages/config","rule":"一个工作区可包含多个项目；新建或编辑项目时指定工作区、项目根目录。项目显式 Agent 从该项目根目录开始工作。","scenario":"Workspace → Project → cwd","scope":"HumanAgent MVP V1","state_after":"同一工作区的两个项目各用自己的根目录","state_before":"创建或切换项目","trigger":"创建或切换项目"},"revision":1},"source_refs":["memory/assets/mvp-ui-v1/ontology-confirmation.md","memory/assets/mvp-ui-v1/聊天界面审阅.html"],"tags":["mvp-ui-v1","ontology"],"updated_at":"2026-11-22T15:17:52.237627+00:00"} -->
+
+# 项目工作区与默认目录
+
+一个工作区可包含多个项目；新建或编辑项目时指定工作区、项目根目录。项目显式 Agent 从该项目根目录开始工作。
+<!-- project-memory:end -->

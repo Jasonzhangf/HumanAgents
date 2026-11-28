@@ -1,0 +1,12 @@
+{
+  "action": "noop",
+  "migration_id": "project-memory-v0-to-v1",
+  "raw_sources_retained": true,
+  "schema_version": 1,
+  "source": null,
+  "source_digest": null,
+  "source_schema": "v1",
+  "status": "complete",
+  "target_schema": 1,
+  "updated_at": "2026-11-28T05:41:02.039580+00:00"
+}

@@ -20,7 +20,6 @@ import {
   MEMORY_SCOPE_COMPATIBILITY_VERSION,
   canonicalMemoryScopeToLegacy,
   id,
-  legacyMemoryScopeToCanonical,
   validateProjectSourcePatchArtifact,
 } from '../../contracts/src/index.js';
 import type { LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';

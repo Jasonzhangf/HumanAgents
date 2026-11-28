@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, formatPairingCommand, loadConfiguration, resolveRuntimePaths, type AgentRole } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, prepareAgentProvider, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, prepareAgentProvider, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult, type OperationId, type StopRequestReceipt } from '../../packages/contracts/src/index.js';
 import { canonicalJsonStringify, checkpointCommitIdentityV2 } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
@@ -4699,110 +4699,7 @@ test('driver composition selects fake or dsh explicitly and never falls back', a
     memoryScopes: ['task'] as const,
     resourceClass: 'foreground',
   };
-  assert.throws(() => composeAgentDriver({ agent: dshAgent, paths, runtimeId: 'runtime-dsh', workspace }), /execution\.dsh is not configured/);
-});
-
-test('DSH home must stay below the HumanAgent control root', async () => {
-  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-dsh-home-');
-  const paths = await resolveRuntimePaths({ controlRoot, workspace });
-  assert.equal(resolveDshHome({ paths, configuredHome: '~/.humanagent/dsh/home' }), join(await realpath(controlRoot), 'dsh', 'home'));
-  assert.equal(resolveDshHome({ paths, configuredHome: 'dsh/other' }), join(await realpath(controlRoot), 'dsh', 'other'));
-  assert.throws(() => resolveDshHome({ paths, configuredHome: join(workspace, 'dsh') }), /must remain below the HumanAgent control root/);
-  assert.throws(() => resolveDshHome({ paths, configuredHome: '~/outside-dsh' }), /must remain below the HumanAgent control root/);
-});
-
-test('DSH home rejects a symlink escaping the control root', async () => {
-  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-dsh-home-link-');
-  const paths = await resolveRuntimePaths({ controlRoot, workspace });
-  const outside = join(root, 'outside-dsh');
-  await mkdir(outside);
-  await mkdir(join(controlRoot, 'dsh'));
-  await symlink(outside, join(controlRoot, 'dsh', 'link'));
-  assert.throws(() => resolveDshHome({ paths, configuredHome: 'dsh/link/home' }), /must remain below the HumanAgent control root/);
-});
-
-test('DSH settings quote configured provider and model scalars', async () => {
-  const { root } = await createConfiguredWorkspace('humanagent-app-dsh-settings-');
-  const home = join(root, 'dsh-home');
-  await ensureDshSettings(home, {
-    sourceRoot: '/locked/dsh',
-    home: '~/.humanagent/dsh/home',
-    profile: 'sdk',
-    provider: 'rcc\n    injected: true',
-    model: 'gpt-5.5\n          injected: true',
-  });
-  const document = await readFile(join(home, 'settings.yaml'), 'utf8');
-  assert.match(document, /^    "rcc\\n    injected: true":$/m);
-  assert.match(document, /^        - id: "gpt-5\.5\\n          injected: true"$/m);
-  assert.equal(document.includes('\n    injected: true'), false);
-  assert.equal(document.includes('\n          injected: true'), false);
-});
-
-test('DSH driver accepts an explicitly configured readable source without source identity locks', async () => {
-  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-dsh-compose-');
-  const paths = await resolveRuntimePaths({ controlRoot, workspace });
-  const sourceRoot = join(root, 'dsh-source');
-  const patchRef = 'apps/cli/src/sdk-source.cordis.patch.yml';
-  await mkdir(join(sourceRoot, 'apps/cli/src'), { recursive: true });
-  await writeFile(join(sourceRoot, patchRef), '- id: configured\n', 'utf8');
-  const agent = {
-    agentId: 'execution-dsh',
-    roleId: 'execution' as const,
-    templateRef: 'builtin/execution@1.0.0',
-    driverRef: 'dsh' as const,
-    skills: ['single-capability-worker'],
-    tools: ['search'],
-    permissions: ['task.read', 'workspace.read'],
-    memoryScopes: ['task'] as const,
-    resourceClass: 'foreground',
-  };
-  try {
-    const composed = composeAgentDriver({
-      agent,
-      paths,
-      dsh: {
-        sourceRoot,
-        home: '~/.humanagent/dsh/home',
-        profile: 'sdk',
-        provider: 'rcc',
-        model: 'gpt-5.5',
-        patchFiles: [patchRef],
-      },
-      runtimeId: 'runtime-dsh-compose',
-      workspace,
-    });
-    assert.equal(composed.driver.kind, 'humanagent.agent-driver.dsh');
-    assert.equal(composed.execution?.provider.providerId, 'dsh');
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test('DSH patches are required, readable, and contained without content identity checks', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-dsh-patches-'));
-  const sourceRoot = join(root, 'source');
-  const patchRef = 'apps/cli/src/sdk-source.cordis.patch.yml';
-  const patchFile = join(sourceRoot, patchRef);
-  await mkdir(join(sourceRoot, 'apps/cli/src'), { recursive: true });
-  await writeFile(patchFile, '- id: approved\n', 'utf8');
-
-  const verified = verifyDshPatches(sourceRoot, [patchRef]);
-  assert.deepEqual(verified.refs, [patchRef]);
-  assert.deepEqual(verified.files, [await realpath(patchFile)]);
-  assert.throws(() => verifyDshPatches(sourceRoot, []), /patch set must contain exactly/);
-
-  await writeFile(patchFile, '- id: modified\n', 'utf8');
-  verifyDshPatches(sourceRoot, [patchRef]);
-
-  await rm(patchFile);
-  assert.throws(() => verifyDshPatches(sourceRoot, [patchRef]), /does not exist/);
-
-  await writeFile(join(root, 'outside.patch.yml'), '- id: outside\n', 'utf8');
-  await symlink(join(root, 'outside.patch.yml'), patchFile);
-  assert.throws(
-    () => verifyDshPatches(sourceRoot, [patchRef]),
-    /outside the locked source tree/,
-  );
+  assert.throws(() => composeAgentDriver({ agent: dshAgent, paths, runtimeId: 'runtime-dsh', workspace }), /agent driver is not enabled: dsh/);
 });
 
 test('run creates a HumanAgent task, operation, checkpoint, and run manifest', async () => {

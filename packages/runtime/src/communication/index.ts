@@ -1,3 +1,4 @@
+export * from './addressing.js';
 export * from './errors.js';
 export * from './feedback.js';
 export * from './registry.js';

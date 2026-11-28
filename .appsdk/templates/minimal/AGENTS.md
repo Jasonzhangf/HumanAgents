@@ -12,7 +12,8 @@ contracts.
 - Compatibility and legacy boundaries: [describe].
 
 When persistent requirements are established, `.appsdk/requirements.json` is
-their sole source. Read it through `appsdk requirements show` and `history`.
+their sole source. Read applicable effective items through `appsdk requirements show`;
+use `history` when a relevant change needs verification. Reuse unchanged evidence.
 Requirements remain effective until the user explicitly changes or revokes
 them in the conversation. Preserve that instruction and source when applying
 a change; agent plans, task completion, review PASS and reset are not authority
@@ -60,13 +61,18 @@ current ledger version, and use the SDK review context for all applicable items.
 - AppSDK quality, safety and evidence gates are mandatory when applicable.
   Guidance and Memory are auxiliary; no plan or memory write is required by
   default. Select persistent Guidance when it helps the task.
-- When using Guidance, bind plans to current goal, task, module, owner, scope,
-  declared rule sources, source commit, and tree.
+- For skeleton, Operation, reusable operator, or graph-configuration changes,
+  follow the installed `appsdk-project-governance` Skill's
+  `references/bootstrap-migration.md` section `Skeleton, Operations and operators`.
+  Do not add a parallel registry, schema, or approval checklist.
+- When using Guidance, bind plans to current goal, task, module, owner, scope
+  and declared rule sources. Do not introduce candidate identity or freeze
+  ceremonies for ordinary development.
 - After an SDK or template upgrade, read the effective upstream rules, project
   AGENTS and Skills, actual test commands, and CI/hook entrypoints before
-  comparing the advisory template. Record each difference with location, owner,
-  delete/merge/narrow/add action, basis, retained safeguard, and entrypoint
-  impact. Reuse session authorization that already covers a difference; seek
+  comparing the advisory template. Correct affected contradictions and confirmed
+  duplication at the unique owner; record material decisions in existing notes,
+  without a separate difference ledger. Reuse session authorization and seek
   approval only for uncovered changes.
 - Guidance is optional for this audit. Repeated initialization and unrelated
   version refreshes do not trigger a whole-project rule audit. Run checks
@@ -81,8 +87,9 @@ current ledger version, and use the SDK review context for all applicable items.
   regressions. Optional simplification is advisory. Follow the host review
   contract; internal progress does not dispatch another review. Reuse valid
   evidence when relevant inputs are unchanged; rerun affected checks on drift.
-- Keep Collab automatic for multi-worker identity, communication and task/file
-  ownership. Check conflicts before shared writes. Failure blocks dependent
+- When explicitly enabled and registered, use Collab for multi-worker identity,
+  communication and task/file ownership. Follow its Skill; registration is not
+  a prerequisite for independent work. Check conflicts before shared writes. Failure blocks dependent
   collaboration, not independent isolated work or quality checks.
 - Long tasks and handoffs may save relevant notes; no automatic promotion to
   memory, Skills or rules. Delivery and retained-resource cleanup are separate.
@@ -90,15 +97,38 @@ current ledger version, and use the SDK review context for all applicable items.
   summaries. Current facts, rules and gates remain owned by project AGENTS,
   Skills and declared contracts; memory never overrides them.
 
+## Ontology Rule Governance
+
+- Rule and governance changes first model the affected objects, behaviors and
+  relations with the installed `appsdk-project-governance` Skill's
+  `references/ontology-governance.md`.
+- Every rule clause names its scenario, trigger, allowed actions, forbidden
+  actions, affected state or effect, owner and evidence.
+- A candidate remains a candidate until the user approves that exact clause.
+- An approved clause is enforceable only after it is bound to a declared DAG
+  edge or gate with one legal case, one illegal case and a real observation
+  path. The requirements ledger is a declaration, not enforcement.
+- A guidance manifest that claims ontology governance declares its object,
+  behavior and relation models and references an `ontology_clause`.
+  `appsdk guide compile` binds each forbidden rule and clause in strict
+  bidirectional one-to-one form and rejects candidate, unapproved, unbound,
+  unresolved, duplicate or mismatched clauses.
+- Non-rule project facts do not enter rule approval.
+- While any rule or ontology candidate awaits user approval, do not arm,
+  renew or subscribe the next wake for that goal.
+
 ## Git Protection
 
 - Treat the protected mainline checkout as read-only. Develop in a clean owner
-  worktree created from the latest remote mainline and preserve other workers'
-  state.
+  worktree created from the latest remote mainline, or in the project's
+  configured LayerFS task branch and Workspace. Preserve other workers' state.
 - Configure the project's own commit and push protection. A passing protection
   check proves only the Git boundary.
-- Remove the owned worktree and release its claim only after required delivery,
-  remote receipt, and retention evidence exist.
+- For a Git worktree, remove the owned worktree and release its claim only
+  after required delivery, remote receipt, and retention evidence exist. For a
+  LayerFS task, keep the branch reference until its publish, Git capture, and
+  remote delivery evidence are complete; do not run Git worktree commands
+  against the LayerFS Workspace.
 
 ## Task Routing
 
@@ -116,7 +146,8 @@ clear. Guide may assist; enabling it is not a prerequisite.
 ## Evidence Boundary
 
 - Report source, test, build, installed artifact, restart, deployed-entrypoint
-  replay, review, merge, remote receipt, freeze, and cleanup separately.
+  replay, review, merge, remote receipt and cleanup separately. Freeze applies
+  only to an explicitly selected release flow, never ordinary delivery.
 - Never infer a later evidence level from an earlier one.
 - A blocked result names the first failing gate, preserved state, retry policy,
   owner, and one executable next action.

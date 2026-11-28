@@ -80,13 +80,13 @@ collab task update --status <state>    update task state
 collab task block <id>                 block with concrete cause/owner/unblock condition
 collab task close <id> [--force --reason "<reason>"]
                                        close owned task
-collab migrate inspect                 read-only migration/retirement inspection
-collab migrate plan                    prepare migration/retirement snapshot
-collab migrate apply                   freeze admission and persist snapshot
-collab migrate verify                  verify migration/retirement continuity
 collab reset --project --discard-legacy --approval "<text>"
                                        retire/rebuild Collab-owned local control plane
 ```
+
+Collab identity recovery uses the current `identity-map.json` and current
+business `state.json`. It has no migration-maintenance command. AppSDK's SDK
+migration commands have a separate owner and remain available as documented.
 
 The commands below are read-only operator diagnostics. They are not
 initialization, route recovery, or agent bootstrap steps. Do not chain them
@@ -107,7 +107,10 @@ it, including during installation, identity recovery, Collab reset, or this
 governance flow. Long-horizon work belongs to a consenting peer assigned through
 the public board. That peer orchestrates independent
 `codex exec --profile gcm` workers. One-shot execution and observation go
-directly to those workers regardless of peer availability. Each master/peer
+to those workers after checking idle, suitable authorized peers and available
+capacity first; use peer capacity that can take the ready work. Direct-dispatch
+those independent GCM workers only when no suitable authorized peer can take the
+work. Each master/peer
 registers and manages its own goal; master does not proxy-register peer goals.
 
 ## Do not guess

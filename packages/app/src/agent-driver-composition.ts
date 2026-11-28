@@ -1,20 +1,7 @@
-import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
-import {
-  createDshAgentDriver,
-  createDshExecutionRuntimePort,
-  createRealDshTransport,
-  dshBaselineLock,
-  type DshProfileDescriptor,
-} from '../../adapters/dsh/src/index.js';
 import type {
   AgentConfig,
   AgentRole,
   AcpExecutionConfig,
-  DshExecutionConfig,
   EffectiveAgentProviderBinding,
   ProviderConfig,
   ProviderSource,
@@ -47,144 +34,16 @@ import {
 } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
 import { admitAgentProvider } from './agent-provider-admission.js';
+import { createHash } from 'node:crypto';
 import type {
   PreparedExecutionStop,
   PreparedExecutionStopPreparationLease,
 } from './ui-runtime/prepared-execution-stop.js';
 
-const DSH_OWNER = 'humanagent.app.dsh-composition';
 const AGENT_PROVIDER_OWNER = 'humanagent.app.agent-provider-binding';
-const DSH_SETTINGS_FILE = 'settings.yaml';
-const DSH_RCC_BASE_URL = 'http://127.0.0.1:4444/v1';
-const DSH_REQUIRED_PATCHES = ['apps/cli/src/sdk-source.cordis.patch.yml'] as const;
 
 function digest(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
-}
-
-function isWithin(root: string, candidate: string): boolean {
-  const normalizedRoot = normalize(root);
-  const normalizedCandidate = normalize(candidate);
-  const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(prefix);
-}
-
-/**
- * The DSH home is persistent runtime state, so it must live below the single
- * HumanAgent control root. A project workspace or arbitrary user path would
- * create a second persistence source and is rejected here.
- */
-export function resolveDshHome(input: { readonly paths: RuntimePaths; readonly configuredHome: string }): string {
-  const expanded = input.configuredHome === '~/.humanagent'
-    ? input.paths.controlRoot
-    : input.configuredHome.startsWith('~/.humanagent/')
-      ? join(input.paths.controlRoot, input.configuredHome.slice('~/.humanagent/'.length))
-      : input.configuredHome === '~'
-        ? homedir()
-        : input.configuredHome.startsWith('~/')
-          ? join(homedir(), input.configuredHome.slice(2))
-      : isAbsolute(input.configuredHome)
-        ? resolve(input.configuredHome)
-        : resolve(input.paths.controlRoot, input.configuredHome);
-  const controlRootReal = realpathSync(input.paths.controlRoot);
-  let existing = expanded;
-  const missing: string[] = [];
-  while (!existsSync(existing)) {
-    missing.unshift(basename(existing));
-    const parent = dirname(existing);
-    if (parent === existing) break;
-    existing = parent;
-  }
-  const candidateReal = join(realpathSync(existing), ...missing);
-  if (!isWithin(controlRootReal, candidateReal)) {
-    throw new AppLifecycleError(
-      'dsh-home-outside-control-root',
-      'DSH home must remain below the HumanAgent control root',
-      'configure execution.dsh.home as ~/.humanagent/dsh/home',
-      DSH_OWNER,
-    );
-  }
-  return candidateReal;
-}
-
-function dshProfile(
-  config: DshExecutionConfig,
-  patchRefs: readonly string[],
-): DshProfileDescriptor {
-  return {
-    profileName: config.profile,
-    homeRef: 'env:DSH_HOME',
-    plugin: {
-      bundleRef: `humanagent-dsh-bundle:${config.profile}`,
-      entry: 'apps/cli/src/bin.ts',
-    },
-    routeRef: `explicit/dsh/${config.provider}`,
-    patchRefs: [...patchRefs],
-  };
-}
-
-interface DshPatchVerification {
-  readonly refs: readonly string[];
-  readonly files: readonly string[];
-}
-
-export function verifyDshPatches(
-  sourceRoot: string,
-  patchRefs: readonly string[],
-): DshPatchVerification {
-  const expected = new Set<string>(DSH_REQUIRED_PATCHES);
-  const provided = new Set(patchRefs);
-  const missing = [...expected].filter((ref) => !provided.has(ref));
-  if (provided.size !== patchRefs.length || patchRefs.length !== expected.size || missing.length > 0) {
-    throw new AppLifecycleError(
-      'dsh-patch-set-mismatch',
-      `DSH patch set must contain exactly ${expected.size} required patch(es), received ${patchRefs.length}`,
-      'configure the required DSH source entry patch',
-      DSH_OWNER,
-    );
-  }
-  const sourceRootReal = realpathSync(sourceRoot);
-  const files: string[] = [];
-  for (const patchRef of patchRefs) {
-    if (!expected.has(patchRef)) {
-      throw new AppLifecycleError(
-        'dsh-patch-not-approved',
-        `DSH patch is not required by this composition: ${patchRef}`,
-        'remove unexpected patches and use the required source patch',
-        DSH_OWNER,
-      );
-    }
-    const candidate = resolve(sourceRoot, patchRef);
-    if (!existsSync(candidate)) {
-      throw new AppLifecycleError(
-        'dsh-patch-missing',
-        `DSH patch does not exist: ${patchRef}`,
-        'restore the required DSH source patch',
-        DSH_OWNER,
-      );
-    }
-    const file = realpathSync(candidate);
-    if (!isWithin(sourceRootReal, file)) {
-      throw new AppLifecycleError(
-        'dsh-patch-outside-source',
-        `DSH patch resolves outside the locked source tree: ${patchRef}`,
-        'configure a patch contained by execution.dsh.sourceRoot',
-        DSH_OWNER,
-      );
-    }
-    try {
-      readFileSync(file);
-    } catch {
-      throw new AppLifecycleError(
-        'dsh-patch-invalid',
-        `DSH patch is not a readable regular file: ${patchRef}`,
-        'restore the required DSH source patch',
-        DSH_OWNER,
-      );
-    }
-    files.push(file);
-  }
-  return { refs: [...patchRefs], files };
 }
 
 export interface AgentProviderPortFactoryInput {
@@ -493,77 +352,6 @@ export async function prepareExecutionAgentProvider<
   return composition;
 }
 
-function providerBinding(
-  config: DshExecutionConfig,
-  profile: DshProfileDescriptor,
-  patchRefs: readonly string[],
-): ProviderBinding {
-  const configDigest = digest(JSON.stringify({
-    profile: config.profile,
-    provider: config.provider,
-    model: config.model,
-    sourceRoot: config.sourceRoot,
-    patchRefs,
-    permissionMode: config.permissionMode ?? null,
-  }));
-  return {
-    bindingId: `dsh-${config.profile}-${config.provider}`,
-    providerId: 'dsh',
-    protocol: 'other-explicit',
-    endpointRef: `local:dsh-stdio:${profile.profileName}`,
-    modelRef: `${config.provider}/${config.model}`,
-    configDigest,
-    capabilityDigest: digest(`${config.provider}:${config.model}`),
-  };
-}
-
-/**
- * `llm-pi-ai` provider routes live in the DSH home, not in RCC. HumanAgent
- * writes the one route it was configured with and refuses to silently replace
- * a different existing document: the DSH home is persistent runtime state.
- */
-function settingsDocument(config: DshExecutionConfig): string {
-  const yamlScalar = (value: string): string => JSON.stringify(value);
-  return [
-    'llm-pi-ai:',
-    '  providers:',
-    `    ${yamlScalar(config.provider)}:`,
-    `      displayName: ${yamlScalar(`${config.provider} route`)}`,
-    '      api: openai-completions',
-    `      baseURL: ${DSH_RCC_BASE_URL}`,
-    '      apiKeyEnv: RCC_LOCAL_API_KEY',
-    '      models:',
-    `        - id: ${yamlScalar(config.model)}`,
-    '          contextWindow: 272000',
-    '          maxTokens: 32768',
-    '',
-  ].join('\n');
-}
-
-export async function ensureDshSettings(home: string, config: DshExecutionConfig): Promise<void> {
-  await mkdir(home, { recursive: true });
-  const file = join(home, DSH_SETTINGS_FILE);
-  const document = settingsDocument(config);
-  let existing: string | undefined;
-  try {
-    existing = await readFile(file, 'utf8');
-  } catch (error) {
-    if ((error as { code?: string }).code !== 'ENOENT') throw error;
-  }
-  if (existing === undefined) {
-    await writeFile(file, document, 'utf8');
-    return;
-  }
-  if (existing.trim() !== document.trim()) {
-    throw new AppLifecycleError(
-      'dsh-settings-conflict',
-      `DSH home settings already exist and do not match the configured ${config.provider}/${config.model} route`,
-      `inspect or move ${file} before running this agent`,
-      DSH_OWNER,
-    );
-  }
-}
-
 export interface ComposedAgentDriver {
   readonly driver: AgentDriver;
   readonly execution?: ExecutionBinding;
@@ -572,7 +360,6 @@ export interface ComposedAgentDriver {
 export interface DshCompositionInput {
   readonly agent: AgentConfig;
   readonly paths: RuntimePaths;
-  readonly dsh?: DshExecutionConfig;
   readonly opencode?: AcpExecutionConfig;
   readonly antigravity?: AcpExecutionConfig;
   readonly dshAcp?: AcpExecutionConfig;
@@ -720,51 +507,10 @@ export function composeAgentDriver(input: DshCompositionInput): ComposedAgentDri
       }),
     };
   }
-  if (input.agent.driverRef !== 'dsh') {
-    throw new AppLifecycleError(
-      'agent-driver-unsupported',
-      `agent driver is not enabled: ${input.agent.driverRef}`,
-      'choose an explicitly supported driverRef',
-      'app-agent-driver-composition',
-    );
-  }
-  const config = input.dsh;
-  if (!config) {
-    throw new AppLifecycleError(
-      'dsh-config-missing',
-      'agent uses the dsh driver but execution.dsh is not configured',
-      'configure execution.dsh in the user config before running the agent',
-      DSH_OWNER,
-    );
-  }
-  const sourceRoot = resolve(config.sourceRoot);
-  const patches = verifyDshPatches(sourceRoot, config.patchFiles ?? []);
-  const home = resolveDshHome({ paths: input.paths, configuredHome: config.home });
-  const profile = dshProfile(config, patches.refs);
-  const binding = providerBinding(config, profile, patches.refs);
-  const transport = createRealDshTransport({
-    binding,
-    lock: dshBaselineLock,
-    profile,
-    sourceRoot,
-    home,
-    workspace: config.workspace ?? input.workspace,
-    provider: config.provider,
-    model: config.model,
-    patchFiles: patches.files,
-    ...(config.permissionMode === undefined ? {} : { env: { DSH_PERMISSION_MODE: config.permissionMode } }),
-    ...(config.turnTimeoutMs === undefined ? {} : { turnTimeoutMs: config.turnTimeoutMs }),
-    ...(config.shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs: config.shutdownTimeoutMs }),
-  });
-  const runtime = createDshExecutionRuntimePort({
-    lock: dshBaselineLock,
-    profile,
-    transport,
-    requiredCapabilities: ['dsh.session', 'dsh.model', 'dsh.tool', 'dsh.continuation'],
-    ownerId: DSH_OWNER,
-  });
-  return {
-    driver: createDshAgentDriver({ runtime, binding }),
-    execution: { runtimeId: input.runtimeId, provider: binding },
-  };
+  throw new AppLifecycleError(
+    'agent-driver-unsupported',
+    `agent driver is not enabled: ${input.agent.driverRef}`,
+    'choose an explicitly supported driverRef',
+    'app-agent-driver-composition',
+  );
 }

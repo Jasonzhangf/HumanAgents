@@ -12,7 +12,6 @@
     "../config/src/**/*.ts",
     "../contracts/src/**/*.ts",
     "../agent-templates/src/**/*.ts",
-    "../adapters/dsh/src/**/*.ts",
     "../adapters/testing/src/**/*.ts",
     "../core/src/**/*.ts",
     "../runtime/src/**/*.ts",
