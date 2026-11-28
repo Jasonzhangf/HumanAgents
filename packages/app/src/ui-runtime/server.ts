@@ -1423,6 +1423,76 @@ async function handleRequest(
       writeJson(response, 200, await readProduct(() => service.productPublicOutput(id('task', taskId))));
       return;
     }
+    if (path === '/api/settings/concurrency' && method === 'GET') {
+      writeJson(response, 200, { implicitOrchestrationMaxRuntimes: service.getImplicitOrchestrationLimit() });
+      return;
+    }
+    if (path === '/api/settings/concurrency' && method === 'POST') {
+      const body = await readBody(request);
+      const limit = Number(body.implicitOrchestrationMaxRuntimes);
+      writeJson(response, 200, { implicitOrchestrationMaxRuntimes: service.setImplicitOrchestrationLimit(limit) });
+      return;
+    }
+    if (path === '/api/product/members' && method === 'GET') {
+      writeJson(response, 200, service.listProjectMembers());
+      return;
+    }
+    if (path === '/api/product/members' && method === 'POST') {
+      const body = await readBody(request);
+      const template = body.template as Record<string, unknown> | undefined;
+      if (!template || typeof template !== 'object' || typeof template.systemPrompt !== 'string' || typeof template.rolePrompt !== 'string') {
+        throw new UiRuntimeApiError(
+          'member.template.invalid',
+          APP_OWNER,
+          'member template with systemPrompt and rolePrompt is required',
+          'provide template.{role, systemPrompt, rolePrompt}',
+          400,
+        );
+      }
+      const created = service.addProjectMember({
+        template: {
+          role: (typeof template.role === 'string' ? template.role : 'executor') as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist',
+          systemPrompt: template.systemPrompt,
+          rolePrompt: template.rolePrompt,
+          ...(typeof template.provider === 'string' ? { provider: template.provider } : {}),
+          ...(typeof template.model === 'string' ? { model: template.model } : {}),
+        },
+        ...(typeof body.name === 'string' ? { name: body.name } : {}),
+        ...(typeof body.memberId === 'string' ? { memberId: body.memberId } : {}),
+        ...(typeof body.provider === 'string' ? { provider: body.provider } : {}),
+        ...(typeof body.model === 'string' ? { model: body.model } : {}),
+      });
+      writeJson(response, 201, { member: created });
+      return;
+    }
+    if (path === '/api/product/address/resolve' && method === 'POST') {
+      const body = await readBody(request);
+      if (typeof body.token !== 'string') {
+        throw new UiRuntimeApiError('addressing.invalid', APP_OWNER, 'address token string is required', 'provide token', 400);
+      }
+      const connectedMachines = Array.isArray(body.connectedMachines)
+        ? body.connectedMachines.filter((item): item is string => typeof item === 'string')
+        : undefined;
+      writeJson(response, 200, {
+        resolved: service.resolveCanonicalAddress({
+          token: body.token,
+          ...(connectedMachines === undefined ? {} : { connectedMachines }),
+        }),
+      });
+      return;
+    }
+    if (path === '/api/product/dispatch/resolve' && method === 'POST') {
+      const body = await readBody(request);
+      const connectedMachines = Array.isArray(body.connectedMachines)
+        ? body.connectedMachines.filter((item): item is string => typeof item === 'string')
+        : undefined;
+      writeJson(response, 200, service.dispatchMemberByRole({
+        ...(typeof body.role === 'string' ? { role: body.role as 'architect' | 'reviewer' | 'tester' | 'specialist' | 'executor' } : {}),
+        ...(typeof body.explicitTarget === 'string' ? { explicitTarget: body.explicitTarget } : {}),
+        ...(connectedMachines === undefined ? {} : { connectedMachines }),
+      }));
+      return;
+    }
     if (path === '/api/tasks' && method === 'GET') {
       writeJson(response, 200, await service.listTasksWithIdentitySource());
       return;
