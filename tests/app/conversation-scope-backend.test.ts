@@ -605,6 +605,7 @@ test('HTTP system dashboard projects connected conversationSession per registere
     const dynTopic = await memoryCall(dispatcher, '/api/main-topic?scope=project&projectKey=project-dyn')
     assert.equal(dynTopic.status, 200)
     assert.equal((dynTopic.body as { agentName: string }).agentName, 'Jenny')
+    assert.equal((dynTopic.body as { projectName?: string }).projectName, 'project-dyn')
   } finally {
     await dispatcher.sseRegistry.closeAll('server.shutdown')
   }

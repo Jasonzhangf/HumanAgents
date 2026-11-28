@@ -292,7 +292,7 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
     const rows = entryProjectRows({ systemRead, current, search })
     if (current) {
       const currentRow = rows.find((row) => row.scope?.projectKey === current.projectKey)
-      title.textContent = `${currentRow?.label || current.projectName} · ${current.agentName}`
+      title.textContent = `${currentRow?.label || current.projectName || '项目'} · ${current.agentName}`
       title.title = title.textContent
     }
     const signature = JSON.stringify([rows.map(row => [row.scope?.projectKey, row.label, row.workspaceCwd,

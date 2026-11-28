@@ -15,6 +15,7 @@ import {
   resolveRuntimePaths,
   resolveWebSearchBackendConfig,
   runtimePathsForConversationProject,
+  type ConfiguredProjectReadSource,
   type LoadedConfiguration,
   type RuntimePaths,
 } from '../../config/src/index.js';
@@ -1819,14 +1820,17 @@ export async function main(args: readonly string[]): Promise<void> {
         baseUrl,
       };
       const effectiveAgentProviderBindings = resolveCliAgentProviderBindings(configuration, effectiveLegacyProvider);
-      const selectedAgentProviderPreparerFor = (agentEvidenceRoot: string) => <
+      const selectedAgentProviderPreparerFor = (
+        agentEvidenceRoot: string,
+        agentProviderBindings = effectiveAgentProviderBindings,
+      ) => <
         TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
       >(input: {
         readonly roleId: import('../../config/src/index.js').AgentRole;
         readonly configuredAgentId?: string;
       }) => prepareAgentProvider<TIdentity>({
         ...input,
-        agentProviderBindings: effectiveAgentProviderBindings,
+        agentProviderBindings,
         legacyProvider: effectiveLegacyProvider,
         legacyBindingOverrides: {
           endpointRef: binding.endpointRef,
@@ -1856,14 +1860,17 @@ export async function main(args: readonly string[]): Promise<void> {
             option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined,
             fakeScenario(args),
           );
-      const taskAgentProviderPreparerFor = (agentEvidenceRoot: string) => (
+      const taskAgentProviderPreparerFor = (
+        agentEvidenceRoot: string,
+        agentProviderBindings = effectiveAgentProviderBindings,
+      ) => (
         selection: { readonly roleId: import('../../config/src/index.js').AgentRole; readonly configuredAgentId?: string },
         owner: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStop,
         lease: import('./ui-runtime/prepared-execution-stop.js').PreparedExecutionStopPreparationLease,
       ) => prepareExecutionAgentProvider({
         roleId: selection.roleId,
         ...(selection.configuredAgentId === undefined ? {} : { agentId: selection.configuredAgentId }),
-        agentProviderBindings: effectiveAgentProviderBindings,
+        agentProviderBindings,
         legacyProvider: effectiveLegacyProvider,
         legacyBindingOverrides: {
           endpointRef: binding.endpointRef,
@@ -1877,17 +1884,38 @@ export async function main(args: readonly string[]): Promise<void> {
         ),
       }, owner, lease);
       const prepareTaskAgentProvider = taskAgentProviderPreparerFor(evidenceRoot);
-      const explicitBrainHelperProviderPreparerFor = (agentEvidenceRoot: string) => (selection: {
+      const explicitBrainHelperProviderPreparerFor = (
+        agentEvidenceRoot: string,
+        agentProviderBindings = effectiveAgentProviderBindings,
+      ) => (selection: {
         readonly roleId: import('../../config/src/index.js').AgentRole;
         readonly configuredAgentId?: string;
-      }) => selectedAgentProviderPreparerFor(agentEvidenceRoot)<TasklessProviderExecutionIdentityRef>(selection);
+      }) => selectedAgentProviderPreparerFor(agentEvidenceRoot, agentProviderBindings)<TasklessProviderExecutionIdentityRef>(selection);
       const prepareExplicitBrainHelper = explicitBrainHelperProviderPreparerFor(evidenceRoot);
       const explicitBrainTemplateRoot = process.env.HUMANAGENT_TEMPLATE_ROOT;
+      const resolveProjectBundle = async (targetProject: ConfiguredProjectReadSource) => {
+        if (targetProject.projectKey === paths.projectKey) {
+          return {
+            project: targetProject,
+            paths,
+            configuration,
+            bindings: effectiveAgentProviderBindings,
+          };
+        }
+        const targetPaths = runtimePathsForConversationProject(paths, targetProject);
+        const targetConfiguration = await loadConfiguration(targetPaths);
+        const targetBindings = resolveCliAgentProviderBindings(targetConfiguration, effectiveLegacyProvider);
+        return {
+          project: targetProject,
+          paths: targetPaths,
+          configuration: targetConfiguration,
+          bindings: targetBindings,
+        };
+      };
       const configuredProjectsCatalog = await listConfiguredProjects(paths);
-      const conversationProjects = configuredProjectsCatalog.projects;
       const conversationDescriptors = [...resolveConfiguredConversationScopes({
         config: { internal: configuration.internal, user: configuration.effective },
-        projects: conversationProjects,
+        projects: [],
       })];
       if (!conversationDescriptors.some((descriptor) => descriptor.scope.kind === 'alex')) {
         const machineName = process.env.HOSTNAME?.trim() || 'local';
@@ -1899,11 +1927,34 @@ export async function main(args: readonly string[]): Promise<void> {
           role: 'ceo',
         });
       }
+      for (const project of configuredProjectsCatalog.projects) {
+        try {
+          const bundle = await resolveProjectBundle(project);
+          const descriptor = resolveConversationScope(
+            { kind: 'project', projectKey: project.projectKey },
+            {
+              internal: bundle.configuration.internal,
+              user: { ...bundle.configuration.effective, project: { ...bundle.configuration.effective.project } },
+              projects: [project],
+            },
+          );
+          conversationDescriptors.push(descriptor);
+        } catch (error) {
+          if (error instanceof ConfigurationError) continue;
+          if (error instanceof Error && error.name === 'ConversationScopeResolutionError' && (error as { code?: string }).code === 'project-agent-missing') {
+            continue;
+          }
+          throw error;
+        }
+      }
       const alexConfiguredBinding = effectiveAgentProviderBindings.some(
         (candidate) => candidate.agentId === (conversationDescriptors.find((d) => d.scope.kind === 'alex')?.agentId ?? 'Alex')
           && candidate.roleId === 'interaction',
       );
-      const projectInteractionAgentId = conversationDescriptors.find((descriptor) => descriptor.scope.kind === 'project')?.agentId
+      const boundProjectDescriptor = conversationDescriptors.find(
+        (descriptor) => descriptor.scope.kind === 'project' && descriptor.projectKey === paths.projectKey,
+      );
+      const projectInteractionAgentId = boundProjectDescriptor?.agentId
         ?? configuration.effective.project?.defaultAgent;
       const projectExplicitBrainHelperProviderPreparer = (selection: {
         readonly roleId: import('../../config/src/index.js').AgentRole;
@@ -1928,11 +1979,14 @@ export async function main(args: readonly string[]): Promise<void> {
       let projectRuntimeForConversation: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
       const resolveDynamicProjectDescriptor = async (projectKey: string) => {
         const latestCatalog = await listConfiguredProjects(paths);
+        const targetProject = latestCatalog.projects.find((project) => project.projectKey === projectKey);
+        if (!targetProject) return undefined;
         try {
+          const bundle = await resolveProjectBundle(targetProject);
           return resolveConversationScope({ kind: 'project', projectKey }, {
-            internal: configuration.internal,
-            user: { ...configuration.effective, project: { ...configuration.effective.project } },
-            projects: latestCatalog.projects,
+            internal: bundle.configuration.internal,
+            user: { ...bundle.configuration.effective, project: { ...bundle.configuration.effective.project } },
+            projects: [targetProject],
           });
         } catch (error) {
           if (error instanceof ConfigurationError) return undefined;
@@ -1967,16 +2021,39 @@ export async function main(args: readonly string[]): Promise<void> {
                 'humanagent.app.serve',
               );
             }
-            const targetPaths = runtimePathsForConversationProject(paths, targetProject);
-            await ensureControlLayout(targetPaths);
+            const bundle = await resolveProjectBundle(targetProject);
+            const targetPaths = bundle.paths;
             const targetCheckpointRoot = join(targetPaths.checkpointsRoot, 'ui-runtime');
             const targetEvidenceRoot = join(targetPaths.artifactsRoot, 'ui-provider-evidence');
+            const targetInteractionRoot = join(targetPaths.projectRoot, 'explicit-interaction');
             await mkdir(targetEvidenceRoot, { recursive: true });
+            await mkdir(targetInteractionRoot, { recursive: true });
+            const targetAgentId = descriptor.agentId;
+            const prepareTargetExplicitBrainHelper = (selection: {
+              readonly roleId: import('../../config/src/index.js').AgentRole;
+              readonly configuredAgentId?: string;
+            }) => explicitBrainHelperProviderPreparerFor(targetEvidenceRoot, bundle.bindings)({
+              ...selection,
+              ...(selection.configuredAgentId === undefined && selection.roleId === 'interaction'
+                ? { configuredAgentId: targetAgentId }
+                : {}),
+            });
+            const prepareTargetSelectedAgentProvider = <
+              TIdentity extends AnyProviderExecutionIdentityRef = ProviderExecutionIdentityRef,
+            >(selection: {
+              readonly roleId: import('../../config/src/index.js').AgentRole;
+              readonly configuredAgentId?: string;
+            }) => selectedAgentProviderPreparerFor(targetEvidenceRoot, bundle.bindings)<TIdentity>({
+              ...selection,
+              ...(selection.configuredAgentId === undefined && selection.roleId === 'interaction'
+                ? { configuredAgentId: targetAgentId }
+                : {}),
+            });
             const targetRuntime = await startUiRuntime({
               listen: false,
               mode,
-              agentRoster: configuration.agentRoster,
-              implicitOrchestrationMaxRuntimes: effectiveImplicitOrchestrationMaxRuntimes(configuration.effective),
+              agentRoster: bundle.configuration.agentRoster,
+              implicitOrchestrationMaxRuntimes: effectiveImplicitOrchestrationMaxRuntimes(bundle.configuration.effective),
               onImplicitOrchestrationLimitChange: (limit) => {
                 serveRuntime?.runtimePool.setMaxRuntimes(limit);
               },
@@ -1987,7 +2064,7 @@ export async function main(args: readonly string[]): Promise<void> {
               providerSource: resolvedSource,
               port: cordisHost.getExecutionRuntimePort(),
               checkpointRoot: targetCheckpointRoot,
-              interactionRoot: targetPaths.mainRoot,
+              interactionRoot: targetInteractionRoot,
               evidenceRoot: targetEvidenceRoot,
               uiRoot,
               productRoot: paths.controlRoot,
@@ -1998,15 +2075,15 @@ export async function main(args: readonly string[]): Promise<void> {
               providerToolStorageKey: `project-${targetPaths.projectKey}`,
               providerToolWorkspaceRoot: targetPaths.workspaceCwd,
               webSearchProviderConfig: resolveWebSearchBackendConfig(),
-              ...(providerRetryConfigFromEffective(configuration) === undefined ? {} : {
+              ...(providerRetryConfigFromEffective(bundle.configuration) === undefined ? {} : {
                 providerRetryConfig: {
-                  config: providerRetryConfigFromEffective(configuration)!,
+                  config: providerRetryConfigFromEffective(bundle.configuration)!,
                   journalRoot: join(targetPaths.journalRoot, 'ui-runtime'),
                 },
               }),
               ...(explicitBrainTemplateRoot === undefined ? {} : { explicitBrainTemplateRoot }),
               ...(mode === 'fake' ? {} : {
-                explicitBrainHelperProviderPreparer: projectExplicitBrainHelperProviderPreparer,
+                explicitBrainHelperProviderPreparer: prepareTargetExplicitBrainHelper,
               }),
               memory: {
                 coordinator: new MemoryCoordinator(),
@@ -2016,8 +2093,8 @@ export async function main(args: readonly string[]): Promise<void> {
               },
               runtimeComposition: {
                 ...(mode === 'fake' ? {} : {
-                  prepareAgentProvider: prepareProjectSelectedAgentProvider,
-                  prepareTaskAgentProvider,
+                  prepareAgentProvider: prepareTargetSelectedAgentProvider,
+                  prepareTaskAgentProvider: taskAgentProviderPreparerFor(targetEvidenceRoot, bundle.bindings),
                 }),
                 ...(orchestrationPorts === undefined ? {} : {
                   createTaskAssembly: serveRuntime!.createTaskAssembly,
@@ -2052,7 +2129,17 @@ export async function main(args: readonly string[]): Promise<void> {
                   resourceClass: 'foreground' as const,
                 },
               ];
-          const resolvedAlexAgentId = alexConfiguredBinding ? descriptor.agentId : projectInteractionAgentId;
+          const alexAgentProviderBindings = alexConfiguredBinding
+            ? effectiveAgentProviderBindings
+            : [
+                ...effectiveAgentProviderBindings,
+                {
+                  agentId: descriptor.agentId,
+                  roleId: 'interaction' as const,
+                  source: 'inherited' as const,
+                  provider: effectiveLegacyProvider,
+                },
+              ];
           const alexRuntime = await startUiRuntime({
             listen: false,
             mode,
@@ -2090,11 +2177,10 @@ export async function main(args: readonly string[]): Promise<void> {
               },
             }),
             ...(explicitBrainTemplateRoot === undefined ? {} : { explicitBrainTemplateRoot }),
-            explicitBrainHelperProviderPreparer: (selection) => explicitBrainHelperProviderPreparerFor(alexEvidenceRoot)({
+            explicitBrainHelperProviderPreparer: (selection) => explicitBrainHelperProviderPreparerFor(alexEvidenceRoot, alexAgentProviderBindings)({
               ...selection,
-              ...(selection.configuredAgentId === undefined && selection.roleId === 'interaction' && resolvedAlexAgentId !== undefined
-                ? { configuredAgentId: resolvedAlexAgentId }
-                : {}),
+              configuredAgentId: selection.configuredAgentId
+                ?? (selection.roleId === 'interaction' ? descriptor.agentId : undefined),
             }),
             memory: {
               coordinator: new MemoryCoordinator(),
@@ -2103,14 +2189,14 @@ export async function main(args: readonly string[]): Promise<void> {
               roleId: 'interaction',
             },
             runtimeComposition: {
-              prepareAgentProvider: (selection) => selectedAgentProviderPreparerFor(alexEvidenceRoot)({
+              prepareAgentProvider: (selection) => selectedAgentProviderPreparerFor(alexEvidenceRoot, alexAgentProviderBindings)({
                 ...selection,
                 // Alex is the interaction entry identity. Other duties, such as
                 // the closed-turn Planner, must resolve from their configured role.
                 configuredAgentId: selection.configuredAgentId
-                  ?? (selection.roleId === 'interaction' ? resolvedAlexAgentId : undefined),
+                  ?? (selection.roleId === 'interaction' ? descriptor.agentId : undefined),
               }),
-              prepareTaskAgentProvider: taskAgentProviderPreparerFor(alexEvidenceRoot),
+              prepareTaskAgentProvider: taskAgentProviderPreparerFor(alexEvidenceRoot, alexAgentProviderBindings),
               // Alex has its own headless UI-runtime and journals. The task
               // assembly comes from the already-started serve composition so
               // confirmation can enter the real orchestration path; the Alex

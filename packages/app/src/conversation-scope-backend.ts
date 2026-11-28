@@ -582,6 +582,9 @@ function scopeMainTopic(projection: MainTopicProjection, descriptor: Conversatio
 
 function emptyScopedMainTopic(descriptor: ConversationScopeDescriptor): ScopedMainTopicProjection {
   const agentName = descriptor.role === 'ceo' ? 'Alex' : 'Jenny';
+  const projectName = descriptor.role === 'ceo'
+    ? undefined
+    : descriptor.workspaceCwd?.split('/').filter(Boolean).at(-1) || descriptor.projectKey;
   return {
     surface: 'main-topic',
     agentName,
@@ -590,6 +593,7 @@ function emptyScopedMainTopic(descriptor: ConversationScopeDescriptor): ScopedMa
     tasks: [],
     turns: [],
     usage: { calls: [] },
+    ...(projectName === undefined ? {} : { projectName }),
     ...(descriptor.projectKey === undefined ? {} : { projectKey: descriptor.projectKey }),
     ...(descriptor.workspaceCwd === undefined ? {} : { workspaceCwd: descriptor.workspaceCwd }),
   } as unknown as ScopedMainTopicProjection;
