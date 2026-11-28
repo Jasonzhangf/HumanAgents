@@ -44,6 +44,13 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
   const runtimeOptions = {
     mode: 'fake' as const,
     productRoot: root,
+    controlStateRoot: root,
+    maxConcurrentTasks: 1,
+    agentRoster: [
+      { agentId: 'Alex', roleId: 'interaction' as const, managementRole: 'ceo' as const },
+      { agentId: 'interaction-default', roleId: 'interaction' as const, managementRole: 'project-lead' as const },
+      { agentId: 'review-default', roleId: 'review' as const },
+    ],
     organId,
     binding,
     port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1, replay: [] }),
@@ -52,12 +59,20 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     uiRoot: join(process.cwd(), 'packages', 'ui', 'static'),
     runtimePaths: paths,
     projectCatalog: async () => ({
-      projects: [{
-        projectKey: 'projA',
-        workspaceCwd: workspaceRoot,
-        projectRoot: root,
-        checkpointsRoot: join(root, 'checkpoints'),
-      }],
+      projects: [
+        {
+          projectKey: 'projA',
+          workspaceCwd: workspaceRoot,
+          projectRoot: root,
+          checkpointsRoot: join(root, 'checkpoints'),
+        },
+        {
+          projectKey: 'projB',
+          workspaceCwd: workspaceRoot,
+          projectRoot: root,
+          checkpointsRoot: join(root, 'checkpoints'),
+        },
+      ],
       failures: [],
     }),
     projectKey,
@@ -184,6 +199,50 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     });
     assert.equal(duplicateMember.status, 409);
 
+    // Reject reserved CEO/Alex names, manager creation bypass, and duplicate memberIds
+    const badManagerRole = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ template: { role: 'manager', systemPrompt: 'sys', rolePrompt: 'role' } }),
+    });
+    assert.equal(badManagerRole.status, 409);
+
+    const reservedCeoName = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ name: 'CEO', role: 'executor' }),
+    });
+    assert.equal(reservedCeoName.status, 400);
+
+    const dupMemberId = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ memberId: createdBody.member.memberId, name: 'Carol', role: 'executor' }),
+    });
+    assert.equal(dupMemberId.status, 409);
+
+    // Shared 50-name pool across projects: projB allocates Carol without colliding on Alice/Bob
+    const projBCreated = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ projectKey: 'projB', role: 'executor' }),
+    });
+    assert.equal(projBCreated.status, 201);
+    const projBBody = await projBCreated.json() as { member: { name: string } };
+    assert.equal(projBBody.member.name, 'Carol');
+
+    // Configured agentRoster member visible in projectRoster also resolves via address resolver
+    const configuredAddr = await fetch(`${baseUrl}/api/product/address/resolve`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ token: 'projA.review-default' }),
+    });
+    assert.equal(configuredAddr.status, 200);
+    assert.equal(
+      (await configuredAddr.json() as { resolved: { canonicalAddress: string } }).resolved.canonicalAddress,
+      'local.projA.review-default',
+    );
+
     // 3. Canonical addressing resolves Alex, project Jenny, and project.member; rejects missing
     const alex = await fetch(`${baseUrl}/api/product/address/resolve`, {
       method: 'POST',
@@ -235,10 +294,35 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
       rosterBody.members.map((m) => ({ name: m.memberName, addr: m.canonicalAddress })),
       [
         { name: 'Jenny', addr: 'local.projA.Jenny' },
+        { name: 'review-default', addr: 'local.projA.review-default' },
         { name: 'Alice', addr: 'local.projA.Alice' },
         { name: 'Bob', addr: 'local.projA.Bob' },
       ],
     );
+
+    // 6. Verify concurrency update overrides legacy maxConcurrentTasks=1 during admission
+    const runtimeAdmissionLimit = (runtime.service as unknown as {
+      effectiveExecutionConcurrencyLimit(): number | undefined;
+    }).effectiveExecutionConcurrencyLimit();
+    assert.equal(runtimeAdmissionLimit, 12);
+
+    // 7. Second independent runtime on projB sharing controlStateRoot sees Alice/Bob/Carol without clobbering projA
+    const secondRuntime = await startUiRuntime({
+      ...runtimeOptions,
+      listen: false,
+      projectKey: 'projB',
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1, replay: [] }),
+    });
+    try {
+      const projBMember = secondRuntime.service.addProjectMember({ projectKey: 'projB', role: 'specialist' });
+      assert.equal(projBMember.name, 'David');
+      assert.deepEqual(
+        runtime.service.listProjectMembers('projA').members.map((m) => m.name),
+        ['Jenny', 'Alice', 'Bob'],
+      );
+    } finally {
+      await secondRuntime.close();
+    }
 
     // 6. Cold restart hydrates concurrency setting and persisted project members durably
     await runtime.close();

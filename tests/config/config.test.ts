@@ -1872,6 +1872,26 @@ test('worker name pool has 50 names excluding Jenny and template creation copies
     () => createMemberFromTemplate({ existingMembers: [first], template, name: 'Jenny', memberId: 'm-3' }),
     /reserved for the project manager/,
   );
+  assert.throws(
+    () => createMemberFromTemplate({ existingMembers: [first], template, name: 'CEO', memberId: 'm-4' }),
+    /reserved canonical addressing identity/,
+  );
+  assert.throws(
+    () => createMemberFromTemplate({ existingMembers: [first], template, name: 'Alex', memberId: 'm-5' }),
+    /reserved canonical addressing identity/,
+  );
+  assert.throws(
+    () => createMemberFromTemplate({
+      existingMembers: [first],
+      template: { ...template, role: 'manager' as unknown as 'executor' },
+      memberId: 'm-6',
+    }),
+    /only Jenny may hold the manager role/,
+  );
+  assert.throws(
+    () => createMemberFromTemplate({ existingMembers: [first], template, memberId: first.memberId }),
+    /memberId already exists/,
+  );
 
   const reused = allocateWorkerName(new Set());
   assert.equal(reused, WORKER_NAME_POOL[0]);

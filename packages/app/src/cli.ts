@@ -3,6 +3,7 @@ import {
   ConfigurationError,
   declareDefaultProduct,
   declareProjectWorkspace,
+  effectiveImplicitOrchestrationMaxRuntimes,
   ensureControlLayout,
   formatPairingCommand,
   listConfiguredProjects,
@@ -1926,7 +1927,8 @@ export async function main(args: readonly string[]): Promise<void> {
           const alexRuntime = await startUiRuntime({
             listen: false,
             mode,
-            maxConcurrentTasks: configuration.effective.execution?.maxConcurrentTasks,
+            implicitOrchestrationMaxRuntimes: effectiveImplicitOrchestrationMaxRuntimes(configuration.effective),
+            controlStateRoot: paths.controlRoot,
             accessControl,
             organId: id('organ', 'humanagent-alex-conversation'),
             binding,
@@ -2103,7 +2105,8 @@ export async function main(args: readonly string[]): Promise<void> {
           start: async () => {
             runtime = await startUiRuntime({
               agentRoster: configuration.agentRoster,
-              maxConcurrentTasks: configuration.effective.execution?.maxConcurrentTasks,
+              implicitOrchestrationMaxRuntimes: effectiveImplicitOrchestrationMaxRuntimes(configuration.effective),
+              controlStateRoot: paths.controlRoot,
               mode,
               accessControl,
               organId: id('organ', 'humanagent-ui'),

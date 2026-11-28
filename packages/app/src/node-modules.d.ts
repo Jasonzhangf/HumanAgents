@@ -142,6 +142,9 @@ declare module 'node:fs' {
   export function readFileSync(path: string): string;
   export function readFileSync(path: string, encoding: 'utf8'): string;
   export function realpathSync(path: string): string;
+  export function renameSync(oldPath: string, newPath: string): void;
+  export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+  export function writeFileSync(path: string, data: string, encoding?: string): void;
 }
 
 declare module 'node:zlib' {

@@ -7,6 +7,15 @@ export type ProjectMemberRole =
   | 'executor';
 
 export const RESERVED_MANAGER_NAME = 'Jenny' as const;
+export const ALLOWED_WORKER_ROLES = ['architect', 'reviewer', 'tester', 'specialist', 'executor'] as const;
+export const RESERVED_ADDRESSING_NAMES = ['Jenny', 'Alex', 'CEO'] as const;
+
+const ALLOWED_WORKER_ROLE_SET = new Set<string>(ALLOWED_WORKER_ROLES);
+const RESERVED_ADDRESSING_NAME_SET = new Set<string>(RESERVED_ADDRESSING_NAMES);
+
+export function isAllowedWorkerRole(role: unknown): role is Exclude<ProjectMemberRole, 'manager'> {
+  return typeof role === 'string' && ALLOWED_WORKER_ROLE_SET.has(role);
+}
 
 export const DEFAULT_ROLE_TEMPLATES: Readonly<Record<Exclude<ProjectMemberRole, 'manager'>, MemberRoleTemplate>> = {
   architect: {
@@ -110,22 +119,54 @@ export function createMemberFromTemplate(input: {
   readonly memberId: string;
   readonly provider?: string;
   readonly model?: string;
+  readonly reservedNames?: ReadonlySet<string>;
+  readonly existingMemberIds?: ReadonlySet<string>;
 }): ProjectMemberRecord {
-  const usedNames = new Set(input.existingMembers.map((member) => member.name));
-  const chosenName = input.name?.trim() || allocateWorkerName(usedNames);
-  if (chosenName === RESERVED_MANAGER_NAME) {
-    throw new MemberRosterError('member.reserved-name', `${RESERVED_MANAGER_NAME} is reserved for the project manager`);
+  const role = (input.template.role ?? 'executor') as unknown;
+  if (!isAllowedWorkerRole(role)) {
+    if (role === 'manager') {
+      throw new MemberRosterError('member.manager-immutable', 'only Jenny may hold the manager role');
+    }
+    throw new MemberRosterError('member.invalid-role', `unsupported worker role: ${String(role)}`);
   }
-  if (usedNames.has(chosenName)) {
+  const projectUsedNames = new Set(input.existingMembers.map((member) => member.name));
+  const poolUsedNames = new Set<string>([
+    ...projectUsedNames,
+    ...(input.reservedNames ?? []),
+  ]);
+  const rawName = input.name?.trim();
+  if (input.name !== undefined && !rawName) {
+    throw new MemberRosterError('member.invalid-name', 'member name cannot be blank');
+  }
+  const chosenName = rawName || allocateWorkerName(poolUsedNames);
+  if (RESERVED_ADDRESSING_NAME_SET.has(chosenName)) {
+    throw new MemberRosterError(
+      'member.reserved-name',
+      chosenName === RESERVED_MANAGER_NAME
+        ? `${RESERVED_MANAGER_NAME} is reserved for the project manager`
+        : `${chosenName} is a reserved canonical addressing identity`,
+    );
+  }
+  if (chosenName.includes('.') || chosenName.includes('/')) {
+    throw new MemberRosterError('member.invalid-name', `member name cannot contain '.' or '/': ${chosenName}`);
+  }
+  if (projectUsedNames.has(chosenName)) {
     throw new MemberRosterError('member.duplicate-name', `member name already exists: ${chosenName}`);
   }
-  if (!input.memberId.trim()) {
+  const memberId = input.memberId.trim();
+  if (!memberId) {
     throw new MemberRosterError('member.invalid-id', 'memberId is required');
   }
+  if (
+    input.existingMembers.some((member) => member.memberId === memberId)
+    || input.existingMemberIds?.has(memberId)
+  ) {
+    throw new MemberRosterError('member.duplicate-id', `memberId already exists: ${memberId}`);
+  }
   return {
-    memberId: input.memberId,
+    memberId,
     name: chosenName,
-    role: input.template.role ?? 'executor',
+    role,
     systemPrompt: `${input.template.systemPrompt}`,
     rolePrompt: `${input.template.rolePrompt}`,
     ...(input.provider ?? input.template.provider ? { provider: input.provider ?? input.template.provider } : {}),
@@ -152,8 +193,11 @@ export function updateMemberRecord(input: {
   if (current.role === 'manager' && input.patch.role !== undefined && input.patch.role !== 'manager') {
     throw new MemberRosterError('member.manager-immutable', 'project manager Jenny role cannot be changed');
   }
-  if (current.role !== 'manager' && input.patch.role === 'manager') {
-    throw new MemberRosterError('member.manager-immutable', 'only Jenny may hold the manager role');
+  if (current.role !== 'manager' && input.patch.role !== undefined && !isAllowedWorkerRole(input.patch.role)) {
+    if (input.patch.role === 'manager') {
+      throw new MemberRosterError('member.manager-immutable', 'only Jenny may hold the manager role');
+    }
+    throw new MemberRosterError('member.invalid-role', `unsupported worker role: ${String(input.patch.role)}`);
   }
   if (input.patch.systemPrompt !== undefined && !input.patch.systemPrompt.trim()) {
     throw new MemberRosterError('member.invalid-prompt', 'systemPrompt cannot be empty');

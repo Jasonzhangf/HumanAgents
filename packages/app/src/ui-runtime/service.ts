@@ -8,12 +8,19 @@ import {
   RESERVED_MANAGER_NAME,
   createMemberFromTemplate,
   defaultRoleTemplate,
+  isAllowedWorkerRole,
   removeMemberRecord,
   updateMemberRecord,
   type MemberRoleTemplate,
   type ProjectMemberRecord,
   type ProjectMemberRole,
 } from '../../../config/src/index.js';
+import {
+  createFileControlDomainRosterStore,
+  createJournalSharedControlDomainRosterStore,
+  type ControlDomainRosterSnapshot,
+  type ControlDomainRosterStore,
+} from './control-domain-roster-store.js';
 import {
   AddressingError,
   dispatchByRole,
@@ -633,6 +640,7 @@ export interface UiRuntimeServiceOptions {
   readonly agentRoster?: readonly Pick<import('../../../config/src/index.js').AgentConfig, 'agentId' | 'roleId' | 'managementRole'>[];
   readonly maxConcurrentTasks?: number;
   readonly implicitOrchestrationMaxRuntimes?: number;
+  readonly controlStateRoot?: string;
   readonly machineName?: string;
   readonly organId: OrganId;
   readonly principalOwner?: string;
@@ -3252,11 +3260,28 @@ function checkpointAssetForSelector(
   return { ok: true, value: matches[0]!.refinedDelivery };
 }
 
+function addressingRoleForConfiguredAgent(roleId: string): CanonicalAddressEntry['role'] {
+  switch (roleId) {
+    case 'review': return 'reviewer';
+    case 'execution': return 'executor';
+    case 'architect':
+    case 'reviewer':
+    case 'tester':
+    case 'specialist':
+    case 'executor':
+      return roleId;
+    default:
+      return 'specialist';
+  }
+}
+
 export class UiRuntimeService {
   private readResources?: { readonly runtimePaths: RuntimePaths; readonly projectCatalog: () => Promise<ConfiguredProjectCatalog> };
   private implicitOrchestrationLimit: number;
+  private implicitConcurrencyCustomized = false;
   private readonly machineName: string;
-  private readonly projectMembersByProject = new Map<string, ProjectMemberRecord[]>();
+  private readonly controlRosterStore: ControlDomainRosterStore;
+  private readonly hasFileControlRosterStore: boolean;
 
   private defaultManagerMember(projectKey: string): ProjectMemberRecord {
     return {
@@ -3268,34 +3293,55 @@ export class UiRuntimeService {
     };
   }
 
-  private ensureProjectMembers(projectKey = this.options.projectKey ?? 'default'): ProjectMemberRecord[] {
+  private ensureMembersList(
+    projects: Record<string, ProjectMemberRecord[]>,
+    projectKey: string,
+  ): ProjectMemberRecord[] {
     const key = projectKey.trim() || (this.options.projectKey ?? 'default');
-    let members = this.projectMembersByProject.get(key);
+    let members = projects[key];
     if (!members) {
       members = [this.defaultManagerMember(key)];
-      this.projectMembersByProject.set(key, members);
+      projects[key] = members;
     } else if (!members.some((member) => member.role === 'manager' || member.name === RESERVED_MANAGER_NAME)) {
       members.unshift(this.defaultManagerMember(key));
     }
     return members;
   }
 
-  private exportProjectMembersSnapshot(): Record<string, ProjectMemberRecord[]> {
-    const out: Record<string, ProjectMemberRecord[]> = {};
-    for (const [key, members] of this.projectMembersByProject.entries()) {
-      out[key] = members.map((member) => ({ ...member }));
+  private allReservedWorkerNames(projects: Record<string, readonly ProjectMemberRecord[]>): Set<string> {
+    const names = new Set<string>();
+    for (const members of Object.values(projects)) {
+      for (const member of members) {
+        if (member.role === 'manager' || member.name === RESERVED_MANAGER_NAME) continue;
+        names.add(member.name);
+      }
     }
-    return out;
+    return names;
   }
 
-  private restoreProjectMembersSnapshot(snapshot: Record<string, readonly ProjectMemberRecord[]>): void {
-    this.projectMembersByProject.clear();
-    for (const [key, members] of Object.entries(snapshot)) {
-      this.projectMembersByProject.set(key, members.map((member) => ({ ...member })));
+  private allMemberIds(projects: Record<string, readonly ProjectMemberRecord[]>): Set<string> {
+    const ids = new Set<string>();
+    for (const members of Object.values(projects)) {
+      for (const member of members) {
+        ids.add(member.memberId);
+      }
     }
+    return ids;
+  }
+
+  private effectiveExecutionConcurrencyLimit(): number | undefined {
+    if (this.implicitConcurrencyCustomized) {
+      return this.implicitOrchestrationLimit;
+    }
+    return this.options.maxConcurrentTasks ?? this.implicitOrchestrationLimit;
   }
 
   getImplicitOrchestrationLimit(): number {
+    const persisted = this.controlRosterStore.readSnapshot().implicitOrchestrationMaxRuntimes;
+    if (persisted !== undefined) {
+      this.implicitOrchestrationLimit = persisted;
+      this.implicitConcurrencyCustomized = true;
+    }
     return this.implicitOrchestrationLimit;
   }
 
@@ -3309,19 +3355,26 @@ export class UiRuntimeService {
         400,
       );
     }
-    const previous = this.implicitOrchestrationLimit;
+    const previousLimit = this.implicitOrchestrationLimit;
+    const previousCustomized = this.implicitConcurrencyCustomized;
     this.implicitOrchestrationLimit = limit;
+    this.implicitConcurrencyCustomized = true;
     try {
-      this.persistExplicitBrainState();
+      this.controlRosterStore.update((draft) => {
+        (draft as { implicitOrchestrationMaxRuntimes?: number }).implicitOrchestrationMaxRuntimes = limit;
+      });
     } catch (error) {
-      this.implicitOrchestrationLimit = previous;
+      this.implicitOrchestrationLimit = previousLimit;
+      this.implicitConcurrencyCustomized = previousCustomized;
       throw error;
     }
     return this.implicitOrchestrationLimit;
   }
 
   private canonicalAddressEntries(defaultProject = this.options.projectKey ?? 'default'): readonly CanonicalAddressEntry[] {
-    this.ensureProjectMembers(defaultProject);
+    const snapshot = this.controlRosterStore.readSnapshot();
+    const projectSet = { ...snapshot.projects };
+    this.ensureMembersList(projectSet, defaultProject);
     const entries: CanonicalAddressEntry[] = [
       {
         canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, name: 'CEO' }),
@@ -3330,8 +3383,10 @@ export class UiRuntimeService {
         role: 'ceo',
       },
     ];
-    for (const [project, members] of this.projectMembersByProject.entries()) {
+    for (const [project, members] of Object.entries(projectSet)) {
+      const seenNames = new Set<string>();
       for (const member of members) {
+        seenNames.add(member.name);
         entries.push({
           canonicalAddress: formatCanonicalAgentAddress({
             machine: this.machineName,
@@ -3344,6 +3399,25 @@ export class UiRuntimeService {
           role: member.role,
         });
       }
+      if (project === (this.options.projectKey ?? 'default') && this.options.agentRoster) {
+        for (const agent of this.options.agentRoster) {
+          const mgmt = managementRoleForAgent(agent);
+          if (mgmt === 'ceo' || mgmt === 'project-lead') continue;
+          if (seenNames.has(agent.agentId)) continue;
+          seenNames.add(agent.agentId);
+          entries.push({
+            canonicalAddress: formatCanonicalAgentAddress({
+              machine: this.machineName,
+              project,
+              name: agent.agentId,
+            }),
+            machine: this.machineName,
+            project,
+            name: agent.agentId,
+            role: addressingRoleForConfiguredAgent(agent.roleId),
+          });
+        }
+      }
     }
     return entries;
   }
@@ -3354,7 +3428,8 @@ export class UiRuntimeService {
     readonly members: readonly ProjectMemberRecord[];
   } {
     const project = projectKey?.trim() || (this.options.projectKey ?? 'default');
-    const members = this.ensureProjectMembers(project);
+    const snapshot = this.controlRosterStore.readSnapshot();
+    const members = this.ensureMembersList(snapshot.projects, project);
     return {
       machine: this.machineName,
       project,
@@ -3372,25 +3447,40 @@ export class UiRuntimeService {
     readonly model?: string;
   }): ProjectMemberRecord {
     const project = input.projectKey?.trim() || (this.options.projectKey ?? 'default');
-    const previous = this.exportProjectMembersSnapshot();
-    const members = this.ensureProjectMembers(project);
     try {
-      const template = input.template ?? defaultRoleTemplate(input.role ?? 'executor');
-      const created = createMemberFromTemplate({
-        existingMembers: members,
-        template,
-        ...(input.name === undefined ? {} : { name: input.name }),
-        memberId: input.memberId?.trim() || `member-${randomUUID()}`,
-        ...(input.provider === undefined ? {} : { provider: input.provider }),
-        ...(input.model === undefined ? {} : { model: input.model }),
+      return this.controlRosterStore.update((draft) => {
+        const members = this.ensureMembersList(draft.projects, project);
+        const reservedNames = this.allReservedWorkerNames(draft.projects);
+        const existingMemberIds = this.allMemberIds(draft.projects);
+        const rawTemplateRole = (input.template as { readonly role?: unknown } | undefined)?.role ?? input.role ?? 'executor';
+        if (!isAllowedWorkerRole(rawTemplateRole)) {
+          if (rawTemplateRole === 'manager') {
+            throw new MemberRosterError('member.manager-immutable', 'only Jenny may hold the manager role');
+          }
+          throw new MemberRosterError('member.invalid-role', `unsupported worker role: ${String(rawTemplateRole)}`);
+        }
+        const template = input.template ?? defaultRoleTemplate(rawTemplateRole);
+        const created = createMemberFromTemplate({
+          existingMembers: members,
+          reservedNames,
+          existingMemberIds,
+          template,
+          ...(input.name === undefined ? {} : { name: input.name }),
+          memberId: input.memberId?.trim() || `member-${randomUUID()}`,
+          ...(input.provider === undefined ? {} : { provider: input.provider }),
+          ...(input.model === undefined ? {} : { model: input.model }),
+        });
+        members.push(created);
+        return { ...created };
       });
-      members.push(created);
-      this.persistExplicitBrainState();
-      return { ...created };
     } catch (error) {
-      this.restoreProjectMembersSnapshot(previous);
       if (error instanceof MemberRosterError) {
-        const status = error.code === 'member.duplicate-name' || error.code === 'member.name-pool-exhausted' ? 409 : 400;
+        const status = error.code === 'member.duplicate-name'
+          || error.code === 'member.duplicate-id'
+          || error.code === 'member.name-pool-exhausted'
+          || error.code === 'member.manager-immutable'
+          ? 409
+          : 400;
         throw new UiRuntimeApiError(error.code, APP_OWNER, error.message, 'choose an available member name and valid template', status);
       }
       throw error;
@@ -3407,25 +3497,24 @@ export class UiRuntimeService {
     readonly model?: string;
   }): ProjectMemberRecord {
     const project = input.projectKey?.trim() || (this.options.projectKey ?? 'default');
-    const previous = this.exportProjectMembersSnapshot();
-    const current = this.ensureProjectMembers(project);
     try {
-      const result = updateMemberRecord({
-        existingMembers: current,
-        memberId: input.memberId,
-        patch: {
-          ...(input.role === undefined ? {} : { role: input.role }),
-          ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }),
-          ...(input.rolePrompt === undefined ? {} : { rolePrompt: input.rolePrompt }),
-          ...(input.provider === undefined ? {} : { provider: input.provider }),
-          ...(input.model === undefined ? {} : { model: input.model }),
-        },
+      return this.controlRosterStore.update((draft) => {
+        const current = this.ensureMembersList(draft.projects, project);
+        const result = updateMemberRecord({
+          existingMembers: current,
+          memberId: input.memberId,
+          patch: {
+            ...(input.role === undefined ? {} : { role: input.role }),
+            ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }),
+            ...(input.rolePrompt === undefined ? {} : { rolePrompt: input.rolePrompt }),
+            ...(input.provider === undefined ? {} : { provider: input.provider }),
+            ...(input.model === undefined ? {} : { model: input.model }),
+          },
+        });
+        draft.projects[project] = result.members;
+        return { ...result.updated };
       });
-      this.projectMembersByProject.set(project, result.members);
-      this.persistExplicitBrainState();
-      return { ...result.updated };
     } catch (error) {
-      this.restoreProjectMembersSnapshot(previous);
       if (error instanceof MemberRosterError) {
         const status = error.code === 'member.not-found' ? 404 : error.code === 'member.manager-immutable' ? 409 : 400;
         throw new UiRuntimeApiError(error.code, APP_OWNER, error.message, 'provide valid editable member fields', status);
@@ -3439,18 +3528,17 @@ export class UiRuntimeService {
     readonly memberId: string;
   }): ProjectMemberRecord {
     const project = input.projectKey?.trim() || (this.options.projectKey ?? 'default');
-    const previous = this.exportProjectMembersSnapshot();
-    const current = this.ensureProjectMembers(project);
     try {
-      const result = removeMemberRecord({
-        existingMembers: current,
-        memberId: input.memberId,
+      return this.controlRosterStore.update((draft) => {
+        const current = this.ensureMembersList(draft.projects, project);
+        const result = removeMemberRecord({
+          existingMembers: current,
+          memberId: input.memberId,
+        });
+        draft.projects[project] = result.members;
+        return { ...result.removed };
       });
-      this.projectMembersByProject.set(project, result.members);
-      this.persistExplicitBrainState();
-      return { ...result.removed };
     } catch (error) {
-      this.restoreProjectMembersSnapshot(previous);
       if (error instanceof MemberRosterError) {
         const status = error.code === 'member.not-found' ? 404 : error.code === 'member.manager-immutable' ? 409 : 400;
         throw new UiRuntimeApiError(error.code, APP_OWNER, error.message, 'only non-manager workers may be removed', status);
@@ -3647,9 +3735,22 @@ export class UiRuntimeService {
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
     this.memory = options.memory;
-    this.implicitOrchestrationLimit = options.implicitOrchestrationMaxRuntimes ?? DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES;
     this.machineName = options.machineName?.trim() || 'local';
-    this.ensureProjectMembers(options.projectKey ?? 'default');
+    const fileControlRoot = options.controlStateRoot?.trim() || options.runtimePaths?.controlRoot;
+    this.hasFileControlRosterStore = Boolean(fileControlRoot);
+    this.controlRosterStore = fileControlRoot
+      ? createFileControlDomainRosterStore(fileControlRoot)
+      : createJournalSharedControlDomainRosterStore(
+        options.interactionJournal ?? options.journal,
+        () => this.persistExplicitBrainState(),
+      );
+    const snapshot = this.controlRosterStore.readSnapshot();
+    if (snapshot.implicitOrchestrationMaxRuntimes !== undefined) {
+      this.implicitOrchestrationLimit = snapshot.implicitOrchestrationMaxRuntimes;
+      this.implicitConcurrencyCustomized = true;
+    } else {
+      this.implicitOrchestrationLimit = options.implicitOrchestrationMaxRuntimes ?? DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES;
+    }
     this.subscriptionControl = options.subscriptionControl;
     this.explicitBrainInterpreter = options.explicitBrainInterpreter;
     this.explicitBrainTraceJournal = new DecisionTraceJournal({
@@ -7445,7 +7546,8 @@ export class UiRuntimeService {
     const source = await this.findProjectSource(projectKey);
     if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
     const roster = this.options.agentRoster;
-    const storedMembers = this.projectMembersByProject.get(source.projectKey) ?? [];
+    const storeSnapshot = this.controlRosterStore.readSnapshot();
+    const storedMembers = storeSnapshot.projects[source.projectKey] ?? [];
     const dynamicWorkers = storedMembers.filter((member) => member.role !== 'manager' && member.name !== RESERVED_MANAGER_NAME);
     const dynamicManager = storedMembers.find((member) => member.role === 'manager' || member.name === RESERVED_MANAGER_NAME);
     if ((!roster || roster.length === 0) && dynamicWorkers.length === 0) {
@@ -8896,13 +8998,40 @@ export class UiRuntimeService {
     for (const roundKey of extraState.hiddenRoundKeys ?? []) {
       if (typeof roundKey === 'string' && roundKey.length > 0) this.hiddenMainTopicRoundKeys.add(roundKey);
     }
-    if (typeof extraState.implicitOrchestrationLimit === 'number'
-      && Number.isSafeInteger(extraState.implicitOrchestrationLimit)
-      && extraState.implicitOrchestrationLimit >= 1) {
-      this.implicitOrchestrationLimit = extraState.implicitOrchestrationLimit;
-    }
-    if (extraState.projectMembersByProject && typeof extraState.projectMembersByProject === 'object') {
-      this.restoreProjectMembersSnapshot(extraState.projectMembersByProject);
+    if (!this.hasFileControlRosterStore) {
+      const currentSnapshot = this.controlRosterStore.readSnapshot();
+      const restoredProjects = extraState.projectMembersByProject;
+      const restoredLimit = extraState.implicitOrchestrationLimit;
+      if (
+        (restoredProjects && typeof restoredProjects === 'object' && Object.keys(currentSnapshot.projects).length === 0)
+        || (typeof restoredLimit === 'number' && Number.isSafeInteger(restoredLimit) && restoredLimit >= 1 && currentSnapshot.implicitOrchestrationMaxRuntimes === undefined)
+      ) {
+        const journalKey = this.options.interactionJournal ?? this.options.journal;
+        const syncOnly = createJournalSharedControlDomainRosterStore(journalKey);
+        syncOnly.update((draft) => {
+          if (draft.implicitOrchestrationMaxRuntimes === undefined && typeof restoredLimit === 'number' && Number.isSafeInteger(restoredLimit) && restoredLimit >= 1) {
+            (draft as { implicitOrchestrationMaxRuntimes?: number }).implicitOrchestrationMaxRuntimes = restoredLimit;
+          }
+          if (restoredProjects && typeof restoredProjects === 'object') {
+            for (const [projectKey, members] of Object.entries(restoredProjects)) {
+              if (!draft.projects[projectKey] && Array.isArray(members)) {
+                draft.projects[projectKey] = members.map((member) => ({ ...member }));
+              }
+            }
+          }
+        });
+      }
+      const synced = this.controlRosterStore.readSnapshot();
+      if (synced.implicitOrchestrationMaxRuntimes !== undefined) {
+        this.implicitOrchestrationLimit = synced.implicitOrchestrationMaxRuntimes;
+        this.implicitConcurrencyCustomized = true;
+      }
+    } else {
+      const fileSnapshot = this.controlRosterStore.readSnapshot();
+      if (fileSnapshot.implicitOrchestrationMaxRuntimes !== undefined) {
+        this.implicitOrchestrationLimit = fileSnapshot.implicitOrchestrationMaxRuntimes;
+        this.implicitConcurrencyCustomized = true;
+      }
     }
     this.explicitBrainTraceRecords.length = 0;
     this.explicitBrainTraceRecords.push(...(restored.decisionTraces ?? []).map((record) => structuredClone(record)));
@@ -10799,7 +10928,7 @@ export class UiRuntimeService {
       envelope,
       queue: defaultAdmissionQueueConfig(
         queue,
-        this.options.maxConcurrentTasks ?? (queue === 'execution' ? this.implicitOrchestrationLimit : undefined),
+        queue === 'execution' ? this.effectiveExecutionConcurrencyLimit() : this.options.maxConcurrentTasks,
       ),
       registeredQueues: ADMISSION_QUEUE_KINDS,
       queueLoad: {
@@ -11066,6 +11195,9 @@ export class UiRuntimeService {
   }
 
   private persistExplicitBrainState(): void {
+    const controlSnapshot = !this.hasFileControlRosterStore
+      ? this.controlRosterStore.readSnapshot()
+      : undefined;
     const state: RuntimeExplicitBrainJournalState & {
       readonly finalSubmissions?: readonly PersistedFinalSubmitReceipt[];
       readonly hiddenRoundKeys?: readonly string[];
@@ -11080,8 +11212,12 @@ export class UiRuntimeService {
       submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
       finalSubmissions: this.requirementSubmissions.finalReceipts(),
       hiddenRoundKeys: [...this.hiddenMainTopicRoundKeys],
-      implicitOrchestrationLimit: this.implicitOrchestrationLimit,
-      projectMembersByProject: this.exportProjectMembersSnapshot(),
+      ...(controlSnapshot?.implicitOrchestrationMaxRuntimes === undefined
+        ? {}
+        : { implicitOrchestrationLimit: controlSnapshot.implicitOrchestrationMaxRuntimes }),
+      ...(controlSnapshot && Object.keys(controlSnapshot.projects).length > 0
+        ? { projectMembersByProject: controlSnapshot.projects }
+        : {}),
       decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
       taskInputRevisions: this.coordinator.exportTaskInputRevisions().map((entry) => structuredClone(entry)),
     };

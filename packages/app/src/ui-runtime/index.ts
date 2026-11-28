@@ -126,6 +126,8 @@ export interface RccModeConfig {
 export interface UiRuntimeLaunchOptions {
   readonly mode: 'fake' | 'rcc';
   readonly maxConcurrentTasks?: number;
+  readonly implicitOrchestrationMaxRuntimes?: number;
+  readonly controlStateRoot?: string;
   readonly accessControl?: AccessControlService;
   /**
    * Config-owned product root. The entry that owns configuration supplies the
@@ -713,6 +715,8 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     mode: options.mode,
     ...(options.agentRoster === undefined ? {} : { agentRoster: options.agentRoster }),
     maxConcurrentTasks: options.maxConcurrentTasks,
+    ...(options.implicitOrchestrationMaxRuntimes === undefined ? {} : { implicitOrchestrationMaxRuntimes: options.implicitOrchestrationMaxRuntimes }),
+    controlStateRoot: options.controlStateRoot ?? options.runtimePaths?.controlRoot ?? options.productRoot,
     organId: options.organId,
     principalOwner,
     // The coordinator-owned lane (fake mode) opens its own active turn from
