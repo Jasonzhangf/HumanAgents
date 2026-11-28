@@ -57,7 +57,7 @@ export function decideOrchestrationRuntimePool(input: {
   }
 
   const activeRuntimes = input.pool.runtimes.filter(
-    (runtime) => runtime.state === 'running' || runtime.currentBindings > 0,
+    (runtime) => runtime.state === 'spawning' || runtime.state === 'running' || runtime.currentBindings > 0,
   ).length;
   const hasActiveCapacity = activeRuntimes < input.pool.maxRuntimes;
 

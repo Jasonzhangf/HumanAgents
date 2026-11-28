@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ProjectMemberRecord } from '../../../config/src/index.js';
@@ -111,6 +112,49 @@ function isLockHolderDead(rawToken: string): boolean {
   }
 }
 
+function tryReclaimDeadLock(lockPath: string, holderToken: string, statsMtimeMs: number): boolean {
+  if (Date.now() - statsMtimeMs <= STALE_LOCK_AGE_MS || !isLockHolderDead(holderToken)) {
+    return false;
+  }
+  const claimHash = createHash('sha256').update(holderToken).digest('hex').slice(0, 16);
+  const reclaimPath = `${lockPath}.reclaim.${claimHash}`;
+  const reclaimToken = `${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}\n`;
+  let claimFd: number;
+  try {
+    claimFd = openSync(reclaimPath, 'wx', 0o600);
+  } catch (error) {
+    if (isErrnoWithCode(error, 'EEXIST')) {
+      return false;
+    }
+    throw error;
+  }
+  try {
+    writeSync(claimFd, reclaimToken);
+  } finally {
+    closeSync(claimFd);
+  }
+  try {
+    let currentHolder: string;
+    try {
+      currentHolder = readFileSync(lockPath, 'utf8');
+    } catch (error) {
+      if (isErrnoWithCode(error, 'ENOENT')) return false;
+      throw error;
+    }
+    if (currentHolder !== holderToken) {
+      return false;
+    }
+    rmSync(lockPath, { force: true });
+    return true;
+  } finally {
+    try {
+      if (readFileSync(reclaimPath, 'utf8') === reclaimToken) {
+        rmSync(reclaimPath, { force: true });
+      }
+    } catch {}
+  }
+}
+
 function withFileLock<T>(lockPath: string, run: () => T): T {
   mkdirSync(dirname(lockPath), { recursive: true });
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
@@ -131,11 +175,8 @@ function withFileLock<T>(lockPath: string, run: () => T): T {
       try {
         const stats = statSync(lockPath);
         const holderToken = readFileSync(lockPath, 'utf8');
-        if (Date.now() - stats.mtimeMs > STALE_LOCK_AGE_MS && isLockHolderDead(holderToken)) {
-          if (readFileSync(lockPath, 'utf8') === holderToken) {
-            rmSync(lockPath, { force: true });
-            continue;
-          }
+        if (tryReclaimDeadLock(lockPath, holderToken, stats.mtimeMs)) {
+          continue;
         }
       } catch (statError) {
         if (isErrnoWithCode(statError, 'ENOENT')) continue;

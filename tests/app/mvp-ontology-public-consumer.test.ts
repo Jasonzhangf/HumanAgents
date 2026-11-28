@@ -450,7 +450,7 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     await writeFile(storePath, savedBefore, 'utf8');
     assert.equal(fileStore.readSnapshot().projects.projA?.length, 3);
 
-    // 9. Lowering maxRuntimes blocks reuse of existing idle runtimes while active count >= maxRuntimes
+    // 9. Lowering maxRuntimes blocks reuse of existing idle runtimes while active OR spawning count >= maxRuntimes
     const shrinkDecision = decideOrchestrationRuntimePool({
       requiredCapabilities: ['execute'],
       pool: {
@@ -463,6 +463,19 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     });
     assert.equal(shrinkDecision.action, 'wait');
     assert.equal(shrinkDecision.condition, 'orchestration.runtime.max');
+
+    const spawningShrinkDecision = decideOrchestrationRuntimePool({
+      requiredCapabilities: ['execute'],
+      pool: {
+        maxRuntimes: 1,
+        runtimes: [
+          { runtimeId: 'r1-spawning', state: 'spawning', capabilities: [], currentBindings: 0, maxBindings: 1 },
+          { runtimeId: 'r2-idle', state: 'idle', capabilities: ['execute'], currentBindings: 0, maxBindings: 1 },
+        ],
+      },
+    });
+    assert.equal(spawningShrinkDecision.action, 'wait');
+    assert.equal(spawningShrinkDecision.condition, 'orchestration.runtime.max');
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });
