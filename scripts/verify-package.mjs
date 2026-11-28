@@ -95,7 +95,7 @@ try {
   });
   if (explicitInput.status !== 201) throw new Error(`package smoke explicit session start failed: ${explicitInput.status}`);
   explicitInputStatus = explicitInput.status;
-  await access(join(controlRoot, 'main', 'sessions', 'explicit-brain.jsonl'));
+  await access(join(controlRoot, 'sessions', started.projectKey, 'explicit-interaction', 'sessions', 'explicit-brain.jsonl'));
   const tasksResponse = await fetch(`${baseUrl}/api/tasks`, { headers: { cookie: sessionCookie } });
   if (tasksResponse.status !== 200) throw new Error(`package smoke runtime API failed: /api/tasks ${tasksResponse.status}`);
   tasksStatus = tasksResponse.status;

@@ -814,6 +814,10 @@ export function parseRevisionLabel(label) {
  * it is never guessed from a name.
  */
 export function interactionJournalPath(binding) {
+  const projectRoot = binding?.runtimePaths?.projectRoot
+    ?? binding?.formalPaths?.projectRoot
+    ?? null;
+  if (projectRoot) return join(projectRoot, 'explicit-interaction', 'sessions', 'explicit-brain.jsonl');
   const mainRoot = binding?.runtimePaths?.mainRoot
     ?? (binding?.controlRoot ? join(binding.controlRoot, 'main') : null)
     ?? binding?.formalPaths?.mainRoot

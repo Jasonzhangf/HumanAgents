@@ -120,6 +120,7 @@ declare module 'node:fs/promises' {
     isFile(): boolean;
   }
   export function appendFile(path: string, data: string, encoding?: string): Promise<void>;
+  export function copyFile(src: string, dest: string, mode?: number): Promise<void>;
   export function mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>;
   export function link(oldPath: string, newPath: string): Promise<void>;
   export function open(path: string | URL, flags: string | number, mode?: number): Promise<FileHandle>;

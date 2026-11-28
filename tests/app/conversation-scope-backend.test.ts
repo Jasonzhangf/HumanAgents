@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { ScopedConversationBackend } from '../../packages/app/src/conversation-scope-backend.js'
 import type { MainTopicProjection } from '../../packages/ui/projection/main-topic.js'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { ensureCanonicalProjectInteractionRoot } from '../../packages/app/src/cli.js'
 import { createUiRuntimeRequestDispatcher } from '../../packages/app/src/ui-runtime/server.js'
 import { FakeReplayExecutionRuntimePort, FileCheckpointStore, UiRuntimeJournal, UiRuntimeService } from '../../packages/app/src/ui-runtime/index.js'
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js'
@@ -610,5 +611,40 @@ test('HTTP system dashboard projects connected conversationSession per registere
     assert.equal((dynTopic.body as { mode?: string }).mode, 'rcc')
   } finally {
     await dispatcher.sseRegistry.closeAll('server.shutdown')
+  }
+})
+
+test('canonical project interaction root stays project-scoped when switching between secondary and serve-bound roles', async () => {
+  const controlRoot = await mkdtemp(join(tmpdir(), 'humanagent-canonical-interaction-'))
+  try {
+    const mainRoot = join(controlRoot, 'main')
+    const mainSessionsRoot = join(mainRoot, 'sessions')
+    await mkdir(mainSessionsRoot, { recursive: true })
+    await writeFile(join(mainSessionsRoot, 'explicit-brain.jsonl'), '{"legacy":"project-a"}\n', 'utf8')
+    const projectAPaths = {
+      projectKey: 'project-a',
+      projectRoot: join(controlRoot, 'sessions', 'project-a'),
+      mainRoot,
+      mainSessionsRoot,
+    }
+    const projectBPaths = {
+      projectKey: 'project-b',
+      projectRoot: join(controlRoot, 'sessions', 'project-b'),
+      mainRoot,
+      mainSessionsRoot,
+    }
+    const rootABound = await ensureCanonicalProjectInteractionRoot(projectAPaths, { allowLegacySeed: true })
+    assert.equal(rootABound, join(projectAPaths.projectRoot, 'explicit-interaction'))
+    assert.equal(await readFile(join(rootABound, 'sessions', 'explicit-brain.jsonl'), 'utf8'), '{"legacy":"project-a"}\n')
+
+    const rootBSecondary = await ensureCanonicalProjectInteractionRoot(projectBPaths, { allowLegacySeed: false })
+    assert.equal(rootBSecondary, join(projectBPaths.projectRoot, 'explicit-interaction'))
+    await writeFile(join(rootBSecondary, 'sessions', 'explicit-brain.jsonl'), '{"project":"b"}\n', 'utf8')
+
+    const rootBBound = await ensureCanonicalProjectInteractionRoot(projectBPaths, { allowLegacySeed: true })
+    assert.equal(rootBBound, rootBSecondary)
+    assert.equal(await readFile(join(rootBBound, 'sessions', 'explicit-brain.jsonl'), 'utf8'), '{"project":"b"}\n')
+  } finally {
+    await rm(controlRoot, { recursive: true, force: true })
   }
 })
