@@ -9,10 +9,12 @@ import {
   listConfiguredProjects,
   loadConfiguration,
   resolveConfiguredConversationScopes,
+  resolveConversationScope,
   resolveOptionalAlexReadonlyInventoryRoot,
   resolveProductPaths,
   resolveRuntimePaths,
   resolveWebSearchBackendConfig,
+  runtimePathsForConversationProject,
   type LoadedConfiguration,
   type RuntimePaths,
 } from '../../config/src/index.js';
@@ -1881,12 +1883,26 @@ export async function main(args: readonly string[]): Promise<void> {
       }) => selectedAgentProviderPreparerFor(agentEvidenceRoot)<TasklessProviderExecutionIdentityRef>(selection);
       const prepareExplicitBrainHelper = explicitBrainHelperProviderPreparerFor(evidenceRoot);
       const explicitBrainTemplateRoot = process.env.HUMANAGENT_TEMPLATE_ROOT;
-      const conversationProjects = (await listConfiguredProjects(paths)).projects
-        .filter((project) => project.projectKey === paths.projectKey);
-      const conversationDescriptors = resolveConfiguredConversationScopes({
+      const configuredProjectsCatalog = await listConfiguredProjects(paths);
+      const conversationProjects = configuredProjectsCatalog.projects;
+      const conversationDescriptors = [...resolveConfiguredConversationScopes({
         config: { internal: configuration.internal, user: configuration.effective },
         projects: conversationProjects,
-      });
+      })];
+      if (!conversationDescriptors.some((descriptor) => descriptor.scope.kind === 'alex')) {
+        const machineName = process.env.HOSTNAME?.trim() || 'local';
+        conversationDescriptors.unshift({
+          scope: { kind: 'alex' },
+          scopeKey: 'alex',
+          canonicalAddress: `${machineName}.CEO`,
+          agentId: configuration.internal.ceoAgentId ?? 'Alex',
+          role: 'ceo',
+        });
+      }
+      const alexConfiguredBinding = effectiveAgentProviderBindings.some(
+        (candidate) => candidate.agentId === (conversationDescriptors.find((d) => d.scope.kind === 'alex')?.agentId ?? 'Alex')
+          && candidate.roleId === 'interaction',
+      );
       const projectInteractionAgentId = conversationDescriptors.find((descriptor) => descriptor.scope.kind === 'project')?.agentId
         ?? configuration.effective.project?.defaultAgent;
       const projectExplicitBrainHelperProviderPreparer = (selection: {
@@ -1910,29 +1926,140 @@ export async function main(args: readonly string[]): Promise<void> {
           : {}),
       });
       let projectRuntimeForConversation: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+      const resolveDynamicProjectDescriptor = async (projectKey: string) => {
+        const latestCatalog = await listConfiguredProjects(paths);
+        try {
+          return resolveConversationScope({ kind: 'project', projectKey }, {
+            internal: configuration.internal,
+            user: { ...configuration.effective, project: { ...configuration.effective.project } },
+            projects: latestCatalog.projects,
+          });
+        } catch (error) {
+          if (error instanceof ConfigurationError) return undefined;
+          if (error instanceof Error && error.name === 'ConversationScopeResolutionError') return undefined;
+          throw error;
+        }
+      };
       const scopedConversationBackend = new ScopedConversationBackend({
         descriptors: conversationDescriptors,
+        resolveProjectDescriptor: resolveDynamicProjectDescriptor,
         stateRoot: join(paths.mainRoot, 'conversation-scopes'),
         createSession: async (descriptor) => {
           if (descriptor.scope.kind === 'project') {
-            if (projectRuntimeForConversation === undefined || descriptor.projectKey !== paths.projectKey) {
+            if (descriptor.projectKey === paths.projectKey) {
+              if (projectRuntimeForConversation === undefined) {
+                throw new AppLifecycleError(
+                  'conversation.project-runtime-unavailable',
+                  `the project conversation runtime is not available for ${descriptor.projectKey}`,
+                  'retry after serve has started the configured project runtime',
+                  'humanagent.app.serve',
+                );
+              }
+              return scopedSessionFromUiRuntime(projectRuntimeForConversation.service);
+            }
+            const latestCatalog = await listConfiguredProjects(paths);
+            const targetProject = latestCatalog.projects.find((project) => project.projectKey === descriptor.projectKey);
+            if (!targetProject) {
               throw new AppLifecycleError(
                 'conversation.project-runtime-unavailable',
-                `the project conversation runtime is not available for ${descriptor.projectKey}`,
-                'retry after serve has started the configured project runtime',
+                `configured project is not available for ${descriptor.projectKey}`,
+                'declare the project workspace before opening its conversation',
                 'humanagent.app.serve',
               );
             }
-            return scopedSessionFromUiRuntime(projectRuntimeForConversation.service);
+            const targetPaths = runtimePathsForConversationProject(paths, targetProject);
+            await ensureControlLayout(targetPaths);
+            const targetCheckpointRoot = join(targetPaths.checkpointsRoot, 'ui-runtime');
+            const targetEvidenceRoot = join(targetPaths.artifactsRoot, 'ui-provider-evidence');
+            await mkdir(targetEvidenceRoot, { recursive: true });
+            const targetRuntime = await startUiRuntime({
+              listen: false,
+              mode,
+              agentRoster: configuration.agentRoster,
+              implicitOrchestrationMaxRuntimes: effectiveImplicitOrchestrationMaxRuntimes(configuration.effective),
+              onImplicitOrchestrationLimitChange: (limit) => {
+                serveRuntime?.runtimePool.setMaxRuntimes(limit);
+              },
+              controlStateRoot: paths.controlRoot,
+              accessControl,
+              organId: id('organ', 'humanagent-ui'),
+              binding,
+              providerSource: resolvedSource,
+              port: cordisHost.getExecutionRuntimePort(),
+              checkpointRoot: targetCheckpointRoot,
+              interactionRoot: targetPaths.mainRoot,
+              evidenceRoot: targetEvidenceRoot,
+              uiRoot,
+              productRoot: paths.controlRoot,
+              projectKey: targetPaths.projectKey,
+              workspaceRoot: targetPaths.workspaceCwd,
+              runtimePaths: targetPaths,
+              projectCatalog: () => listConfiguredProjects(paths),
+              providerToolStorageKey: `project-${targetPaths.projectKey}`,
+              providerToolWorkspaceRoot: targetPaths.workspaceCwd,
+              webSearchProviderConfig: resolveWebSearchBackendConfig(),
+              ...(providerRetryConfigFromEffective(configuration) === undefined ? {} : {
+                providerRetryConfig: {
+                  config: providerRetryConfigFromEffective(configuration)!,
+                  journalRoot: join(targetPaths.journalRoot, 'ui-runtime'),
+                },
+              }),
+              ...(explicitBrainTemplateRoot === undefined ? {} : { explicitBrainTemplateRoot }),
+              ...(mode === 'fake' ? {} : {
+                explicitBrainHelperProviderPreparer: projectExplicitBrainHelperProviderPreparer,
+              }),
+              memory: {
+                coordinator: new MemoryCoordinator(),
+                backend: new DeterministicMemoryBackend(),
+                projectKey: targetPaths.projectKey,
+                roleId: 'interaction',
+              },
+              runtimeComposition: {
+                ...(mode === 'fake' ? {} : {
+                  prepareAgentProvider: prepareProjectSelectedAgentProvider,
+                  prepareTaskAgentProvider,
+                }),
+                ...(orchestrationPorts === undefined ? {} : {
+                  createTaskAssembly: serveRuntime!.createTaskAssembly,
+                }),
+              },
+              lease: () => supervisor?.lease,
+            });
+            targetRuntime.service.bindReadResources({ runtimePaths: targetPaths, projectCatalog: () => listConfiguredProjects(paths) });
+            return {
+              ...scopedSessionFromUiRuntime(targetRuntime.service),
+              close: () => targetRuntime.close(),
+            };
           }
           const alexRoot = join(paths.mainRoot, 'alex');
           const alexEvidenceRoot = join(alexRoot, 'evidence');
           const alexTaskWorkspaceRoot = join(alexRoot, 'task-workspace');
           await mkdir(alexTaskWorkspaceRoot, { recursive: true });
+          const alexAgentRoster = configuration.agentRoster.some((agent) => agent.agentId === descriptor.agentId)
+            ? configuration.agentRoster
+            : [
+                ...configuration.agentRoster,
+                {
+                  agentId: descriptor.agentId,
+                  roleId: 'interaction' as const,
+                  managementRole: 'ceo' as const,
+                  templateRef: 'builtin/interaction@1.0.0',
+                  driverRef: effectiveLegacyProvider.provider,
+                  skills: ['input-normalization', 'task-matching', 'confirmation'],
+                  tools: ['input.receive', 'task.query', 'proposal.render'],
+                  permissions: ['task.read', 'task.propose'],
+                  memoryScopes: ['task', 'organ', 'approved-global'],
+                  resourceClass: 'foreground' as const,
+                },
+              ];
+          const resolvedAlexAgentId = alexConfiguredBinding ? descriptor.agentId : projectInteractionAgentId;
           const alexRuntime = await startUiRuntime({
             listen: false,
             mode,
             implicitOrchestrationMaxRuntimes: effectiveImplicitOrchestrationMaxRuntimes(configuration.effective),
+            onImplicitOrchestrationLimitChange: (limit) => {
+              serveRuntime?.runtimePool.setMaxRuntimes(limit);
+            },
             controlStateRoot: paths.controlRoot,
             accessControl,
             organId: id('organ', 'humanagent-alex-conversation'),
@@ -1952,7 +2079,7 @@ export async function main(args: readonly string[]): Promise<void> {
             ...(alexReadonlyInventoryRoot === undefined ? {} : {
               providerToolReadonlyInventoryRoot: alexReadonlyInventoryRoot,
             }),
-            agentRoster: configuration.agentRoster,
+            agentRoster: alexAgentRoster,
             // Cold recovery reads the retry-cycle owner even when this scoped
             // Alex launch has no provider avoidance configured.
             providerRetryJournalRoot: join(alexRoot, 'retry'),
@@ -1963,7 +2090,12 @@ export async function main(args: readonly string[]): Promise<void> {
               },
             }),
             ...(explicitBrainTemplateRoot === undefined ? {} : { explicitBrainTemplateRoot }),
-            explicitBrainHelperProviderPreparer: explicitBrainHelperProviderPreparerFor(alexEvidenceRoot),
+            explicitBrainHelperProviderPreparer: (selection) => explicitBrainHelperProviderPreparerFor(alexEvidenceRoot)({
+              ...selection,
+              ...(selection.configuredAgentId === undefined && selection.roleId === 'interaction' && resolvedAlexAgentId !== undefined
+                ? { configuredAgentId: resolvedAlexAgentId }
+                : {}),
+            }),
             memory: {
               coordinator: new MemoryCoordinator(),
               backend: new DeterministicMemoryBackend(),
@@ -1976,7 +2108,7 @@ export async function main(args: readonly string[]): Promise<void> {
                 // Alex is the interaction entry identity. Other duties, such as
                 // the closed-turn Planner, must resolve from their configured role.
                 configuredAgentId: selection.configuredAgentId
-                  ?? (selection.roleId === 'interaction' ? descriptor.agentId : undefined),
+                  ?? (selection.roleId === 'interaction' ? resolvedAlexAgentId : undefined),
               }),
               prepareTaskAgentProvider: taskAgentProviderPreparerFor(alexEvidenceRoot),
               // Alex has its own headless UI-runtime and journals. The task

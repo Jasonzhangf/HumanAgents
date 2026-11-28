@@ -441,6 +441,11 @@ export interface RuntimeProjectReadProjection {
   readonly taskCount: number;
   readonly complete: boolean;
   readonly failures: readonly RuntimeReadFailure[];
+  readonly conversationSession?: {
+    readonly connected: boolean;
+    readonly agentName: string;
+    readonly agentId: string;
+  };
 }
 
 export interface RuntimeSystemReadProjection {

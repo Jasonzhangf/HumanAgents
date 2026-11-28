@@ -1522,7 +1522,23 @@ async function handleRequest(
         return;
       }
       if (scope === 'system') {
-        writeJson(response, 200, await service.systemRead());
+        const system = await service.systemRead();
+        const projects = scopedConversationBackend
+          ? await Promise.all(system.projects.map(async (project) => {
+              const descriptor = await scopedConversationBackend.ensureProjectDescriptor(project.scope.projectKey);
+              return descriptor
+                ? {
+                    ...project,
+                    conversationSession: {
+                      connected: true,
+                      agentName: 'Jenny',
+                      agentId: descriptor.agentId,
+                    },
+                  }
+                : project;
+            }))
+          : system.projects;
+        writeJson(response, 200, { ...system, projects });
         return;
       }
       if (scope === 'project') {

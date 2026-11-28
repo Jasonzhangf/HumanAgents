@@ -569,3 +569,43 @@ test('HTTP opted-in scope recovery delegates exact task and operation to the exi
     await dispatcher.sseRegistry.closeAll('server.shutdown')
   }
 })
+
+test('HTTP system dashboard projects connected conversationSession per registered project and resolves dynamic project scopes', async () => {
+  const dynamicBackend = new ScopedConversationBackend({
+    descriptors: [
+      { scope: { kind: 'alex' }, scopeKey: 'alex', canonicalAddress: 'machine.CEO', agentId: 'alex-agent', role: 'ceo' },
+    ],
+    resolveProjectDescriptor: async (projectKey) => projectKey === 'project-dyn'
+      ? { scope: { kind: 'project', projectKey: 'project-dyn' }, scopeKey: 'project:project-dyn', canonicalAddress: 'machine.project-dyn.Jenny', agentId: 'interaction-default', role: 'project-lead', projectKey: 'project-dyn', workspaceCwd: '/tmp/project-dyn' }
+      : undefined,
+    createSession: async (descriptor) => session(descriptor.scopeKey),
+  })
+  const dispatcher = memoryDispatcher(dynamicBackend, {
+    systemRead: async () => ({
+      surface: 'runtime-system',
+      scope: { kind: 'system' },
+      observedAt: new Date(0).toISOString(),
+      runtime: { state: 'ready', mode: 'fake', connected: true },
+      coverage: 'configured-projects-in-current-control-root',
+      projects: [
+        { surface: 'runtime-project', scope: { kind: 'project', projectKey: 'project-dyn' }, label: 'DynProj', workspaceCwd: '/tmp/project-dyn', observedAt: new Date(0).toISOString(), tasks: [], taskCount: 0, complete: true, failures: [] },
+        { surface: 'runtime-project', scope: { kind: 'project', projectKey: 'project-missing' }, label: 'MissingProj', workspaceCwd: '/tmp/project-missing', observedAt: new Date(0).toISOString(), tasks: [], taskCount: 0, complete: true, failures: [] },
+      ],
+      taskCount: 0,
+      complete: true,
+      failures: [],
+    }),
+  })
+  try {
+    const sysRes = await memoryCall(dispatcher, '/api/dashboard?scope=system')
+    assert.equal(sysRes.status, 200)
+    const projects = (sysRes.body as { projects: Array<{ scope: { projectKey: string }; conversationSession?: { connected: boolean; agentName: string; agentId: string } }> }).projects
+    assert.deepEqual(projects[0]?.conversationSession, { connected: true, agentName: 'Jenny', agentId: 'interaction-default' })
+    assert.equal(projects[1]?.conversationSession, undefined)
+    const dynTopic = await memoryCall(dispatcher, '/api/main-topic?scope=project&projectKey=project-dyn')
+    assert.equal(dynTopic.status, 200)
+    assert.equal((dynTopic.body as { agentName: string }).agentName, 'Jenny')
+  } finally {
+    await dispatcher.sseRegistry.closeAll('server.shutdown')
+  }
+})

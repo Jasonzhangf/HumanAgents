@@ -91,6 +91,7 @@ export interface ScopedConversationBackendOptions {
   readonly descriptors: readonly ConversationScopeDescriptor[];
   readonly sessions?: ReadonlyMap<string, ScopedConversationSession>;
   readonly createSession?: ScopedConversationSessionFactory;
+  readonly resolveProjectDescriptor?: (projectKey: string) => Promise<ConversationScopeDescriptor | undefined>;
   readonly legacyBinding?: LegacyConversationBinding;
   /** Control-root-owned state directory. Omit only for an explicitly ephemeral fixture. */
   readonly stateRoot?: string;
@@ -112,9 +113,11 @@ export interface ScopedConversationResponse<T> {
 }
 
 export class ScopedConversationBackend {
-  private readonly descriptors: ReadonlyMap<string, ConversationScopeDescriptor>;
+  private readonly descriptors: Map<string, ConversationScopeDescriptor>;
   private readonly sessions: ReadonlyMap<string, ScopedConversationSession>;
   private readonly createSession?: ScopedConversationSessionFactory;
+  private readonly resolveProjectDescriptor?: (projectKey: string) => Promise<ConversationScopeDescriptor | undefined>;
+  private readonly descriptorResolutions = new Map<string, Promise<ConversationScopeDescriptor | undefined>>();
   private readonly sessionCache = new Map<string, ScopedConversationSession>();
   private readonly sessionCreations = new Map<string, Promise<ScopedConversationSession>>();
   private readonly sessionKeys = new WeakMap<object, string>();
@@ -134,6 +137,7 @@ export class ScopedConversationBackend {
     }
     this.sessions = options.sessions ?? new Map();
     this.createSession = options.createSession;
+    this.resolveProjectDescriptor = options.resolveProjectDescriptor;
     const seenSessions = new Set<object>();
     for (const [scopeKey, session] of this.sessions) {
       if (seenSessions.has(session)) throw new ScopedConversationBackendError('scope.session-shared', 'one session is bound to more than one conversation scope: ' + scopeKey);
@@ -153,7 +157,32 @@ export class ScopedConversationBackend {
     });
   }
 
+  async ensureProjectDescriptor(projectKey: string): Promise<ConversationScopeDescriptor | undefined> {
+    const scopeKey = conversationScopeKey({ kind: 'project', projectKey });
+    const existing = this.descriptors.get(scopeKey);
+    if (existing !== undefined) return existing;
+    if (this.resolveProjectDescriptor === undefined) return undefined;
+    let pending = this.descriptorResolutions.get(scopeKey);
+    if (pending === undefined) {
+      pending = this.resolveProjectDescriptor(projectKey).then((resolved) => {
+        if (resolved !== undefined && resolved.scopeKey === scopeKey && !this.descriptors.has(scopeKey)) {
+          this.descriptors.set(scopeKey, resolved);
+        }
+        return this.descriptors.get(scopeKey) ?? resolved;
+      }).finally(() => {
+        if (this.descriptorResolutions.get(scopeKey) === pending) {
+          this.descriptorResolutions.delete(scopeKey);
+        }
+      });
+      this.descriptorResolutions.set(scopeKey, pending);
+    }
+    return pending;
+  }
+
   private async session(scope: ConversationScope): Promise<{ readonly descriptor: ConversationScopeDescriptor; readonly session: ScopedConversationSession; readonly state: Awaited<ReturnType<ScopedConversationEngine['open']>> }> {
+    if (scope.kind === 'project') {
+      await this.ensureProjectDescriptor(scope.projectKey);
+    }
     const state = await this.engine.open(scope);
     const descriptor = state.scope;
     let session = this.sessionCache.get(descriptor.scopeKey);
@@ -184,6 +213,9 @@ export class ScopedConversationBackend {
   }
 
   async readState(scope: ConversationScope): Promise<Awaited<ReturnType<ScopedConversationEngine['open']>>> {
+    if (scope.kind === 'project') {
+      await this.ensureProjectDescriptor(scope.projectKey);
+    }
     return this.engine.read(scope);
   }
 
@@ -345,7 +377,9 @@ export class ScopedConversationBackend {
   }
 
   async readMainTopic(scope: ConversationScope): Promise<ScopedConversationResponse<ScopedMainTopicProjection>> {
-    const descriptor = this.descriptors.get(conversationScopeKey(scope));
+    const descriptor = scope.kind === 'project'
+      ? await this.ensureProjectDescriptor(scope.projectKey)
+      : this.descriptors.get(conversationScopeKey(scope));
     if (descriptor === undefined) throw new ScopedConversationBackendError('scope.unknown', `conversation scope is not registered: ${conversationScopeKey(scope)}`);
     const state = await this.engine.read(scope);
     const legacy = this.legacyMetadata(scope, state);
@@ -384,7 +418,9 @@ export class ScopedConversationBackend {
 
   async receiveInput(scope: ConversationScope, input: Parameters<ScopedConversationSession['receiveInput']>[0]): Promise<ScopedConversationResponse<ScopedInputReceipt>> {
     return this.serializedInput(scope, async () => {
-      const descriptor = this.descriptors.get(conversationScopeKey(scope));
+      const descriptor = scope.kind === 'project'
+        ? await this.ensureProjectDescriptor(scope.projectKey)
+        : this.descriptors.get(conversationScopeKey(scope));
       if (descriptor === undefined) throw new ScopedConversationBackendError('scope.unknown', `conversation scope is not registered: ${conversationScopeKey(scope)}`);
       const state = await this.engine.read(scope);
       const digest = createHash('sha256').update(JSON.stringify({

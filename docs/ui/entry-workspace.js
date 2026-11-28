@@ -349,7 +349,9 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
       }
       const index = positions.get(workspaceKey) ?? 0
       positions.set(workspaceKey, index + 1)
-      const groupSignature = JSON.stringify([label, isCurrent, mode, workspace, isCurrent ? current.agentName : undefined])
+      const sessionConnected = Boolean(project.conversationSession?.connected)
+      const groupSignature = JSON.stringify([label, isCurrent, mode, workspace, isCurrent ? current.agentName : undefined,
+        sessionConnected, project.conversationSession?.agentId])
       const previous = projectGroups.get(key)
       if (previous?.signature === groupSignature) {
         const position = workspaceProjects.children[index]
@@ -390,9 +392,14 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
         })
         members.append(element('summary', '成员'))
         const memberLabel = isCurrent ? current.projectName : project.label || '项目'
+        const projectMainTopic = isCurrent
+          ? { projectKey: key, agentName: current.agentName, agentId: current.agentId, href: window.location.href, current: true }
+          : project.conversationSession?.connected
+            ? { projectKey: key, agentName: project.conversationSession.agentName || 'Jenny',
+                agentId: project.conversationSession.agentId, href: entryProjectHref('', key, current?.mode), current: false }
+            : null
         members.append(mountMemberRoster({ projectKey: key, projectLabel: memberLabel, reader: rosterReader,
-          mainTopic: isCurrent ? { projectKey: key, agentName: current.agentName,
-            agentId: current.agentId, href: window.location.href, current: true } : null,
+          mainTopic: projectMainTopic,
           onCurrentActivate: () => {
             if (mobileRail.open) mobileRail.close()
             focusCurrentConversation()

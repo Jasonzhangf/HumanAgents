@@ -148,7 +148,10 @@ export function mountMemberRoster({ projectKey, projectLabel, reader, mainTopic,
   const topic = mainTopic?.projectKey === projectKey ? mainTopic : null
   function render(members, issue) {
     root.replaceChildren()
-    const mainMember = topic?.agentId && members.find((member) => member.agentId === topic.agentId)
+    const mainMember = topic
+      ? ((topic.agentId && members.find((member) => member.agentId === topic.agentId))
+          || members.find((member) => member.roleId === 'manager' || member.memberName === (topic.agentName || 'Jenny')))
+      : null
     const displayed = topic ? [mainMember ?? { memberName: topic.agentName, roleId: 'manager', sessions: [] },
       ...members.filter((member) => member !== mainMember)] : members
     if (!topic) {

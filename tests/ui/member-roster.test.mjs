@@ -109,5 +109,20 @@ test('serve-bound Jenny is one member row with separate session and detail contr
     assert.match(issue, /not found/)
     failed.children[0].children[0].listeners.click({ preventDefault() {} })
     assert.equal(activations, 1, 'clicking the current Jenny returns to the existing conversation')
+
+    // Non-current connected project links directly to its Jenny conversation without duplicating manager row
+    const linked = mountMemberRoster({
+      projectKey: 'proj-2',
+      projectLabel: '关联项目',
+      mainTopic: { projectKey: 'proj-2', agentName: 'Jenny', agentId: 'interaction-default', href: './?scope=project&projectKey=proj-2', current: false },
+      reader: { read: async (projectKey) => ({ projectKey, rosterState: 'configured', members: [
+        { memberId: 'manager-local-proj-2', memberName: 'Jenny', agentId: 'manager-local-proj-2', roleId: 'manager', sessions: [] },
+        { memberId: 'm-1', memberName: 'Alice', agentId: 'm-1', roleId: 'executor', sessions: [] },
+      ] }) },
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(linked.children.length, 2)
+    assert.equal(linked.children[0].children[0].tag, 'a')
+    assert.equal(linked.children[0].children[0].href, './?scope=project&projectKey=proj-2')
   } finally { globalThis.document = previous }
 })
