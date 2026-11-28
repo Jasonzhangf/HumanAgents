@@ -17,7 +17,7 @@ import {
   validateCheckpointClosureRecord, validateCheckpointReentryRecord, validateControlProbeRecord, validateControlWatchdogPolicy, validateInteractionClosure,
   validateEventConsumerCursor, validateEventConsumerReceipt, validateEventHandlerCommit, validateEventRetryObligation, validateExecutionBinding,
   validateGoalRecord, validateOccurrence, validateProviderBinding, validateProviderCapabilities,
-  MEMORY_SCOPE_COMPATIBILITY_VERSION, canonicalMemoryScopeToLegacy, legacyMemoryScopeToCanonical,
+  MEMORY_SCOPE_COMPATIBILITY_VERSION, canonicalMemoryScopeToLegacy,
   validateCanonicalMemoryScope, validateMemoryActor, validateMemoryBinding, validateMemoryCurationResult, validateMemoryFollowUpRequest,
   validateMemoryForgettingPlan, validateMemoryForgettingRequest, validateMemoryPromotionReceipt, validateMemoryQueryRequest, validateMemoryRecallRequest,
   validateMemoryReviewReceipt, validateMemorySubmission, validateProjectSourceUpdateProposal,
@@ -1541,26 +1541,6 @@ test('memory contracts keep canonical scope, provenance, review, and promotion b
     compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
     scope: globalScope,
   }), { kind: 'approved-global', organId: id('organ', 'global') });
-  assert.deepEqual(legacyMemoryScopeToCanonical({
-    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
-    scope: { kind: 'task', organId: organ, taskId: task },
-    projectKey: 'project-a',
-  }), projectScope);
-  assert.deepEqual(legacyMemoryScopeToCanonical({
-    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
-    scope: { kind: 'organ', organId: organ },
-    projectKey: 'project-a',
-  }), { namespace: 'project', projectKey: 'project-a', organId: organ });
-  assert.throws(() => legacyMemoryScopeToCanonical({
-    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
-    scope: { kind: 'approved-global', organId: id('organ', 'global') },
-    projectKey: 'project-a',
-  }), ContractError);
-  assert.throws(() => legacyMemoryScopeToCanonical({
-    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
-    scope: { kind: 'organ', organId: organ },
-    projectKey: '',
-  }), ContractError);
   assert.throws(() => canonicalMemoryScopeToLegacy({
     compatibilityVersion: 2 as never,
     scope: projectScope,

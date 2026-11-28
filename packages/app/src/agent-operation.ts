@@ -26,7 +26,7 @@ import {
 } from '../../contracts/src/index.js';
 import type { AgentConfig, LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
 import { managementRoleForAgent } from '../../agent-templates/src/index.js';
-import { closeAgentProvider, composeAgentDriver, ensureDshSettings, prepareAgentProvider, resolveDshHome, type AgentProviderComposition, type ComposedAgentDriver } from './agent-driver-composition.js';
+import { closeAgentProvider, composeAgentDriver, prepareAgentProvider, type AgentProviderComposition, type ComposedAgentDriver } from './agent-driver-composition.js';
 import { openAgentExecution, type AgentExecutionSession, type AgentExecutionReceipt } from './agent-execution.js';
 import { createJsonlAttentionPort } from './attention-journal.js';
 import {
@@ -216,7 +216,6 @@ export async function prepareAgentOperation(input: PrepareAgentOperationInput): 
     const composed = input.composed ?? composeAgentDriver({
       agent,
       paths: input.paths,
-      ...(input.configuration.effective.execution?.dsh === undefined ? {} : { dsh: input.configuration.effective.execution.dsh }),
       ...(input.configuration.effective.execution?.opencode === undefined ? {} : { opencode: input.configuration.effective.execution.opencode }),
       ...(input.configuration.effective.execution?.antigravity === undefined ? {} : { antigravity: input.configuration.effective.execution.antigravity }),
       ...(input.configuration.effective.execution?.dshAcp === undefined ? {} : { dshAcp: input.configuration.effective.execution.dshAcp }),
@@ -224,12 +223,6 @@ export async function prepareAgentOperation(input: PrepareAgentOperationInput): 
       workspace: input.workspace,
       ...(pair === undefined ? {} : { rcc: { port: pair.port, binding: pair.binding, scope, taskId, operationId, executionEpoch, assignmentId, inputRefs } }),
     });
-    const dshSettings = input.configuration.effective.execution?.dsh;
-    if (agent.driverRef === 'dsh' && dshSettings) {
-      // The DSH home owns provider routes, so HumanAgent must place the one
-      // configured route before the runtime boots. Conflicts fail loudly.
-      await ensureDshSettings(resolveDshHome({ paths: input.paths, configuredHome: dshSettings.home }), dshSettings);
-    }
     const journal = checkpointJournal(input.paths);
     const closurePort = createJsonlCheckpointClosurePort({
       filePath: join(input.paths.journalRoot, 'checkpoints.jsonl'),
