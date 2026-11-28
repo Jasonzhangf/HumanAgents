@@ -3403,6 +3403,13 @@ function registerPublicConsumers(): void {
       assert.equal(rehydrated.state, 'stopped');
       assert.deepEqual(rehydrated.allowedActions, ['start']);
       assert.equal(rehydrated.checkpoint?.outcome, 'stopped');
+
+      const freshAllocation = coordinator2.prepareExecution(fixture.taskId, {
+        prompt: 'fresh execution after stopped held turn',
+      });
+      assert.ok(freshAllocation.operationId.value !== fixture.allocation.operationId.value);
+      assert.ok(freshAllocation.scope.cycleId?.value !== fixture.allocation.scope.cycleId?.value);
+      assert.ok(freshAllocation.executionEpoch > (stopped.executionEpoch ?? 0));
     } finally {
       await http.close();
       await rm(fixture.root, { recursive: true, force: true });

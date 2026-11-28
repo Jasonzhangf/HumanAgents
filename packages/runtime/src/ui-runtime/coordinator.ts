@@ -9048,6 +9048,15 @@ export class RuntimeTaskCoordinator {
         }
         task.running = false;
         task.stopping = false;
+        if (
+          task.state === 'succeeded'
+          || task.state === 'stopped'
+          || task.state === 'failed'
+          || task.state === 'cancelled'
+        ) {
+          task.release = undefined;
+          task.releasePending = undefined;
+        }
         if (selection?.basis === 'terminal') {
           applySettledTaskProjection(task, task.state === 'waiting' || task.state === 'blocked'
             ? pendingTaskNextStepText(checkpoint.next)
