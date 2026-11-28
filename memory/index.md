@@ -19,6 +19,10 @@ _Empty._
 - tags: `delivery`, `frontend-test`, `gate`, `mvp`, `ontology`
 - details: [L2/all-deliverables-frontend-test-20261108.md](L2/all-deliverables-frontend-test-20261108.md)
 
+### Ontology: Single-turn Checkpoint summary/detail split with simple-QA fast path
+- tags: `c07`, `checkpoint`, `context-tools`, `mvp`, `ontology`
+- details: [L2/checkpoint-single-turn-summary-and-detail.md](L2/checkpoint-single-turn-summary-and-detail.md)
+
 ### 入口页任务列表放入可隐藏抽屉
 - tags: `drawer`, `mvp`, `ontology`, `task-list`, `ux`
 - details: [L2/entry-task-list-drawer-20261108.md](L2/entry-task-list-drawer-20261108.md)
@@ -219,6 +223,10 @@ _Empty._
 - tags: `error`, `mia`, `mvp`, `ontology`, `retry`
 - details: [L2/transient-error-retry-10-20261108.md](L2/transient-error-retry-10-20261108.md)
 
+### Ontology: Per-turn context is Checkpoints plus live incomplete Turn, converging to Checkpoint plus timeline input
+- tags: `checkpoint`, `context-tools`, `mvp`, `ontology`, `turn-context`
+- details: [L2/turn-context-checkpoint-plus-live-turn.md](L2/turn-context-checkpoint-plus-live-turn.md)
+
 ### 用户界面只显示可理解的语义阶段名
 - tags: `mvp`, `ontology`, `stage-label`, `ux`
 - details: [L2/user-facing-stage-labels-20261108.md](L2/user-facing-stage-labels-20261108.md)
@@ -290,11 +298,11 @@ _Empty._
 Base budget: 8 lines. Copy the compact lines into the project Skill `description` after manual architecture deduplication. Fill level 1 first; use level 2, then level 3, only for remaining slots.
 
 - L2: Ontology: MVP delivery requires real frontend user-perspective acceptance (plan) [delivery,frontend-test,gate,mvp,ontology] -> L2/all-deliverables-frontend-test-20261108.md
+- L2: Ontology: Single-turn Checkpoint summary/detail split with simple-QA fast path (plan) [c07,checkpoint,context-tools,mvp,ontology] -> L2/checkpoint-single-turn-summary-and-detail.md
 - L2: 入口页任务列表放入可隐藏抽屉 (plan) [drawer,mvp,ontology,task-list,ux] -> L2/entry-task-list-drawer-20261108.md
 - L2: C01 · 上下文按稳定性排列 (plan) [c01,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c01.md
 - L2: C02 · 标准 Skill 与工具说明 (plan) [c02,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c02.md
 - L2: C03 · 框架按身份、operator 和配置执行 (plan) [c03,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c03.md
 - L2: C04 · 项目变更自动投递收件箱 (plan) [c04,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c04.md
 - L2: C05 · Agent 寻址工具模块 (plan) [c05,context-tools,explicit-agent,mvp,ontology] -> L2/explicit-agent-context-tools-c05.md
-- L2: C06 · Agent 通信工具模块 (plan) [c06,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c06.md
 
