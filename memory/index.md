@@ -39,6 +39,10 @@ _Empty._
 - tags: `c04`, `context-tools`, `explicit-agent`, `ontology`
 - details: [L2/explicit-agent-context-tools-c04.md](L2/explicit-agent-context-tools-c04.md)
 
+### C05 · Agent 寻址工具模块
+- tags: `c05`, `context-tools`, `explicit-agent`, `mvp`, `ontology`
+- details: [L2/explicit-agent-context-tools-c05.md](L2/explicit-agent-context-tools-c05.md)
+
 ### C06 · Agent 通信工具模块
 - tags: `c06`, `context-tools`, `explicit-agent`, `ontology`
 - details: [L2/explicit-agent-context-tools-c06.md](L2/explicit-agent-context-tools-c06.md)
@@ -71,6 +75,18 @@ _Empty._
 - tags: `mvp-ui-v1`, `ontology`
 - details: [L2/mvp-v1-01-project.md](L2/mvp-v1-01-project.md)
 
+### 唯一显式入口与身份
+- tags: `mvp`, `mvp-ui-v1`, `ontology`
+- details: [L2/mvp-v1-02-identity.md](L2/mvp-v1-02-identity.md)
+
+### 成员配置与寻址
+- tags: `mvp`, `mvp-ui-v1`, `ontology`
+- details: [L2/mvp-v1-03-member.md](L2/mvp-v1-03-member.md)
+
+### 自动分派的默认决定
+- tags: `mvp`, `mvp-ui-v1`, `ontology`
+- details: [L2/mvp-v1-04-dispatch.md](L2/mvp-v1-04-dispatch.md)
+
 ### 任务归属与任务板
 - tags: `mvp-ui-v1`, `ontology`
 - details: [L2/mvp-v1-05-board.md](L2/mvp-v1-05-board.md)
@@ -82,6 +98,10 @@ _Empty._
 ### 主 Topic 与旁支的并行会话
 - tags: `mvp-ui-v1`, `ontology`
 - details: [L2/mvp-v1-07-topic.md](L2/mvp-v1-07-topic.md)
+
+### 任务关系与记忆 Agent
+- tags: `mvp`, `mvp-ui-v1`, `ontology`
+- details: [L2/mvp-v1-08-runtime.md](L2/mvp-v1-08-runtime.md)
 
 ### 工作区 Buglist
 - tags: `mvp-ui-v1`, `ontology`
@@ -111,6 +131,14 @@ _Empty._
 - tags: `mvp-ui-v1`, `ontology`
 - details: [L2/mvp-v1-15-boundary.md](L2/mvp-v1-15-boundary.md)
 
+### 按模板新增成员
+- tags: `mvp`, `mvp-ui-v1`, `ontology`
+- details: [L2/mvp-v1-16-template.md](L2/mvp-v1-16-template.md)
+
+### 项目地址与人员地址
+- tags: `mvp`, `mvp-ui-v1`, `ontology`
+- details: [L2/mvp-v1-17-address.md](L2/mvp-v1-17-address.md)
+
 ### 消息投递与回执
 - tags: `mvp-ui-v1`, `ontology`
 - details: [L2/mvp-v1-18-delivery.md](L2/mvp-v1-18-delivery.md)
@@ -118,6 +146,10 @@ _Empty._
 ### 消息投递的三个执行时机
 - tags: `mvp-ui-v1`, `ontology`
 - details: [L2/mvp-v1-19-trigger.md](L2/mvp-v1-19-trigger.md)
+
+### 跨机器寻址与项目展开
+- tags: `mvp`, `mvp-ui-v1`, `ontology`
+- details: [L2/mvp-v1-20-remote.md](L2/mvp-v1-20-remote.md)
 
 ### Ontology: Goal carries target semantics, not dispatch control
 - tags: `busy-policy`, `dispatch-policy`, `goal`, `goal-revision`, `mvp`, `ontology`, `periodic`, `wakeup`
@@ -193,10 +225,6 @@ _Empty._
 
 ## Level 3 — new or unreviewed
 
-### C05 · Agent 寻址工具模块
-- tags: `c05`, `context-tools`, `explicit-agent`, `mvp`, `ontology`
-- details: [L3/explicit-agent-context-tools-c05.md](L3/explicit-agent-context-tools-c05.md)
-
 ### Frank 用户视角巡检目标已退役，由 Mia 接替
 - tags: `frank`, `mia`, `missing`, `mvp`, `patrol`, `replacement`
 - details: [L3/frank-patrol-goal-removed-20261107.md](L3/frank-patrol-goal-removed-20261107.md)
@@ -245,34 +273,6 @@ _Empty._
 - tags: `mvp-ui-v1`, `webui`
 - details: [L3/mvp-ui-v1-final-reference.md](L3/mvp-ui-v1-final-reference.md)
 
-### 唯一显式入口与身份
-- tags: `mvp`, `mvp-ui-v1`, `ontology`
-- details: [L3/mvp-v1-02-identity.md](L3/mvp-v1-02-identity.md)
-
-### 成员配置与寻址
-- tags: `mvp`, `mvp-ui-v1`, `ontology`
-- details: [L3/mvp-v1-03-member.md](L3/mvp-v1-03-member.md)
-
-### 自动分派的默认决定
-- tags: `mvp`, `mvp-ui-v1`, `ontology`
-- details: [L3/mvp-v1-04-dispatch.md](L3/mvp-v1-04-dispatch.md)
-
-### 任务关系与记忆 Agent
-- tags: `mvp`, `mvp-ui-v1`, `ontology`
-- details: [L3/mvp-v1-08-runtime.md](L3/mvp-v1-08-runtime.md)
-
-### 按模板新增成员
-- tags: `mvp`, `mvp-ui-v1`, `ontology`
-- details: [L3/mvp-v1-16-template.md](L3/mvp-v1-16-template.md)
-
-### 项目地址与人员地址
-- tags: `mvp`, `mvp-ui-v1`, `ontology`
-- details: [L3/mvp-v1-17-address.md](L3/mvp-v1-17-address.md)
-
-### 跨机器寻址与项目展开
-- tags: `mvp`, `mvp-ui-v1`, `ontology`
-- details: [L3/mvp-v1-20-remote.md](L3/mvp-v1-20-remote.md)
-
 ### Goal ontology review: evidence and pending decisions
 - tags: `goal`, `ontology`, `pending-decision`, `review`
 - details: [L3/ontology-goal-review-20261121.md](L3/ontology-goal-review-20261121.md)
@@ -295,6 +295,6 @@ Base budget: 8 lines. Copy the compact lines into the project Skill `description
 - L2: C02 · 标准 Skill 与工具说明 (plan) [c02,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c02.md
 - L2: C03 · 框架按身份、operator 和配置执行 (plan) [c03,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c03.md
 - L2: C04 · 项目变更自动投递收件箱 (plan) [c04,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c04.md
+- L2: C05 · Agent 寻址工具模块 (plan) [c05,context-tools,explicit-agent,mvp,ontology] -> L2/explicit-agent-context-tools-c05.md
 - L2: C06 · Agent 通信工具模块 (plan) [c06,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c06.md
-- L2: C07 · 结束工具、格式纠错与 partial 续跑 (plan) [c07,context-tools,explicit-agent,ontology] -> L2/explicit-agent-context-tools-c07.md
 

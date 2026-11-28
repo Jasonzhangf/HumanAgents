@@ -1,0 +1,637 @@
+{
+  "schema_version": 1,
+  "skill_id": "humanagent-mvp-ontology",
+  "guidance_version": "1",
+  "rules": [
+    {
+      "rule_id": "explicit-agent-context-tools-c05",
+      "severity": "forbidden",
+      "description": "Provide explicit-agent addressing tools obeying local addressing rules and explicit error reporting.",
+      "ontology_clause": "clause-explicit-agent-addressing-tools"
+    },
+    {
+      "rule_id": "mvp-v1-02-identity",
+      "severity": "forbidden",
+      "description": "Distinguish projectless Alex from per-project Jenny; each project has exactly one manager.",
+      "ontology_clause": "clause-explicit-entry-identity"
+    },
+    {
+      "rule_id": "mvp-v1-03-member",
+      "severity": "forbidden",
+      "description": "Persist per-member prompt, provider, and model configuration; isolate parallel member outputs to their address.",
+      "ontology_clause": "clause-project-member-config"
+    },
+    {
+      "rule_id": "mvp-v1-04-dispatch",
+      "severity": "forbidden",
+      "description": "Dispatch from real project roster by role; fall back to Jenny when no role matches; error explicitly on missing named address.",
+      "ontology_clause": "clause-role-based-dispatch-fallback"
+    },
+    {
+      "rule_id": "mvp-v1-08-runtime",
+      "severity": "forbidden",
+      "description": "Link Task explicit, implicit orchestration (default 8 configurable slots, downstream roles excluded), and memory runtimes with real IDs; memory failure never blocks Task delivery.",
+      "ontology_clause": "clause-task-runtime-memory-links"
+    },
+    {
+      "rule_id": "mvp-v1-16-template",
+      "severity": "forbidden",
+      "description": "Copy system prompt and role prompt independently when creating a member; edits never mutate templates or peers; reject duplicate names.",
+      "ontology_clause": "clause-dual-prompt-member-creation"
+    },
+    {
+      "rule_id": "mvp-v1-17-address",
+      "severity": "forbidden",
+      "description": "Resolve local addresses unambiguously: Alex, project->Jenny, project.member->member; reject missing or ambiguous addresses.",
+      "ontology_clause": "clause-local-member-addressing"
+    },
+    {
+      "rule_id": "mvp-v1-20-remote",
+      "severity": "forbidden",
+      "description": "Represent machine.project and machine.project.member hierarchy in UI tree and show real disconnected status without misrouting locally.",
+      "ontology_clause": "clause-machine-project-member-tree"
+    }
+  ],
+  "workflows": [],
+  "ontology": {
+    "schema_version": 1,
+    "objects": [
+      {
+        "id": "humanagent-project-member",
+        "name": "Project Member",
+        "definition": "A named agent belonging to a HumanAgent project with independent config and canonical address.",
+        "identity": "Canonical address machine.project.name",
+        "owner": "packages/config",
+        "attributes": [
+          "role",
+          "name",
+          "prompts",
+          "provider",
+          "model"
+        ],
+        "perception": "Project roster and member config",
+        "must_have": [
+          "canonical machine.project.name address"
+        ],
+        "must_not_have": [
+          "cross-member prompt or output leakage"
+        ],
+        "source": [
+          "memory/L3/mvp-v1-03-member.md"
+        ]
+      },
+      {
+        "id": "humanagent-runtime-node",
+        "name": "Runtime Node",
+        "definition": "An explicit, implicit orchestration, or memory runtime instance associated with a Task.",
+        "identity": "RuntimeId bound to Task and scope",
+        "owner": "packages/runtime",
+        "attributes": [
+          "runtimeId",
+          "kind",
+          "slotBudget"
+        ],
+        "perception": "Task relationship graph and runtime status",
+        "must_have": [
+          "real runtimeId",
+          "isolated failure boundary for memory agent"
+        ],
+        "must_not_have": [
+          "memory failure blocking MVP delivery"
+        ],
+        "source": [
+          "memory/L3/mvp-v1-08-runtime.md"
+        ]
+      },
+      {
+        "id": "explicit-entry-identity",
+        "name": "唯一显式入口与身份",
+        "definition": "Distinguish projectless Alex from per-project Jenny; each project has exactly one manager.",
+        "identity": "humanagent/explicit-identity",
+        "owner": "packages/config",
+        "attributes": [
+          "Explicit session or project entry opened.",
+          "User opens explicit entry",
+          "Session bound to Alex or single project Jenny"
+        ],
+        "perception": "Public observation via packages/config",
+        "must_have": [
+          "Route projectless conversation to Alex",
+          "Route project conversation to that project's single Jenny manager"
+        ],
+        "must_not_have": [
+          "Create multiple managers for one project",
+          "Mix Alex and project Jenny cwd/task scope"
+        ],
+        "source": [
+          "memory/L3/mvp-v1-02-identity.md"
+        ]
+      },
+      {
+        "id": "project-member-config",
+        "name": "成员配置与寻址",
+        "definition": "Persist per-member prompt, provider, and model configuration; isolate parallel member outputs to their address.",
+        "identity": "humanagent/member-config",
+        "owner": "packages/config",
+        "attributes": [
+          "Member config saved or request dispatched.",
+          "Member configured in project",
+          "Runtime executes with member's own config and address"
+        ],
+        "perception": "Public observation via packages/config",
+        "must_have": [
+          "Load member-specific prompts, provider, and model",
+          "Bind parallel outputs and tasks to member address"
+        ],
+        "must_not_have": [
+          "Leak one member's prompt/provider/model or output into another member"
+        ],
+        "source": [
+          "memory/L3/mvp-v1-03-member.md"
+        ]
+      },
+      {
+        "id": "local-member-addressing",
+        "name": "项目地址与人员地址",
+        "definition": "Resolve local addresses unambiguously: Alex, project->Jenny, project.member->member; reject missing or ambiguous addresses.",
+        "identity": "humanagent/addressing",
+        "owner": "packages/runtime",
+        "attributes": [
+          "Address lookup.",
+          "Unresolved address token",
+          "Resolved target identity or explicit addressing error"
+        ],
+        "perception": "Public observation via packages/runtime",
+        "must_have": [
+          "Resolve Alex, project, or project.member within current host",
+          "Reject missing or ambiguous address with explicit error"
+        ],
+        "must_not_have": [
+          "Cross-project misdelivery on missing local member"
+        ],
+        "source": [
+          "memory/L3/mvp-v1-17-address.md"
+        ]
+      },
+      {
+        "id": "machine-project-member-tree",
+        "name": "跨机器寻址与项目展开",
+        "definition": "Represent machine.project and machine.project.member hierarchy in UI tree and show real disconnected status without misrouting locally.",
+        "identity": "humanagent/remote-addressing",
+        "owner": "packages/ui",
+        "attributes": [
+          "Project tree render or remote address check.",
+          "Multi-machine roster configured",
+          "Tree renders real state; remote misrouting prevented"
+        ],
+        "perception": "Public observation via packages/ui",
+        "must_have": [
+          "Display machine->project->member hierarchy with real connection state",
+          "Refuse local fallback for disconnected remote targets"
+        ],
+        "must_not_have": [
+          "Route disconnected remote address to same-named local member"
+        ],
+        "source": [
+          "memory/L3/mvp-v1-20-remote.md"
+        ]
+      }
+    ],
+    "behaviors": [
+      {
+        "id": "explicit-agent-addressing-tools",
+        "name": "C05 · Agent 寻址工具模块",
+        "owner": "packages/runtime",
+        "precondition": [
+          "Explicit agent resolves target member or project."
+        ],
+        "input": [
+          "Addressing tool call."
+        ],
+        "output": [
+          "Safe addressing tool contract"
+        ],
+        "transition": {
+          "from": "Addressing tool invoked",
+          "to": "Canonical target returned or structured error surfaced"
+        },
+        "effects": [
+          "Safe addressing tool contract"
+        ],
+        "perception": "Public observation via packages/runtime",
+        "must_have": [
+          "Resolve target via canonical addressing owner",
+          "Return structured error when target is missing or ambiguous"
+        ],
+        "must_not_have": [
+          "Guess or silently substitute a different target"
+        ],
+        "source": [
+          "memory/L3/explicit-agent-context-tools-c05.md"
+        ]
+      },
+      {
+        "id": "role-based-dispatch-fallback",
+        "name": "自动分派的默认决定",
+        "owner": "packages/runtime",
+        "precondition": [
+          "Explicit intake or orchestrator dispatches work."
+        ],
+        "input": [
+          "Dispatch target resolution."
+        ],
+        "output": [
+          "Deterministic routing receipt"
+        ],
+        "transition": {
+          "from": "Requirement ready for dispatch",
+          "to": "Assigned to matching member, Jenny fallback, or explicit error"
+        },
+        "effects": [
+          "Deterministic routing receipt"
+        ],
+        "perception": "Public observation via packages/runtime",
+        "must_have": [
+          "Assign to matching role member in project roster",
+          "Fall back to project Jenny when no role matches",
+          "Return explicit error on unknown named address"
+        ],
+        "must_not_have": [
+          "Silently reroute an explicit unknown address to another member or project"
+        ],
+        "source": [
+          "memory/L3/mvp-v1-04-dispatch.md"
+        ]
+      },
+      {
+        "id": "dual-prompt-member-creation",
+        "name": "按模板新增成员",
+        "owner": "packages/config",
+        "precondition": [
+          "Creating or editing a project member from a role template."
+        ],
+        "input": [
+          "Member create or update."
+        ],
+        "output": [
+          "Template and peer configs remain immutable"
+        ],
+        "transition": {
+          "from": "Role template selected",
+          "to": "Independent member config saved or duplicate rejected"
+        },
+        "effects": [
+          "Template and peer configs remain immutable"
+        ],
+        "perception": "Public observation via packages/config",
+        "must_have": [
+          "Copy system and role prompts independently",
+          "Reject duplicate member name preserving existing member"
+        ],
+        "must_not_have": [
+          "Mutate shared template or other members when editing one member",
+          "Overwrite existing member on name collision"
+        ],
+        "source": [
+          "memory/L3/mvp-v1-16-template.md"
+        ]
+      }
+    ],
+    "relations": [
+      {
+        "id": "task-runtime-memory-links",
+        "name": "任务关系与记忆 Agent",
+        "from": "humanagent-project-member",
+        "to": "humanagent-runtime-node",
+        "kind": "governs",
+        "direction": "directed",
+        "cardinality": "one-to-many",
+        "perception": "Public observation via packages/runtime",
+        "must_have": [
+          "Expose real runtime IDs linking explicit, implicit orchestration, and memory nodes",
+          "Enforce default 8-slot limit on implicit orchestration runtimes only (downstream roles counted separately) and apply Settings updates live without restart",
+          "Continue Task mainline if memory agent fails"
+        ],
+        "must_not_have": [
+          "Count downstream worker roles against the 8 implicit orchestration slots or hardcode the limit as unconfigurable",
+          "Block MVP Task delivery on memory agent failure"
+        ],
+        "source": [
+          "memory/L3/mvp-v1-08-runtime.md"
+        ]
+      }
+    ],
+    "clauses": [
+      {
+        "clause_id": "clause-explicit-agent-addressing-tools",
+        "rule_id": "explicit-agent-context-tools-c05",
+        "axis": "behavior",
+        "axis_id": "explicit-agent-addressing-tools",
+        "scope": "humanagent/explicit-context-tools",
+        "scenario": "Explicit agent resolves target member or project.",
+        "trigger": "Addressing tool call.",
+        "allowed_actions": [
+          "Resolve target via canonical addressing owner",
+          "Return structured error when target is missing or ambiguous"
+        ],
+        "forbidden_actions": [
+          "Guess or silently substitute a different target"
+        ],
+        "state_before": "Addressing tool invoked",
+        "state_after": "Canonical target returned or structured error surfaced",
+        "effects": [
+          "Safe addressing tool contract"
+        ],
+        "owner": "packages/runtime",
+        "approval": {
+          "state": "approved",
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "evidence": [
+          "memory/L3/explicit-agent-context-tools-c05.md"
+        ],
+        "governance": {
+          "allow_case": "Resolve target via canonical addressing owner",
+          "check": "Verify Provide explicit-agent addressing tools obeying local addressing rules and explicit error reporting.",
+          "deny_case": "Guess or silently substitute a different target",
+          "edge": "explicit-addressing-tool",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/runtime"
+        }
+      },
+      {
+        "clause_id": "clause-explicit-entry-identity",
+        "rule_id": "mvp-v1-02-identity",
+        "axis": "object",
+        "axis_id": "explicit-entry-identity",
+        "scope": "humanagent/explicit-identity",
+        "scenario": "Initiating or routing an explicit conversation.",
+        "trigger": "Explicit session or project entry opened.",
+        "allowed_actions": [
+          "Route projectless conversation to Alex",
+          "Route project conversation to that project's single Jenny manager"
+        ],
+        "forbidden_actions": [
+          "Create multiple managers for one project",
+          "Mix Alex and project Jenny cwd/task scope"
+        ],
+        "state_before": "User opens explicit entry",
+        "state_after": "Session bound to Alex or single project Jenny",
+        "effects": [
+          "Identity, cwd, and task scope isolated per owner"
+        ],
+        "owner": "packages/config",
+        "approval": {
+          "state": "approved",
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "evidence": [
+          "memory/L3/mvp-v1-02-identity.md"
+        ],
+        "governance": {
+          "allow_case": "Route projectless conversation to Alex",
+          "check": "Verify Distinguish projectless Alex from per-project Jenny; each project has exactly one manager.",
+          "deny_case": "Create multiple managers for one project",
+          "edge": "explicit-identity-binding",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/config"
+        }
+      },
+      {
+        "clause_id": "clause-project-member-config",
+        "rule_id": "mvp-v1-03-member",
+        "axis": "object",
+        "axis_id": "project-member-config",
+        "scope": "humanagent/member-config",
+        "scenario": "Configuring or running a named project member.",
+        "trigger": "Member config saved or request dispatched.",
+        "allowed_actions": [
+          "Load member-specific prompts, provider, and model",
+          "Bind parallel outputs and tasks to member address"
+        ],
+        "forbidden_actions": [
+          "Leak one member's prompt/provider/model or output into another member"
+        ],
+        "state_before": "Member configured in project",
+        "state_after": "Runtime executes with member's own config and address",
+        "effects": [
+          "Member isolation preserved"
+        ],
+        "owner": "packages/config",
+        "approval": {
+          "state": "approved",
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "evidence": [
+          "memory/L3/mvp-v1-03-member.md"
+        ],
+        "governance": {
+          "allow_case": "Load member-specific prompts, provider, and model",
+          "check": "Verify Persist per-member prompt, provider, and model configuration; isolate parallel member outputs to their address.",
+          "deny_case": "Leak one member's prompt/provider/model or output into another member",
+          "edge": "member-config-isolation",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/config"
+        }
+      },
+      {
+        "clause_id": "clause-role-based-dispatch-fallback",
+        "rule_id": "mvp-v1-04-dispatch",
+        "axis": "behavior",
+        "axis_id": "role-based-dispatch-fallback",
+        "scope": "humanagent/member-dispatch",
+        "scenario": "Explicit intake or orchestrator dispatches work.",
+        "trigger": "Dispatch target resolution.",
+        "allowed_actions": [
+          "Assign to matching role member in project roster",
+          "Fall back to project Jenny when no role matches",
+          "Return explicit error on unknown named address"
+        ],
+        "forbidden_actions": [
+          "Silently reroute an explicit unknown address to another member or project"
+        ],
+        "state_before": "Requirement ready for dispatch",
+        "state_after": "Assigned to matching member, Jenny fallback, or explicit error",
+        "effects": [
+          "Deterministic routing receipt"
+        ],
+        "owner": "packages/runtime",
+        "approval": {
+          "state": "approved",
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "evidence": [
+          "memory/L3/mvp-v1-04-dispatch.md"
+        ],
+        "governance": {
+          "allow_case": "Assign to matching role member in project roster",
+          "check": "Verify Dispatch from real project roster by role; fall back to Jenny when no role matches; error explicitly on missing named address.",
+          "deny_case": "Silently reroute an explicit unknown address to another member or project",
+          "edge": "roster-dispatch-resolution",
+          "gate_kind": "relation",
+          "observation": "Public observation via packages/runtime"
+        }
+      },
+      {
+        "clause_id": "clause-task-runtime-memory-links",
+        "rule_id": "mvp-v1-08-runtime",
+        "axis": "relation",
+        "axis_id": "task-runtime-memory-links",
+        "scope": "humanagent/task-runtime-graph",
+        "scenario": "Inspecting Task execution graph, allocating implicit orchestration slots, or running memory curation.",
+        "trigger": "Task relationship inspection, implicit orchestration slot allocation, config update, or memory trigger.",
+        "allowed_actions": [
+          "Expose real runtime IDs linking explicit, implicit orchestration, and memory nodes",
+          "Enforce default 8-slot limit on implicit orchestration runtimes only (downstream roles counted separately) and apply Settings updates live without restart",
+          "Continue Task mainline if memory agent fails"
+        ],
+        "forbidden_actions": [
+          "Count downstream worker roles against the 8 implicit orchestration slots or hardcode the limit as unconfigurable",
+          "Block MVP Task delivery on memory agent failure"
+        ],
+        "state_before": "Task active with implicit orchestration slot budget and memory nodes",
+        "state_after": "Read-only graph reflects real runtime IDs; implicit slot limit updated live; Task mainline isolated from memory failure",
+        "effects": [
+          "Traceable Task-to-runtime-to-memory topology",
+          "Live-configurable implicit orchestration concurrency cap"
+        ],
+        "owner": "packages/runtime",
+        "approval": {
+          "state": "approved",
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "evidence": [
+          "memory/L3/mvp-v1-08-runtime.md"
+        ],
+        "governance": {
+          "allow_case": "Settings updates implicit orchestration slot limit live without restart; memory failure leaves Task delivery unblocked",
+          "check": "Verify implicit orchestration concurrency uses live-configurable default 8-slot pool excluding downstream roles, and memory failure does not block Task delivery.",
+          "deny_case": "Downstream roles consume implicit orchestration slots or memory failure blocks MVP Task delivery",
+          "edge": "task-runtime-observation",
+          "gate_kind": "relation",
+          "observation": "Public observation via packages/runtime"
+        }
+      },
+      {
+        "clause_id": "clause-dual-prompt-member-creation",
+        "rule_id": "mvp-v1-16-template",
+        "axis": "behavior",
+        "axis_id": "dual-prompt-member-creation",
+        "scope": "humanagent/member-template",
+        "scenario": "Creating or editing a project member from a role template.",
+        "trigger": "Member create or update.",
+        "allowed_actions": [
+          "Copy system and role prompts independently",
+          "Reject duplicate member name preserving existing member"
+        ],
+        "forbidden_actions": [
+          "Mutate shared template or other members when editing one member",
+          "Overwrite existing member on name collision"
+        ],
+        "state_before": "Role template selected",
+        "state_after": "Independent member config saved or duplicate rejected",
+        "effects": [
+          "Template and peer configs remain immutable"
+        ],
+        "owner": "packages/config",
+        "approval": {
+          "state": "approved",
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "evidence": [
+          "memory/L3/mvp-v1-16-template.md"
+        ],
+        "governance": {
+          "allow_case": "Copy system and role prompts independently",
+          "check": "Verify Copy system prompt and role prompt independently when creating a member; edits never mutate templates or peers; reject duplicate names.",
+          "deny_case": "Mutate shared template or other members when editing one member",
+          "edge": "member-template-copy",
+          "gate_kind": "effect",
+          "observation": "Public observation via packages/config"
+        }
+      },
+      {
+        "clause_id": "clause-local-member-addressing",
+        "rule_id": "mvp-v1-17-address",
+        "axis": "object",
+        "axis_id": "local-member-addressing",
+        "scope": "humanagent/addressing",
+        "scenario": "Resolving a recipient address for messaging or dispatch.",
+        "trigger": "Address lookup.",
+        "allowed_actions": [
+          "Resolve Alex, project, or project.member within current host",
+          "Reject missing or ambiguous address with explicit error"
+        ],
+        "forbidden_actions": [
+          "Cross-project misdelivery on missing local member"
+        ],
+        "state_before": "Unresolved address token",
+        "state_after": "Resolved target identity or explicit addressing error",
+        "effects": [
+          "Zero cross-project misdelivery"
+        ],
+        "owner": "packages/runtime",
+        "approval": {
+          "state": "approved",
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "evidence": [
+          "memory/L3/mvp-v1-17-address.md"
+        ],
+        "governance": {
+          "allow_case": "Resolve Alex, project, or project.member within current host",
+          "check": "Verify Resolve local addresses unambiguously: Alex, project->Jenny, project.member->member; reject missing or ambiguous addresses.",
+          "deny_case": "Cross-project misdelivery on missing local member",
+          "edge": "local-address-resolution",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/runtime"
+        }
+      },
+      {
+        "clause_id": "clause-machine-project-member-tree",
+        "rule_id": "mvp-v1-20-remote",
+        "axis": "object",
+        "axis_id": "machine-project-member-tree",
+        "scope": "humanagent/remote-addressing",
+        "scenario": "Rendering remote machines/projects or addressing remote targets.",
+        "trigger": "Project tree render or remote address check.",
+        "allowed_actions": [
+          "Display machine->project->member hierarchy with real connection state",
+          "Refuse local fallback for disconnected remote targets"
+        ],
+        "forbidden_actions": [
+          "Route disconnected remote address to same-named local member"
+        ],
+        "state_before": "Multi-machine roster configured",
+        "state_after": "Tree renders real state; remote misrouting prevented",
+        "effects": [
+          "Remote identity separation preserved"
+        ],
+        "owner": "packages/ui",
+        "approval": {
+          "state": "approved",
+          "source": "current conversation user approval (2026-11-27T22:26:33-08:00)",
+          "text": "8 并发是指的隐式编排并发，并且配置可改；其余可以入库"
+        },
+        "evidence": [
+          "memory/L3/mvp-v1-20-remote.md"
+        ],
+        "governance": {
+          "allow_case": "Display machine->project->member hierarchy with real connection state",
+          "check": "Verify Represent machine.project and machine.project.member hierarchy in UI tree and show real disconnected status without misrouting locally.",
+          "deny_case": "Route disconnected remote address to same-named local member",
+          "edge": "remote-address-isolation",
+          "gate_kind": "identity",
+          "observation": "Public observation via packages/ui"
+        }
+      }
+    ]
+  }
+}
