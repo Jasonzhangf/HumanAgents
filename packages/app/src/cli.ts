@@ -1941,7 +1941,11 @@ export async function main(args: readonly string[]): Promise<void> {
           conversationDescriptors.push(descriptor);
         } catch (error) {
           if (error instanceof ConfigurationError) continue;
-          if (error instanceof Error && error.name === 'ConversationScopeResolutionError' && (error as { code?: string }).code === 'project-agent-missing') {
+          if (
+            error instanceof Error
+            && error.name === 'ConversationScopeResolutionError'
+            && ((error as { code?: string }).code === 'project-agent-missing' || project.projectKey !== paths.projectKey)
+          ) {
             continue;
           }
           throw error;
@@ -1997,6 +2001,7 @@ export async function main(args: readonly string[]): Promise<void> {
       const scopedConversationBackend = new ScopedConversationBackend({
         descriptors: conversationDescriptors,
         resolveProjectDescriptor: resolveDynamicProjectDescriptor,
+        defaultMode: mode,
         stateRoot: join(paths.mainRoot, 'conversation-scopes'),
         createSession: async (descriptor) => {
           if (descriptor.scope.kind === 'project') {

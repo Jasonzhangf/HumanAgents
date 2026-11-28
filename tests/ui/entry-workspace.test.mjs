@@ -22,6 +22,29 @@ test('the selected scope is readable only when the server projection proves that
   assert.equal(entryWorkspaceSelection('?projectKey=project-b', topic).available, false)
   assert.equal(entryWorkspaceSelection('?projectKey=project-a&mode=fake', topic).available, false)
   assert.equal(entryWorkspaceSelection('?projectKey=project-a&mode=rcc', null).available, false)
+  const emptyHttpTopic = {
+    surface: 'main-topic',
+    agentName: 'Jenny',
+    mode: 'rcc',
+    interactions: [],
+    tasks: [],
+    turns: [],
+    usage: { calls: [] },
+    projectName: 'project-b',
+    projectKey: 'project-b',
+    workspaceCwd: '/tmp/project-b',
+    scope: { kind: 'project', projectKey: 'project-b' },
+    canonicalAddress: 'machine.project-b.Jenny',
+    agentId: 'interaction-default',
+    role: 'project-lead',
+  }
+  assert.deepEqual(
+    {
+      available: entryWorkspaceSelection('?projectKey=project-b&scope=project&mode=rcc', emptyHttpTopic).available,
+      label: entryWorkspaceSelection('?projectKey=project-b&scope=project&mode=rcc', emptyHttpTopic).label,
+    },
+    { available: true, label: 'project-b · Jenny' },
+  )
 })
 
 // Failure basis: the conversation API was created without the URL scope, so a

@@ -93,6 +93,7 @@ export interface ScopedConversationBackendOptions {
   readonly createSession?: ScopedConversationSessionFactory;
   readonly resolveProjectDescriptor?: (projectKey: string) => Promise<ConversationScopeDescriptor | undefined>;
   readonly legacyBinding?: LegacyConversationBinding;
+  readonly defaultMode?: MainTopicProjection['mode'];
   /** Control-root-owned state directory. Omit only for an explicitly ephemeral fixture. */
   readonly stateRoot?: string;
 }
@@ -123,6 +124,7 @@ export class ScopedConversationBackend {
   private readonly sessionKeys = new WeakMap<object, string>();
   private readonly engine: ScopedConversationEngine;
   private readonly legacyBinding?: LegacyConversationBinding;
+  private readonly defaultMode: MainTopicProjection['mode'];
   private readonly inputTails = new Map<string, Promise<void>>();
 
   constructor(options: ScopedConversationBackendOptions) {
@@ -146,6 +148,7 @@ export class ScopedConversationBackend {
       this.sessionKeys.set(session, scopeKey);
     }
     this.legacyBinding = options.legacyBinding === undefined ? undefined : validateLegacyAlexBinding(options.legacyBinding);
+    this.defaultMode = options.defaultMode ?? 'rcc';
     this.engine = new ScopedConversationEngine({
       store: options.stateRoot === undefined ? new InMemoryScopedConversationStore() : new FileScopedConversationStore(options.stateRoot),
       resolve: (scope) => {
@@ -385,7 +388,7 @@ export class ScopedConversationBackend {
     const legacy = this.legacyMetadata(scope, state);
     const cached = this.sessionCache.get(descriptor.scopeKey);
     if (cached === undefined && state.interactionIds.length === 0 && state.preservedInteractionRefs.length === 0) {
-      return { ...descriptorFields(descriptor), value: emptyScopedMainTopic(descriptor), ...legacy };
+      return { ...descriptorFields(descriptor), value: emptyScopedMainTopic(descriptor, this.defaultMode), ...legacy };
     }
     const { session } = await this.session(scope);
     const projection = await session.readMainTopic();
@@ -580,7 +583,10 @@ function scopeMainTopic(projection: MainTopicProjection, descriptor: Conversatio
   return { ...alex, agentName: 'Alex' };
 }
 
-function emptyScopedMainTopic(descriptor: ConversationScopeDescriptor): ScopedMainTopicProjection {
+function emptyScopedMainTopic(
+  descriptor: ConversationScopeDescriptor,
+  mode: MainTopicProjection['mode'] = 'rcc',
+): ScopedMainTopicProjection {
   const agentName = descriptor.role === 'ceo' ? 'Alex' : 'Jenny';
   const projectName = descriptor.role === 'ceo'
     ? undefined
@@ -588,7 +594,7 @@ function emptyScopedMainTopic(descriptor: ConversationScopeDescriptor): ScopedMa
   return {
     surface: 'main-topic',
     agentName,
-    mode: descriptor.role,
+    mode,
     interactions: [],
     tasks: [],
     turns: [],

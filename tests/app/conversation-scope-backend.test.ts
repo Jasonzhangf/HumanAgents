@@ -572,6 +572,7 @@ test('HTTP opted-in scope recovery delegates exact task and operation to the exi
 
 test('HTTP system dashboard projects connected conversationSession per registered project and resolves dynamic project scopes', async () => {
   const dynamicBackend = new ScopedConversationBackend({
+    defaultMode: 'rcc',
     descriptors: [
       { scope: { kind: 'alex' }, scopeKey: 'alex', canonicalAddress: 'machine.CEO', agentId: 'alex-agent', role: 'ceo' },
     ],
@@ -606,6 +607,7 @@ test('HTTP system dashboard projects connected conversationSession per registere
     assert.equal(dynTopic.status, 200)
     assert.equal((dynTopic.body as { agentName: string }).agentName, 'Jenny')
     assert.equal((dynTopic.body as { projectName?: string }).projectName, 'project-dyn')
+    assert.equal((dynTopic.body as { mode?: string }).mode, 'rcc')
   } finally {
     await dispatcher.sseRegistry.closeAll('server.shutdown')
   }
