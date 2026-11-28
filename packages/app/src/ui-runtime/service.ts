@@ -640,6 +640,7 @@ export interface UiRuntimeServiceOptions {
   readonly agentRoster?: readonly Pick<import('../../../config/src/index.js').AgentConfig, 'agentId' | 'roleId' | 'managementRole'>[];
   readonly maxConcurrentTasks?: number;
   readonly implicitOrchestrationMaxRuntimes?: number;
+  readonly onImplicitOrchestrationLimitChange?: (limit: number) => void;
   readonly controlStateRoot?: string;
   readonly machineName?: string;
   readonly organId: OrganId;
@@ -3316,6 +3317,11 @@ export class UiRuntimeService {
         names.add(member.name);
       }
     }
+    for (const agent of this.options.agentRoster ?? []) {
+      const mgmt = managementRoleForAgent(agent);
+      if (mgmt === 'ceo' || mgmt === 'project-lead') continue;
+      names.add(agent.agentId);
+    }
     return names;
   }
 
@@ -3330,7 +3336,13 @@ export class UiRuntimeService {
   }
 
   private effectiveExecutionConcurrencyLimit(): number | undefined {
-    if (this.implicitConcurrencyCustomized) {
+    const persisted = this.controlRosterStore.readSnapshot().implicitOrchestrationMaxRuntimes;
+    if (persisted !== undefined) {
+      this.implicitOrchestrationLimit = persisted;
+      this.implicitConcurrencyCustomized = true;
+      return persisted;
+    }
+    if (this.implicitConcurrencyCustomized || this.options.implicitOrchestrationMaxRuntimes !== undefined) {
       return this.implicitOrchestrationLimit;
     }
     return this.options.maxConcurrentTasks ?? this.implicitOrchestrationLimit;
@@ -3368,7 +3380,89 @@ export class UiRuntimeService {
       this.implicitConcurrencyCustomized = previousCustomized;
       throw error;
     }
+    this.options.onImplicitOrchestrationLimitChange?.(this.implicitOrchestrationLimit);
     return this.implicitOrchestrationLimit;
+  }
+
+  private mergedRosterMembers(
+    project: string,
+    storedMembers: readonly ProjectMemberRecord[],
+  ): readonly {
+    readonly memberId?: string;
+    readonly memberName: string;
+    readonly agentId: string;
+    readonly role: CanonicalAddressEntry['role'];
+    readonly roleId: string;
+    readonly systemPrompt?: string;
+    readonly rolePrompt?: string;
+    readonly provider?: string;
+    readonly model?: string;
+  }[] {
+    const boundProject = this.options.projectKey ?? 'default';
+    const configured = project === boundProject ? (this.options.agentRoster ?? []) : [];
+    const configuredManager = configured.find((agent) => managementRoleForAgent(agent) === 'project-lead');
+    const dynamicManager = storedMembers.find((member) => member.role === 'manager' || member.name === RESERVED_MANAGER_NAME);
+    const dynamicWorkers = storedMembers.filter((member) => member.role !== 'manager' && member.name !== RESERVED_MANAGER_NAME);
+    const result: {
+      readonly memberId?: string;
+      readonly memberName: string;
+      readonly agentId: string;
+      readonly role: CanonicalAddressEntry['role'];
+      readonly roleId: string;
+      readonly systemPrompt?: string;
+      readonly rolePrompt?: string;
+      readonly provider?: string;
+      readonly model?: string;
+    }[] = [];
+    const seenNames = new Set<string>();
+    if (dynamicManager) {
+      seenNames.add(dynamicManager.name);
+      result.push({
+        memberId: dynamicManager.memberId,
+        memberName: dynamicManager.name,
+        agentId: configuredManager?.agentId ?? dynamicManager.memberId,
+        role: 'manager',
+        roleId: 'manager',
+        systemPrompt: dynamicManager.systemPrompt,
+        rolePrompt: dynamicManager.rolePrompt,
+      });
+    } else if (configuredManager) {
+      seenNames.add(RESERVED_MANAGER_NAME);
+      result.push({
+        memberName: RESERVED_MANAGER_NAME,
+        agentId: configuredManager.agentId,
+        role: 'manager',
+        roleId: 'manager',
+      });
+    }
+    for (const worker of dynamicWorkers) {
+      if (seenNames.has(worker.name)) continue;
+      seenNames.add(worker.name);
+      result.push({
+        memberId: worker.memberId,
+        memberName: worker.name,
+        agentId: worker.memberId,
+        role: worker.role,
+        roleId: worker.role,
+        systemPrompt: worker.systemPrompt,
+        rolePrompt: worker.rolePrompt,
+        ...(worker.provider ? { provider: worker.provider } : {}),
+        ...(worker.model ? { model: worker.model } : {}),
+      });
+    }
+    for (const agent of configured) {
+      const mgmt = managementRoleForAgent(agent);
+      if (mgmt === 'ceo' || mgmt === 'project-lead') continue;
+      if (seenNames.has(agent.agentId)) continue;
+      seenNames.add(agent.agentId);
+      result.push({
+        memberName: agent.agentId,
+        agentId: agent.agentId,
+        role: addressingRoleForConfiguredAgent(agent.roleId),
+        roleId: agent.roleId,
+      });
+    }
+    return result;
   }
 
   private canonicalAddressEntries(defaultProject = this.options.projectKey ?? 'default'): readonly CanonicalAddressEntry[] {
@@ -3384,39 +3478,18 @@ export class UiRuntimeService {
       },
     ];
     for (const [project, members] of Object.entries(projectSet)) {
-      const seenNames = new Set<string>();
-      for (const member of members) {
-        seenNames.add(member.name);
+      for (const member of this.mergedRosterMembers(project, members)) {
         entries.push({
           canonicalAddress: formatCanonicalAgentAddress({
             machine: this.machineName,
             project,
-            name: member.name,
+            name: member.memberName,
           }),
           machine: this.machineName,
           project,
-          name: member.name,
+          name: member.memberName,
           role: member.role,
         });
-      }
-      if (project === (this.options.projectKey ?? 'default') && this.options.agentRoster) {
-        for (const agent of this.options.agentRoster) {
-          const mgmt = managementRoleForAgent(agent);
-          if (mgmt === 'ceo' || mgmt === 'project-lead') continue;
-          if (seenNames.has(agent.agentId)) continue;
-          seenNames.add(agent.agentId);
-          entries.push({
-            canonicalAddress: formatCanonicalAgentAddress({
-              machine: this.machineName,
-              project,
-              name: agent.agentId,
-            }),
-            machine: this.machineName,
-            project,
-            name: agent.agentId,
-            role: addressingRoleForConfiguredAgent(agent.roleId),
-          });
-        }
       }
     }
     return entries;
@@ -7545,58 +7618,26 @@ export class UiRuntimeService {
   }>> {
     const source = await this.findProjectSource(projectKey);
     if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
-    const roster = this.options.agentRoster;
+    const boundProject = this.options.projectKey ?? 'default';
+    const roster = source.projectKey === boundProject ? this.options.agentRoster : undefined;
     const storeSnapshot = this.controlRosterStore.readSnapshot();
     const storedMembers = storeSnapshot.projects[source.projectKey] ?? [];
     const dynamicWorkers = storedMembers.filter((member) => member.role !== 'manager' && member.name !== RESERVED_MANAGER_NAME);
-    const dynamicManager = storedMembers.find((member) => member.role === 'manager' || member.name === RESERVED_MANAGER_NAME);
     if ((!roster || roster.length === 0) && dynamicWorkers.length === 0) {
       return { ok: true, value: { machine: this.machineName, projectKey: source.projectKey, rosterState: 'not-initialized', members: [] } };
     }
-    const baseMembers = (roster ?? [])
-      .filter((agent) => managementRoleForAgent(agent) !== 'ceo')
-      .map((agent) => {
-        const isManager = managementRoleForAgent(agent) === 'project-lead';
-        const memberName = isManager ? RESERVED_MANAGER_NAME : agent.agentId;
-        return {
-          ...(isManager && dynamicManager ? { memberId: dynamicManager.memberId, systemPrompt: dynamicManager.systemPrompt, rolePrompt: dynamicManager.rolePrompt } : {}),
-          memberName,
-          agentId: agent.agentId,
-          roleId: isManager ? 'manager' : agent.roleId,
-          canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, project: source.projectKey, name: memberName }),
-          sessions: [],
-        };
-      });
-    const seenNames = new Set(baseMembers.map((member) => member.memberName));
-    if (!seenNames.has(RESERVED_MANAGER_NAME) && dynamicManager) {
-      baseMembers.unshift({
-        memberId: dynamicManager.memberId,
-        memberName: dynamicManager.name,
-        agentId: dynamicManager.memberId,
-        roleId: dynamicManager.role,
-        canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, project: source.projectKey, name: dynamicManager.name }),
-        systemPrompt: dynamicManager.systemPrompt,
-        rolePrompt: dynamicManager.rolePrompt,
-        sessions: [],
-      });
-      seenNames.add(dynamicManager.name);
-    }
-    for (const worker of dynamicWorkers) {
-      if (seenNames.has(worker.name)) continue;
-      seenNames.add(worker.name);
-      baseMembers.push({
-        memberId: worker.memberId,
-        memberName: worker.name,
-        agentId: worker.memberId,
-        roleId: worker.role,
-        canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, project: source.projectKey, name: worker.name }),
-        systemPrompt: worker.systemPrompt,
-        rolePrompt: worker.rolePrompt,
-        ...(worker.provider ? { provider: worker.provider } : {}),
-        ...(worker.model ? { model: worker.model } : {}),
-        sessions: [],
-      });
-    }
+    const baseMembers = this.mergedRosterMembers(source.projectKey, storedMembers).map((member) => ({
+      ...(member.memberId ? { memberId: member.memberId } : {}),
+      memberName: member.memberName,
+      agentId: member.agentId,
+      roleId: member.roleId,
+      canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, project: source.projectKey, name: member.memberName }),
+      ...(member.systemPrompt ? { systemPrompt: member.systemPrompt } : {}),
+      ...(member.rolePrompt ? { rolePrompt: member.rolePrompt } : {}),
+      ...(member.provider ? { provider: member.provider } : {}),
+      ...(member.model ? { model: member.model } : {}),
+      sessions: [],
+    }));
     return {
       ok: true,
       value: {

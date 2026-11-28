@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ProjectMemberRecord } from '../../../config/src/index.js';
 
@@ -33,15 +33,20 @@ function cloneSnapshot(snapshot: ControlDomainRosterSnapshot): ControlDomainRost
   };
 }
 
-function normalizeSnapshot(raw: unknown): ControlDomainRosterSnapshot {
+function normalizeSnapshotStrict(raw: unknown): ControlDomainRosterSnapshot {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { schemaVersion: 1, projects: {} };
+    throw new Error('control-domain roster store root must be a JSON object');
   }
   const obj = raw as Record<string, unknown>;
   const projects: Record<string, ProjectMemberRecord[]> = {};
-  if (obj.projects && typeof obj.projects === 'object' && !Array.isArray(obj.projects)) {
+  if (obj.projects !== undefined) {
+    if (!obj.projects || typeof obj.projects !== 'object' || Array.isArray(obj.projects)) {
+      throw new Error('control-domain roster store projects field must be an object');
+    }
     for (const [projectKey, members] of Object.entries(obj.projects as Record<string, unknown>)) {
-      if (!Array.isArray(members)) continue;
+      if (!Array.isArray(members)) {
+        throw new Error(`control-domain roster project ${projectKey} must be an array`);
+      }
       projects[projectKey] = members
         .filter((item): item is ProjectMemberRecord => Boolean(item && typeof item === 'object' && typeof (item as ProjectMemberRecord).memberId === 'string' && typeof (item as ProjectMemberRecord).name === 'string'))
         .map((member) => ({ ...member }));
@@ -57,32 +62,90 @@ function normalizeSnapshot(raw: unknown): ControlDomainRosterSnapshot {
   };
 }
 
+const LOCK_WAIT_STEP_MS = 10;
+const LOCK_TIMEOUT_MS = 5000;
+const STALE_LOCK_AGE_MS = 15000;
+const LOCK_SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSyncMs(ms: number): void {
+  Atomics.wait(LOCK_SLEEP_BUF, 0, 0, ms);
+}
+
+function isErrnoWithCode(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { code?: unknown }).code === code);
+}
+
+function withFileLock<T>(lockPath: string, run: () => T): T {
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      const fd = openSync(lockPath, 'wx', 0o600);
+      try {
+        writeSync(fd, `${process.pid}:${Date.now()}\n`);
+      } finally {
+        closeSync(fd);
+      }
+      break;
+    } catch (error) {
+      if (!isErrnoWithCode(error, 'EEXIST')) {
+        throw error;
+      }
+      try {
+        const stats = statSync(lockPath);
+        if (Date.now() - stats.mtimeMs > STALE_LOCK_AGE_MS) {
+          rmSync(lockPath, { force: true });
+          continue;
+        }
+      } catch (statError) {
+        if (isErrnoWithCode(statError, 'ENOENT')) continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`control-domain roster lock contention timeout: ${lockPath}`);
+      }
+      sleepSyncMs(LOCK_WAIT_STEP_MS);
+    }
+  }
+  try {
+    return run();
+  } finally {
+    try { rmSync(lockPath, { force: true }); } catch {}
+  }
+}
+
 export function createFileControlDomainRosterStore(rootDir: string): ControlDomainRosterStore {
   const filePath = join(rootDir, 'control-domain-roster.json');
+  const lockPath = join(rootDir, '.control-domain-roster.lock');
   const readSnapshot = (): ControlDomainRosterSnapshot => {
-    if (!existsSync(filePath)) return { schemaVersion: 1, projects: {} };
+    let raw: string;
     try {
-      const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
-      return normalizeSnapshot(parsed);
-    } catch {
-      return { schemaVersion: 1, projects: {} };
+      raw = readFileSync(filePath, 'utf8');
+    } catch (error) {
+      if (isErrnoWithCode(error, 'ENOENT')) {
+        return { schemaVersion: 1, projects: {} };
+      }
+      throw error;
     }
+    const parsed: unknown = JSON.parse(raw);
+    return normalizeSnapshotStrict(parsed);
   };
   return {
     readSnapshot,
     update<T>(mutate: (draft: ControlDomainRosterSnapshot) => T): T {
-      const draft = cloneSnapshot(readSnapshot());
-      const result = mutate(draft);
-      mkdirSync(dirname(filePath), { recursive: true });
-      const tempPath = join(dirname(filePath), `.control-domain-roster-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
-      try {
-        writeFileSync(tempPath, `${JSON.stringify(draft, null, 2)}\n`, 'utf8');
-        renameSync(tempPath, filePath);
-      } catch (error) {
-        try { rmSync(tempPath, { recursive: false, force: true }); } catch {}
-        throw error;
-      }
-      return result;
+      return withFileLock(lockPath, () => {
+        const draft = cloneSnapshot(readSnapshot());
+        const result = mutate(draft);
+        mkdirSync(dirname(filePath), { recursive: true });
+        const tempPath = join(dirname(filePath), `.control-domain-roster-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+        try {
+          writeFileSync(tempPath, `${JSON.stringify(draft, null, 2)}\n`, 'utf8');
+          renameSync(tempPath, filePath);
+        } catch (error) {
+          try { rmSync(tempPath, { recursive: false, force: true }); } catch {}
+          throw error;
+        }
+        return result;
+      });
     },
   };
 }

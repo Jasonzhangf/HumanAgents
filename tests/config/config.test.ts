@@ -1893,6 +1893,17 @@ test('worker name pool has 50 names excluding Jenny and template creation copies
     /memberId already exists/,
   );
 
+  assert.throws(
+    () => createMemberFromTemplate({
+      existingMembers: [],
+      reservedNames: new Set(['Alice']),
+      template,
+      name: 'Alice',
+      memberId: 'm-cross-project-dup',
+    }),
+    /member name already exists/,
+  );
+
   const reused = allocateWorkerName(new Set());
   assert.equal(reused, WORKER_NAME_POOL[0]);
 

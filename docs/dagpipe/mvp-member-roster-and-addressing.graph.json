@@ -7,10 +7,10 @@
     "capabilityStatus": "implemented",
     "requirementsVersion": 36,
     "terminalContract": {
-      "success": "项目成员名册、双提示词独立副本与 8 槽位隐式编排并发上限持久化至控制根，重启再水合保持一致；规范全名与职责分派确定性解析并在无匹配时回退至本机项目 Jenny",
-      "rejected": "重名、占用保留名 Jenny、50 名字池耗尽、无效并发数、缺失地址、跨项目越界与断连远端节点明确报错，绝不静默降级或覆盖模板",
-      "scope": "按 projectKey 隔离成员配置与名字池；Alex 与各项目 Jenny 身份严格分离",
-      "authority": "packages/config/src/member-roster.ts 与 packages/runtime/src/communication/addressing.ts 持有规则，UiRuntimeJournal explicit-brain.state 持有控制根耐久态"
+      "success": "项目成员名册、双提示词独立副本与 8 槽位隐式编排并发上限通过文件锁原子持久化至控制域 control-domain-roster.json，重启与跨进程再水合保持一致；规范全名与职责分派确定性解析并在无匹配时回退至本机项目 Jenny",
+      "rejected": "重名（含跨项目同短名）、重复 memberId、占用保留名 Jenny/Alex/CEO、非 worker 角色、50 名字池耗尽、无效并发数、缺失地址、跨项目越界、断连远端节点与存储不可读/损坏明确报错，绝不静默降级或覆盖既有状态",
+      "scope": "全控制域共享 50 名字池与隐式编排并发上限，成员名册与任务归属按 projectKey 隔离；Alex 与各项目 Jenny 身份严格分离",
+      "authority": "packages/config/src/member-roster.ts 与 packages/runtime/src/communication/addressing.ts 持有规则，control-domain-roster.json（文件锁 + 原子重命名）持有控制域跨进程耐久态"
     }
   },
   "inputs": [{ "id": "member_roster_and_concurrency_request", "schema": "Object" }],

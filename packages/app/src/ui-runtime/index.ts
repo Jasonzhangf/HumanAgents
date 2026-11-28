@@ -127,6 +127,7 @@ export interface UiRuntimeLaunchOptions {
   readonly mode: 'fake' | 'rcc';
   readonly maxConcurrentTasks?: number;
   readonly implicitOrchestrationMaxRuntimes?: number;
+  readonly onImplicitOrchestrationLimitChange?: (limit: number) => void;
   readonly controlStateRoot?: string;
   readonly accessControl?: AccessControlService;
   /**
@@ -716,6 +717,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.agentRoster === undefined ? {} : { agentRoster: options.agentRoster }),
     maxConcurrentTasks: options.maxConcurrentTasks,
     ...(options.implicitOrchestrationMaxRuntimes === undefined ? {} : { implicitOrchestrationMaxRuntimes: options.implicitOrchestrationMaxRuntimes }),
+    ...(options.onImplicitOrchestrationLimitChange === undefined ? {} : { onImplicitOrchestrationLimitChange: options.onImplicitOrchestrationLimitChange }),
     controlStateRoot: options.controlStateRoot ?? options.runtimePaths?.controlRoot ?? options.productRoot,
     organId: options.organId,
     principalOwner,

@@ -54,6 +54,7 @@ import {
   scopedSessionFromUiRuntime,
   startUiRuntime,
 } from './ui-runtime/index.js';
+import { createFileControlDomainRosterStore } from './ui-runtime/control-domain-roster-store.js';
 import { MemoryCoordinator } from '../../runtime/src/memory/index.js';
 import { DeterministicMemoryBackend } from '../../adapters/memory/src/index.js';
 import { assembleProviderExecutionPort } from './provider-assembly.js';
@@ -1147,8 +1148,12 @@ async function runNativeTask(input: {
       review: servePromptSegments(configuration, 'review'),
     },
   });
+  const fallbackOrchestrationMaxRuntimes = effectiveImplicitOrchestrationMaxRuntimes(configuration.effective);
+  const initialOrchestrationMaxRuntimes = createFileControlDomainRosterStore(paths.controlRoot)
+    .readSnapshot()
+    .implicitOrchestrationMaxRuntimes ?? fallbackOrchestrationMaxRuntimes;
   const serveRuntime = createServeRuntimeComposition({
-    maxRuntimes: configuration.effective.execution?.maxConcurrentTasks,
+    maxRuntimes: initialOrchestrationMaxRuntimes,
     eventBusPorts: memoryRuntime.ports,
     feedbackPorts: {
       journal: memoryRuntime.ports.journal,
@@ -2083,8 +2088,11 @@ export async function main(args: readonly string[]): Promise<void> {
           ownerId: 'humanagent.app.serve-runtime',
           nextAction: 'repair the serve runtime composition before retrying',
           start: async () => {
+            const initialLimit = createFileControlDomainRosterStore(paths.controlRoot)
+              .readSnapshot()
+              .implicitOrchestrationMaxRuntimes ?? effectiveImplicitOrchestrationMaxRuntimes(configuration.effective);
             serveRuntime = createServeRuntimeComposition({
-              maxRuntimes: configuration.effective.execution?.maxConcurrentTasks,
+              maxRuntimes: initialLimit,
               eventBusPorts: memoryRuntime.ports,
               feedbackPorts: {
                 journal: memoryRuntime.ports.journal,
@@ -2106,6 +2114,9 @@ export async function main(args: readonly string[]): Promise<void> {
             runtime = await startUiRuntime({
               agentRoster: configuration.agentRoster,
               implicitOrchestrationMaxRuntimes: effectiveImplicitOrchestrationMaxRuntimes(configuration.effective),
+              onImplicitOrchestrationLimitChange: (limit) => {
+                serveRuntime?.runtimePool.setMaxRuntimes(limit);
+              },
               controlStateRoot: paths.controlRoot,
               mode,
               accessControl,

@@ -217,7 +217,7 @@ function assertSameIncarnation(
 export class AgentRuntimePoolManager {
   private readonly runtimes = new Map<string, RuntimeRecord>();
   private readonly ownerId: string;
-  private readonly maxRuntimes: number;
+  private maxRuntimes: number;
   private readonly factory: OrchestrationRuntimeFactoryPort;
   private readonly instanceIdFactory: () => string;
   private disposed = false;
@@ -257,6 +257,18 @@ export class AgentRuntimePoolManager {
       });
       this.generationSequence = Math.max(this.generationSequence, generation);
     }
+  }
+
+  setMaxRuntimes(maxRuntimes: number): void {
+    if (!Number.isSafeInteger(maxRuntimes) || maxRuntimes < 0) {
+      throw new OrchestrationError('max runtimes must be a non-negative safe integer', {
+        ownerId: this.ownerId,
+        reason: 'orchestration.runtime.max.invalid',
+        nextAction: { kind: 'recover', ref: 'orchestration.runtime.max' },
+        evidenceRefs: [evidence({ organId: id('organ', 'orchestration-runtime-manager') }, 'orchestration.runtime.max.invalid')],
+      });
+    }
+    this.maxRuntimes = maxRuntimes;
   }
 
   private snapshot(): OrchestrationRuntimePoolSnapshot {

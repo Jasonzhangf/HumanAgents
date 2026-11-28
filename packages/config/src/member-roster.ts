@@ -150,7 +150,7 @@ export function createMemberFromTemplate(input: {
   if (chosenName.includes('.') || chosenName.includes('/')) {
     throw new MemberRosterError('member.invalid-name', `member name cannot contain '.' or '/': ${chosenName}`);
   }
-  if (projectUsedNames.has(chosenName)) {
+  if (poolUsedNames.has(chosenName)) {
     throw new MemberRosterError('member.duplicate-name', `member name already exists: ${chosenName}`);
   }
   const memberId = input.memberId.trim();

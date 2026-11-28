@@ -137,14 +137,18 @@ declare module 'node:fs/promises' {
 }
 declare module 'node:fs' {
   export function appendFileSync(path: string, data: string, encoding?: string): void;
+  export function closeSync(fd: number): void;
   export function existsSync(path: string): boolean;
   export function mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined;
+  export function openSync(path: string, flags: string | number, mode?: number): number;
   export function readFileSync(path: string): string;
   export function readFileSync(path: string, encoding: 'utf8'): string;
   export function realpathSync(path: string): string;
   export function renameSync(oldPath: string, newPath: string): void;
   export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+  export function statSync(path: string): { readonly mtimeMs: number };
   export function writeFileSync(path: string, data: string, encoding?: string): void;
+  export function writeSync(fd: number, data: string): number;
 }
 
 declare module 'node:zlib' {

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { id, type ProviderBinding } from '../../packages/contracts/src/index.js';
 import { FakeReplayExecutionRuntimePort, startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import { createFileControlDomainRosterStore } from '../../packages/app/src/ui-runtime/control-domain-roster-store.js';
 import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
@@ -286,7 +287,7 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     });
     assert.equal(missingDispatch.status, 404);
 
-    // 5. GET /api/projects/roster reflects dynamic persisted members with canonical addresses
+    // 5. GET /api/projects/roster reflects dynamic persisted members first then configured members, and never leaks configured agents to projB
     const rosterRes = await fetch(`${baseUrl}/api/projects/roster?projectKey=projA`, { headers });
     assert.equal(rosterRes.status, 200);
     const rosterBody = await rosterRes.json() as { members: Array<{ memberName: string; canonicalAddress: string }> };
@@ -294,10 +295,66 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
       rosterBody.members.map((m) => ({ name: m.memberName, addr: m.canonicalAddress })),
       [
         { name: 'Jenny', addr: 'local.projA.Jenny' },
-        { name: 'review-default', addr: 'local.projA.review-default' },
         { name: 'Alice', addr: 'local.projA.Alice' },
         { name: 'Bob', addr: 'local.projA.Bob' },
+        { name: 'review-default', addr: 'local.projA.review-default' },
       ],
+    );
+
+    const dupExplicitCrossProj = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ projectKey: 'projB', role: 'executor', name: 'Bob' }),
+    });
+    assert.equal(dupExplicitCrossProj.status, 409);
+
+    const dupConfiguredName = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ projectKey: 'projA', role: 'executor', name: 'review-default' }),
+    });
+    assert.equal(dupConfiguredName.status, 409);
+
+    const badRoleType = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        projectKey: 'projA',
+        template: { role: 123, systemPrompt: 's', rolePrompt: 'r' },
+      }),
+    });
+    assert.equal(badRoleType.status, 400);
+
+    const badNameType = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ projectKey: 'projA', role: 'executor', name: 123 }),
+    });
+    assert.equal(badNameType.status, 400);
+
+    const blankPostPrompt = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        projectKey: 'projA',
+        template: { role: 'executor', systemPrompt: '   ', rolePrompt: 'valid' },
+      }),
+    });
+    assert.equal(blankPostPrompt.status, 400);
+
+    const badPatchRole = await fetch(`${baseUrl}/api/product/members/${encodeURIComponent(createdBody.member.memberId)}?projectKey=projA`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ role: 123 }),
+    });
+    assert.equal(badPatchRole.status, 400);
+
+    const projBRosterRes = await fetch(`${baseUrl}/api/projects/roster?projectKey=projB`, { headers });
+    assert.equal(projBRosterRes.status, 200);
+    const projBRosterBody = await projBRosterRes.json() as { members: Array<{ memberName: string }> };
+    assert.deepEqual(
+      projBRosterBody.members.map((m) => m.memberName),
+      ['Jenny', 'Carol'],
     );
 
     // 6. Verify concurrency update overrides legacy maxConcurrentTasks=1 during admission
@@ -306,11 +363,15 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     }).effectiveExecutionConcurrencyLimit();
     assert.equal(runtimeAdmissionLimit, 12);
 
-    // 7. Second independent runtime on projB sharing controlStateRoot sees Alice/Bob/Carol without clobbering projA
+    // 7. Second independent runtime on projB sharing controlStateRoot sees Alice/Bob/Carol without clobbering projA, propagates concurrency live without reading settings
+    let observedCallbackLimit: number | undefined;
     const secondRuntime = await startUiRuntime({
       ...runtimeOptions,
       listen: false,
       projectKey: 'projB',
+      onImplicitOrchestrationLimitChange: (limit) => {
+        observedCallbackLimit = limit;
+      },
       port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1, replay: [] }),
     });
     try {
@@ -320,6 +381,14 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
         runtime.service.listProjectMembers('projA').members.map((m) => m.name),
         ['Jenny', 'Alice', 'Bob'],
       );
+      secondRuntime.service.setImplicitOrchestrationLimit(9);
+      assert.equal(observedCallbackLimit, 9);
+      assert.equal(
+        (runtime.service as unknown as { effectiveExecutionConcurrencyLimit(): number | undefined }).effectiveExecutionConcurrencyLimit(),
+        9,
+      );
+      // Restore 12 for cold-restart assertion below
+      secondRuntime.service.setImplicitOrchestrationLimit(12);
     } finally {
       await secondRuntime.close();
     }
@@ -343,6 +412,18 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
       ['Jenny', 'Alice', 'Bob'],
     );
     assert.equal(coldMembersBody.members[1]?.systemPrompt, 'sys-alice-edited');
+
+    // 8. Corrupt control-domain-roster.json fails loudly without wiping stored projects
+    const storePath = join(root, 'control-domain-roster.json');
+    const savedBefore = await readFile(storePath, 'utf8');
+    await writeFile(storePath, '{not-valid-json', 'utf8');
+    const fileStore = createFileControlDomainRosterStore(root);
+    assert.throws(() => fileStore.readSnapshot());
+    assert.throws(() => fileStore.update((draft) => {
+      (draft as { implicitOrchestrationMaxRuntimes?: number }).implicitOrchestrationMaxRuntimes = 3;
+    }));
+    await writeFile(storePath, savedBefore, 'utf8');
+    assert.equal(fileStore.readSnapshot().projects.projA?.length, 3);
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });

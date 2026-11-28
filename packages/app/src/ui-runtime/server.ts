@@ -1625,9 +1625,25 @@ async function handleRequest(
     if (path === '/api/product/members' && method === 'POST') {
       const body = await readBody(request);
       const rawTemplate = body.template;
-      const role = typeof body.role === 'string'
-        ? body.role as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist'
-        : undefined;
+      if (body.projectKey !== undefined && typeof body.projectKey !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-project', APP_OWNER, 'projectKey must be a string', 'provide a valid projectKey', 400);
+      }
+      if (body.name !== undefined && typeof body.name !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-name', APP_OWNER, 'member name must be a string', 'provide a valid name string', 400);
+      }
+      if (body.memberId !== undefined && typeof body.memberId !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-id', APP_OWNER, 'memberId must be a string', 'provide a valid memberId string', 400);
+      }
+      if (body.provider !== undefined && typeof body.provider !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-provider', APP_OWNER, 'provider must be a string', 'provide a valid provider string', 400);
+      }
+      if (body.model !== undefined && typeof body.model !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-model', APP_OWNER, 'model must be a string', 'provide a valid model string', 400);
+      }
+      if (body.role !== undefined && typeof body.role !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-role', APP_OWNER, 'role must be a valid worker role string', 'provide executor, architect, reviewer, tester, or specialist', 400);
+      }
+      const role = body.role as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist' | undefined;
       let template: {
         readonly role: 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist';
         readonly systemPrompt: string;
@@ -1637,21 +1653,48 @@ async function handleRequest(
       } | undefined;
       if (rawTemplate !== undefined) {
         const record = rawTemplate as Record<string, unknown>;
-        if (!record || typeof record !== 'object' || typeof record.systemPrompt !== 'string' || typeof record.rolePrompt !== 'string') {
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
           throw new UiRuntimeApiError(
             'member.template.invalid',
             APP_OWNER,
-            'member template with systemPrompt and rolePrompt is required',
+            'member template must be an object',
             'provide template.{role, systemPrompt, rolePrompt}',
             400,
           );
         }
+        if (record.role !== undefined && typeof record.role !== 'string') {
+          throw new UiRuntimeApiError('member.invalid-role', APP_OWNER, 'template.role must be a valid worker role string', 'provide executor, architect, reviewer, tester, or specialist', 400);
+        }
+        if (typeof record.systemPrompt !== 'string' || !record.systemPrompt.trim()) {
+          throw new UiRuntimeApiError(
+            'member.template.invalid',
+            APP_OWNER,
+            'template.systemPrompt must be a non-empty string',
+            'provide a non-empty template.systemPrompt',
+            400,
+          );
+        }
+        if (typeof record.rolePrompt !== 'string' || !record.rolePrompt.trim()) {
+          throw new UiRuntimeApiError(
+            'member.template.invalid',
+            APP_OWNER,
+            'template.rolePrompt must be a non-empty string',
+            'provide a non-empty template.rolePrompt',
+            400,
+          );
+        }
+        if (record.provider !== undefined && typeof record.provider !== 'string') {
+          throw new UiRuntimeApiError('member.invalid-provider', APP_OWNER, 'template.provider must be a string', 'provide a valid provider string', 400);
+        }
+        if (record.model !== undefined && typeof record.model !== 'string') {
+          throw new UiRuntimeApiError('member.invalid-model', APP_OWNER, 'template.model must be a string', 'provide a valid model string', 400);
+        }
         template = {
-          role: (typeof record.role === 'string' ? record.role : role ?? 'executor') as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist',
+          role: (record.role ?? role ?? 'executor') as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist',
           systemPrompt: record.systemPrompt,
           rolePrompt: record.rolePrompt,
-          ...(typeof record.provider === 'string' ? { provider: record.provider } : {}),
-          ...(typeof record.model === 'string' ? { model: record.model } : {}),
+          ...(record.provider !== undefined ? { provider: record.provider } : {}),
+          ...(record.model !== undefined ? { model: record.model } : {}),
         };
       } else if (role === undefined) {
         throw new UiRuntimeApiError(
@@ -1663,13 +1706,13 @@ async function handleRequest(
         );
       }
       const created = service.addProjectMember({
-        ...(typeof body.projectKey === 'string' ? { projectKey: body.projectKey } : {}),
+        ...(body.projectKey === undefined ? {} : { projectKey: body.projectKey }),
         ...(role === undefined ? {} : { role }),
         ...(template === undefined ? {} : { template }),
-        ...(typeof body.name === 'string' ? { name: body.name } : {}),
-        ...(typeof body.memberId === 'string' ? { memberId: body.memberId } : {}),
-        ...(typeof body.provider === 'string' ? { provider: body.provider } : {}),
-        ...(typeof body.model === 'string' ? { model: body.model } : {}),
+        ...(body.name === undefined ? {} : { name: body.name }),
+        ...(body.memberId === undefined ? {} : { memberId: body.memberId }),
+        ...(body.provider === undefined ? {} : { provider: body.provider }),
+        ...(body.model === undefined ? {} : { model: body.model }),
       });
       writeJson(response, 201, { member: created });
       return;
@@ -1678,16 +1721,34 @@ async function handleRequest(
     if (productMemberRoute && method === 'PATCH') {
       const body = await readBody(request);
       const memberId = decodeURIComponent(productMemberRoute[1]!);
+      if (body.projectKey !== undefined && typeof body.projectKey !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-project', APP_OWNER, 'projectKey must be a string', 'provide a valid projectKey', 400);
+      }
+      if (body.role !== undefined && typeof body.role !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-role', APP_OWNER, 'role must be a valid member role string', 'provide a valid role', 400);
+      }
+      if (body.systemPrompt !== undefined && typeof body.systemPrompt !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-prompt', APP_OWNER, 'systemPrompt must be a string', 'provide a non-empty systemPrompt string', 400);
+      }
+      if (body.rolePrompt !== undefined && typeof body.rolePrompt !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-prompt', APP_OWNER, 'rolePrompt must be a string', 'provide a non-empty rolePrompt string', 400);
+      }
+      if (body.provider !== undefined && typeof body.provider !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-provider', APP_OWNER, 'provider must be a string', 'provide a valid provider string', 400);
+      }
+      if (body.model !== undefined && typeof body.model !== 'string') {
+        throw new UiRuntimeApiError('member.invalid-model', APP_OWNER, 'model must be a string', 'provide a valid model string', 400);
+      }
       const projectKey = url.searchParams.get('projectKey')?.trim()
         || (typeof body.projectKey === 'string' ? body.projectKey.trim() : undefined);
       const updated = service.updateProjectMember({
         memberId,
         ...(projectKey ? { projectKey } : {}),
-        ...(typeof body.role === 'string' ? { role: body.role as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist' | 'manager' } : {}),
-        ...(typeof body.systemPrompt === 'string' ? { systemPrompt: body.systemPrompt } : {}),
-        ...(typeof body.rolePrompt === 'string' ? { rolePrompt: body.rolePrompt } : {}),
-        ...(typeof body.provider === 'string' ? { provider: body.provider } : {}),
-        ...(typeof body.model === 'string' ? { model: body.model } : {}),
+        ...(body.role === undefined ? {} : { role: body.role as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist' | 'manager' }),
+        ...(body.systemPrompt === undefined ? {} : { systemPrompt: body.systemPrompt }),
+        ...(body.rolePrompt === undefined ? {} : { rolePrompt: body.rolePrompt }),
+        ...(body.provider === undefined ? {} : { provider: body.provider }),
+        ...(body.model === undefined ? {} : { model: body.model }),
       });
       writeJson(response, 200, { member: updated });
       return;
