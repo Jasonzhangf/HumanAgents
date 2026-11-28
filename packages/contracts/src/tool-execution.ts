@@ -18,7 +18,7 @@ import { canonicalJsonStringify } from './explicit-brain.js';
 import { ContractError } from './errors.js';
 
 export type OperationKind = 'inspect' | 'apply' | 'run' | 'interact' | 'verify';
-export type OperationMode = 'gateway' | 'legacy' | 'dual-observe' | 'legacy-forward' | 'retired';
+export type OperationMode = 'gateway' | 'legacy' | 'dual-observe' | 'retired';
 export type ArtifactRef = string;
 export type SchemaRef = string;
 export type VerifierRef = string;
@@ -811,7 +811,7 @@ export interface OperationIdempotencyRecord {
 export type OperationIdempotencyDecision = 'new' | 'replay' | 'conflict';
 
 const OPERATION_KINDS: readonly OperationKind[] = ['inspect', 'apply', 'run', 'interact', 'verify'];
-const OPERATION_MODES: readonly OperationMode[] = ['gateway', 'legacy', 'dual-observe', 'legacy-forward', 'retired'];
+const OPERATION_MODES: readonly OperationMode[] = ['gateway', 'legacy', 'dual-observe', 'retired'];
 const OPERATION_STATUSES: readonly OperationStatus[] = [
   'accepted',
   'queued',

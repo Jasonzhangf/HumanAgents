@@ -145,6 +145,12 @@ or reset path. Only an explicitly authorized control-plane discard uses
 [Existing project: remove old governance](#existing-project-remove-old-governance),
 with AppSDK and Collab transactions kept separate.
 
+The existing preparation fields also bind the skeleton and operator plan. Use
+`objective`, `boundary`, `acceptance_criteria`, `non_goals`, and `change_kind`
+directly. When the project has a real business flow, also follow
+[Skeleton, Operations and operators](#skeleton-operations-and-operators).
+Do not add a parallel intake, schema, registry, or approval checklist.
+
 AppSDK preserves the launching environment and does not pass a project path to
 Collab. The daemon resolves project scope from the exact process cwd. Without a
 live registered App Server transport, AppSDK initializes governance and
@@ -212,11 +218,16 @@ appsdk longhorizon show --json
 `appsdk goal status --json` must report `active: true`, `desired: subscribed`,
 `observed: subscribed`, `collab_subscribed: true`, a non-null
 `subscription_id`, and a null `error`. A successful command output is not
-proof that a timer fired. Run one short-interval live replay and record the
+proof that a timer fired. Exercise the declared interval and record the
 armed subscription, fired deadline notification, and consumed result before
-declaring long-horizon scheduling verified. The current implementation is a
-one-shot deadline that must be explicitly rearmed with `appsdk goal subscribe`
-after it is consumed, expires, or Collab restarts.
+declaring long-horizon scheduling verified. New periodic long-horizon goals
+default to100 deliveries, with an explicit count taking priority. Reuse a valid
+batch across consumption and restart. Renew an ended batch only while work and
+authorization remain. Explicit one-shot deadlines and existing one-shot records
+keep their lifecycle. A batch ending does not establish task or goal completion.
+Master dispatch task sheets carry the long-horizon content and cadence, and
+dispatch starts the target peer's subscription atomically. The current typed
+CEO can modify any member's long-horizon schedule across projects.
 
 For a new governance root, AppSDK installs a project-neutral root `AGENTS.md`
 when none exists. It contains the Project Truth, Semantic Invariants,
@@ -302,18 +313,35 @@ upgrade uses [governance ablation](#existing-project-governance-ablation).
 For that migration or reset scope, inventory AppSDK roots, maps, records,
 Active/Protected, local control state, claims, and worktrees. Choose one route:
 
+### State-by-state migration matrix to `0.1.0015`
+
+All legacy `0.1.x` consumers must move to `0.1.0015`. Do not guess between
+`init`, `pin-lock`, `prepare`, and `--fresh --discard-legacy`; run the read-only
+inspection in [`appsdk-migration`](../../appsdk-migration/SKILL.md#3-appsdk-version-migration-runbook-legacy-01x---010015)
+and match the exact state:
+
+| Current `.appsdk/project.json` state | Checkout / worktree requirement | Exact command sequence | Notes |
+| --- | --- | --- | --- |
+| `.sdk.version == "0.1.0015"`, `sdk-resources.json` valid, only `docs`/`rules`/`skills` stale | Canonical project checkout on clean non-`main` branch | `appsdk resources refresh .` -> `appsdk verify .` | Refreshes `docs`/`rules`/`skills` only; keeps contracts, `AGENTS.md`, records, `active/`, `protected/` |
+| `.sdk.version == "0.1.0015"`, `sdk-resources.json` or `contracts/` missing/invalid | Canonical project checkout (ordinary `init` rejects linked worktrees) | `appsdk init .` -> `appsdk verify .` | Non-destructive; rebuilds managed bundle and `sdk-resources.json` |
+| `.sdk.version == "0.1.0014"`, canonical maps intact | Canonical project checkout on clean non-`main` branch | `appsdk pin-lock . --binary "$(command -v appsdk)"` -> `appsdk init .` -> `appsdk verify .` | Upgrades lock and bundle in place; if map reconciliation fails, preserve exact error before reconciling or requesting authorized `--fresh` |
+| `.sdk.version` in `0.1.5`–`0.1.0013` (retired legacy baseline) | Clean non-`main`/`master` linked `git worktree` + explicit user discard authorization | `appsdk init "$PWD" --fresh --discard-legacy` -> optional `appsdk guide init --task governance-reset --mode bootstrap --module <id>` / `appsdk guide compile` -> `appsdk verify .` | Rebuilds `.appsdk/` and declared `generated_root` on `0.1.0015`; preserves business source, runtime data, `active/`, `protected/`, `.agent-collab/` |
+| Absent (first adoption / new root) | Canonical project checkout | `appsdk prepare` -> user confirms `.appsdk-prepare.json` -> `appsdk init .` -> `appsdk verify .` | Never self-confirm `.appsdk-prepare.json` |
+| Malformed / unreadable JSON | Read-only until diagnosed | Stop and report exact parse error | Never auto-delete `.appsdk/` |
+
 ### Preserve and migrate
 
-Use when historical evidence remains valuable and the current version has a
-supported canonical migration.
+Use the existing governed root identified by `.appsdk/project.json`. For a
+supported managed-resource upgrade, run `appsdk init` from that root. It
+refreshes the managed bundle through the current SDK. Run `appsdk verify`,
+then exercise the affected project entry and check the retained records
+identified before migration. If the change is only to effective rules or
+CI/hooks, use [governance ablation](#existing-project-governance-ablation).
 
-```text
-snapshot immutable truth
--> reconcile ownership/conflicts
--> run canonical migration once
--> verify one retained truth
--> compile Harness rules
-```
+If the current SDK rejects the project version, records, or pin, retain the
+exact error and affected paths for the SDK owner. Continue after an explicit
+supported migration for that version pair is available and verified. Use
+confirmed preparation for a relocated root or first adoption.
 
 ### Reset and reinitialize
 
@@ -416,6 +444,251 @@ read current effective source and task state
 Untouched legacy gaps are warnings unless safety, source ownership, evidence
 truth, or current delivery is affected.
 
+For changes to the project skeleton, Operations, operators, or graph
+configuration, use [Skeleton, Operations and operators](#skeleton-operations-and-operators)
+after placing the task at its real phase. Do not repeat that procedure here.
+
+## Skeleton, Operations and operators
+
+This section owns the project procedure for turning a business flow into a
+skeleton, Operations, reusable operators, and graph configuration. Other
+references route here; do not copy the procedure.
+
+AppSDK governs consumer projects through this procedure and the mechanisms it
+provides. The consumer owns its architecture, business semantics, operator
+implementations, configuration, and acceptance. DAGPipe owns graph compilation
+and execution. AppSDK's own Operations can serve as pilots; migrating one SDK
+command does not by itself establish or verify governance for other projects.
+
+Use this procedure to design the consumer's adoption. When a consumer turns
+an instruction into a mandatory governance rule, use the
+[ontology rule template](ontology-governance.md) to model its Object, Behavior,
+and Relation, record exact clause approval, and bind its executable edge or
+gate with legal and illegal cases and a real observation path. Keep proposed
+clauses marked as candidates until those conditions are met.
+
+For a Rust consumer that must execute an approved rule, put the executable
+extension in the same ontology declaration:
+
+```text
+static rule approval and three-axis model
+  -> ontology.execution operation and commit-node declaration
+  -> registry with the real project operators and gates
+  -> consumer CommitOwner under one consistency boundary
+  -> bind_operation
+  -> CompiledOperation::call
+```
+
+For a Guidance-style manifest, use the normal `appsdk guide compile` entry to
+compile the static declaration and preserve the ontology projection. Use a
+static project fixture to exercise declaration errors, execution projection,
+and legacy compatibility through that same public entry.
+
+For the executable path, follow the
+[ontology execution design](https://github.com/Jasonzhangf/appsdk/blob/main/docs/design/appsdk-ontology-governance.md).
+Use the actual public interfaces from the Rust consumer:
+
+```rust
+pipeline_runtime::governance::validate_execution_declaration(ontology)?;
+let operation = pipeline_runtime::governance::bind_operation(
+    ontology,
+    behavior_id,
+    graph,
+    registry,
+    owner,
+    capabilities,
+)?;
+let result = operation.call(
+    OperationRequest {
+        subject,
+        event,
+        data,
+    },
+    identity,
+    cancellation,
+)?;
+```
+
+Bind once at the real production entrypoint. Call
+`validate_execution_declaration` when a declaration may exist without
+execution, for example before compiling a Guidance projection. Call
+`bind_operation` when the operation must actually execute. The consumer's
+`CommitOwner` reads the current state, builds the complete affected candidate,
+invokes the supplied validation closure, and commits only after that closure
+succeeds. Keep this sequence under the consumer's existing storage consistency
+boundary; the SDK does not add a transaction, retry, or automatic rollback. The
+isolated `governed_catalog` example is a mechanism example, not approval of a
+production business clause.
+
+### Shape the skeleton
+
+1. Bind the user goal, accepted behavior, acceptance criteria, non-goals,
+   owners, and allowed/forbidden paths first. For a new project, reuse the
+   existing `appsdk prepare` fields. Do not add a second preparation record.
+2. Map the whole project at skeleton level: modules, owners, Operations,
+   public entrypoints, external dependencies, success and failure endpoints,
+   and side effects. Mark unmigrated paths; refine and migrate each selected
+   Operation incrementally.
+3. Split a node only at a stable capability boundary. Do not turn ordinary
+   functions into nodes mechanically. A function stays in the owner that
+   provides the capability.
+4. Keep configuration and control truth separate from business payloads,
+   metadata, debug logs, and implicit context.
+5. A missing required capability returns an explicit error on the affected
+   path. An optional capability may be skipped only when its contract permits
+   the skip. Preserve the actual result and error.
+
+An Operation is one user-visible business action with an input, result, error
+boundary, and declared side effects. It can compose several graph nodes. A
+node invokes one capability in that flow. An operator is the versioned
+implementation bound by the node. Define each selected node's purpose, inputs,
+outputs, errors, side effects, and capability owner. Maintain reusable
+operators with their capability owners instead of duplicating them per node.
+
+### Define and verify capabilities
+
+```text
+declare Operation and node contract
+-> reuse the existing operator or shared capability
+-> define black-box success, failure, and side-effect assertions
+-> implement or extend only the missing capability
+-> verify the base capability
+-> compile the graph and bind the real entrypoint
+-> run the public acceptance path
+```
+
+Define the acceptance before implementing a new operator. A graph-only change
+may reuse an already verified operator. A capability change updates its unique
+operator owner and only the affected bindings. Verify each added or changed
+operator through its public interface or a real consumer before wiring it.
+The project's real entrypoint registers the operators and executes the compiled
+graph; a valid design graph alone does not prove that this happens.
+
+For a Rust consumer, obtain the `pipeline_runtime` library using the project's
+actual dependency source, then follow the [DAGPipe usage guide](https://github.com/Jasonzhangf/appsdk/blob/main/dagpipe/docs/usage.md)
+for operator implementation, graph configuration, registration, compilation,
+execution, and output and failure handling. The guide is hosted in the AppSDK
+source repository; the AppSDK Skill installer does not install DAGPipe's Rust
+library or its documentation. The notification example below demonstrates an
+existing SDK entrypoint, not registration of a consumer's own operator. Verify
+other language integrations against their actual supported interface.
+
+The runtime's `Object` type does not validate required business fields; those
+remain the capability owner's contract. Multiple input ARCs in `Whole` mode
+arrive as an array. An operator returns string errors wrapped by the runtime;
+check that the consumer entrypoint can preserve its required error contract.
+The graph has no general per-node business-parameter field. A consumer may
+construct an operator from declared project configuration before registration.
+
+### New project
+
+Use the existing preparation fields to bind the modules, Operation, entrypoint,
+external ARCs, operator owners, and acceptance. Add a graph only when the
+actual business flow needs composition. A new project does not need a general
+operation scheduler, a second registry, or a generated business graph that has
+no real consumer.
+
+### Existing project or mid-development change
+
+Read the current behavior and affected graph first. Record the original
+entrypoint, candidate entrypoint, and the terminal for switching or deleting
+the old implementation.
+
+```text
+current behavior and affected graph
+-> candidate implementation
+-> same-input white-box and black-box comparison
+-> switch the public entrypoint
+-> delete the old implementation, call sites, dedicated tests, and dependencies
+-> unique-entrypoint regression
+```
+
+Update the affected skeleton and Operation contract before changing the
+implementation. Explain intentional old/new behavior differences. Reuse valid
+evidence and recheck only the affected guarantees. A combination change updates
+the graph. A capability change updates the owning operator. Do not keep the old
+production path as a fallback.
+
+One invocation keeps its selected compiled graph. If the business contract also
+requires configuration to remain stable during that invocation, the consumer
+owner must preserve the configuration and operator instance for its lifetime;
+prefer an immutable configured instance instead of mutating a shared instance.
+A fixed graph alone cannot keep external configuration or a process alive.
+Do not add in-flight hot switching unless a later contract requires it. Arrange
+state migration only when the state contract changes, and define how old
+invocations complete or exit during a state-format change.
+
+A failure still allows the other nodes in its scheduled wave to finish, even
+with the default single worker. Later waves do not start. When multiple nodes
+in that wave fail, the primary error follows stable node-ID order, not failure
+time or an implicit business priority. Cancellation does not interrupt a
+blocking operator or an `Items` iteration; an effect may still complete. Put
+an action that must not run after a failed check in a later wave through a real
+dependency. Effect capabilities are declarations and compile-time checks, not
+locks, OS permissions, a sandbox, automatic retry, or rollback. If these runtime
+boundaries cannot preserve a required error, cancellation, or transaction
+contract, keep the existing atomic owner boundary and redesign that connection.
+
+### Ablation and evidence
+
+Physically remove an implementation, call site, dedicated test, or dependency
+when no current consumer or independent guarantee needs it. Keep safety,
+data-correctness, and public black-box checks.
+
+Use `compile` for graph structure, types, bindings, and capability checks. Do
+not repeat those checks at every layer. Do not add a per-item proof table, a
+second governance status, hashes, or frozen snapshots merely to record an
+ablation.
+
+### Notification configuration example
+
+The notification validation chain demonstrates this composition pattern.
+Graph paths resolve within the project. Relative paths start at the project
+root; an absolute path must also name a file inside that project.
+
+```sh
+appsdk dagpipe validate-notifications <project>
+appsdk dagpipe validate-notifications <project> --graph <path>
+```
+
+| CLI choice | Successful result meaning |
+| --- | --- |
+| no `--graph` | `evidence_scope: "sdk_default_contract"`; the input passed the SDK's complete default notification contract |
+| explicit `--graph` | `evidence_scope: "selected_project_program"`; the input passed the selected project program and entry-result consumption contract |
+
+The default graph is
+`source_validate -> delivery_validate -> terminal_accept`. A complete
+alternative graph may order `delivery_validate` before `source_validate`.
+These two complete graphs retain all validation stages. On an object with both a
+source error and a delivery error, the first reported business error follows
+the selected order.
+
+An explicit graph is a trusted project program. A legal graph that omits source
+or terminal acceptance may complete successfully. Its success remains
+`selected_project_program`. SDK default acceptance uses the default command
+and `sdk_default_contract`.
+Derive `evidence_scope` only from the CLI default/explicit choice. Never infer
+it from Graph ID, version, path, node names, or output content.
+
+Default and explicit graph failures must fail explicitly. Do not fall back to
+another graph or an old implementation. Consume the actual Runtime output; do
+not rebuild a missing terminal from input state. Verify these behaviors
+through the public command when changing this Operation.
+
+After argument parsing and safe project-root resolution, this command appends
+one invocation and outcome to `.appsdk-control/command-invocations.jsonl`.
+The record contains the command, UTC start time, elapsed milliseconds, graph
+selection, outcome, and a fixed error code on failure. It excludes message
+content, graph content, paths, and business results.
+
+Mailbox, graph, and other business files remain read-only. The invocation log
+is the declared audit write. A log failure reports
+`COMMAND_INVOCATION_LOG_WRITE_FAILED` on stderr and preserves the original
+business result and exit status. Such a warning identifies an audit gap.
+Early usage or unsafe-root rejection writes no project log. This logging
+boundary covers the notification command; other CLI commands keep their own
+owners. The log supports review and has no role in validation or recovery.
+
 ## Existing project: remove old governance
 
 Use this section when a real project root already contains `.appsdk/`,
@@ -433,14 +706,15 @@ cd /abs/path/project
 git status --short --branch
 git worktree list
 find .appsdk .appsdk-control .agent-collab -maxdepth 3 -print 2>/dev/null
-collab migrate inspect
 collab context
 ```
 
 Record the exact project root, branch/HEAD, worktrees, `.appsdk/` and
 `.appsdk-control/` contents, generated roots, `active/`, `protected/`,
-`.agent-collab/` journal/mailbox/tasks/claims, daemon PID/socket, peer
-identities, routes, and migration blockers in the run note. A file name, old
+the current Collab identity map, task/mailbox state and resource claims, daemon
+PID/socket, peer identities, routes, and actual blockers in the run note. Collab
+has no migration-maintenance command; current recovery is `collab context`.
+A file name, old
 PID file, socket existence, or successful `collab status` is not sufficient
 proof of ownership.
 
@@ -472,8 +746,8 @@ start from the current SDK baseline, the preferred single entry is:
 ```bash
 cd /abs/path/project
 git worktree add -b codex/governance-reset-<slug> \
-  /Volumes/Intel/playground/<project-key>/<task-slug> origin/main
-cd /Volumes/Intel/playground/<project-key>/<task-slug>
+  /Volumes/extension/playground/<project-key>/<task-slug>-<yyyymmdd> origin/main
+cd /Volumes/extension/playground/<project-key>/<task-slug>-<yyyymmdd>
 appsdk init "$PWD" --fresh --discard-legacy
 appsdk guide init --task governance-reset --mode bootstrap --module <module-id>
 appsdk guide compile

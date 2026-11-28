@@ -24,13 +24,40 @@ Use this Skill only when an AppSDK-managed project performs governance bootstrap
    - Upgrading an existing project to the 2026-10-16 ablated governance uses [bootstrap-migration.md](references/bootstrap-migration.md#existing-project-governance-ablation) to remove legacy SHA/freeze/identity-record calls from project docs, hooks, and gates. Never run `appsdk init --fresh` or `collab reset` merely to upgrade rules.
    - New project admission uses `appsdk prepare` -> explicit user confirmation of `.appsdk-prepare.json` -> `appsdk init` -> `appsdk verify`.
 3. **Development, review, and delivery**:
-   - Work in an exclusive clean external worktree (`/Volumes/Intel/playground/<project-key>/<task-slug>`) following the SESE Close-Before-Open lifecycle.
-   - Check affected DAG completeness and SESE closure first (`dagpipe graph validate`), then run red test -> unique owner fix -> real public-entrypoint black-box regression.
-   - Trigger one independent architecture/milestone review at the milestone integration boundary after author verification passes. Ordinary internal nodes and commits do not trigger review.
+   - Follow the host's coding and delivery contract for worktree ownership, affected DAG, red test, public-entrypoint regression and milestone review. Pure documentation uses targeted checks; do not create another lifecycle here.
 4. **Collaboration ownership**:
-   - Long-horizon work belongs to a consenting peer assigned through the public Collab board. That peer orchestrates independent `codex exec --profile gcm` execution and observation workers.
-   - Master and peer each own and orchestrate their goal. One-shot execution/observation goes directly to independent GCM workers regardless of peer availability. Managed-subagent commands and records are legacy compatibility for diagnosis or migration, not a production execution surface.
-   - Fleet, patrol, worktree-hold, and one-shot rearm rules belong to the Collab Skill. This governance Skill owns AppSDK intake, DAG, gates, review, and goal commands.
+   - When explicitly registered, follow the [Collab Skill](../collab/SKILL.md) for goal ownership, task routing, waits and patrols. Execution and review routing follow the current host contract.
+   - This Skill owns AppSDK governance entrypoints. It does not duplicate Collab identity, role or scheduling rules.
+
+## Ontology rule governance
+
+Rule, governance, ontology, Skill, or old-memory renovation changes first model
+the affected Object, Behavior and Relation semantics with
+[references/ontology-governance.md](references/ontology-governance.md).
+
+Every rule clause records its scenario, trigger, allowed actions, forbidden
+actions, affected state or effect, owner, evidence, approval state, and target
+governance edge or gate. Approving the overall model or flow does not approve
+each individual clause.
+
+The manifest carries the three axes as `ontology.objects`,
+`ontology.behaviors`, and `ontology.relations`. Each clause names an
+`axis_id` that resolves to one declared entry of its axis. Every forbidden
+rule and its clause bind in strict bidirectional one-to-one form.
+
+A clause is enforceable only after exact user approval and binding to an
+executable edge or gate with one legal case, one illegal case, and a real
+observation path. `.appsdk/requirements.json` is a declaration, not
+enforcement. Non-rule project facts do not enter rule approval.
+Guidance manifests that claim ontology governance carry an
+`ontology_clause` reference and a complete `ontology.clauses` record.
+`appsdk guide compile` rejects a candidate, unapproved, unbound, or unresolved
+clause before writing the compiled manifest.
+
+While any rule or ontology candidate awaits user approval, do not arm, renew,
+or subscribe the next wake for that goal. Legacy memory without the
+object/behavior/relation fields must be renovated into candidate clauses, or
+recorded as a non-rule project fact, before it is used as rule input.
 
 ## Reference router (load on demand)
 
@@ -39,6 +66,7 @@ Read only the reference matching the current action; do not preload all files:
 | Scenario | Reference |
 | --- | --- |
 | Existing project SHA/ceremony ablation, `appsdk prepare/init`, or legacy governance removal | [references/bootstrap-migration.md](references/bootstrap-migration.md) |
+| New, existing, or mid-development skeleton, Operation, operator, and graph-configuration changes | [references/bootstrap-migration.md](references/bootstrap-migration.md#skeleton-operations-and-operators) |
 | Authoritative requirement review packet & milestone delivery/cleanup boundaries | [references/review-delivery.md](references/review-delivery.md) & [references/authoritative-review-template.md](references/authoritative-review-template.md) |
 | AppSDK vs. Collab directory ownership (`.appsdk`, `.appsdk-control`, `.agent-collab`, `~/.collab`) | [references/state-paths.md](references/state-paths.md) |
 | `appsdk` CLI command surface and exit semantics | [references/command-surface.md](references/command-surface.md) |
@@ -46,4 +74,5 @@ Read only the reference matching the current action; do not preload all files:
 | Error contracts and failure classification | [references/contracts-and-failures.md](references/contracts-and-failures.md) |
 | Legacy managed-child compatibility, independent GCM workers, and process harness | [references/subagents-config.md](references/subagents-config.md) & [references/process-control-harness.md](references/process-control-harness.md) |
 | Initializer and long-horizon goal prompt templates | [references/init-prompts.md](references/init-prompts.md) & [references/goal-prompt.md](references/goal-prompt.md) |
+| Ontology/rule upgrade or old-memory renovation | [references/ontology-governance.md](references/ontology-governance.md) |
 | Control-plane migration, daemon maintenance, or authorized state reset | [`appsdk-migration`](../appsdk-migration/SKILL.md) |
