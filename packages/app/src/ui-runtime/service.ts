@@ -7,8 +7,12 @@ import {
   MemberRosterError,
   RESERVED_MANAGER_NAME,
   createMemberFromTemplate,
+  defaultRoleTemplate,
+  removeMemberRecord,
+  updateMemberRecord,
   type MemberRoleTemplate,
   type ProjectMemberRecord,
+  type ProjectMemberRole,
 } from '../../../config/src/index.js';
 import {
   AddressingError,
@@ -3252,7 +3256,44 @@ export class UiRuntimeService {
   private readResources?: { readonly runtimePaths: RuntimePaths; readonly projectCatalog: () => Promise<ConfiguredProjectCatalog> };
   private implicitOrchestrationLimit: number;
   private readonly machineName: string;
-  private readonly projectMembers: ProjectMemberRecord[];
+  private readonly projectMembersByProject = new Map<string, ProjectMemberRecord[]>();
+
+  private defaultManagerMember(projectKey: string): ProjectMemberRecord {
+    return {
+      memberId: `manager-${this.machineName}-${projectKey}`,
+      name: RESERVED_MANAGER_NAME,
+      role: 'manager',
+      systemPrompt: 'HumanAgent project manager system boundary',
+      rolePrompt: 'Jenny project manager',
+    };
+  }
+
+  private ensureProjectMembers(projectKey = this.options.projectKey ?? 'default'): ProjectMemberRecord[] {
+    const key = projectKey.trim() || (this.options.projectKey ?? 'default');
+    let members = this.projectMembersByProject.get(key);
+    if (!members) {
+      members = [this.defaultManagerMember(key)];
+      this.projectMembersByProject.set(key, members);
+    } else if (!members.some((member) => member.role === 'manager' || member.name === RESERVED_MANAGER_NAME)) {
+      members.unshift(this.defaultManagerMember(key));
+    }
+    return members;
+  }
+
+  private exportProjectMembersSnapshot(): Record<string, ProjectMemberRecord[]> {
+    const out: Record<string, ProjectMemberRecord[]> = {};
+    for (const [key, members] of this.projectMembersByProject.entries()) {
+      out[key] = members.map((member) => ({ ...member }));
+    }
+    return out;
+  }
+
+  private restoreProjectMembersSnapshot(snapshot: Record<string, readonly ProjectMemberRecord[]>): void {
+    this.projectMembersByProject.clear();
+    for (const [key, members] of Object.entries(snapshot)) {
+      this.projectMembersByProject.set(key, members.map((member) => ({ ...member })));
+    }
+  }
 
   getImplicitOrchestrationLimit(): number {
     return this.implicitOrchestrationLimit;
@@ -3268,82 +3309,168 @@ export class UiRuntimeService {
         400,
       );
     }
+    const previous = this.implicitOrchestrationLimit;
     this.implicitOrchestrationLimit = limit;
+    try {
+      this.persistExplicitBrainState();
+    } catch (error) {
+      this.implicitOrchestrationLimit = previous;
+      throw error;
+    }
     return this.implicitOrchestrationLimit;
   }
 
-  private canonicalAddressEntries(): readonly CanonicalAddressEntry[] {
-    const project = this.options.projectKey ?? 'default';
-    return [
+  private canonicalAddressEntries(defaultProject = this.options.projectKey ?? 'default'): readonly CanonicalAddressEntry[] {
+    this.ensureProjectMembers(defaultProject);
+    const entries: CanonicalAddressEntry[] = [
       {
         canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, name: 'CEO' }),
         machine: this.machineName,
         name: 'CEO',
         role: 'ceo',
       },
-      ...this.projectMembers.map((member) => ({
-        canonicalAddress: formatCanonicalAgentAddress({
+    ];
+    for (const [project, members] of this.projectMembersByProject.entries()) {
+      for (const member of members) {
+        entries.push({
+          canonicalAddress: formatCanonicalAgentAddress({
+            machine: this.machineName,
+            project,
+            name: member.name,
+          }),
           machine: this.machineName,
           project,
           name: member.name,
-        }),
-        machine: this.machineName,
-        project,
-        name: member.name,
-        role: member.role,
-      })),
-    ];
+          role: member.role,
+        });
+      }
+    }
+    return entries;
   }
 
-  listProjectMembers(): {
+  listProjectMembers(projectKey?: string): {
     readonly machine: string;
     readonly project: string;
     readonly members: readonly ProjectMemberRecord[];
   } {
+    const project = projectKey?.trim() || (this.options.projectKey ?? 'default');
+    const members = this.ensureProjectMembers(project);
     return {
       machine: this.machineName,
-      project: this.options.projectKey ?? 'default',
-      members: this.projectMembers.map((member) => ({ ...member })),
+      project,
+      members: members.map((member) => ({ ...member })),
     };
   }
 
   addProjectMember(input: {
-    readonly template: MemberRoleTemplate;
+    readonly projectKey?: string;
+    readonly role?: Exclude<ProjectMemberRole, 'manager'>;
+    readonly template?: MemberRoleTemplate;
     readonly name?: string;
     readonly memberId?: string;
     readonly provider?: string;
     readonly model?: string;
   }): ProjectMemberRecord {
+    const project = input.projectKey?.trim() || (this.options.projectKey ?? 'default');
+    const previous = this.exportProjectMembersSnapshot();
+    const members = this.ensureProjectMembers(project);
     try {
+      const template = input.template ?? defaultRoleTemplate(input.role ?? 'executor');
       const created = createMemberFromTemplate({
-        existingMembers: this.projectMembers,
-        template: input.template,
+        existingMembers: members,
+        template,
         ...(input.name === undefined ? {} : { name: input.name }),
         memberId: input.memberId?.trim() || `member-${randomUUID()}`,
         ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.model === undefined ? {} : { model: input.model }),
       });
-      this.projectMembers.push(created);
+      members.push(created);
+      this.persistExplicitBrainState();
       return { ...created };
     } catch (error) {
+      this.restoreProjectMembersSnapshot(previous);
       if (error instanceof MemberRosterError) {
-        const status = error.code === 'member.duplicate-name' ? 409 : 400;
+        const status = error.code === 'member.duplicate-name' || error.code === 'member.name-pool-exhausted' ? 409 : 400;
         throw new UiRuntimeApiError(error.code, APP_OWNER, error.message, 'choose an available member name and valid template', status);
       }
       throw error;
     }
   }
 
+  updateProjectMember(input: {
+    readonly projectKey?: string;
+    readonly memberId: string;
+    readonly role?: ProjectMemberRole;
+    readonly systemPrompt?: string;
+    readonly rolePrompt?: string;
+    readonly provider?: string;
+    readonly model?: string;
+  }): ProjectMemberRecord {
+    const project = input.projectKey?.trim() || (this.options.projectKey ?? 'default');
+    const previous = this.exportProjectMembersSnapshot();
+    const current = this.ensureProjectMembers(project);
+    try {
+      const result = updateMemberRecord({
+        existingMembers: current,
+        memberId: input.memberId,
+        patch: {
+          ...(input.role === undefined ? {} : { role: input.role }),
+          ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }),
+          ...(input.rolePrompt === undefined ? {} : { rolePrompt: input.rolePrompt }),
+          ...(input.provider === undefined ? {} : { provider: input.provider }),
+          ...(input.model === undefined ? {} : { model: input.model }),
+        },
+      });
+      this.projectMembersByProject.set(project, result.members);
+      this.persistExplicitBrainState();
+      return { ...result.updated };
+    } catch (error) {
+      this.restoreProjectMembersSnapshot(previous);
+      if (error instanceof MemberRosterError) {
+        const status = error.code === 'member.not-found' ? 404 : error.code === 'member.manager-immutable' ? 409 : 400;
+        throw new UiRuntimeApiError(error.code, APP_OWNER, error.message, 'provide valid editable member fields', status);
+      }
+      throw error;
+    }
+  }
+
+  removeProjectMember(input: {
+    readonly projectKey?: string;
+    readonly memberId: string;
+  }): ProjectMemberRecord {
+    const project = input.projectKey?.trim() || (this.options.projectKey ?? 'default');
+    const previous = this.exportProjectMembersSnapshot();
+    const current = this.ensureProjectMembers(project);
+    try {
+      const result = removeMemberRecord({
+        existingMembers: current,
+        memberId: input.memberId,
+      });
+      this.projectMembersByProject.set(project, result.members);
+      this.persistExplicitBrainState();
+      return { ...result.removed };
+    } catch (error) {
+      this.restoreProjectMembersSnapshot(previous);
+      if (error instanceof MemberRosterError) {
+        const status = error.code === 'member.not-found' ? 404 : error.code === 'member.manager-immutable' ? 409 : 400;
+        throw new UiRuntimeApiError(error.code, APP_OWNER, error.message, 'only non-manager workers may be removed', status);
+      }
+      throw error;
+    }
+  }
+
   resolveCanonicalAddress(input: {
+    readonly projectKey?: string;
     readonly token: string;
     readonly connectedMachines?: readonly string[];
   }): CanonicalAddressEntry {
+    const project = input.projectKey?.trim() || (this.options.projectKey ?? 'default');
     try {
       return resolveAgentAddress({
         token: input.token,
         currentMachine: this.machineName,
-        currentProject: this.options.projectKey ?? 'default',
-        entries: this.canonicalAddressEntries(),
+        currentProject: project,
+        entries: this.canonicalAddressEntries(project),
         connectedMachines: new Set([this.machineName, ...(input.connectedMachines ?? [])]),
       });
     } catch (error) {
@@ -3362,15 +3489,17 @@ export class UiRuntimeService {
   }
 
   dispatchMemberByRole(input: {
+    readonly projectKey?: string;
     readonly role?: CanonicalAddressEntry['role'];
     readonly explicitTarget?: string;
     readonly connectedMachines?: readonly string[];
   }): { readonly target: CanonicalAddressEntry; readonly reason: 'explicit' | 'role-match' | 'jenny-fallback' } {
+    const project = input.projectKey?.trim() || (this.options.projectKey ?? 'default');
     try {
       return dispatchByRole({
         currentMachine: this.machineName,
-        currentProject: this.options.projectKey ?? 'default',
-        entries: this.canonicalAddressEntries(),
+        currentProject: project,
+        entries: this.canonicalAddressEntries(project),
         ...(input.role === undefined ? {} : { role: input.role }),
         ...(input.explicitTarget === undefined ? {} : { explicitTarget: input.explicitTarget }),
         connectedMachines: new Set([this.machineName, ...(input.connectedMachines ?? [])]),
@@ -3520,15 +3649,7 @@ export class UiRuntimeService {
     this.memory = options.memory;
     this.implicitOrchestrationLimit = options.implicitOrchestrationMaxRuntimes ?? DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES;
     this.machineName = options.machineName?.trim() || 'local';
-    this.projectMembers = [
-      {
-        memberId: `manager-${this.machineName}-${options.projectKey ?? 'default'}`,
-        name: RESERVED_MANAGER_NAME,
-        role: 'manager',
-        systemPrompt: 'HumanAgent project manager system boundary',
-        rolePrompt: 'Jenny project manager',
-      },
-    ];
+    this.ensureProjectMembers(options.projectKey ?? 'default');
     this.subscriptionControl = options.subscriptionControl;
     this.explicitBrainInterpreter = options.explicitBrainInterpreter;
     this.explicitBrainTraceJournal = new DecisionTraceJournal({
@@ -7305,35 +7426,82 @@ export class UiRuntimeService {
   }
 
   async projectRoster(projectKey: string): Promise<RuntimeReadResult<{
+    readonly machine: string;
     readonly projectKey: string;
     readonly rosterState: 'configured' | 'not-initialized';
     readonly members: readonly {
+      readonly memberId?: string;
       readonly memberName: string;
       readonly agentId: string;
       readonly roleId: string;
+      readonly canonicalAddress: string;
+      readonly systemPrompt?: string;
+      readonly rolePrompt?: string;
+      readonly provider?: string;
+      readonly model?: string;
       readonly sessions: readonly { readonly sessionId: string; readonly state: string }[];
     }[];
   }>> {
     const source = await this.findProjectSource(projectKey);
     if (source === undefined) return { ok: false, failure: unknownProjectFailure(projectKey) };
     const roster = this.options.agentRoster;
-    if (!roster || roster.length === 0) {
-      return { ok: true, value: { projectKey: source.projectKey, rosterState: 'not-initialized', members: [] } };
+    const storedMembers = this.projectMembersByProject.get(source.projectKey) ?? [];
+    const dynamicWorkers = storedMembers.filter((member) => member.role !== 'manager' && member.name !== RESERVED_MANAGER_NAME);
+    const dynamicManager = storedMembers.find((member) => member.role === 'manager' || member.name === RESERVED_MANAGER_NAME);
+    if ((!roster || roster.length === 0) && dynamicWorkers.length === 0) {
+      return { ok: true, value: { machine: this.machineName, projectKey: source.projectKey, rosterState: 'not-initialized', members: [] } };
     }
-    const members = roster
+    const baseMembers = (roster ?? [])
       .filter((agent) => managementRoleForAgent(agent) !== 'ceo')
-      .map((agent) => ({
-        memberName: managementRoleForAgent(agent) === 'project-lead' ? 'Jenny' : agent.agentId,
-        agentId: agent.agentId,
-        roleId: managementRoleForAgent(agent) === 'project-lead' ? 'manager' : agent.roleId,
+      .map((agent) => {
+        const isManager = managementRoleForAgent(agent) === 'project-lead';
+        const memberName = isManager ? RESERVED_MANAGER_NAME : agent.agentId;
+        return {
+          ...(isManager && dynamicManager ? { memberId: dynamicManager.memberId, systemPrompt: dynamicManager.systemPrompt, rolePrompt: dynamicManager.rolePrompt } : {}),
+          memberName,
+          agentId: agent.agentId,
+          roleId: isManager ? 'manager' : agent.roleId,
+          canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, project: source.projectKey, name: memberName }),
+          sessions: [],
+        };
+      });
+    const seenNames = new Set(baseMembers.map((member) => member.memberName));
+    if (!seenNames.has(RESERVED_MANAGER_NAME) && dynamicManager) {
+      baseMembers.unshift({
+        memberId: dynamicManager.memberId,
+        memberName: dynamicManager.name,
+        agentId: dynamicManager.memberId,
+        roleId: dynamicManager.role,
+        canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, project: source.projectKey, name: dynamicManager.name }),
+        systemPrompt: dynamicManager.systemPrompt,
+        rolePrompt: dynamicManager.rolePrompt,
         sessions: [],
-      }));
+      });
+      seenNames.add(dynamicManager.name);
+    }
+    for (const worker of dynamicWorkers) {
+      if (seenNames.has(worker.name)) continue;
+      seenNames.add(worker.name);
+      baseMembers.push({
+        memberId: worker.memberId,
+        memberName: worker.name,
+        agentId: worker.memberId,
+        roleId: worker.role,
+        canonicalAddress: formatCanonicalAgentAddress({ machine: this.machineName, project: source.projectKey, name: worker.name }),
+        systemPrompt: worker.systemPrompt,
+        rolePrompt: worker.rolePrompt,
+        ...(worker.provider ? { provider: worker.provider } : {}),
+        ...(worker.model ? { model: worker.model } : {}),
+        sessions: [],
+      });
+    }
     return {
       ok: true,
       value: {
+        machine: this.machineName,
         projectKey: source.projectKey,
         rosterState: 'configured',
-        members,
+        members: baseMembers,
       },
     };
   }
@@ -8720,10 +8888,21 @@ export class UiRuntimeService {
       }).finalSubmissions ?? [],
     );
     this.hiddenMainTopicRoundKeys.clear();
-    for (const roundKey of (restored as RuntimeExplicitBrainJournalState & {
+    const extraState = restored as RuntimeExplicitBrainJournalState & {
       readonly hiddenRoundKeys?: readonly string[];
-    }).hiddenRoundKeys ?? []) {
+      readonly implicitOrchestrationLimit?: number;
+      readonly projectMembersByProject?: Record<string, readonly ProjectMemberRecord[]>;
+    };
+    for (const roundKey of extraState.hiddenRoundKeys ?? []) {
       if (typeof roundKey === 'string' && roundKey.length > 0) this.hiddenMainTopicRoundKeys.add(roundKey);
+    }
+    if (typeof extraState.implicitOrchestrationLimit === 'number'
+      && Number.isSafeInteger(extraState.implicitOrchestrationLimit)
+      && extraState.implicitOrchestrationLimit >= 1) {
+      this.implicitOrchestrationLimit = extraState.implicitOrchestrationLimit;
+    }
+    if (extraState.projectMembersByProject && typeof extraState.projectMembersByProject === 'object') {
+      this.restoreProjectMembersSnapshot(extraState.projectMembersByProject);
     }
     this.explicitBrainTraceRecords.length = 0;
     this.explicitBrainTraceRecords.push(...(restored.decisionTraces ?? []).map((record) => structuredClone(record)));
@@ -10890,6 +11069,8 @@ export class UiRuntimeService {
     const state: RuntimeExplicitBrainJournalState & {
       readonly finalSubmissions?: readonly PersistedFinalSubmitReceipt[];
       readonly hiddenRoundKeys?: readonly string[];
+      readonly implicitOrchestrationLimit?: number;
+      readonly projectMembersByProject?: Record<string, readonly ProjectMemberRecord[]>;
     } = {
       intake: this.explicitIntake.exportState(),
       inbox: this.requirementInbox.exportState(),
@@ -10899,6 +11080,8 @@ export class UiRuntimeService {
       submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
       finalSubmissions: this.requirementSubmissions.finalReceipts(),
       hiddenRoundKeys: [...this.hiddenMainTopicRoundKeys],
+      implicitOrchestrationLimit: this.implicitOrchestrationLimit,
+      projectMembersByProject: this.exportProjectMembersSnapshot(),
       decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
       taskInputRevisions: this.coordinator.exportTaskInputRevisions().map((entry) => structuredClone(entry)),
     };

@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import test from 'node:test';
-import { ConfigurationError, DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES, DEFAULT_UI_DISPLAY_PREFERENCE, MemberRosterError, WORKER_NAME_POOL, allocateWorkerName, applyManualDisplaySelection, compileAgentProviderBindings, createMemberFromTemplate, declareDefaultProduct, effectiveImplicitOrchestrationMaxRuntimes, ensureControlLayout, formatPairingCommand, listConfiguredProjects, loadConfiguration, parseToml, readDefaultProductSelection, resolveProductPaths, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, validateInternalConfig, validateProjectOverride, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
+import { ConfigurationError, DEFAULT_IMPLICIT_ORCHESTRATION_MAX_RUNTIMES, DEFAULT_UI_DISPLAY_PREFERENCE, MemberRosterError, WORKER_NAME_POOL, allocateWorkerName, applyManualDisplaySelection, compileAgentProviderBindings, createMemberFromTemplate, declareDefaultProduct, defaultRoleTemplate, effectiveImplicitOrchestrationMaxRuntimes, ensureControlLayout, formatPairingCommand, listConfiguredProjects, loadConfiguration, parseToml, readDefaultProductSelection, removeMemberRecord, resolveProductPaths, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, updateMemberRecord, validateInternalConfig, validateProjectOverride, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
 
 const minimalInteractionAgent = () => ({
   agentId: 'interaction-default',
@@ -1875,4 +1875,26 @@ test('worker name pool has 50 names excluding Jenny and template creation copies
 
   const reused = allocateWorkerName(new Set());
   assert.equal(reused, WORKER_NAME_POOL[0]);
+
+  const second = createMemberFromTemplate({ existingMembers: [first], template, memberId: 'm-2' });
+  assert.equal(second.name, WORKER_NAME_POOL[1]);
+  const edited = updateMemberRecord({
+    existingMembers: [first, second],
+    memberId: first.memberId,
+    patch: { systemPrompt: 'edited-system', model: 'claude-sonnet' },
+  });
+  assert.equal(edited.updated.systemPrompt, 'edited-system');
+  assert.equal(edited.updated.model, 'claude-sonnet');
+  assert.equal(edited.members[1]?.systemPrompt, 'system-base');
+  assert.equal(template.systemPrompt, 'system-base');
+
+  const removed = removeMemberRecord({ existingMembers: edited.members, memberId: first.memberId });
+  assert.equal(removed.removed.name, WORKER_NAME_POOL[0]);
+  const reallocated = createMemberFromTemplate({
+    existingMembers: removed.members,
+    template: defaultRoleTemplate('reviewer'),
+    memberId: 'm-3',
+  });
+  assert.equal(reallocated.name, WORKER_NAME_POOL[0]);
+  assert.equal(reallocated.role, 'reviewer');
 });

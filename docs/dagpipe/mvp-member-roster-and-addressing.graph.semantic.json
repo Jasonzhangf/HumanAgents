@@ -1,0 +1,9 @@
+{
+  "graph": "humanagent-mvp-member-roster-and-addressing",
+  "labels": {
+    "read_roster_and_concurrency": "从控制根加载项目成员名册与隐式编排并发上限（默认 8 槽位），确保每项目保留唯一管理角色 Jenny",
+    "validate_roster_and_addressing": "校验双提示词独立复制、50 名字池分配与回收、规范全名寻址及断连远端隔离约束",
+    "persist_roster_and_concurrency": "将成员名册变更与并发上限原子追加写入控制根 explicit-brain.state，失败即完整回滚",
+    "dispatch_and_project_roster": "按职责匹配成员或回退本机项目 Jenny，并将最新成员树与并发设置实时投影至 WebUI"
+  }
+}

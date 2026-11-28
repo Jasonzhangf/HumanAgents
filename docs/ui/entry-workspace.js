@@ -104,7 +104,8 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
   manageNames.type = 'button'
   manageNames.addEventListener('click', () => management(manageNames))
   projectHead.append(element('h2', '工作区', 'entry-kicker'), manageNames, newProject)
-  rail.append(closeRail, brand, alexSection, projectHead, projects)
+  const machineLabel = element('p', '本机 · local', 'entry-machine-kicker')
+  rail.append(closeRail, brand, alexSection, projectHead, machineLabel, projects)
   mobileRail.append(rail)
   const toolbar = element('header', undefined, 'entry-toolbar')
   const title = element('strong', '项目会话', 'entry-scope-title')
@@ -206,6 +207,44 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
         template.shell?.openShellSection(id)
       })
       content.append(control)
+    }
+    if (api.getConcurrencySettings && api.setConcurrencySettings) {
+      const box = element('section', undefined, 'entry-concurrency-box')
+      box.dataset.concurrencySettings = 'true'
+      box.append(element('strong', '系统并发设置'))
+      const label = element('label', '隐式编排并发槽位上限（默认 8，下游执行另计）')
+      const input = element('input')
+      input.type = 'number'
+      input.min = '1'
+      input.step = '1'
+      input.value = '8'
+      input.dataset.concurrencyInput = 'true'
+      label.append(input)
+      const saveBtn = element('button', '保存并发上限', 'button button--primary')
+      saveBtn.type = 'button'
+      saveBtn.dataset.concurrencySave = 'true'
+      const status = element('p', '正在读取当前并发上限…', 'muted')
+      saveBtn.addEventListener('click', async () => {
+        const parsed = Number(input.value)
+        status.textContent = '正在保存…'
+        try {
+          const saved = await api.setConcurrencySettings(parsed)
+          input.value = String(saved.implicitOrchestrationMaxRuntimes ?? parsed)
+          status.textContent = `已更新隐式编排并发上限：${input.value}`
+        } catch (error) {
+          status.textContent = error?.message || '保存失败'
+        }
+      })
+      box.append(label, saveBtn, status)
+      content.append(box)
+      void api.getConcurrencySettings().then((read) => {
+        if (typeof read?.implicitOrchestrationMaxRuntimes === 'number') {
+          input.value = String(read.implicitOrchestrationMaxRuntimes)
+          status.textContent = `当前隐式编排并发上限：${input.value}`
+        }
+      }, (error) => {
+        status.textContent = error?.message || '并发设置读取失败'
+      })
     }
     openWorkspaceDetail({ title: '导航与设置', content, trigger })
   })
@@ -358,6 +397,92 @@ export function mountEntryWorkspace({ root, template, api, search = window.locat
             if (mobileRail.open) mobileRail.close()
             focusCurrentConversation()
           },
+          onAddMember: api.addProductMember ? (trigger, reload) => {
+            const roleDefaults = {
+              executor: ['Execute scoped tasks cleanly inside exclusive worktree paths with test evidence.', 'Implement minimal root-cause changes and verify affected tests before return.'],
+              architect: ['Follow HumanAgent project rules and keep module boundaries single-owner.', 'Design architecture, interfaces, and SESE DAG boundaries cleanly.'],
+              reviewer: ['Review changes independently against requirements, DAGs, and runtime evidence.', 'Verify correctness, invariants, and minimal necessary code before acceptance.'],
+              tester: ['Verify real user-facing behavior through live entrypoints and deterministic receipts.', 'Execute blackbox and regression checks and report concrete pass/fail evidence.'],
+              specialist: ['Operate within assigned domain scope without inventing cross-project authority.', 'Handle specialized investigation or targeted delivery with verifiable outputs.'],
+            }
+            const form = element('div', undefined, 'member-roster-form')
+            const roleLabel = element('label', '职责模板')
+            const roleSelect = element('select')
+            for (const [val, text] of [['executor', '执行'], ['architect', '架构'], ['reviewer', '审查'], ['tester', '测试'], ['specialist', '专家']]) {
+              const opt = element('option', text)
+              opt.value = val
+              roleSelect.append(opt)
+            }
+            roleLabel.append(roleSelect)
+            const nameLabel = element('label', '成员名字（留空自动从 50 名字池分配）')
+            const nameInput = element('input')
+            nameInput.type = 'text'
+            nameInput.placeholder = '例如 Alice（不可与 Jenny 或已有成员重名）'
+            nameLabel.append(nameInput)
+            const providerLabel = element('label', 'Provider（可选）')
+            const providerInput = element('input')
+            providerInput.type = 'text'
+            providerInput.placeholder = '例如 rcc'
+            providerLabel.append(providerInput)
+            const modelLabel = element('label', 'Model（可选）')
+            const modelInput = element('input')
+            modelInput.type = 'text'
+            modelLabel.append(modelInput)
+            const sysLabel = element('label', '系统提示词（创建后独立保存）')
+            const sysInput = element('textarea')
+            sysInput.rows = 3
+            sysInput.value = roleDefaults.executor[0]
+            sysLabel.append(sysInput)
+            const rolePromptLabel = element('label', '角色提示词（创建后独立保存）')
+            const rolePromptInput = element('textarea')
+            rolePromptInput.rows = 3
+            rolePromptInput.value = roleDefaults.executor[1]
+            rolePromptLabel.append(rolePromptInput)
+            roleSelect.addEventListener('change', () => {
+              const pair = roleDefaults[roleSelect.value] ?? roleDefaults.executor
+              sysInput.value = pair[0]
+              rolePromptInput.value = pair[1]
+            })
+            const status = element('p', '', 'muted')
+            const submit = element('button', '创建成员', 'button button--primary')
+            submit.type = 'button'
+            submit.dataset.submitAddMember = key
+            submit.addEventListener('click', async () => {
+              status.textContent = '正在创建…'
+              try {
+                const payload = {
+                  projectKey: key,
+                  ...(nameInput.value.trim() ? { name: nameInput.value.trim() } : {}),
+                  ...(providerInput.value.trim() ? { provider: providerInput.value.trim() } : {}),
+                  ...(modelInput.value.trim() ? { model: modelInput.value.trim() } : {}),
+                  template: {
+                    role: roleSelect.value,
+                    systemPrompt: sysInput.value,
+                    rolePrompt: rolePromptInput.value,
+                  },
+                }
+                const created = await api.addProductMember(payload)
+                await reload()
+                status.textContent = `已创建成员：${created.member?.name || ''}`
+                form.closest('dialog')?.close?.()
+              } catch (error) {
+                status.textContent = error?.message || '创建失败'
+              }
+            })
+            form.append(roleLabel, nameLabel, providerLabel, modelLabel, sysLabel, rolePromptLabel, submit, status)
+            openWorkspaceDetail({ title: `${memberLabel} · 添加成员`, eyebrow: '成员名册', content: form, trigger })
+          } : undefined,
+          memberActions: api.updateProductMember ? (member, reload) => ({
+            onSave: async (patch) => {
+              await api.updateProductMember(patch.memberId, patch, key)
+              await reload()
+            },
+            onRemove: api.removeProductMember ? async (target) => {
+              await api.removeProductMember(target.memberId, key)
+              await reload()
+              root.ownerDocument.querySelector('dialog[open]')?.close?.()
+            } : undefined,
+          }) : undefined,
           onReadIssue: (issue) => {
             if (issue) rosterIssues.set(key, issue)
             else rosterIssues.delete(key)

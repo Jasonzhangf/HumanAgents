@@ -103,4 +103,13 @@ body:has(.entry-workspace) { margin: 0; background: #f8faf6; color: #242b25; }
 .entry-workspace-folder{margin-block-end:8px}
 .entry-workspace-projects{margin-inline-start:8px;padding-inline-start:8px;border-inline-start:1px solid var(--line)}
 .entry-workspace-path{overflow-wrap:anywhere}
+.entry-machine-kicker{font-size:11px;font-weight:650;color:#59655c;margin:0 0 6px}
+.entry-concurrency-box{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:10px;background:white;margin:8px 0}
+.entry-concurrency-box label{display:grid;gap:4px;font-size:12px}
+.entry-concurrency-box input{padding:6px 8px;border:1px solid #bac8bb;border-radius:6px;font:inherit}
+.member-roster-add{color:#205b45;font-weight:600}
+.member-roster-form{display:grid;gap:10px;margin-top:8px}
+.member-roster-form label{display:grid;gap:4px;font-size:12px;color:#28362d}
+.member-roster-form input,.member-roster-form select,.member-roster-form textarea{padding:6px 8px;border:1px solid #bac8bb;border-radius:6px;font:inherit;background:white}
+.member-roster-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
 .entry-toolbar [hidden]{display:none}

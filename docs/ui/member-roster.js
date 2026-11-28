@@ -7,6 +7,11 @@ const roles = {
   review: { label: '审查', color: '#966012' },
   memory: { label: '记忆', color: '#a04473' },
   manager: { label: '项目负责人', color: '#23754c' },
+  architect: { label: '架构', color: '#4c51bf' },
+  reviewer: { label: '审查', color: '#966012' },
+  tester: { label: '测试', color: '#0f766e' },
+  specialist: { label: '专家', color: '#7e22ce' },
+  executor: { label: '执行', color: '#23754c' },
 }
 export function memberRole(roleId) {
   return roles[roleId] ?? { label: roleId, color: '#626975' }
@@ -42,7 +47,7 @@ function roleBadge(roleId) {
   return badge
 }
 
-export function memberRosterDetail(member, projectLabel, projectKey, mainTopic) {
+export function memberRosterDetail(member, projectLabel, projectKey, mainTopic, actions) {
   const content = element('div', undefined, 'member-roster-detail')
   content.append(element('p', `项目：${projectLabel}`), roleBadge(member.roleId))
   if (mainTopic) content.append(element('p', '项目负责人'), element('p', '主入口：当前服务主会话'))
@@ -55,12 +60,89 @@ export function memberRosterDetail(member, projectLabel, projectKey, mainTopic) 
   }
   const scope = element('section', undefined, 'member-roster-identifiers')
   scope.append(element('h3', '技术信息'), element('p', `项目：${projectKey}`))
+  if (member.canonicalAddress) scope.append(element('p', `规范地址：${member.canonicalAddress}`))
   if (member.agentId) scope.append(element('p', `成员：${member.agentId}`))
+  if (member.provider || member.model) {
+    scope.append(element('p', `模型配置：${[member.provider, member.model].filter(Boolean).join(' / ')}`))
+  }
   content.append(scope)
+  if (actions && member.memberId && member.roleId !== 'manager') {
+    const editSection = element('section', undefined, 'member-roster-edit')
+    editSection.append(element('h3', '独立成员配置'))
+    const form = element('div', undefined, 'member-roster-form')
+    const roleLabel = element('label', '职责')
+    const roleSelect = element('select')
+    for (const [value, text] of [['executor', '执行'], ['architect', '架构'], ['reviewer', '审查'], ['tester', '测试'], ['specialist', '专家']]) {
+      const opt = element('option', text)
+      opt.value = value
+      if (member.roleId === value) opt.selected = true
+      roleSelect.append(opt)
+    }
+    roleLabel.append(roleSelect)
+    const providerLabel = element('label', 'Provider（可选）')
+    const providerInput = element('input')
+    providerInput.type = 'text'
+    providerInput.value = member.provider || ''
+    providerLabel.append(providerInput)
+    const modelLabel = element('label', 'Model（可选）')
+    const modelInput = element('input')
+    modelInput.type = 'text'
+    modelInput.value = member.model || ''
+    modelLabel.append(modelInput)
+    const sysLabel = element('label', '系统提示词（独立副本）')
+    const sysInput = element('textarea')
+    sysInput.rows = 3
+    sysInput.value = member.systemPrompt || ''
+    sysLabel.append(sysInput)
+    const rolePromptLabel = element('label', '角色提示词（独立副本）')
+    const rolePromptInput = element('textarea')
+    rolePromptInput.rows = 3
+    rolePromptInput.value = member.rolePrompt || ''
+    rolePromptLabel.append(rolePromptInput)
+    const status = element('p', '', 'muted')
+    const btns = element('div', undefined, 'member-roster-actions')
+    const saveBtn = element('button', '保存配置', 'button button--primary')
+    saveBtn.type = 'button'
+    saveBtn.dataset.saveMember = member.memberId
+    saveBtn.addEventListener('click', async () => {
+      status.textContent = '正在保存…'
+      try {
+        await actions.onSave?.({
+          memberId: member.memberId,
+          role: roleSelect.value,
+          provider: providerInput.value,
+          model: modelInput.value,
+          systemPrompt: sysInput.value,
+          rolePrompt: rolePromptInput.value,
+        })
+        status.textContent = '已保存独立成员配置。'
+      } catch (err) {
+        status.textContent = err?.message || '保存失败'
+      }
+    })
+    btns.append(saveBtn)
+    if (actions.onRemove) {
+      const removeBtn = element('button', '移除成员', 'button button--quiet')
+      removeBtn.type = 'button'
+      removeBtn.dataset.removeMember = member.memberId
+      removeBtn.addEventListener('click', async () => {
+        status.textContent = '正在移除…'
+        try {
+          await actions.onRemove(member)
+        } catch (err) {
+          status.textContent = err?.message || '移除失败'
+        }
+      })
+      btns.append(removeBtn)
+    }
+    form.append(roleLabel, providerLabel, modelLabel, sysLabel, rolePromptLabel, btns, status)
+    editSection.append(form)
+    content.append(editSection)
+  }
   return content
 }
 
-export function mountMemberRoster({ projectKey, projectLabel, reader, mainTopic, onReadIssue = () => {}, onCurrentActivate }) {
+export function mountMemberRoster({ projectKey, projectLabel, reader, mainTopic, onReadIssue = () => {}, onCurrentActivate, onAddMember, memberActions }) {
   const root = element('div', undefined, 'member-roster')
   root.dataset.projectKey = projectKey
   const topic = mainTopic?.projectKey === projectKey ? mainTopic : null
@@ -86,7 +168,7 @@ export function mountMemberRoster({ projectKey, projectLabel, reader, mainTopic,
     for (const member of displayed) {
       const isMain = topic && member === displayed[0]
       const openDetail = (trigger) => openTechnicalDetail({ title: member.memberName,
-        eyebrow: '成员详情', content: memberRosterDetail(member, projectLabel, projectKey, isMain ? topic : null), trigger })
+        eyebrow: '成员详情', content: memberRosterDetail(member, projectLabel, projectKey, isMain ? topic : null, memberActions?.(member, () => readRoster(true))), trigger })
       if (isMain) {
         const row = element('div', undefined, 'member-roster-main-row')
         const link = element('a', undefined, 'entry-person entry-jenny member-roster-main')
@@ -117,6 +199,13 @@ export function mountMemberRoster({ projectKey, projectLabel, reader, mainTopic,
       root.append(button)
     }
     if (issue) root.append(element('p', issue, 'member-roster-state'))
+    if (onAddMember) {
+      const addBtn = element('button', '＋ 添加成员', 'entry-person member-roster-add')
+      addBtn.type = 'button'
+      addBtn.dataset.addMemberProject = projectKey
+      addBtn.addEventListener('click', () => onAddMember(addBtn, () => readRoster(true)))
+      root.append(addBtn)
+    }
   }
   function readRoster(retry = false) {
     render([], '正在读取成员名册…')

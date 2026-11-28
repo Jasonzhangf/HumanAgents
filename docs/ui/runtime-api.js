@@ -526,6 +526,38 @@ export function createRuntimeApi(options = {}) {
     // dashboard, never an invented project/task identity.
     systemDashboard: () => request('/api/dashboard?scope=system', { method: 'GET' }),
     projectRoster: (projectKey) => request(`/api/projects/roster?${new URLSearchParams({ projectKey })}`, { method: 'GET' }),
+    getConcurrencySettings: () => request('/api/settings/concurrency', { method: 'GET' }),
+    setConcurrencySettings: (implicitOrchestrationMaxRuntimes) => request('/api/settings/concurrency', {
+      method: 'POST',
+      body: JSON.stringify({ implicitOrchestrationMaxRuntimes }),
+    }),
+    listProductMembers: (projectKey) => request(
+      projectKey ? `/api/product/members?${new URLSearchParams({ projectKey })}` : '/api/product/members',
+      { method: 'GET' },
+    ),
+    addProductMember: (payload) => request('/api/product/members', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    updateProductMember: (memberId, payload, projectKey) => request(
+      `/api/product/members/${encodeURIComponent(memberId)}${projectKey ? `?${new URLSearchParams({ projectKey })}` : ''}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      },
+    ),
+    removeProductMember: (memberId, projectKey) => request(
+      `/api/product/members/${encodeURIComponent(memberId)}${projectKey ? `?${new URLSearchParams({ projectKey })}` : ''}`,
+      { method: 'DELETE' },
+    ),
+    resolveCanonicalAddress: (payload) => request('/api/product/address/resolve', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    dispatchMemberByRole: (payload) => request('/api/product/dispatch/resolve', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
     projectDashboard: ({ projectKey }) => {
       const query = new URLSearchParams({ scope: 'project', projectKey })
       return request(`/api/dashboard?${query}`, { method: 'GET' })

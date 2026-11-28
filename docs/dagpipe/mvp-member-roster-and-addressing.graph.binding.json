@@ -1,0 +1,13 @@
+{
+  "graph": "humanagent-mvp-member-roster-and-addressing",
+  "operator": {
+    "operator": "humanagent-mvp-member-roster-and-addressing",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "read_roster_and_concurrency": { "ownerPath": "packages/app/src/ui-runtime/service.ts", "ownerRel": "packages/app/src/ui-runtime/service.ts" },
+    "validate_roster_and_addressing": { "ownerPath": "packages/config/src/member-roster.ts", "ownerRel": "packages/config/src/member-roster.ts" },
+    "persist_roster_and_concurrency": { "ownerPath": "packages/app/src/ui-runtime/service.ts", "ownerRel": "packages/app/src/ui-runtime/service.ts" },
+    "dispatch_and_project_roster": { "ownerPath": "packages/runtime/src/communication/addressing.ts", "ownerRel": "packages/runtime/src/communication/addressing.ts" }
+  }
+}

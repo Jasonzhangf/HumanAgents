@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { id, type ProviderBinding } from '../../packages/contracts/src/index.js';
 import { FakeReplayExecutionRuntimePort, startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
@@ -22,6 +23,11 @@ const binding: ProviderBinding = {
 
 test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool, dual-prompt copy, canonical addressing, and role dispatch', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-mvp-ontology-http-'));
+  const controlRoot = join(root, 'control');
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace: workspaceRoot });
+  await ensureControlLayout(paths);
   await mkdir(join(root, 'checkpoints'), { recursive: true });
   await mkdir(join(root, 'evidence'), { recursive: true });
   await mkdir(join(root, 'security'), { recursive: true, mode: 0o700 });
@@ -34,8 +40,9 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
   const challenge = await accessControl.issuePairingChallenge();
   const session = await accessControl.consumePairingCode(challenge.code);
 
-  const runtime = await startUiRuntime({
-    mode: 'fake',
+  const projectKey = 'projA';
+  const runtimeOptions = {
+    mode: 'fake' as const,
     productRoot: root,
     organId,
     binding,
@@ -43,20 +50,31 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     checkpointRoot: join(root, 'checkpoints'),
     evidenceRoot: join(root, 'evidence'),
     uiRoot: join(process.cwd(), 'packages', 'ui', 'static'),
-    projectKey: 'projA',
-    workspaceRoot: root,
+    runtimePaths: paths,
+    projectCatalog: async () => ({
+      projects: [{
+        projectKey: 'projA',
+        workspaceCwd: workspaceRoot,
+        projectRoot: root,
+        checkpointsRoot: join(root, 'checkpoints'),
+      }],
+      failures: [],
+    }),
+    projectKey,
+    workspaceRoot,
     memory: {
       coordinator: new MemoryCoordinator(),
       backend: new DeterministicMemoryBackend(),
-      projectKey: 'projA',
+      projectKey,
       roleId: 'execution',
     },
     accessControl,
     explicitBrainInterpreter: { interpret: async () => { throw new Error('unused'); } },
-  });
+  };
+  let runtime = await startUiRuntime(runtimeOptions);
 
   try {
-    const baseUrl = runtime.server.url;
+    let baseUrl = runtime.server.url;
     const headers = {
       'content-type': 'application/json',
       cookie: accessControl.sessionCookie(session).split(';')[0]!,
@@ -85,10 +103,11 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
     // 2. Members start with Jenny; adding copies dual prompts from 50-name pool and rejects duplicates
     const initialMembers = await fetch(`${baseUrl}/api/product/members`, { headers });
     assert.equal(initialMembers.status, 200);
-    const membersBody = await initialMembers.json() as { machine: string; project: string; members: Array<{ name: string; role: string }> };
+    const membersBody = await initialMembers.json() as { machine: string; project: string; members: Array<{ memberId: string; name: string; role: string }> };
     assert.equal(membersBody.project, 'projA');
     assert.equal(membersBody.members[0]?.name, 'Jenny');
     assert.equal(membersBody.members[0]?.role, 'manager');
+    const jennyId = membersBody.members[0]!.memberId;
 
     const created = await fetch(`${baseUrl}/api/product/members`, {
       method: 'POST',
@@ -98,11 +117,62 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
       }),
     });
     assert.equal(created.status, 201);
-    const createdBody = await created.json() as { member: { name: string; role: string; systemPrompt: string; rolePrompt: string } };
+    const createdBody = await created.json() as { member: { memberId: string; name: string; role: string; systemPrompt: string; rolePrompt: string } };
     assert.equal(createdBody.member.name, 'Alice');
     assert.equal(createdBody.member.role, 'reviewer');
     assert.equal(createdBody.member.systemPrompt, 'sys-1');
     assert.equal(createdBody.member.rolePrompt, 'rev-1');
+
+    // Add second member using built-in role template preset (Bob)
+    const createdBob = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ role: 'executor' }),
+    });
+    assert.equal(createdBob.status, 201);
+    const createdBobBody = await createdBob.json() as { member: { memberId: string; name: string; role: string; systemPrompt: string } };
+    assert.equal(createdBobBody.member.name, 'Bob');
+    assert.equal(createdBobBody.member.role, 'executor');
+
+    // Edit Alice independently; Bob stays unchanged and Jenny role cannot be edited or removed
+    const patchedAlice = await fetch(`${baseUrl}/api/product/members/${encodeURIComponent(createdBody.member.memberId)}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ systemPrompt: 'sys-alice-edited', model: 'gpt-6.1' }),
+    });
+    assert.equal(patchedAlice.status, 200);
+    const patchedAliceBody = await patchedAlice.json() as { member: { systemPrompt: string; model?: string } };
+    assert.equal(patchedAliceBody.member.systemPrompt, 'sys-alice-edited');
+    assert.equal(patchedAliceBody.member.model, 'gpt-6.1');
+
+    const jennyEditRejected = await fetch(`${baseUrl}/api/product/members/${encodeURIComponent(jennyId)}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ role: 'executor' }),
+    });
+    assert.equal(jennyEditRejected.status, 409);
+
+    const jennyDeleteRejected = await fetch(`${baseUrl}/api/product/members/${encodeURIComponent(jennyId)}`, {
+      method: 'DELETE',
+      headers,
+    });
+    assert.equal(jennyDeleteRejected.status, 409);
+
+    // Removing Bob frees Bob back into the 50-name pool
+    const deleteBob = await fetch(`${baseUrl}/api/product/members/${encodeURIComponent(createdBobBody.member.memberId)}`, {
+      method: 'DELETE',
+      headers,
+    });
+    assert.equal(deleteBob.status, 200);
+    const reAdded = await fetch(`${baseUrl}/api/product/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ role: 'architect' }),
+    });
+    assert.equal(reAdded.status, 201);
+    const reAddedBody = await reAdded.json() as { member: { name: string; role: string } };
+    assert.equal(reAddedBody.member.name, 'Bob');
+    assert.equal(reAddedBody.member.role, 'architect');
 
     const duplicateMember = await fetch(`${baseUrl}/api/product/members`, {
       method: 'POST',
@@ -156,6 +226,39 @@ test('ui-runtime HTTP endpoints enforce 8-slot implicit concurrency, roster pool
       body: JSON.stringify({ explicitTarget: 'projA.Ghost' }),
     });
     assert.equal(missingDispatch.status, 404);
+
+    // 5. GET /api/projects/roster reflects dynamic persisted members with canonical addresses
+    const rosterRes = await fetch(`${baseUrl}/api/projects/roster?projectKey=projA`, { headers });
+    assert.equal(rosterRes.status, 200);
+    const rosterBody = await rosterRes.json() as { members: Array<{ memberName: string; canonicalAddress: string }> };
+    assert.deepEqual(
+      rosterBody.members.map((m) => ({ name: m.memberName, addr: m.canonicalAddress })),
+      [
+        { name: 'Jenny', addr: 'local.projA.Jenny' },
+        { name: 'Alice', addr: 'local.projA.Alice' },
+        { name: 'Bob', addr: 'local.projA.Bob' },
+      ],
+    );
+
+    // 6. Cold restart hydrates concurrency setting and persisted project members durably
+    await runtime.close();
+    runtime = await startUiRuntime({
+      ...runtimeOptions,
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1, replay: [] }),
+    });
+    baseUrl = runtime.server.url;
+    const coldConcurrency = await fetch(`${baseUrl}/api/settings/concurrency`, { headers });
+    assert.equal(coldConcurrency.status, 200);
+    assert.deepEqual(await coldConcurrency.json(), { implicitOrchestrationMaxRuntimes: 12 });
+
+    const coldMembers = await fetch(`${baseUrl}/api/product/members`, { headers });
+    assert.equal(coldMembers.status, 200);
+    const coldMembersBody = await coldMembers.json() as { members: Array<{ name: string; systemPrompt: string }> };
+    assert.deepEqual(
+      coldMembersBody.members.map((m) => m.name),
+      ['Jenny', 'Alice', 'Bob'],
+    );
+    assert.equal(coldMembersBody.members[1]?.systemPrompt, 'sys-alice-edited');
   } finally {
     await runtime.close();
     await rm(root, { recursive: true, force: true });

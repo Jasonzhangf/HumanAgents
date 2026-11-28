@@ -1618,35 +1618,88 @@ async function handleRequest(
       return;
     }
     if (path === '/api/product/members' && method === 'GET') {
-      writeJson(response, 200, service.listProjectMembers());
+      const projectKey = url.searchParams.get('projectKey')?.trim() || undefined;
+      writeJson(response, 200, service.listProjectMembers(projectKey));
       return;
     }
     if (path === '/api/product/members' && method === 'POST') {
       const body = await readBody(request);
-      const template = body.template as Record<string, unknown> | undefined;
-      if (!template || typeof template !== 'object' || typeof template.systemPrompt !== 'string' || typeof template.rolePrompt !== 'string') {
+      const rawTemplate = body.template;
+      const role = typeof body.role === 'string'
+        ? body.role as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist'
+        : undefined;
+      let template: {
+        readonly role: 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist';
+        readonly systemPrompt: string;
+        readonly rolePrompt: string;
+        readonly provider?: string;
+        readonly model?: string;
+      } | undefined;
+      if (rawTemplate !== undefined) {
+        const record = rawTemplate as Record<string, unknown>;
+        if (!record || typeof record !== 'object' || typeof record.systemPrompt !== 'string' || typeof record.rolePrompt !== 'string') {
+          throw new UiRuntimeApiError(
+            'member.template.invalid',
+            APP_OWNER,
+            'member template with systemPrompt and rolePrompt is required',
+            'provide template.{role, systemPrompt, rolePrompt}',
+            400,
+          );
+        }
+        template = {
+          role: (typeof record.role === 'string' ? record.role : role ?? 'executor') as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist',
+          systemPrompt: record.systemPrompt,
+          rolePrompt: record.rolePrompt,
+          ...(typeof record.provider === 'string' ? { provider: record.provider } : {}),
+          ...(typeof record.model === 'string' ? { model: record.model } : {}),
+        };
+      } else if (role === undefined) {
         throw new UiRuntimeApiError(
           'member.template.invalid',
           APP_OWNER,
-          'member template with systemPrompt and rolePrompt is required',
-          'provide template.{role, systemPrompt, rolePrompt}',
+          'member template or role is required',
+          'provide template.{role, systemPrompt, rolePrompt} or role',
           400,
         );
       }
       const created = service.addProjectMember({
-        template: {
-          role: (typeof template.role === 'string' ? template.role : 'executor') as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist',
-          systemPrompt: template.systemPrompt,
-          rolePrompt: template.rolePrompt,
-          ...(typeof template.provider === 'string' ? { provider: template.provider } : {}),
-          ...(typeof template.model === 'string' ? { model: template.model } : {}),
-        },
+        ...(typeof body.projectKey === 'string' ? { projectKey: body.projectKey } : {}),
+        ...(role === undefined ? {} : { role }),
+        ...(template === undefined ? {} : { template }),
         ...(typeof body.name === 'string' ? { name: body.name } : {}),
         ...(typeof body.memberId === 'string' ? { memberId: body.memberId } : {}),
         ...(typeof body.provider === 'string' ? { provider: body.provider } : {}),
         ...(typeof body.model === 'string' ? { model: body.model } : {}),
       });
       writeJson(response, 201, { member: created });
+      return;
+    }
+    const productMemberRoute = /^\/api\/product\/members\/([^/]+)$/.exec(path);
+    if (productMemberRoute && method === 'PATCH') {
+      const body = await readBody(request);
+      const memberId = decodeURIComponent(productMemberRoute[1]!);
+      const projectKey = url.searchParams.get('projectKey')?.trim()
+        || (typeof body.projectKey === 'string' ? body.projectKey.trim() : undefined);
+      const updated = service.updateProjectMember({
+        memberId,
+        ...(projectKey ? { projectKey } : {}),
+        ...(typeof body.role === 'string' ? { role: body.role as 'executor' | 'architect' | 'reviewer' | 'tester' | 'specialist' | 'manager' } : {}),
+        ...(typeof body.systemPrompt === 'string' ? { systemPrompt: body.systemPrompt } : {}),
+        ...(typeof body.rolePrompt === 'string' ? { rolePrompt: body.rolePrompt } : {}),
+        ...(typeof body.provider === 'string' ? { provider: body.provider } : {}),
+        ...(typeof body.model === 'string' ? { model: body.model } : {}),
+      });
+      writeJson(response, 200, { member: updated });
+      return;
+    }
+    if (productMemberRoute && method === 'DELETE') {
+      const memberId = decodeURIComponent(productMemberRoute[1]!);
+      const projectKey = url.searchParams.get('projectKey')?.trim() || undefined;
+      const removed = service.removeProjectMember({
+        memberId,
+        ...(projectKey ? { projectKey } : {}),
+      });
+      writeJson(response, 200, { member: removed });
       return;
     }
     if (path === '/api/product/address/resolve' && method === 'POST') {
@@ -1659,6 +1712,7 @@ async function handleRequest(
         : undefined;
       writeJson(response, 200, {
         resolved: service.resolveCanonicalAddress({
+          ...(typeof body.projectKey === 'string' ? { projectKey: body.projectKey } : {}),
           token: body.token,
           ...(connectedMachines === undefined ? {} : { connectedMachines }),
         }),
@@ -1671,6 +1725,7 @@ async function handleRequest(
         ? body.connectedMachines.filter((item): item is string => typeof item === 'string')
         : undefined;
       writeJson(response, 200, service.dispatchMemberByRole({
+        ...(typeof body.projectKey === 'string' ? { projectKey: body.projectKey } : {}),
         ...(typeof body.role === 'string' ? { role: body.role as 'architect' | 'reviewer' | 'tester' | 'specialist' | 'executor' } : {}),
         ...(typeof body.explicitTarget === 'string' ? { explicitTarget: body.explicitTarget } : {}),
         ...(connectedMachines === undefined ? {} : { connectedMachines }),
