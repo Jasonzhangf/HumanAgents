@@ -614,7 +614,7 @@ test('HTTP system dashboard projects connected conversationSession per registere
   }
 })
 
-test('canonical project interaction root stays project-scoped when switching between secondary and serve-bound roles', async () => {
+test('canonical project interaction root stays project-scoped when switching roles and refuses wrong-project legacy seed when B boots first', async () => {
   const controlRoot = await mkdtemp(join(tmpdir(), 'humanagent-canonical-interaction-'))
   try {
     const mainRoot = join(controlRoot, 'main')
@@ -633,17 +633,59 @@ test('canonical project interaction root stays project-scoped when switching bet
       mainRoot,
       mainSessionsRoot,
     }
-    const rootABound = await ensureCanonicalProjectInteractionRoot(projectAPaths, { allowLegacySeed: true })
-    assert.equal(rootABound, join(projectAPaths.projectRoot, 'explicit-interaction'))
-    assert.equal(await readFile(join(rootABound, 'sessions', 'explicit-brain.jsonl'), 'utf8'), '{"legacy":"project-a"}\n')
+    await mkdir(join(projectAPaths.projectRoot, 'daemon'), { recursive: true })
+    await writeFile(
+      join(projectAPaths.projectRoot, 'daemon', 'lease.json'),
+      JSON.stringify({ readyAt: '2026-11-28T09:00:00.000Z' }),
+      'utf8',
+    )
 
-    const rootBSecondary = await ensureCanonicalProjectInteractionRoot(projectBPaths, { allowLegacySeed: false })
-    assert.equal(rootBSecondary, join(projectBPaths.projectRoot, 'explicit-interaction'))
-    await writeFile(join(rootBSecondary, 'sessions', 'explicit-brain.jsonl'), '{"project":"b"}\n', 'utf8')
+    // First post-upgrade call binds project-b; it must NOT steal project-a's legacy journal.
+    const rootBFirst = await ensureCanonicalProjectInteractionRoot(projectBPaths)
+    assert.equal(rootBFirst, join(projectBPaths.projectRoot, 'explicit-interaction'))
+    const ownerRecorded = JSON.parse(await readFile(join(mainRoot, 'legacy-explicit-owner.json'), 'utf8')) as { projectKey?: string }
+    assert.equal(ownerRecorded.projectKey, 'project-a')
+    await assert.rejects(() => readFile(join(rootBFirst, 'sessions', 'explicit-brain.jsonl'), 'utf8'))
 
-    const rootBBound = await ensureCanonicalProjectInteractionRoot(projectBPaths, { allowLegacySeed: true })
-    assert.equal(rootBBound, rootBSecondary)
+    // Project-a still receives its verified legacy journal even when initialized afterward.
+    const rootAAfter = await ensureCanonicalProjectInteractionRoot(projectAPaths)
+    assert.equal(rootAAfter, join(projectAPaths.projectRoot, 'explicit-interaction'))
+    assert.equal(await readFile(join(rootAAfter, 'sessions', 'explicit-brain.jsonl'), 'utf8'), '{"legacy":"project-a"}\n')
+
+    // Secondary-to-serve-bound switch on project-b keeps B's own conversation intact.
+    await writeFile(join(rootBFirst, 'sessions', 'explicit-brain.jsonl'), '{"project":"b"}\n', 'utf8')
+    const rootBBound = await ensureCanonicalProjectInteractionRoot(projectBPaths)
+    assert.equal(rootBBound, rootBFirst)
     assert.equal(await readFile(join(rootBBound, 'sessions', 'explicit-brain.jsonl'), 'utf8'), '{"project":"b"}\n')
+  } finally {
+    await rm(controlRoot, { recursive: true, force: true })
+  }
+})
+
+test('canonical project interaction root refuses unverified legacy seed when ownership is ambiguous', async () => {
+  const controlRoot = await mkdtemp(join(tmpdir(), 'humanagent-ambiguous-legacy-'))
+  try {
+    const mainRoot = join(controlRoot, 'main')
+    const mainSessionsRoot = join(mainRoot, 'sessions')
+    await mkdir(mainSessionsRoot, { recursive: true })
+    await writeFile(join(mainSessionsRoot, 'explicit-brain.jsonl'), '{"legacy":"unknown"}\n', 'utf8')
+    const projectAPaths = {
+      projectKey: 'project-a',
+      projectRoot: join(controlRoot, 'sessions', 'project-a'),
+      mainRoot,
+      mainSessionsRoot,
+    }
+    const projectBPaths = {
+      projectKey: 'project-b',
+      projectRoot: join(controlRoot, 'sessions', 'project-b'),
+      mainRoot,
+      mainSessionsRoot,
+    }
+    await mkdir(projectAPaths.projectRoot, { recursive: true })
+    await mkdir(projectBPaths.projectRoot, { recursive: true })
+    const rootB = await ensureCanonicalProjectInteractionRoot(projectBPaths)
+    await assert.rejects(() => readFile(join(rootB, 'sessions', 'explicit-brain.jsonl'), 'utf8'))
+    await assert.rejects(() => readFile(join(mainRoot, 'legacy-explicit-owner.json'), 'utf8'))
   } finally {
     await rm(controlRoot, { recursive: true, force: true })
   }

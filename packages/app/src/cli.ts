@@ -101,7 +101,7 @@ import {
   type SupervisorStartupDeclaration,
 } from './supervisor/restart-client.js';
 import { constants as fsConstants, existsSync, readFileSync, realpathSync } from 'node:fs';
-import { copyFile, mkdir, open, readFile, rename } from 'node:fs/promises';
+import { copyFile, mkdir, open, readdir, readFile, rename } from 'node:fs/promises';
 import { homedir, networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1788,6 +1788,7 @@ export async function main(args: readonly string[]): Promise<void> {
       console.log(JSON.stringify({ event: 'restart.accepted', ...handoff.receipt }, null, 2));
       return handoff.receipt;
     };
+    const preLeaseLegacyOwner = await resolveLegacyExplicitOwner(paths);
     const launch = await runSupervisorServeStartup(paths, async () => {
       // A continuation invocation never reaches this factory, so it opens no
       // credential, writes no product file, opens no listener and installs no
@@ -2030,7 +2031,7 @@ export async function main(args: readonly string[]): Promise<void> {
             const targetPaths = bundle.paths;
             const targetCheckpointRoot = join(targetPaths.checkpointsRoot, 'ui-runtime');
             const targetEvidenceRoot = join(targetPaths.artifactsRoot, 'ui-provider-evidence');
-            const targetInteractionRoot = await ensureCanonicalProjectInteractionRoot(targetPaths, { allowLegacySeed: false });
+            const targetInteractionRoot = await ensureCanonicalProjectInteractionRoot(targetPaths);
             await mkdir(targetEvidenceRoot, { recursive: true });
             const targetAgentId = descriptor.agentId;
             const prepareTargetExplicitBrainHelper = (selection: {
@@ -2333,7 +2334,7 @@ export async function main(args: readonly string[]): Promise<void> {
           ownerId: 'humanagent.runtime.ui',
           nextAction: 'repair UI runtime startup before retrying serve',
           start: async () => {
-            const boundInteractionRoot = await ensureCanonicalProjectInteractionRoot(paths, { allowLegacySeed: true });
+            const boundInteractionRoot = await ensureCanonicalProjectInteractionRoot(paths, { resolvedLegacyOwner: preLeaseLegacyOwner });
             runtime = await startUiRuntime({
               agentRoster: configuration.agentRoster,
               implicitOrchestrationMaxRuntimes: effectiveImplicitOrchestrationMaxRuntimes(configuration.effective),
@@ -2630,43 +2631,86 @@ export function formatCliError(error: unknown, args: readonly string[] = []): st
   ].join('\n');
 }
 
+export async function resolveLegacyExplicitOwner(
+  targetPaths: Pick<RuntimePaths, 'projectKey' | 'projectRoot' | 'mainRoot' | 'mainSessionsRoot'>,
+): Promise<string | undefined> {
+  const legacyMainJournal = join(targetPaths.mainSessionsRoot, 'explicit-brain.jsonl');
+  if (!existsSync(legacyMainJournal)) return undefined;
+  const legacyOwnerPath = join(targetPaths.mainRoot, 'legacy-explicit-owner.json');
+  if (existsSync(legacyOwnerPath)) {
+    try {
+      const parsedOwner = JSON.parse(await readFile(legacyOwnerPath, 'utf8')) as { projectKey?: unknown };
+      if (typeof parsedOwner.projectKey === 'string' && parsedOwner.projectKey.length > 0) {
+        return parsedOwner.projectKey;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  const sessionsDir = dirname(targetPaths.projectRoot);
+  if (!existsSync(sessionsDir)) return undefined;
+  const entries = await readdir(sessionsDir, { withFileTypes: true });
+  const projectDirs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  let latestTimestamp = -Infinity;
+  let latestProjectKey: string | undefined;
+  let tied = false;
+  let sawLease = false;
+  for (const dirName of projectDirs) {
+    const leasePath = join(sessionsDir, dirName, 'daemon', 'lease.json');
+    if (!existsSync(leasePath)) continue;
+    sawLease = true;
+    try {
+      const lease = JSON.parse(await readFile(leasePath, 'utf8')) as { readyAt?: unknown; acquiredAt?: unknown };
+      const rawTime = typeof lease.readyAt === 'string' ? lease.readyAt : typeof lease.acquiredAt === 'string' ? lease.acquiredAt : undefined;
+      const parsedTime = rawTime === undefined ? Number.NaN : Date.parse(rawTime);
+      if (!Number.isFinite(parsedTime)) continue;
+      if (parsedTime > latestTimestamp) {
+        latestTimestamp = parsedTime;
+        latestProjectKey = dirName;
+        tied = false;
+      } else if (parsedTime === latestTimestamp) {
+        tied = true;
+      }
+    } catch {
+      // Ignore malformed lease files when resolving legacy ownership.
+    }
+  }
+  if (sawLease) return tied ? undefined : latestProjectKey;
+  if (projectDirs.length === 1 && projectDirs[0] === targetPaths.projectKey) return targetPaths.projectKey;
+  return undefined;
+}
+
 export async function ensureCanonicalProjectInteractionRoot(
   targetPaths: Pick<RuntimePaths, 'projectKey' | 'projectRoot' | 'mainRoot' | 'mainSessionsRoot'>,
-  options: { readonly allowLegacySeed?: boolean } = {},
+  options: { readonly resolvedLegacyOwner?: string } = {},
 ): Promise<string> {
   const interactionRoot = join(targetPaths.projectRoot, 'explicit-interaction');
   const targetSessionsDir = join(interactionRoot, 'sessions');
   const targetJournal = join(targetSessionsDir, 'explicit-brain.jsonl');
   await mkdir(targetSessionsDir, { recursive: true });
-  if (options.allowLegacySeed === true && !existsSync(targetJournal)) {
-    const legacyMainJournal = join(targetPaths.mainSessionsRoot, 'explicit-brain.jsonl');
+  const legacyMainJournal = join(targetPaths.mainSessionsRoot, 'explicit-brain.jsonl');
+  if (!existsSync(targetJournal) && existsSync(legacyMainJournal)) {
     const legacyOwnerPath = join(targetPaths.mainRoot, 'legacy-explicit-owner.json');
-    let ownerProjectKey: string | undefined;
-    if (existsSync(legacyOwnerPath)) {
-      try {
-        const parsedOwner = JSON.parse(await readFile(legacyOwnerPath, 'utf8')) as { projectKey?: unknown };
-        if (typeof parsedOwner.projectKey === 'string') ownerProjectKey = parsedOwner.projectKey;
-      } catch {
-        ownerProjectKey = undefined;
-      }
-    }
-    if (existsSync(legacyMainJournal) && (ownerProjectKey === undefined || ownerProjectKey === targetPaths.projectKey)) {
-      const staged = `${targetJournal}.migrating-${process.pid}`;
-      const cloneFlag = (fsConstants as { readonly COPYFILE_FICLONE?: number }).COPYFILE_FICLONE ?? 0;
-      await copyFile(legacyMainJournal, staged, cloneFlag);
-      await rename(staged, targetJournal);
-      if (ownerProjectKey === undefined) {
+    const ownerProjectKey = options.resolvedLegacyOwner ?? await resolveLegacyExplicitOwner(targetPaths);
+    if (ownerProjectKey !== undefined) {
+      if (!existsSync(legacyOwnerPath)) {
         await mkdir(dirname(legacyOwnerPath), { recursive: true });
         try {
           const handle = await open(legacyOwnerPath, 'wx');
           try {
-            await handle.writeFile(`${JSON.stringify({ projectKey: targetPaths.projectKey })}\n`, 'utf8');
+            await handle.writeFile(`${JSON.stringify({ projectKey: ownerProjectKey })}\n`, 'utf8');
           } finally {
             await handle.close();
           }
         } catch {
           // Owner file already created concurrently.
         }
+      }
+      if (ownerProjectKey === targetPaths.projectKey) {
+        const staged = `${targetJournal}.migrating-${process.pid}`;
+        const cloneFlag = (fsConstants as { readonly COPYFILE_FICLONE?: number }).COPYFILE_FICLONE ?? 0;
+        await copyFile(legacyMainJournal, staged, cloneFlag);
+        await rename(staged, targetJournal);
       }
     }
   }
