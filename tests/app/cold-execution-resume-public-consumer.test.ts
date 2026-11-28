@@ -3367,6 +3367,48 @@ function registerPublicConsumers(): void {
     }
   });
 
+  // Live 10088 recovery-hold-effect-unknown advertised stop alongside recover
+  // but stop rejected with 409 task.not.running because record.running is false.
+  test('recovery-hold-effect-unknown blocked task supports explicit stop and stays stopped after rehydrate', async () => {
+    const fixture = await buildInterruptedColdFixture('current-segment-hold-stop');
+    const ledger = createJsonlToolEffectLedgerJournal({ filePath: fixture.journalPath, journal: fixture.journal });
+    const checkpointStore = new ServiceExecutionCheckpointStore(fixture.journalPath, fixture.journal, () => new Date(at));
+    const scope = fixture.allocation.scope;
+    await ledger.appendToolEffectLedgerEntry({ scope, turnId: fixture.businessTurnId,
+      toolCallId: 'held-tool', toolName: 'Bash', effectPolicy: 'mutating',
+      idempotencyKey: 'held-tool', argsDigest: 'held-digest', state: 'dispatched-effect-unknown' });
+    const http = await upstream('cold-resume.model', fixture.acceptedEvidenceLocator, fixture);
+    try {
+      const { coordinator } = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model', { effectRecovery: 'native' });
+      await coordinator.hydrate();
+      const hydrated = coordinator.taskSnapshot(fixture.taskId);
+      assert.equal(hydrated.state, 'blocked');
+      assert.equal(hydrated.checkpoint?.recoveryOutcome, 'recovery-hold-effect-unknown');
+      assert.deepEqual(hydrated.allowedActions, ['recover', 'stop']);
+
+      const stopResult = await coordinator.stop(fixture.taskId);
+      assert.equal(stopResult.state, 'stopped');
+
+      const stopped = coordinator.taskSnapshot(fixture.taskId);
+      assert.equal(stopped.state, 'stopped');
+      assert.deepEqual(stopped.allowedActions, ['start']);
+      assert.equal(stopped.error, undefined);
+      assert.equal(stopped.checkpoint?.outcome, 'stopped');
+      assert.equal((await checkpointStore.readLatest(scope))?.checkpoint.outcome, 'stopped');
+      assert.equal(http.wires.length, 0, 'stopping a held blocked task must not dispatch Provider');
+
+      const { coordinator: coordinator2 } = buildResumeRuntime(fixture, http.baseUrl, 'cold-resume.model', { effectRecovery: 'native' });
+      await coordinator2.hydrate();
+      const rehydrated = coordinator2.taskSnapshot(fixture.taskId);
+      assert.equal(rehydrated.state, 'stopped');
+      assert.deepEqual(rehydrated.allowedActions, ['start']);
+      assert.equal(rehydrated.checkpoint?.outcome, 'stopped');
+    } finally {
+      await http.close();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   // Observed resumed dispatch errors left the public task running. Cost:
   // one retained fixture and one local Provider failure response.
   test('resumed provider failure clears running and retains recovery actions', async () => {

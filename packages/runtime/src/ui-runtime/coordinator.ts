@@ -4435,8 +4435,19 @@ export class RuntimeTaskCoordinator {
     actorKind: 'human-operator' | 'harness-control' = 'human-operator',
   ): Promise<{ readonly state: string; readonly operationId?: string }> {
     const record = this.requireTask(taskId);
-    if ((!record.running && record.release?.state !== 'prepared') || record.stopping || !record.operationId || !record.executionEpoch) {
+    const heldBlockedStopAllowed =
+      !record.running
+      && !record.stopping
+      && record.state === 'blocked'
+      && record.allowedActions.includes('stop')
+      && record.checkpoint?.recoveryOutcome === 'recovery-hold-effect-unknown'
+      && record.operationId !== undefined
+      && record.executionEpoch !== undefined;
+    if ((!record.running && record.release?.state !== 'prepared' && !heldBlockedStopAllowed) || record.stopping || !record.operationId || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'task has no running execution to stop', 'start an execution first');
+    }
+    if (heldBlockedStopAllowed) {
+      return this.stopHeldBlockedTask(record, stopReason, actorKind);
     }
     const transientRetryWasActive = record.transientRetryCancel !== undefined;
     const stopControl = { reason: stopReason, actorKind } as const;
@@ -4583,6 +4594,83 @@ export class RuntimeTaskCoordinator {
       record.allowedActions = ['retry-stop'];
       record.updatedAt = this.now().toISOString();
       throw error instanceof RuntimeTaskControlError ? error : new RuntimeTaskControlError('stop.failed', projection.ownerId, projection.message, projection.nextAction);
+    }
+  }
+
+  private async stopHeldBlockedTask(
+    record: TaskRecord,
+    stopReason: string,
+    actorKind: 'human-operator' | 'harness-control',
+  ): Promise<{ readonly state: string; readonly operationId?: string }> {
+    const operationId = record.operationId!;
+    const operation = this.operations.get(operationId.value);
+    const previous = record.checkpoint ?? null;
+    const scope = previous?.scope ?? this.scopes.get(operationId.value);
+    const cycleId = previous?.cycleId ?? scope?.cycleId;
+    if (!operation || !scope || !cycleId) {
+      throw new RuntimeTaskControlError(
+        'operation.scope.missing',
+        RUNTIME_OWNER,
+        'held task has no recoverable operation scope to stop',
+        'start a new execution',
+      );
+    }
+    const executionEpoch = previous?.executionEpoch ?? record.executionEpoch ?? operation.executionEpoch;
+    const seq = Math.max(record.checkpointSeq, previous?.seq ?? 0) + 1;
+    const recoveryStateRef: EvidenceRef = {
+      evidenceId: id('evidence', `recovery-${operationId.value}`),
+      kind: 'operation',
+      source: RUNTIME_OWNER,
+      locator: `operation/${operationId.value}/recovery`,
+      scope,
+    };
+    const evidenceRefs = previous
+      ? [...previous.evidenceRefs, recoveryStateRef]
+      : [recoveryStateRef];
+    const checkpoint: Checkpoint = {
+      id: id('checkpoint', `checkpoint-${record.taskId.value}-${executionEpoch}-${seq}`),
+      scope,
+      cycleId,
+      seq,
+      previousCheckpointId: previous?.id ?? null,
+      directiveRevision: record.directiveRevision,
+      executionEpoch,
+      outcome: 'stopped',
+      summary: `held execution stopped: ${stopReason}`,
+      recoveryStateRef,
+      evidenceRefs,
+      next: { kind: 'stop', ref: stopReason },
+    };
+    const store = this.options.checkpointStoreFor(record.taskId, cycleId);
+    const boundary = record.checkpointBoundary ?? new ContextCheckpointBoundary(store, this.now);
+    record.checkpointBoundary = boundary;
+    record.stopControl = { reason: stopReason, actorKind };
+    record.stopping = true;
+    try {
+      const committed = await boundary.commit(checkpoint, previous);
+      await boundary.publish(committed, previous, this.options.checkpointBoundary);
+      this.recordCommittedCheckpoint(record, committed, 'stopped');
+      await this.settleInspectionStopAfterCommit(record, operation, committed.checkpoint.evidenceRefs, 'regular');
+      record.error = undefined;
+      record.postCommitRecoveryPending = false;
+      this.pushEvent(
+        record,
+        operation,
+        'execution.terminal',
+        'stopped',
+        'held execution stopped by operator',
+        committed.checkpoint.evidenceRefs,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'final',
+      );
+      this.finalize(record, 'stopped');
+      return { state: 'stopped', operationId: operationId.value };
+    } catch (error) {
+      record.stopping = false;
+      throw error;
     }
   }
 
